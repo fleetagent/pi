@@ -7,11 +7,11 @@
 import { getModel } from "@earendil-works/pi-ai";
 import {
 	AuthStorage,
-	createAgentSession,
 	createExtensionRuntime,
+	InMemorySessionManager,
 	ModelRegistry,
+	PiAgent,
 	type ResourceLoader,
-	SessionManager,
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 
@@ -50,7 +50,7 @@ Available: read, bash. Be concise.`,
 	reload: async () => {},
 };
 
-const { session } = await createAgentSession({
+const pi = await PiAgent.create({
 	cwd,
 	agentDir: "/tmp/my-agent",
 	model,
@@ -59,9 +59,10 @@ const { session } = await createAgentSession({
 	modelRegistry,
 	resourceLoader,
 	tools: ["read", "bash"],
-	sessionManager: SessionManager.inMemory(cwd),
+	sessionManager: new InMemorySessionManager(cwd),
 	settingsManager,
 });
+const session = await pi.createAgentSession();
 
 try {
 	session.subscribe((event) => {
@@ -73,5 +74,5 @@ try {
 	await session.prompt("List files in the current directory.");
 	console.log();
 } finally {
-	session.dispose();
+	await pi.dispose();
 }

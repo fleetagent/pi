@@ -3,14 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
-import {
-	type CreateAgentSessionRuntimeFactory,
-	createAgentSessionFromServices,
-	createAgentSessionRuntime,
-	createAgentSessionServices,
-} from "../src/core/agent-session-runtime.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
-import { SessionManager } from "../src/core/session-manager.ts";
+import { PiAgent } from "../src/core/pi-agent.ts";
+import { LocalSessionManager } from "../src/core/session-manager.ts";
 import type {
 	ExtensionFactory,
 	SessionBeforeForkEvent,
@@ -25,7 +20,7 @@ type RecordedSessionEvent =
 	| SessionShutdownEvent
 	| SessionStartEvent;
 
-describe("AgentSessionRuntime session lifecycle events", () => {
+describe("PiAgent session lifecycle events", () => {
 	const cleanups: Array<() => Promise<void> | void> = [];
 
 	afterEach(async () => {
@@ -44,38 +39,20 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		const authStorage = AuthStorage.inMemory();
 		authStorage.setRuntimeApiKey(faux.getModel().provider, "faux-key");
 
-		const runtimeOptions = {
+		const runtimeHost = await PiAgent.create({
+			cwd: tempDir,
 			agentDir: tempDir,
 			authStorage,
-			model: faux.getModel(),
+			sessionManager: new LocalSessionManager({ cwd: tempDir }),
 			resourceLoaderOptions: {
 				extensionFactories: [extensionFactory],
 				noSkills: true,
 				noPromptTemplates: true,
 				noThemes: true,
 			},
-		};
-		const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
-			const services = await createAgentSessionServices({
-				...runtimeOptions,
-				cwd,
-			});
-			return {
-				...(await createAgentSessionFromServices({
-					services,
-					sessionManager,
-					sessionStartEvent,
-					model: faux.getModel(),
-				})),
-				services,
-				diagnostics: services.diagnostics,
-			};
-		};
-		const runtimeHost = await createAgentSessionRuntime(createRuntime, {
-			cwd: tempDir,
-			agentDir: tempDir,
-			sessionManager: SessionManager.create(tempDir),
+			resolveSessionOptions: () => ({ model: faux.getModel() }),
 		});
+		await runtimeHost.createAgentSession();
 		await runtimeHost.session.bindExtensions({});
 
 		cleanups.push(async () => {

@@ -3,14 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerFauxProvider } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
-import {
-	type CreateAgentSessionRuntimeFactory,
-	createAgentSessionFromServices,
-	createAgentSessionRuntime,
-	createAgentSessionServices,
-} from "../../../src/core/agent-session-runtime.ts";
 import { AuthStorage } from "../../../src/core/auth-storage.ts";
-import { SessionManager } from "../../../src/core/session-manager.ts";
+import { PiAgent } from "../../../src/core/pi-agent.ts";
+import { LocalSessionManager } from "../../../src/core/session-manager.ts";
 
 describe("issue #2753 reload stale resource settings", () => {
 	const cleanups: Array<() => void> = [];
@@ -34,51 +29,37 @@ describe("issue #2753 reload stale resource settings", () => {
 		const authStorage = AuthStorage.inMemory();
 		authStorage.setRuntimeApiKey(faux.getModel().provider, "faux-key");
 
-		const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
-			const services = await createAgentSessionServices({
-				cwd,
-				agentDir,
-				authStorage,
-				resourceLoaderOptions: {
-					extensionFactories: [
-						(pi) => {
-							pi.registerProvider(faux.getModel().provider, {
-								baseUrl: faux.getModel().baseUrl,
-								apiKey: "faux-key",
-								api: faux.api,
-								models: faux.models.map((registeredModel) => ({
-									id: registeredModel.id,
-									name: registeredModel.name,
-									api: registeredModel.api,
-									reasoning: registeredModel.reasoning,
-									input: registeredModel.input,
-									cost: registeredModel.cost,
-									contextWindow: registeredModel.contextWindow,
-									maxTokens: registeredModel.maxTokens,
-								})),
-							});
-						},
-					],
-					noSkills: true,
-					noThemes: true,
-				},
-			});
-			return {
-				...(await createAgentSessionFromServices({
-					services,
-					sessionManager,
-					sessionStartEvent,
-					model: faux.getModel(),
-				})),
-				services,
-				diagnostics: services.diagnostics,
-			};
-		};
-		const runtime = await createAgentSessionRuntime(createRuntime, {
+		const runtime = await PiAgent.create({
 			cwd: tempDir,
 			agentDir,
-			sessionManager: SessionManager.create(tempDir),
+			authStorage,
+			sessionManager: new LocalSessionManager({ cwd: tempDir }),
+			resourceLoaderOptions: {
+				extensionFactories: [
+					(pi) => {
+						pi.registerProvider(faux.getModel().provider, {
+							baseUrl: faux.getModel().baseUrl,
+							apiKey: "faux-key",
+							api: faux.api,
+							models: faux.models.map((registeredModel) => ({
+								id: registeredModel.id,
+								name: registeredModel.name,
+								api: registeredModel.api,
+								reasoning: registeredModel.reasoning,
+								input: registeredModel.input,
+								cost: registeredModel.cost,
+								contextWindow: registeredModel.contextWindow,
+								maxTokens: registeredModel.maxTokens,
+							})),
+						});
+					},
+				],
+				noSkills: true,
+				noThemes: true,
+			},
+			resolveSessionOptions: () => ({ model: faux.getModel() }),
 		});
+		await runtime.createAgentSession();
 
 		cleanups.push(() => {
 			runtime.session.dispose();

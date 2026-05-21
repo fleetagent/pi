@@ -82,7 +82,7 @@ import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
-import type { BranchSummaryEntry, CompactionEntry, SessionManager } from "./session-manager.ts";
+import type { BranchSummaryEntry, CompactionEntry, Session } from "./session-manager.ts";
 import { CURRENT_SESSION_VERSION, getLatestCompactionEntry, type SessionHeader } from "./session-manager.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import type { SlashCommandInfo } from "./slash-commands.ts";
@@ -155,7 +155,8 @@ export type AgentSessionEventListener = (event: AgentSessionEvent) => void;
 
 export interface AgentSessionConfig {
 	agent: Agent;
-	sessionManager: SessionManager;
+	session?: Session;
+	sessionManager?: Session;
 	settingsManager: SettingsManager;
 	cwd: string;
 	/** Models to cycle through with Ctrl+P (from --models flag) */
@@ -251,7 +252,7 @@ const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "hi
 
 export class AgentSession {
 	readonly agent: Agent;
-	readonly sessionManager: SessionManager;
+	readonly session: Session;
 	readonly settingsManager: SettingsManager;
 
 	private _scopedModels: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
@@ -316,9 +317,17 @@ export class AgentSession {
 	private _baseSystemPrompt = "";
 	private _baseSystemPromptOptions!: BuildSystemPromptOptions;
 
+	get sessionManager(): Session {
+		return this.session;
+	}
+
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
-		this.sessionManager = config.sessionManager;
+		const session = config.session ?? config.sessionManager;
+		if (!session) {
+			throw new Error("AgentSession requires a session");
+		}
+		this.session = session;
 		this.settingsManager = config.settingsManager;
 		this._scopedModels = config.scopedModels ?? [];
 		this._resourceLoader = config.resourceLoader;
@@ -500,7 +509,7 @@ export class AgentSession {
 			// Check if this is a custom message from extensions
 			if (event.message.role === "custom") {
 				// Persist as CustomMessageEntry
-				this.sessionManager.appendCustomMessageEntry(
+				this.session.appendCustomMessageEntry(
 					event.message.customType,
 					event.message.content,
 					event.message.display,
@@ -512,7 +521,7 @@ export class AgentSession {
 				event.message.role === "toolResult"
 			) {
 				// Regular LLM message - persist as SessionMessageEntry
-				this.sessionManager.appendMessage(event.message);
+				this.session.appendMessage(event.message);
 			}
 			// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
 
@@ -577,7 +586,7 @@ export class AgentSession {
 
 	private _replaceMessageInPlace(target: AgentMessage, replacement: AgentMessage): void {
 		// Agent-core stores the finalized message object in its state before emitting message_end.
-		// SessionManager persistence happens later in _handleAgentEvent() with event.message.
+		// Session persistence happens later in _handleAgentEvent() with event.message.
 		// Mutating this object in place keeps agent state, later turn/agent events, listeners,
 		// and the eventual SessionManager.appendMessage(event.message) persistence in sync.
 		if (target === replacement) {
@@ -823,17 +832,17 @@ export class AgentSession {
 
 	/** Current session file path, or undefined if sessions are disabled */
 	get sessionFile(): string | undefined {
-		return this.sessionManager.getSessionFile();
+		return this.session.getSessionReference();
 	}
 
 	/** Current session ID */
 	get sessionId(): string {
-		return this.sessionManager.getSessionId();
+		return this.session.getSessionId();
 	}
 
 	/** Current session display name, if set */
 	get sessionName(): string | undefined {
-		return this.sessionManager.getSessionName();
+		return this.session.getSessionName();
 	}
 
 	/** Scoped models for cycling (from --models flag) */
@@ -1297,12 +1306,7 @@ export class AgentSession {
 			await this._runAgentPrompt(appMessage);
 		} else {
 			this.agent.state.messages.push(appMessage);
-			this.sessionManager.appendCustomMessageEntry(
-				message.customType,
-				message.content,
-				message.display,
-				message.details,
-			);
+			this.session.appendCustomMessageEntry(message.customType, message.content, message.display, message.details);
 			this._emit({ type: "message_start", message: appMessage });
 			this._emit({ type: "message_end", message: appMessage });
 		}
@@ -1422,7 +1426,7 @@ export class AgentSession {
 		const previousModel = this.model;
 		const thinkingLevel = this._getThinkingLevelForModelSwitch();
 		this.agent.state.model = model;
-		this.sessionManager.appendModelChange(model.provider, model.id);
+		this.session.appendModelChange(model.provider, model.id);
 		this.settingsManager.setDefaultModelAndProvider(model.provider, model.id);
 
 		// Re-clamp thinking level for new model's capabilities
@@ -1459,7 +1463,7 @@ export class AgentSession {
 
 		// Apply model
 		this.agent.state.model = next.model;
-		this.sessionManager.appendModelChange(next.model.provider, next.model.id);
+		this.session.appendModelChange(next.model.provider, next.model.id);
 		this.settingsManager.setDefaultModelAndProvider(next.model.provider, next.model.id);
 
 		// Apply thinking level.
@@ -1487,7 +1491,7 @@ export class AgentSession {
 
 		const thinkingLevel = this._getThinkingLevelForModelSwitch();
 		this.agent.state.model = nextModel;
-		this.sessionManager.appendModelChange(nextModel.provider, nextModel.id);
+		this.session.appendModelChange(nextModel.provider, nextModel.id);
 		this.settingsManager.setDefaultModelAndProvider(nextModel.provider, nextModel.id);
 
 		// Re-clamp thinking level for new model's capabilities
@@ -1518,7 +1522,7 @@ export class AgentSession {
 		this.agent.state.thinkingLevel = effectiveLevel;
 
 		if (isChanging) {
-			this.sessionManager.appendThinkingLevelChange(effectiveLevel);
+			this.session.appendThinkingLevelChange(effectiveLevel);
 			if (this.supportsThinking() || effectiveLevel !== "off") {
 				this.settingsManager.setDefaultThinkingLevel(effectiveLevel);
 			}
@@ -1621,7 +1625,7 @@ export class AgentSession {
 
 			const { apiKey, headers } = await this._getCompactionRequestAuth(this.model);
 
-			const pathEntries = this.sessionManager.getBranch();
+			const pathEntries = this.session.getBranch();
 			const settings = this.settingsManager.getCompactionSettings();
 
 			const preparation = prepareCompaction(pathEntries, settings);
@@ -1689,9 +1693,9 @@ export class AgentSession {
 				throw new Error("Compaction cancelled");
 			}
 
-			this.sessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension);
-			const newEntries = this.sessionManager.getEntries();
-			const sessionContext = this.sessionManager.buildSessionContext();
+			this.session.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension);
+			const newEntries = this.session.getEntries();
+			const sessionContext = this.session.buildSessionContext();
 			this.agent.state.messages = sessionContext.messages;
 
 			// Get the saved compaction entry for the extension event
@@ -1784,7 +1788,7 @@ export class AgentSession {
 		// Skip compaction checks if this assistant message is older than the latest
 		// compaction boundary. This prevents a stale pre-compaction usage/error
 		// from retriggering compaction on the first prompt after compaction.
-		const compactionEntry = getLatestCompactionEntry(this.sessionManager.getBranch());
+		const compactionEntry = getLatestCompactionEntry(this.session.getBranch());
 		const assistantIsFromBeforeCompaction =
 			compactionEntry !== null && assistantMessage.timestamp <= new Date(compactionEntry.timestamp).getTime();
 		if (assistantIsFromBeforeCompaction) {
@@ -1886,7 +1890,7 @@ export class AgentSession {
 				({ apiKey, headers } = await this._getCompactionRequestAuth(this.model));
 			}
 
-			const pathEntries = this.sessionManager.getBranch();
+			const pathEntries = this.session.getBranch();
 
 			const preparation = prepareCompaction(pathEntries, settings);
 			if (!preparation) {
@@ -1969,9 +1973,9 @@ export class AgentSession {
 				return false;
 			}
 
-			this.sessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension);
-			const newEntries = this.sessionManager.getEntries();
-			const sessionContext = this.sessionManager.buildSessionContext();
+			this.session.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension);
+			const newEntries = this.session.getEntries();
+			const sessionContext = this.session.buildSessionContext();
 			this.agent.state.messages = sessionContext.messages;
 
 			// Get the saved compaction entry for the extension event
@@ -2184,16 +2188,16 @@ export class AgentSession {
 					});
 				},
 				appendEntry: (customType, data) => {
-					this.sessionManager.appendCustomEntry(customType, data);
+					this.session.appendCustomEntry(customType, data);
 				},
 				setSessionName: (name) => {
 					this.setSessionName(name);
 				},
 				getSessionName: () => {
-					return this.sessionManager.getSessionName();
+					return this.session.getSessionName();
 				},
 				setLabel: (entryId, label) => {
-					this.sessionManager.appendLabelChange(entryId, label);
+					this.session.appendLabelChange(entryId, label);
 				},
 				getActiveTools: () => this.getActiveToolNames(),
 				getAllTools: () => this.getAllTools(),
@@ -2376,7 +2380,7 @@ export class AgentSession {
 			extensionsResult.extensions,
 			extensionsResult.runtime,
 			this._cwd,
-			this.sessionManager,
+			this.session,
 			this._modelRegistry,
 		);
 		if (this._extensionRunnerRef) {
@@ -2547,7 +2551,7 @@ export class AgentSession {
 		try {
 			const result = await executeBashWithOperations(
 				resolvedCommand,
-				this.sessionManager.getCwd(),
+				this.session.getCwd(),
 				options?.operations ?? createLocalBashOperations({ shellPath }),
 				{
 					onChunk,
@@ -2588,7 +2592,7 @@ export class AgentSession {
 			this.agent.state.messages.push(bashMessage);
 
 			// Save to session
-			this.sessionManager.appendMessage(bashMessage);
+			this.session.appendMessage(bashMessage);
 		}
 	}
 
@@ -2621,7 +2625,7 @@ export class AgentSession {
 			this.agent.state.messages.push(bashMessage);
 
 			// Save to session
-			this.sessionManager.appendMessage(bashMessage);
+			this.session.appendMessage(bashMessage);
 		}
 
 		this._pendingBashMessages = [];
@@ -2635,8 +2639,8 @@ export class AgentSession {
 	 * Set a display name for the current session.
 	 */
 	setSessionName(name: string): void {
-		this.sessionManager.appendSessionInfo(name);
-		this._emit({ type: "session_info_changed", name: this.sessionManager.getSessionName() });
+		this.session.appendSessionInfo(name);
+		this._emit({ type: "session_info_changed", name: this.session.getSessionName() });
 	}
 
 	// =========================================================================
@@ -2658,7 +2662,7 @@ export class AgentSession {
 		targetId: string,
 		options: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string } = {},
 	): Promise<{ editorText?: string; cancelled: boolean; aborted?: boolean; summaryEntry?: BranchSummaryEntry }> {
-		const oldLeafId = this.sessionManager.getLeafId();
+		const oldLeafId = this.session.getLeafId();
 
 		// No-op if already at target
 		if (targetId === oldLeafId) {
@@ -2670,14 +2674,14 @@ export class AgentSession {
 			throw new Error("No model available for summarization");
 		}
 
-		const targetEntry = this.sessionManager.getEntry(targetId);
+		const targetEntry = this.session.getEntry(targetId);
 		if (!targetEntry) {
 			throw new Error(`Entry ${targetId} not found`);
 		}
 
 		// Collect entries to summarize (from old leaf to common ancestor)
 		const { entries: entriesToSummarize, commonAncestorId } = collectEntriesForBranchSummary(
-			this.sessionManager,
+			this.session,
 			oldLeafId,
 			targetId,
 		);
@@ -2794,39 +2798,34 @@ export class AgentSession {
 			let summaryEntry: BranchSummaryEntry | undefined;
 			if (summaryText) {
 				// Create summary at target position (can be null for root)
-				const summaryId = this.sessionManager.branchWithSummary(
-					newLeafId,
-					summaryText,
-					summaryDetails,
-					fromExtension,
-				);
-				summaryEntry = this.sessionManager.getEntry(summaryId) as BranchSummaryEntry;
+				const summaryId = this.session.branchWithSummary(newLeafId, summaryText, summaryDetails, fromExtension);
+				summaryEntry = this.session.getEntry(summaryId) as BranchSummaryEntry;
 
 				// Attach label to the summary entry
 				if (label) {
-					this.sessionManager.appendLabelChange(summaryId, label);
+					this.session.appendLabelChange(summaryId, label);
 				}
 			} else if (newLeafId === null) {
 				// No summary, navigating to root - reset leaf
-				this.sessionManager.resetLeaf();
+				this.session.resetLeaf();
 			} else {
 				// No summary, navigating to non-root
-				this.sessionManager.branch(newLeafId);
+				this.session.branch(newLeafId);
 			}
 
 			// Attach label to target entry when not summarizing (no summary entry to label)
 			if (label && !summaryText) {
-				this.sessionManager.appendLabelChange(targetId, label);
+				this.session.appendLabelChange(targetId, label);
 			}
 
 			// Update agent state
-			const sessionContext = this.sessionManager.buildSessionContext();
+			const sessionContext = this.session.buildSessionContext();
 			this.agent.state.messages = sessionContext.messages;
 
 			// Emit session_tree event
 			await this._extensionRunner.emit({
 				type: "session_tree",
-				newLeafId: this.sessionManager.getLeafId(),
+				newLeafId: this.session.getLeafId(),
 				oldLeafId,
 				summaryEntry,
 				fromExtension: summaryText ? fromExtension : undefined,
@@ -2844,7 +2843,7 @@ export class AgentSession {
 	 * Get all user messages from session for fork selector.
 	 */
 	getUserMessagesForForking(): Array<{ entryId: string; text: string }> {
-		const entries = this.sessionManager.getEntries();
+		const entries = this.session.getEntries();
 		const result: Array<{ entryId: string; text: string }> = [];
 
 		for (const entry of entries) {
@@ -2929,7 +2928,7 @@ export class AgentSession {
 		// After compaction, the last assistant usage reflects pre-compaction context size.
 		// We can only trust usage from an assistant that responded after the latest compaction.
 		// If no such assistant exists, context token count is unknown until the next LLM response.
-		const branchEntries = this.sessionManager.getBranch();
+		const branchEntries = this.session.getBranch();
 		const latestCompaction = getLatestCompactionEntry(branchEntries);
 
 		if (latestCompaction) {
@@ -2977,10 +2976,10 @@ export class AgentSession {
 		const toolRenderer: ToolHtmlRenderer = createToolHtmlRenderer({
 			getToolDefinition: (name) => this.getToolDefinition(name),
 			theme,
-			cwd: this.sessionManager.getCwd(),
+			cwd: this.session.getCwd(),
 		});
 
-		return await exportSessionToHtml(this.sessionManager, this.state, {
+		return await exportSessionToHtml(this.session, this.state, {
 			outputPath,
 			themeName,
 			toolRenderer,
@@ -3006,12 +3005,12 @@ export class AgentSession {
 		const header: SessionHeader = {
 			type: "session",
 			version: CURRENT_SESSION_VERSION,
-			id: this.sessionManager.getSessionId(),
+			id: this.session.getSessionId(),
 			timestamp: new Date().toISOString(),
-			cwd: this.sessionManager.getCwd(),
+			cwd: this.session.getCwd(),
 		};
 
-		const branchEntries = this.sessionManager.getBranch();
+		const branchEntries = this.session.getBranch();
 		const lines = [JSON.stringify(header)];
 
 		// Re-chain parentIds to form a linear sequence

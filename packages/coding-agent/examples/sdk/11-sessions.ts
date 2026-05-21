@@ -4,49 +4,51 @@
  * Control session persistence: in-memory, new file, continue, or open specific.
  */
 
-import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
+import { InMemorySessionManager, LocalSessionManager, PiAgent } from "@earendil-works/pi-coding-agent";
+
+const cwd = process.cwd();
 
 // In-memory (no persistence)
-const { session: inMemory } = await createAgentSession({
-	sessionManager: SessionManager.inMemory(),
-});
+const inMemoryPi = await PiAgent.create({ sessionManager: new InMemorySessionManager(cwd) });
+const inMemory = await inMemoryPi.createAgentSession();
 console.log("In-memory session:", inMemory.sessionFile ?? "(none)");
-inMemory.dispose();
+await inMemoryPi.dispose();
 
 // New persistent session
-const { session: newSession } = await createAgentSession({
-	sessionManager: SessionManager.create(process.cwd()),
-});
+const newSessionManager = new LocalSessionManager({ cwd });
+const newSessionPi = await PiAgent.create({ cwd, sessionManager: newSessionManager });
+const newSession = await newSessionPi.createAgentSession();
 console.log("New session file:", newSession.sessionFile);
-newSession.dispose();
+await newSessionPi.dispose();
 
 // Continue most recent session (or create new if none)
-const { session: continued, modelFallbackMessage } = await createAgentSession({
-	sessionManager: SessionManager.continueRecent(process.cwd()),
-});
-if (modelFallbackMessage) console.log("Note:", modelFallbackMessage);
+const continuedSessionManager = new LocalSessionManager({ cwd });
+const continuedPi = await PiAgent.create({ cwd, sessionManager: continuedSessionManager });
+const continued = await continuedPi.createAgentSession({ session: continuedSessionManager.continueRecent() });
+if (continuedPi.modelFallbackMessage) console.log("Note:", continuedPi.modelFallbackMessage);
 console.log("Continued session:", continued.sessionFile);
-continued.dispose();
+await continuedPi.dispose();
 
 // List and open specific session
-const sessions = await SessionManager.list(process.cwd());
+const sessions = await new LocalSessionManager({ cwd }).list();
 console.log(`\nFound ${sessions.length} sessions:`);
 for (const info of sessions.slice(0, 3)) {
 	console.log(`  ${info.id.slice(0, 8)}... - "${info.firstMessage.slice(0, 30)}..."`);
 }
 
-if (sessions.length > 0) {
-	const { session: opened } = await createAgentSession({
-		sessionManager: SessionManager.open(sessions[0].path),
-	});
+const sessionReference = sessions[0]?.reference;
+if (sessionReference) {
+	const openSessionManager = new LocalSessionManager({ cwd });
+	const openedPi = await PiAgent.create({ cwd, sessionManager: openSessionManager });
+	const opened = await openedPi.createAgentSession({ session: openSessionManager.openReference(sessionReference) });
 	console.log(`\nOpened: ${opened.sessionId}`);
-	opened.dispose();
+	await openedPi.dispose();
 }
 
 // Custom session directory (no cwd encoding)
 // const customDir = "/path/to/my-sessions";
-// const { session } = await createAgentSession({
-//   sessionManager: SessionManager.create(process.cwd(), customDir),
-// });
-// SessionManager.list(process.cwd(), customDir);
-// SessionManager.continueRecent(process.cwd(), customDir);
+// const localSessions = new LocalSessionManager({ cwd, sessionDir: customDir });
+// const pi = await PiAgent.create({ cwd, sessionManager: localSessions });
+// const session = await pi.createAgentSession();
+// await localSessions.list();
+// localSessions.continueRecent();

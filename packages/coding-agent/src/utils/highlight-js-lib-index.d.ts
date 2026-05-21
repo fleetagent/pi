@@ -1,4 +1,4 @@
-declare module "highlight.js/lib/index.js" {
+declare module "highlight.js/lib/index.ts" {
 	interface HighlightResult {
 		value: string;
 	}

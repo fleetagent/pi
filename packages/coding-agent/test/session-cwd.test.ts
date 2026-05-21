@@ -2,9 +2,9 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { type CreateAgentSessionRuntimeFactory, createAgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
+import { PiAgent } from "../src/core/pi-agent.ts";
 import { getMissingSessionCwdIssue, MissingSessionCwdError } from "../src/core/session-cwd.ts";
-import { SessionManager } from "../src/core/session-manager.ts";
+import { LocalSessionManager } from "../src/core/session-manager.ts";
 
 function createTempDir(name: string): string {
 	const dir = join(tmpdir(), `${name}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -42,10 +42,10 @@ describe("session cwd handling", () => {
 		cleanupPaths.push(fallbackCwd, sessionDir);
 		writeSessionFile(sessionFile, missingCwd);
 
-		const sessionManager = SessionManager.open(sessionFile);
+		const sessionManager = new LocalSessionManager({ cwd: process.cwd() }).openReference(sessionFile);
 		const issue = getMissingSessionCwdIssue(sessionManager, fallbackCwd);
 		expect(issue).toEqual({
-			sessionFile: sessionManager.getSessionFile(),
+			sessionReference: sessionManager.getSessionReference(),
 			sessionCwd: missingCwd,
 			fallbackCwd,
 		});
@@ -59,7 +59,10 @@ describe("session cwd handling", () => {
 		cleanupPaths.push(fallbackCwd, sessionDir);
 		writeSessionFile(sessionFile, missingCwd);
 
-		const sessionManager = SessionManager.open(sessionFile, undefined, fallbackCwd);
+		const sessionManager = new LocalSessionManager({ cwd: process.cwd(), sessionDir: undefined }).openReference(
+			sessionFile,
+			{ cwdOverride: fallbackCwd },
+		);
 		expect(sessionManager.getCwd()).toBe(fallbackCwd);
 		expect(getMissingSessionCwdIssue(sessionManager, fallbackCwd)).toBeUndefined();
 	});
@@ -72,20 +75,9 @@ describe("session cwd handling", () => {
 		cleanupPaths.push(fallbackCwd, sessionDir);
 		writeSessionFile(sessionFile, missingCwd);
 
-		const sessionManager = SessionManager.open(sessionFile);
-		let createRuntimeCalled = false;
-		const createRuntime: CreateAgentSessionRuntimeFactory = async () => {
-			createRuntimeCalled = true;
-			throw new Error("should not be called");
-		};
+		const sessionManager = new LocalSessionManager({ cwd: process.cwd() }).openReference(sessionFile);
+		const pi = await PiAgent.create({ cwd: fallbackCwd, agentDir: fallbackCwd });
 
-		await expect(
-			createAgentSessionRuntime(createRuntime, {
-				cwd: fallbackCwd,
-				agentDir: fallbackCwd,
-				sessionManager,
-			}),
-		).rejects.toBeInstanceOf(MissingSessionCwdError);
-		expect(createRuntimeCalled).toBe(false);
+		await expect(pi.createAgentSession({ session: sessionManager })).rejects.toBeInstanceOf(MissingSessionCwdError);
 	});
 });

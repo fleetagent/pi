@@ -6,7 +6,7 @@ import { getResolvedThemeColors, getThemeExportColors } from "../../modes/intera
 import { normalizePath, resolvePath } from "../../utils/paths.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import type { SessionEntry } from "../session-manager.ts";
-import { SessionManager } from "../session-manager.ts";
+import { LocalSessionManager, type Session } from "../session-manager.ts";
 
 /**
  * Interface for rendering custom tools to HTML.
@@ -128,8 +128,8 @@ function generateThemeVars(themeName?: string): string {
 }
 
 interface SessionData {
-	header: ReturnType<SessionManager["getHeader"]>;
-	entries: ReturnType<SessionManager["getEntries"]>;
+	header: ReturnType<Session["getHeader"]>;
+	entries: ReturnType<Session["getEntries"]>;
 	leafId: string | null;
 	systemPrompt?: string;
 	tools?: Array<Pick<ToolDefinition, "name" | "description" | "parameters">>;
@@ -144,9 +144,9 @@ function generateHtml(sessionData: SessionData, themeName?: string): string {
 	const templateDir = getExportTemplateDir();
 	const template = readFileSync(join(templateDir, "template.html"), "utf-8");
 	const templateCss = readFileSync(join(templateDir, "template.css"), "utf-8");
-	const templateJs = readFileSync(join(templateDir, "template.js"), "utf-8");
-	const markedJs = readFileSync(join(templateDir, "vendor", "marked.min.js"), "utf-8");
-	const hljsJs = readFileSync(join(templateDir, "vendor", "highlight.min.js"), "utf-8");
+	const templateJs = readFileSync(join(templateDir, "template.ts"), "utf-8");
+	const markedJs = readFileSync(join(templateDir, "vendor", "marked.min.ts"), "utf-8");
+	const hljsJs = readFileSync(join(templateDir, "vendor", "highlight.min.ts"), "utf-8");
 
 	const themeVars = generateThemeVars(themeName);
 	const colors = getResolvedThemeColors(themeName);
@@ -234,13 +234,13 @@ function preRenderCustomTools(
  * Used by TUI's /export command.
  */
 export async function exportSessionToHtml(
-	sm: SessionManager,
+	sm: Session,
 	state?: AgentState,
 	options?: ExportOptions | string,
 ): Promise<string> {
 	const opts: ExportOptions = typeof options === "string" ? { outputPath: options } : options || {};
 
-	const sessionFile = sm.getSessionFile();
+	const sessionFile = sm.getSessionReference();
 	if (!sessionFile) {
 		throw new Error("Cannot export in-memory session to HTML");
 	}
@@ -293,7 +293,7 @@ export async function exportFromFile(inputPath: string, options?: ExportOptions 
 		throw new Error(`File not found: ${resolvedInputPath}`);
 	}
 
-	const sm = SessionManager.open(resolvedInputPath);
+	const sm = new LocalSessionManager({ cwd: process.cwd() }).openReference(resolvedInputPath);
 
 	const sessionData: SessionData = {
 		header: sm.getHeader(),

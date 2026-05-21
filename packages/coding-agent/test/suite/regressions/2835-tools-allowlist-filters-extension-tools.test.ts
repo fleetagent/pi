@@ -4,9 +4,9 @@ import { join } from "node:path";
 import { getModel } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { PiAgent } from "../../../src/core/pi-agent.ts";
 import { DefaultResourceLoader } from "../../../src/core/resource-loader.ts";
-import { createAgentSession } from "../../../src/core/sdk.ts";
-import { SessionManager } from "../../../src/core/session-manager.ts";
+import { InMemorySessionManager } from "../../../src/core/session-manager.ts";
 import { SettingsManager } from "../../../src/core/settings-manager.ts";
 
 describe("regression #2835: tool allowlists filter extension tools", () => {
@@ -27,7 +27,7 @@ describe("regression #2835: tool allowlists filter extension tools", () => {
 
 	async function createSession(allowedToolNames?: string[]) {
 		const settingsManager = SettingsManager.create(tempDir, agentDir);
-		const sessionManager = SessionManager.inMemory(tempDir);
+		const sessionManager = new InMemorySessionManager(tempDir).create();
 		const resourceLoader = new DefaultResourceLoader({
 			cwd: tempDir,
 			agentDir,
@@ -52,15 +52,16 @@ describe("regression #2835: tool allowlists filter extension tools", () => {
 		});
 		await resourceLoader.reload();
 
-		const { session } = await createAgentSession({
+		const pi = await PiAgent.create({
 			cwd: tempDir,
 			agentDir,
 			model: getModel("anthropic", "claude-sonnet-4-5")!,
 			settingsManager,
-			sessionManager,
+			sessionManager: new InMemorySessionManager(tempDir),
 			resourceLoader,
 			tools: allowedToolNames,
 		});
+		const session = await pi.createAgentSession({ session: sessionManager });
 		await session.bindExtensions({});
 		return session;
 	}

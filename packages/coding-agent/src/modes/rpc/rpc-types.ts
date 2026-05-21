@@ -22,7 +22,7 @@ export type RpcCommand =
 	| { id?: string; type: "steer"; message: string; images?: ImageContent[] }
 	| { id?: string; type: "follow_up"; message: string; images?: ImageContent[] }
 	| { id?: string; type: "abort" }
-	| { id?: string; type: "new_session"; parentSession?: string }
+	| { id?: string; type: "new_session"; sessionId?: string; parentSession?: string }
 
 	// State
 	| { id?: string; type: "get_state" }

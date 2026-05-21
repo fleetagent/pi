@@ -1,45 +1,26 @@
+#!/usr/bin/env tsx
 /**
- * Session runtime
+ * Session replacement
  *
- * Use AgentSessionRuntime when you need to replace the active AgentSession,
- * for example for new-session, resume, fork, or import flows.
+ * Use PiAgent when you need to replace the active AgentSession, for example
+ * for new-session, resume, fork, or import flows.
  *
- * The important pattern is: after the runtime replaces the active session,
- * rebind any session-local subscriptions and extension bindings to `runtime.session`.
+ * The important pattern is: after PiAgent replaces the active session, rebind
+ * any session-local subscriptions and extension bindings to `pi.session`.
  */
 
-import {
-	type CreateAgentSessionRuntimeFactory,
-	createAgentSessionFromServices,
-	createAgentSessionRuntime,
-	createAgentSessionServices,
-	getAgentDir,
-	SessionManager,
-} from "@earendil-works/pi-coding-agent";
+import { LocalSessionManager, PiAgent } from "@earendil-works/pi-coding-agent";
 
-const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
-	const services = await createAgentSessionServices({ cwd });
-	return {
-		...(await createAgentSessionFromServices({
-			services,
-			sessionManager,
-			sessionStartEvent,
-		})),
-		services,
-		diagnostics: services.diagnostics,
-	};
-};
-const runtime = await createAgentSessionRuntime(createRuntime, {
+const pi = await PiAgent.create({
 	cwd: process.cwd(),
-	agentDir: getAgentDir(),
-	sessionManager: SessionManager.create(process.cwd()),
+	sessionManager: new LocalSessionManager({ cwd: process.cwd() }),
 });
 
 let unsubscribe: (() => void) | undefined;
 
 async function bindSession() {
 	unsubscribe?.();
-	const session = runtime.session;
+	const session = pi.session;
 	await session.bindExtensions({});
 	unsubscribe = session.subscribe((event) => {
 		if (event.type === "queue_update") {
@@ -49,19 +30,20 @@ async function bindSession() {
 	return session;
 }
 
+await pi.createAgentSession();
 let session = await bindSession();
 const originalSessionFile = session.sessionFile;
 console.log("Initial session:", originalSessionFile);
 
-await runtime.newSession();
+await pi.newSession();
 session = await bindSession();
 console.log("After newSession():", session.sessionFile);
 
 if (originalSessionFile) {
-	await runtime.switchSession(originalSessionFile);
+	await pi.switchSession(originalSessionFile);
 	session = await bindSession();
 	console.log("After switchSession():", session.sessionFile);
 }
 
 unsubscribe?.();
-await runtime.dispose();
+await pi.dispose();

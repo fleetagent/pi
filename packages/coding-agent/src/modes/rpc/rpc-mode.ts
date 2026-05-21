@@ -12,7 +12,6 @@
  */
 
 import * as crypto from "node:crypto";
-import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
 import type {
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
@@ -20,6 +19,7 @@ import type {
 	WorkingIndicatorOptions,
 } from "../../core/extensions/index.ts";
 import { takeOverStdout, writeRawStdout } from "../../core/output-guard.ts";
+import type { PiAgentRuntimeHost } from "../../core/pi-agent.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import { type Theme, theme } from "../interactive/theme/theme.ts";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
@@ -45,7 +45,7 @@ export type {
  * Run in RPC mode.
  * Listens for JSON commands on stdin, outputs events and responses on stdout.
  */
-export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<never> {
+export async function runRpcMode(runtimeHost: PiAgentRuntimeHost): Promise<never> {
 	takeOverStdout();
 	let session = runtimeHost.session;
 	let unsubscribe: (() => void) | undefined;
@@ -416,7 +416,10 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			}
 
 			case "new_session": {
-				const options = command.parentSession ? { parentSession: command.parentSession } : undefined;
+				const options =
+					command.sessionId || command.parentSession
+						? { id: command.sessionId, parentSession: command.parentSession }
+						: undefined;
 				const result = await runtimeHost.newSession(options);
 				if (!result.cancelled) {
 					await rebindSession();
@@ -577,7 +580,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			}
 
 			case "clone": {
-				const leafId = session.sessionManager.getLeafId();
+				const leafId = session.session.getLeafId();
 				if (!leafId) {
 					return error(id, "clone", "Cannot clone session: no current entry selected");
 				}

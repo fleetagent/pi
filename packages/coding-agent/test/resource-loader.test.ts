@@ -7,7 +7,7 @@ import { AuthStorage } from "../src/core/auth-storage.ts";
 import { ExtensionRunner } from "../src/core/extensions/runner.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
 import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
-import { SessionManager } from "../src/core/session-manager.ts";
+import { InMemorySessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import type { Skill } from "../src/core/skills.ts";
 import { createSyntheticSourceInfo } from "../src/core/source-info.ts";
@@ -163,9 +163,10 @@ Project skill`,
 			writeFileSync(
 				join(sharedExtDir, "shared.ts"),
 				`export default function(pi) {
-	pi.registerCommand("shared", {
+	pi.registerCommand("shared",
+	{
 		description: "shared command",
-		handler: async () => {},
+	handler: async () => {},
 	});
 }`,
 			);
@@ -196,13 +197,15 @@ Project skill`,
 			writeFileSync(
 				join(projectExtDir, "project.ts"),
 				`export default function(pi) {
-	pi.registerCommand("deploy", {
+	pi.registerCommand("deploy",
+	{
 		description: "project deploy",
-		handler: async () => {},
+	handler: async () => {},
 	});
-	pi.registerCommand("project-only", {
+	pi.registerCommand("project-only",
+	{
 		description: "project only",
-		handler: async () => {},
+	handler: async () => {},
 	});
 }`,
 			);
@@ -210,13 +213,15 @@ Project skill`,
 			writeFileSync(
 				join(userExtDir, "user.ts"),
 				`export default function(pi) {
-	pi.registerCommand("deploy", {
+	pi.registerCommand("deploy",
+	{
 		description: "user deploy",
-		handler: async () => {},
+	handler: async () => {},
 	});
-	pi.registerCommand("user-only", {
+	pi.registerCommand("user-only",
+	{
 		description: "user only",
-		handler: async () => {},
+	handler: async () => {},
 	});
 }`,
 			);
@@ -228,7 +233,7 @@ Project skill`,
 			expect(extensionsResult.extensions).toHaveLength(2);
 			expect(extensionsResult.errors.some((e) => e.error.includes('Command "/deploy" conflicts'))).toBe(false);
 
-			const sessionManager = SessionManager.inMemory();
+			const sessionManager = new InMemorySessionManager().create();
 			const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
 			const modelRegistry = ModelRegistry.create(authStorage);
 			const runner = new ExtensionRunner(
@@ -539,30 +544,34 @@ Content`,
 			writeFileSync(
 				join(ext1Dir, "index.ts"),
 				`
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
+import type { ExtensionAPI,
+} from "@earendil-works/pi-coding-agent";
+import {
+	Type } from "typebox";
 export default function(pi: ExtensionAPI) {
   pi.registerTool({
     name: "duplicate-tool",
-    description: "First",
-    parameters: Type.Object({}),
-    execute: async () => ({ result: "1" }),
-  });
+	description: "First",
+	parameters: Type.Object({}),
+	execute: async () => ({ result: "1" }),
+	});
 }`,
 			);
 
 			writeFileSync(
 				join(ext2Dir, "index.ts"),
 				`
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
+import type { ExtensionAPI,
+} from "@earendil-works/pi-coding-agent";
+import {
+	Type } from "typebox";
 export default function(pi: ExtensionAPI) {
   pi.registerTool({
     name: "duplicate-tool",
-    description: "Second",
-    parameters: Type.Object({}),
-    execute: async () => ({ result: "2" }),
-  });
+	description: "Second",
+	parameters: Type.Object({}),
+	execute: async () => ({ result: "2" }),
+	});
 }`,
 			);
 
@@ -581,26 +590,30 @@ export default function(pi: ExtensionAPI) {
 			writeFileSync(
 				join(globalExtDir, "global.ts"),
 				`
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
+import type { ExtensionAPI,
+} from "@earendil-works/pi-coding-agent";
+import {
+	Type } from "typebox";
 export default function(pi: ExtensionAPI) {
   pi.registerTool({
     name: "duplicate-tool",
-    description: "global tool",
-    parameters: Type.Object({}),
-    execute: async () => ({ result: "global" }),
-  });
-  pi.registerCommand("deploy", {
+	description: "global tool",
+	parameters: Type.Object({}),
+	execute: async () => ({ result: "global" }),
+	});
+  pi.registerCommand("deploy",
+	{
     description: "global command",
-    handler: async () => {},
-  });
+	handler: async () => {},
+	});
 }`,
 			);
 
 			writeFileSync(
 				explicitExtPath,
 				`
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI,
+} from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 export default function(pi: ExtensionAPI) {
   pi.registerTool({
@@ -626,7 +639,7 @@ export default function(pi: ExtensionAPI) {
 			const extensionsResult = loader.getExtensions();
 			expect(extensionsResult.extensions[0]?.path).toBe(explicitExtPath);
 
-			const sessionManager = SessionManager.inMemory();
+			const sessionManager = new InMemorySessionManager().create();
 			const authStorage = AuthStorage.create(join(tempDir, "auth-explicit.json"));
 			const modelRegistry = ModelRegistry.create(authStorage);
 			const runner = new ExtensionRunner(

@@ -4,10 +4,10 @@ import { join } from "node:path";
 import { getModel } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
+import type { ExtensionFactory } from "../src/core/extensions/types.ts";
+import { PiAgent } from "../src/core/pi-agent.ts";
 import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
-import type { ExtensionFactory } from "../src/core/sdk.ts";
-import { createAgentSession } from "../src/core/sdk.ts";
-import { SessionManager } from "../src/core/session-manager.ts";
+import { InMemorySessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 
 describe("AgentSession dynamic provider registration", () => {
@@ -28,7 +28,7 @@ describe("AgentSession dynamic provider registration", () => {
 
 	async function createSession(extensionFactories: ExtensionFactory[]) {
 		const settingsManager = SettingsManager.create(tempDir, agentDir);
-		const sessionManager = SessionManager.inMemory();
+		const sessionManager = new InMemorySessionManager().create();
 		const authStorage = AuthStorage.create(join(agentDir, "auth.json"));
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		const resourceLoader = new DefaultResourceLoader({
@@ -39,17 +39,17 @@ describe("AgentSession dynamic provider registration", () => {
 		});
 		await resourceLoader.reload();
 
-		const { session } = await createAgentSession({
+		const pi = await PiAgent.create({
 			cwd: tempDir,
 			agentDir,
 			model: getModel("anthropic", "claude-sonnet-4-5")!,
 			settingsManager,
-			sessionManager,
+			sessionManager: new InMemorySessionManager(tempDir),
 			authStorage,
 			resourceLoader,
 		});
 
-		return session;
+		return pi.createAgentSession({ session: sessionManager });
 	}
 
 	async function capturePromptBaseUrl(

@@ -5,7 +5,7 @@ Example code for pi-coding-agent SDK and extensions.
 ## Directories
 
 ### [sdk/](sdk/)
-Programmatic usage via `createAgentSession()`. Shows how to customize models, prompts, tools, extensions, and session management.
+Programmatic usage via `PiAgent`. Shows how to customize models, prompts, tools, extensions, and session management.
 
 ### [extensions/](extensions/)
 Example extensions demonstrating:

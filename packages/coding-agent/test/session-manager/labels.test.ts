@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { type LabelEntry, SessionManager } from "../../src/core/session-manager.ts";
+import { InMemorySessionManager, type LabelEntry } from "../../src/core/session-manager.ts";
 
 describe("SessionManager labels", () => {
 	it("sets and gets labels", () => {
-		const session = SessionManager.inMemory();
+		const session = new InMemorySessionManager().create();
 
 		const msgId = session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
 
@@ -24,7 +24,7 @@ describe("SessionManager labels", () => {
 	});
 
 	it("clears labels with undefined", () => {
-		const session = SessionManager.inMemory();
+		const session = new InMemorySessionManager().create();
 
 		const msgId = session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
 
@@ -37,7 +37,7 @@ describe("SessionManager labels", () => {
 	});
 
 	it("last label wins", () => {
-		const session = SessionManager.inMemory();
+		const session = new InMemorySessionManager().create();
 
 		const msgId = session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
 
@@ -55,7 +55,7 @@ describe("SessionManager labels", () => {
 	});
 
 	it("labels are included in tree nodes", () => {
-		const session = SessionManager.inMemory();
+		const session = new InMemorySessionManager().create();
 
 		const msg1Id = session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
 		const msg2Id = session.appendMessage({
@@ -96,7 +96,7 @@ describe("SessionManager labels", () => {
 	});
 
 	it("labels are preserved in createBranchedSession", () => {
-		const session = SessionManager.inMemory();
+		const session = new InMemorySessionManager().create();
 
 		const msg1Id = session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
 		const msg2Id = session.appendMessage({
@@ -143,7 +143,7 @@ describe("SessionManager labels", () => {
 	});
 
 	it("labels not on path are not preserved in createBranchedSession", () => {
-		const session = SessionManager.inMemory();
+		const session = new InMemorySessionManager().create();
 
 		const msg1Id = session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
 		const msg2Id = session.appendMessage({
@@ -180,7 +180,7 @@ describe("SessionManager labels", () => {
 	});
 
 	it("labels are not included in buildSessionContext", () => {
-		const session = SessionManager.inMemory();
+		const session = new InMemorySessionManager().create();
 
 		const msgId = session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
 		session.appendLabelChange(msgId, "checkpoint");
@@ -191,7 +191,7 @@ describe("SessionManager labels", () => {
 	});
 
 	it("throws when labeling non-existent entry", () => {
-		const session = SessionManager.inMemory();
+		const session = new InMemorySessionManager().create();
 
 		expect(() => session.appendLabelChange("non-existent", "label")).toThrow("Entry non-existent not found");
 	});

@@ -436,20 +436,22 @@ See [docs/packages.md](docs/packages.md).
 ### SDK
 
 ```typescript
-import { AuthStorage, createAgentSession, ModelRegistry, SessionManager } from "@earendil-works/pi-coding-agent";
+import { AuthStorage, InMemorySessionManager, ModelRegistry, PiAgent } from "@earendil-works/pi-coding-agent";
 
 const authStorage = AuthStorage.create();
 const modelRegistry = ModelRegistry.create(authStorage);
-const { session } = await createAgentSession({
-  sessionManager: SessionManager.inMemory(),
+const pi = await PiAgent.create({
+  sessionManager: new InMemorySessionManager(),
   authStorage,
   modelRegistry,
 });
+const session = await pi.createAgentSession();
 
 await session.prompt("What files are in the current directory?");
+await pi.dispose();
 ```
 
-For advanced multi-session runtime replacement, use `createAgentSessionRuntime()` and `AgentSessionRuntime`.
+For advanced multi-session flows, use `PiAgent` methods such as `newSession()`, `switchSession()`, `fork()`, and `importFromJsonl()`.
 
 See [docs/sdk.md](docs/sdk.md) and [examples/sdk/](examples/sdk/).
 

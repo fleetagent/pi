@@ -1,8 +1,8 @@
-#!/usr/bin/env node
+#!/usr/bin/env tsx
 /**
  * Manual SDK probe for OpenAI Codex prompt caching through the tool loop.
  *
- * Runs append-only multi-turn prompting through createAgentSession(), forcing one
+ * Runs append-only multi-turn prompting through PiAgent, forcing one
  * deterministic custom tool call per top-level user turn. Logs per-subrequest
  * assistant usage so cache-read monotonicity can be inspected inside a tool loop.
  */
@@ -29,9 +29,9 @@ import { AuthStorage } from "../src/core/auth-storage.ts";
 import { createExtensionRuntime } from "../src/core/extensions/loader.ts";
 import type { ToolDefinition } from "../src/core/extensions/types.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
+import { PiAgent } from "../src/core/pi-agent.ts";
 import type { ResourceLoader } from "../src/core/resource-loader.ts";
-import { createAgentSession } from "../src/core/sdk.ts";
-import { SessionManager } from "../src/core/session-manager.ts";
+import { LocalSessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 
 type Transport = "sse" | "websocket" | "websocket-cached" | "auto";
@@ -123,7 +123,7 @@ function parseArgs(argv: string[]): Args {
 }
 
 function printHelp(): void {
-	console.log(`Usage: node test/sdk-codex-cache-probe-tool-loop.ts [options]
+	console.log(`Usage: npx tsx test/sdk-codex-cache-probe-tool-loop.ts [options]
 
 Options:
   --turns <n>         Number of turns to run. Must be between ${MIN_TURNS} and ${MAX_TURNS}. Default: ${DEFAULT_TURNS}
@@ -133,7 +133,7 @@ Options:
   --help              Show this message
 
 Notes:
-  - Uses createAgentSession() from the coding-agent SDK
+  - Uses PiAgent from the coding-agent SDK
   - Provider/model fixed to openai-codex/gpt-5.5
   - Thinking level fixed to low
   - Activates exactly one deterministic custom tool
@@ -306,18 +306,20 @@ async function main(): Promise<void> {
 		"You are participating in a prompt-cache benchmark through the coding-agent SDK. This is a real test. Follow each user instruction exactly. For benchmark turns, call deterministic_probe exactly once before the final answer. Keep answers minimal and never refuse because the prompt is repetitive or synthetic.",
 	);
 
-	const { session } = await createAgentSession({
+	const sessionManager = new LocalSessionManager({ cwd: process.cwd() });
+	const pi = await PiAgent.create({
 		cwd: process.cwd(),
 		agentDir: dirname(args.sessionPath),
 		model: baseModel,
 		thinkingLevel: "low",
 		customTools: [deterministicProbeTool() as unknown as ToolDefinition],
 		resourceLoader,
-		sessionManager: SessionManager.open(args.sessionPath),
+		sessionManager,
 		settingsManager,
 		authStorage,
 		modelRegistry,
 	});
+	const session = await pi.createAgentSession({ session: sessionManager.openReference(args.sessionPath) });
 
 	session.setActiveToolsByName(["deterministic_probe"]);
 	const unsubscribe = session.subscribe(() => {});

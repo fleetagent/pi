@@ -15,7 +15,7 @@ import type { Extension, ExtensionFactory, LoadExtensionsResult } from "../src/c
 import { createExtensionRuntime, loadExtensionFromFactory } from "../src/core/extensions/loader.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
 import type { ResourceLoader } from "../src/core/resource-loader.ts";
-import { SessionManager } from "../src/core/session-manager.ts";
+import { InMemorySessionManager, LocalSessionManager, type Session } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { createCodingTools } from "../src/index.ts";
 
@@ -171,7 +171,7 @@ export interface TestSessionOptions {
  */
 export interface TestSessionContext {
 	session: AgentSession;
-	sessionManager: SessionManager;
+	sessionManager: Session;
 	tempDir: string;
 	cleanup: () => void;
 }
@@ -245,7 +245,9 @@ export function createTestSession(options: TestSessionOptions = {}): TestSession
 		},
 	});
 
-	const sessionManager = options.inMemory ? SessionManager.inMemory() : SessionManager.create(tempDir);
+	const sessionManager = options.inMemory
+		? new InMemorySessionManager().create()
+		: new LocalSessionManager({ cwd: tempDir }).create();
 	const settingsManager = SettingsManager.create(tempDir, tempDir);
 
 	if (options.settingsOverrides) {
@@ -289,7 +291,7 @@ export function createTestSession(options: TestSessionOptions = {}): TestSession
  * ```
  */
 export function buildTestTree(
-	session: SessionManager,
+	session: Session,
 	structure: {
 		messages: Array<{ role: "user" | "assistant"; text: string; branchFrom?: string }>;
 	},

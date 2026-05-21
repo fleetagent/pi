@@ -12,12 +12,12 @@ import { ExtensionRunner } from "../src/core/extensions/runner.ts";
 import type { ExtensionActions, ExtensionContextActions, ProviderConfig } from "../src/core/extensions/types.ts";
 import { KeybindingsManager, type KeyId } from "../src/core/keybindings.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
-import { SessionManager } from "../src/core/session-manager.ts";
+import { InMemorySessionManager, type Session } from "../src/core/session-manager.ts";
 
 describe("ExtensionRunner", () => {
 	let tempDir: string;
 	let extensionsDir: string;
-	let sessionManager: SessionManager;
+	let sessionManager: Session;
 	let modelRegistry: ModelRegistry;
 	const defaultKeybindings = new KeybindingsManager().getEffectiveConfig();
 
@@ -25,7 +25,7 @@ describe("ExtensionRunner", () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-runner-test-"));
 		extensionsDir = path.join(tempDir, "extensions");
 		fs.mkdirSync(extensionsDir);
-		sessionManager = SessionManager.inMemory();
+		sessionManager = new InMemorySessionManager().create();
 		const authStorage = AuthStorage.create(path.join(tempDir, "auth.json"));
 		modelRegistry = ModelRegistry.create(authStorage);
 	});

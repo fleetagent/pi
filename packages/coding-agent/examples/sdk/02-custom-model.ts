@@ -5,7 +5,7 @@
  */
 
 import { getModel } from "@earendil-works/pi-ai";
-import { AuthStorage, createAgentSession, ModelRegistry } from "@earendil-works/pi-coding-agent";
+import { AuthStorage, ModelRegistry, PiAgent } from "@earendil-works/pi-coding-agent";
 
 // Set up auth storage and model registry
 const authStorage = AuthStorage.create();
@@ -31,12 +31,13 @@ console.log(
 );
 
 if (available.length > 0) {
-	const { session } = await createAgentSession({
+	const pi = await PiAgent.create({
 		model: available[0],
 		thinkingLevel: "medium", // off, low, medium, high
 		authStorage,
 		modelRegistry,
 	});
+	const session = await pi.createAgentSession();
 
 	try {
 		session.subscribe((event) => {
@@ -48,6 +49,6 @@ if (available.length > 0) {
 		await session.prompt("Say hello in one sentence.");
 		console.log();
 	} finally {
-		session.dispose();
+		await pi.dispose();
 	}
 }

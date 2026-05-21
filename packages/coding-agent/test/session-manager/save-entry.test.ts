@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { type CustomEntry, SessionManager } from "../../src/core/session-manager.ts";
+import { type CustomEntry, InMemorySessionManager } from "../../src/core/session-manager.ts";
 
 describe("SessionManager.saveCustomEntry", () => {
 	it("saves custom entries and includes them in tree traversal", () => {
-		const session = SessionManager.inMemory();
+		const session = new InMemorySessionManager().create();
 
 		// Save a message
 		const msgId = session.appendMessage({ role: "user", content: "hello", timestamp: 1 });

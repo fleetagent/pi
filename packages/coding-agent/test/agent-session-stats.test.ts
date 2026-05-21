@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
-import { SessionManager } from "../src/core/session-manager.ts";
+import { InMemorySessionManager, type Session } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { createTestResourceLoader } from "./utilities.ts";
 
@@ -50,7 +50,7 @@ function createUserMessage(text: string, timestamp: number) {
 
 function createSession() {
 	const settingsManager = SettingsManager.inMemory();
-	const sessionManager = SessionManager.inMemory();
+	const sessionManager = new InMemorySessionManager().create();
 	const authStorage = AuthStorage.inMemory();
 	authStorage.setRuntimeApiKey("anthropic", "test-key");
 	const session = new AgentSession({
@@ -73,7 +73,7 @@ function createSession() {
 	return { session, sessionManager };
 }
 
-function syncAgentMessages(session: AgentSession, sessionManager: SessionManager): void {
+function syncAgentMessages(session: AgentSession, sessionManager: Session): void {
 	session.agent.state.messages = sessionManager.buildSessionContext().messages;
 }
 

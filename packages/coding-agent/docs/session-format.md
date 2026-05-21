@@ -363,15 +363,15 @@ for (const line of lines) {
 Key methods for working with sessions programmatically.
 
 ### Static Creation Methods
-- `SessionManager.create(cwd, sessionDir?)` - New session
-- `SessionManager.open(path, sessionDir?)` - Open existing session file
-- `SessionManager.continueRecent(cwd, sessionDir?)` - Continue most recent or create new
-- `SessionManager.inMemory(cwd?)` - No file persistence
-- `SessionManager.forkFrom(sourcePath, targetCwd, sessionDir?)` - Fork session from another project
+- `LocalSessionManager.create(cwd, sessionDir?)` - New session
+- `LocalSessionManager.openReference(path, sessionDir?)` - Open existing session file
+- `LocalSessionManager.continueRecent(cwd, sessionDir?)` - Continue most recent or create new
+- `InMemorySessionManager.create(cwd?)` - No file persistence
+- `LocalSessionManager.forkFrom(sourcePath, targetCwd, sessionDir?)` - Fork session from another project
 
 ### Static Listing Methods
-- `SessionManager.list(cwd, sessionDir?, onProgress?)` - List sessions for a directory
-- `SessionManager.listAll(onProgress?)` - List all sessions across all projects
+- `LocalSessionManager.list(cwd, sessionDir?, onProgress?)` - List sessions for a directory
+- `LocalSessionManager.listAll(onProgress?)` - List all sessions across all projects
 
 ### Instance Methods - Session Management
 - `newSession(options?)` - Start a new session (options: `{ parentSession?: string }`)

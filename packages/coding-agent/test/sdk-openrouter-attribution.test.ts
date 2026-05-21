@@ -11,11 +11,11 @@ import {
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
-import { createAgentSession } from "../src/core/sdk.ts";
-import { SessionManager } from "../src/core/session-manager.ts";
+import { PiAgent } from "../src/core/pi-agent.ts";
+import { InMemorySessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 
-describe("createAgentSession OpenRouter attribution headers", () => {
+describe("PiAgent OpenRouter attribution headers", () => {
 	let tempDir: string;
 	let cwd: string;
 	let agentDir: string;
@@ -112,15 +112,17 @@ describe("createAgentSession OpenRouter attribution headers", () => {
 			registeredProviders.push(model.provider);
 		}
 
-		const { session } = await createAgentSession({
+		const sessionManager = new InMemorySessionManager(cwd).create();
+		const pi = await PiAgent.create({
 			cwd,
 			agentDir,
 			model,
 			authStorage,
 			modelRegistry,
 			settingsManager,
-			sessionManager: SessionManager.inMemory(cwd),
+			sessionManager: new InMemorySessionManager(cwd),
 		});
+		const session = await pi.createAgentSession({ session: sessionManager });
 
 		try {
 			await session.agent.streamFn(
@@ -130,7 +132,7 @@ describe("createAgentSession OpenRouter attribution headers", () => {
 			);
 			return capturedOptions?.headers;
 		} finally {
-			session.dispose();
+			await pi.dispose();
 			for (const provider of registeredProviders.reverse()) {
 				modelRegistry.unregisterProvider(provider);
 			}

@@ -1084,7 +1084,7 @@ if (result.cancelled) {
 Options:
 - `withSession`: run post-switch work against a fresh replacement-session context. Do not use captured old `pi` / command `ctx`; see [Session replacement lifecycle and footguns](#session-replacement-lifecycle-and-footguns).
 
-To discover available sessions, use the static `SessionManager.list()` or `SessionManager.listAll()` methods:
+To discover available sessions, use the static `LocalSessionManager.list()` or `LocalSessionManager.listAll()` methods:
 
 ```typescript
 import { SessionManager } from "@earendil-works/pi-coding-agent";
@@ -1092,7 +1092,7 @@ import { SessionManager } from "@earendil-works/pi-coding-agent";
 pi.registerCommand("switch", {
   description: "Switch to another session",
   handler: async (args, ctx) => {
-    const sessions = await SessionManager.list(ctx.cwd);
+    const sessions = await LocalSessionManager.list(ctx.cwd);
     if (sessions.length === 0) return;
     const choice = await ctx.ui.select(
       "Pick session:",
@@ -1503,7 +1503,7 @@ pi.setActiveTools(["read", "bash"]); // Switch to read-only
 
 Typical `sourceInfo.source` values:
 - `builtin` for built-in tools
-- `sdk` for tools passed via `createAgentSession({ customTools })`
+- `sdk` for tools passed via `PiAgent.create({ customTools })`
 - extension source metadata for tools registered by extensions
 
 ### pi.setModel(model)

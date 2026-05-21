@@ -11,10 +11,10 @@ import {
 } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
-import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
-import { SessionManager } from "../src/core/session-manager.ts";
+import type { PiAgentRuntimeHost } from "../src/core/pi-agent.ts";
+import { InMemorySessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
 import { createTestResourceLoader } from "./utilities.ts";
@@ -24,16 +24,16 @@ const rpcIo = vi.hoisted(() => ({
 	lineHandler: undefined as ((line: string) => void) | undefined,
 }));
 
-vi.mock("../src/core/output-guard.js", () => ({
+vi.mock("../src/core/output-guard.ts", () => ({
 	takeOverStdout: vi.fn(),
 	writeRawStdout: (line: string) => {
 		rpcIo.outputLines.push(line);
 	},
 }));
 
-vi.mock("../src/modes/interactive/theme/theme.js", () => ({ theme: {} }));
+vi.mock("../src/modes/interactive/theme/theme.ts", () => ({ theme: {} }));
 
-vi.mock("../src/modes/rpc/jsonl.js", () => ({
+vi.mock("../src/modes/rpc/jsonl.ts", () => ({
 	attachJsonlLineReader: vi.fn((_stream: NodeJS.ReadableStream, onLine: (line: string) => void) => {
 		rpcIo.lineHandler = onLine;
 		return () => {};
@@ -94,7 +94,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 function createRuntimeHost(options: { withAuth: boolean; responseDelayMs: number; model?: Model<any> }): {
-	runtimeHost: AgentSessionRuntime;
+	runtimeHost: PiAgentRuntimeHost;
 	cleanup: () => Promise<void>;
 } {
 	const tempDir = join(tmpdir(), `pi-rpc-prompt-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -124,7 +124,7 @@ function createRuntimeHost(options: { withAuth: boolean; responseDelayMs: number
 		},
 	});
 
-	const sessionManager = SessionManager.inMemory();
+	const sessionManager = new InMemorySessionManager().create();
 	const settingsManager = SettingsManager.create(tempDir, tempDir);
 	const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
 	const modelRegistry = ModelRegistry.create(authStorage, tempDir);
@@ -148,7 +148,7 @@ function createRuntimeHost(options: { withAuth: boolean; responseDelayMs: number
 		fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
 		dispose: vi.fn(async () => {}),
 		setRebindSession: vi.fn(),
-	} as unknown as AgentSessionRuntime;
+	} as unknown as PiAgentRuntimeHost;
 
 	return {
 		runtimeHost,

@@ -18,7 +18,7 @@ import {
 	type SessionEvent,
 } from "../src/core/extensions/index.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
-import { SessionManager } from "../src/core/session-manager.ts";
+import { LocalSessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { createSyntheticSourceInfo } from "../src/core/source-info.ts";
 import { createCodingTools } from "../src/index.ts";
@@ -96,7 +96,7 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 			},
 		});
 
-		const sessionManager = SessionManager.create(tempDir);
+		const sessionManager = new LocalSessionManager({ cwd: tempDir }).create();
 		const settingsManager = SettingsManager.create(tempDir, tempDir);
 		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
 		const modelRegistry = ModelRegistry.create(authStorage);

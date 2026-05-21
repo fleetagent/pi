@@ -59,7 +59,6 @@ import {
 	VERSION,
 } from "../../config.ts";
 import { type AgentSession, type AgentSessionEvent, parseSkillBlock } from "../../core/agent-session.ts";
-import { type AgentSessionRuntime, SessionImportFileNotFoundError } from "../../core/agent-session-runtime.ts";
 import type {
 	AutocompleteProviderFactory,
 	EditorFactory,
@@ -71,15 +70,15 @@ import type {
 	ExtensionWidgetOptions,
 } from "../../core/extensions/index.ts";
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
-import { configureHttpDispatcher, formatHttpIdleTimeoutMs } from "../../core/http-dispatcher.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
 import { createCompactionSummaryMessage } from "../../core/messages.ts";
 import { defaultModelPerProvider, findExactModelReferenceMatch, resolveModelScope } from "../../core/model-resolver.ts";
 import { DefaultPackageManager } from "../../core/package-manager.ts";
+import { type PiAgentRuntimeHost, SessionImportFileNotFoundError } from "../../core/pi-agent.ts";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-names.ts";
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
-import { type SessionContext, SessionManager } from "../../core/session-manager.ts";
+import { LocalSessionManager, type SessionContext } from "../../core/session-manager.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
 import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
@@ -235,7 +234,8 @@ export interface InteractiveModeOptions {
 }
 
 export class InteractiveMode {
-	private runtimeHost: AgentSessionRuntime;
+	private runtimeHost: PiAgentRuntimeHost;
+	private options: InteractiveModeOptions;
 	private ui: TUI;
 	private chatContainer: Container;
 	private pendingMessagesContainer: Container;
@@ -340,8 +340,6 @@ export class InteractiveMode {
 	// Custom header from extension (undefined = use built-in header)
 	private customHeader: (Component & { dispose?(): void }) | undefined = undefined;
 
-	private options: InteractiveModeOptions;
-
 	// Convenience accessors
 	private get session(): AgentSession {
 		return this.runtimeHost.session;
@@ -350,13 +348,13 @@ export class InteractiveMode {
 		return this.session.agent;
 	}
 	private get sessionManager() {
-		return this.session.sessionManager;
+		return this.session.session;
 	}
 	private get settingsManager() {
 		return this.session.settingsManager;
 	}
 
-	constructor(runtimeHost: AgentSessionRuntime, options: InteractiveModeOptions = {}) {
+	constructor(runtimeHost: PiAgentRuntimeHost, options: InteractiveModeOptions = {}) {
 		this.runtimeHost = runtimeHost;
 		this.options = options;
 		this.runtimeHost.setBeforeSessionInvalidate(() => {
@@ -1063,7 +1061,7 @@ export class InteractiveMode {
 			.map((extension) => {
 				const segments = this.getCompactDisplayPathSegments(extension.path);
 				const lastSegment = segments[segments.length - 1];
-				if (segments.length > 1 && (lastSegment === "index.ts" || lastSegment === "index.js")) {
+				if (segments.length > 1 && (lastSegment === "index.ts" || lastSegment === "index.ts")) {
 					segments.pop();
 				}
 				return {
@@ -1567,7 +1565,6 @@ export class InteractiveMode {
 	}
 
 	private applyRuntimeSettings(): void {
-		configureHttpDispatcher(this.settingsManager.getHttpIdleTimeoutMs());
 		this.footer.setSession(this.session);
 		this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);
 		this.footerDataProvider.setCwd(this.sessionManager.getCwd());
@@ -3848,7 +3845,6 @@ export class InteractiveMode {
 					steeringMode: this.session.steeringMode,
 					followUpMode: this.session.followUpMode,
 					transport: this.settingsManager.getTransport(),
-					httpIdleTimeoutMs: this.settingsManager.getHttpIdleTimeoutMs(),
 					thinkingLevel: this.session.thinkingLevel,
 					availableThinkingLevels: this.session.getAvailableThinkingLevels(),
 					currentTheme: this.settingsManager.getTheme() || "dark",
@@ -3864,6 +3860,7 @@ export class InteractiveMode {
 					quietStartup: this.settingsManager.getQuietStartup(),
 					clearOnShrink: this.settingsManager.getClearOnShrink(),
 					showTerminalProgress: this.settingsManager.getShowTerminalProgress(),
+					httpIdleTimeoutMs: this.settingsManager.getHttpIdleTimeoutMs(),
 					warnings: this.settingsManager.getWarnings(),
 				},
 				{
@@ -3906,11 +3903,6 @@ export class InteractiveMode {
 					onTransportChange: (transport) => {
 						this.settingsManager.setTransport(transport);
 						this.session.agent.transport = transport;
-					},
-					onHttpIdleTimeoutMsChange: (timeoutMs) => {
-						this.settingsManager.setHttpIdleTimeoutMs(timeoutMs);
-						configureHttpDispatcher(timeoutMs);
-						this.showStatus(`HTTP idle timeout: ${formatHttpIdleTimeoutMs(timeoutMs)}`);
 					},
 					onThinkingLevelChange: (level) => {
 						this.session.setThinkingLevel(level);
@@ -3982,6 +3974,9 @@ export class InteractiveMode {
 					},
 					onShowTerminalProgressChange: (enabled) => {
 						this.settingsManager.setShowTerminalProgress(enabled);
+					},
+					onHttpIdleTimeoutMsChange: (timeoutMs) => {
+						this.settingsManager.setHttpIdleTimeoutMs(timeoutMs);
 					},
 					onWarningsChange: (warnings) => {
 						this.settingsManager.setWarnings(warnings);
@@ -4382,8 +4377,11 @@ export class InteractiveMode {
 		this.showSelector((done) => {
 			const selector = new SessionSelectorComponent(
 				(onProgress) =>
-					SessionManager.list(this.sessionManager.getCwd(), this.sessionManager.getSessionDir(), onProgress),
-				SessionManager.listAll,
+					new LocalSessionManager({
+						cwd: this.sessionManager.getCwd(),
+						sessionDir: this.sessionManager.getSessionDir(),
+					}).list(onProgress),
+				new LocalSessionManager({ cwd: process.cwd() }).listAll,
 				async (sessionPath) => {
 					done();
 					await this.handleResumeSession(sessionPath);
@@ -4400,14 +4398,14 @@ export class InteractiveMode {
 					renameSession: async (sessionFilePath: string, nextName: string | undefined) => {
 						const next = (nextName ?? "").trim();
 						if (!next) return;
-						const mgr = SessionManager.open(sessionFilePath);
+						const mgr = new LocalSessionManager({ cwd: process.cwd() }).openReference(sessionFilePath);
 						mgr.appendSessionInfo(next);
 					},
 					showRenameHint: true,
 					keybindings: this.keybindings,
 				},
 
-				this.sessionManager.getSessionFile(),
+				this.sessionManager.getSessionReference(),
 			);
 			return { component: selector, focus: selector };
 		});
@@ -4901,7 +4899,6 @@ export class InteractiveMode {
 
 		try {
 			await this.session.reload();
-			configureHttpDispatcher(this.settingsManager.getHttpIdleTimeoutMs());
 			this.keybindings.reload();
 			const activeHeader = this.customHeader ?? this.builtInHeader;
 			if (isExpandable(activeHeader)) {

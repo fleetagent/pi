@@ -4,12 +4,7 @@
  * Shows how to replace or modify the default system prompt.
  */
 
-import {
-	createAgentSession,
-	DefaultResourceLoader,
-	getAgentDir,
-	SessionManager,
-} from "@earendil-works/pi-coding-agent";
+import { DefaultResourceLoader, getAgentDir, InMemorySessionManager, PiAgent } from "@earendil-works/pi-coding-agent";
 
 const cwd = process.cwd();
 const agentDir = getAgentDir();
@@ -25,10 +20,13 @@ Always end responses with "Arrr!"`,
 });
 await loader1.reload();
 
-const { session: session1 } = await createAgentSession({
+const pi1 = await PiAgent.create({
+	cwd,
+	agentDir,
 	resourceLoader: loader1,
-	sessionManager: SessionManager.inMemory(),
+	sessionManager: new InMemorySessionManager(),
 });
+const session1 = await pi1.createAgentSession();
 
 try {
 	session1.subscribe((event) => {
@@ -41,7 +39,7 @@ try {
 	await session1.prompt("What is 2 + 2?");
 	console.log("\n");
 } finally {
-	session1.dispose();
+	await pi1.dispose();
 }
 
 // Option 2: Append instructions to the default prompt
@@ -55,10 +53,13 @@ const loader2 = new DefaultResourceLoader({
 });
 await loader2.reload();
 
-const { session: session2 } = await createAgentSession({
+const pi2 = await PiAgent.create({
+	cwd,
+	agentDir,
 	resourceLoader: loader2,
-	sessionManager: SessionManager.inMemory(),
+	sessionManager: new InMemorySessionManager(),
 });
+const session2 = await pi2.createAgentSession();
 
 try {
 	session2.subscribe((event) => {
@@ -71,5 +72,5 @@ try {
 	await session2.prompt("List 3 benefits of TypeScript.");
 	console.log();
 } finally {
-	session2.dispose();
+	await pi2.dispose();
 }

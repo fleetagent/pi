@@ -13,19 +13,16 @@
  *   export default function (pi: ExtensionAPI) { ... }
  */
 
-import {
-	createAgentSession,
-	DefaultResourceLoader,
-	getAgentDir,
-	SessionManager,
-} from "@earendil-works/pi-coding-agent";
+import { DefaultResourceLoader, getAgentDir, InMemorySessionManager, PiAgent } from "@earendil-works/pi-coding-agent";
 
 // Extensions are discovered automatically from standard locations.
 // You can also add paths via settings.json or DefaultResourceLoader options.
 
+const cwd = process.cwd();
+const agentDir = getAgentDir();
 const resourceLoader = new DefaultResourceLoader({
-	cwd: process.cwd(),
-	agentDir: getAgentDir(),
+	cwd,
+	agentDir,
 	additionalExtensionPaths: ["./my-logging-extension.ts", "./my-safety-extension.ts"],
 	extensionFactories: [
 		(pi) => {
@@ -37,10 +34,8 @@ const resourceLoader = new DefaultResourceLoader({
 });
 await resourceLoader.reload();
 
-const { session } = await createAgentSession({
-	resourceLoader,
-	sessionManager: SessionManager.inMemory(),
-});
+const pi = await PiAgent.create({ cwd, agentDir, resourceLoader, sessionManager: new InMemorySessionManager() });
+const session = await pi.createAgentSession();
 
 try {
 	session.subscribe((event) => {
@@ -52,7 +47,7 @@ try {
 	await session.prompt("List files in the current directory.");
 	console.log();
 } finally {
-	session.dispose();
+	await pi.dispose();
 }
 
 // Example extension file (./my-logging-extension.ts):

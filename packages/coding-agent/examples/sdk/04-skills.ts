@@ -6,11 +6,11 @@
  */
 
 import {
-	createAgentSession,
 	createSyntheticSourceInfo,
 	DefaultResourceLoader,
 	getAgentDir,
-	SessionManager,
+	InMemorySessionManager,
+	PiAgent,
 	type Skill,
 } from "@earendil-works/pi-coding-agent";
 
@@ -24,9 +24,11 @@ const customSkill: Skill = {
 	disableModelInvocation: false,
 };
 
+const cwd = process.cwd();
+const agentDir = getAgentDir();
 const loader = new DefaultResourceLoader({
-	cwd: process.cwd(),
-	agentDir: getAgentDir(),
+	cwd,
+	agentDir,
 	skillsOverride: (current) => {
 		const filteredSkills = current.skills.filter((s) => s.name.includes("browser") || s.name.includes("search"));
 		return {
@@ -47,9 +49,12 @@ if (diagnostics.length > 0) {
 	console.log("Warnings:", diagnostics);
 }
 
-const { session } = await createAgentSession({
+const pi = await PiAgent.create({
+	cwd,
+	agentDir,
 	resourceLoader: loader,
-	sessionManager: SessionManager.inMemory(),
+	sessionManager: new InMemorySessionManager(),
 });
+await pi.createAgentSession();
 console.log("Session created with filtered skills");
-session.dispose();
+await pi.dispose();

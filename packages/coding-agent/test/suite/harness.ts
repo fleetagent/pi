@@ -14,7 +14,7 @@ import { AuthStorage } from "../../src/core/auth-storage.ts";
 import type { ExtensionRunner } from "../../src/core/extensions/index.ts";
 import { convertToLlm } from "../../src/core/messages.ts";
 import { ModelRegistry } from "../../src/core/model-registry.ts";
-import { SessionManager } from "../../src/core/session-manager.ts";
+import { InMemorySessionManager, type Session } from "../../src/core/session-manager.ts";
 import type { Settings } from "../../src/core/settings-manager.ts";
 import { SettingsManager } from "../../src/core/settings-manager.ts";
 import type { ExtensionFactory, ResourceLoader } from "../../src/index.ts";
@@ -67,7 +67,7 @@ export interface HarnessOptions {
 
 export interface Harness {
 	session: AgentSession;
-	sessionManager: SessionManager;
+	sessionManager: Session;
 	settingsManager: SettingsManager;
 	authStorage: AuthStorage;
 	faux: FauxProviderRegistration;
@@ -100,7 +100,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 	const withConfiguredAuth = options.withConfiguredAuth ?? true;
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
 
-	const sessionManager = SessionManager.inMemory();
+	const sessionManager = new InMemorySessionManager().create();
 	const settingsManager = SettingsManager.inMemory(options.settings);
 
 	const authStorage = AuthStorage.inMemory();

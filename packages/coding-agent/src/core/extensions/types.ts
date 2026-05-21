@@ -53,8 +53,8 @@ import type {
 	BranchSummaryEntry,
 	CompactionEntry,
 	ReadonlySessionManager,
+	Session,
 	SessionEntry,
-	SessionManager,
 } from "../session-manager.ts";
 import type { SlashCommandInfo } from "../slash-commands.ts";
 import type { SourceInfo } from "../source-info.ts";
@@ -336,8 +336,9 @@ export interface ExtensionCommandContext extends ExtensionContext {
 
 	/** Start a new session, optionally with initialization. */
 	newSession(options?: {
+		id?: string;
 		parentSession?: string;
-		setup?: (sessionManager: SessionManager) => Promise<void>;
+		setup?: (sessionManager: Session) => Promise<void>;
 		withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
 	}): Promise<{ cancelled: boolean }>;
 
@@ -1509,8 +1510,9 @@ export interface ExtensionContextActions {
 export interface ExtensionCommandContextActions {
 	waitForIdle: () => Promise<void>;
 	newSession: (options?: {
+		id?: string;
 		parentSession?: string;
-		setup?: (sessionManager: SessionManager) => Promise<void>;
+		setup?: (sessionManager: Session) => Promise<void>;
 		withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
 	}) => Promise<{ cancelled: boolean }>;
 	fork: (

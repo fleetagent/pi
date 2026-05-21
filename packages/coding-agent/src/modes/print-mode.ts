@@ -7,8 +7,8 @@
  */
 
 import type { AssistantMessage, ImageContent } from "@earendil-works/pi-ai";
-import type { AgentSessionRuntime } from "../core/agent-session-runtime.ts";
 import { flushRawStdout, writeRawStdout } from "../core/output-guard.ts";
+import type { PiAgentRuntimeHost } from "../core/pi-agent.ts";
 import { killTrackedDetachedChildren } from "../utils/shell.ts";
 
 /**
@@ -29,7 +29,7 @@ export interface PrintModeOptions {
  * Run in print (single-shot) mode.
  * Sends prompts to the agent and outputs the result.
  */
-export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: PrintModeOptions): Promise<number> {
+export async function runPrintMode(runtimeHost: PiAgentRuntimeHost, options: PrintModeOptions): Promise<number> {
 	const { mode, messages = [], initialMessage, initialImages } = options;
 	let exitCode = 0;
 	let session = runtimeHost.session;
@@ -109,7 +109,7 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 
 	try {
 		if (mode === "json") {
-			const header = session.sessionManager.getHeader();
+			const header = session.session.getHeader();
 			if (header) {
 				writeRawStdout(`${JSON.stringify(header)}\n`);
 			}

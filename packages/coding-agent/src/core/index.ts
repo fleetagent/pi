@@ -11,20 +11,6 @@ export {
 	type PromptOptions,
 	type SessionStats,
 } from "./agent-session.ts";
-export {
-	AgentSessionRuntime,
-	type CreateAgentSessionRuntimeFactory,
-	type CreateAgentSessionRuntimeResult,
-	createAgentSessionRuntime,
-} from "./agent-session-runtime.ts";
-export {
-	type AgentSessionRuntimeDiagnostic,
-	type AgentSessionServices,
-	type CreateAgentSessionFromServicesOptions,
-	type CreateAgentSessionServicesOptions,
-	createAgentSessionFromServices,
-	createAgentSessionServices,
-} from "./agent-session-services.ts";
 export { type BashExecutorOptions, type BashResult, executeBashWithOperations } from "./bash-executor.ts";
 export type { CompactionResult } from "./compaction/index.ts";
 export { createEventBus, type EventBus, type EventBusController } from "./event-bus.ts";
@@ -74,4 +60,14 @@ export {
 	type TurnStartEvent,
 	type WorkingIndicatorOptions,
 } from "./extensions/index.ts";
+export {
+	type CreatePiAgentOptions,
+	PiAgent,
+	type PiAgentDiagnostic,
+	type PiAgentRuntimeHost,
+	type PiAgentServices,
+	type PiAgentSessionOptions,
+	type ResolvePiAgentSessionOptionsContext,
+	type ResolvePiAgentSessionOptionsResult,
+} from "./pi-agent.ts";
 export { createSyntheticSourceInfo } from "./source-info.ts";

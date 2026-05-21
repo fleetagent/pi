@@ -7,11 +7,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
-import { SessionManager } from "../src/core/session-manager.ts";
+import { InMemorySessionManager, type Session } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { createTestResourceLoader } from "./utilities.ts";
 
-vi.mock("../src/core/compaction/index.js", () => ({
+vi.mock("../src/core/compaction/index.ts", () => ({
 	calculateContextTokens: (usage: {
 		input: number;
 		output: number;
@@ -55,7 +55,7 @@ vi.mock("../src/core/compaction/index.js", () => ({
 
 describe("AgentSession auto-compaction queue resume", () => {
 	let session: AgentSession;
-	let sessionManager: SessionManager;
+	let sessionManager: Session;
 	let tempDir: string;
 
 	beforeEach(() => {
@@ -72,7 +72,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 			},
 		});
 
-		sessionManager = SessionManager.inMemory();
+		sessionManager = new InMemorySessionManager().create();
 		const settingsManager = SettingsManager.create(tempDir, tempDir);
 		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
 		authStorage.setRuntimeApiKey("anthropic", "test-key");

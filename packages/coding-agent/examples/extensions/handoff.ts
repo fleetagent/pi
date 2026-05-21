@@ -109,7 +109,7 @@ export default function (pi: ExtensionAPI) {
 			// Convert to LLM format and serialize
 			const llmMessages = convertToLlm(messages);
 			const conversationText = serializeConversation(llmMessages);
-			const currentSessionFile = ctx.sessionManager.getSessionFile();
+			const currentSessionFile = ctx.sessionManager.getSessionReference();
 
 			// Generate the handoff prompt with loader UI
 			const result = await ctx.ui.custom<string | null>((tui, theme, _kb, done) => {

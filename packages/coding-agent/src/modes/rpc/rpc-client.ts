@@ -23,9 +23,18 @@ type DistributiveOmit<T, K extends keyof T> = T extends unknown ? Omit<T, K> : n
 /** RpcCommand without the id field (for internal send) */
 type RpcCommandBody = DistributiveOmit<RpcCommand, "id">;
 
+export interface RpcClientStartCommand {
+	/** Executable to spawn. */
+	command: string;
+	/** Arguments passed to the executable. */
+	args: string[];
+}
+
 export interface RpcClientOptions {
 	/** Path to the CLI entry point (default: searches for dist/cli.js) */
 	cliPath?: string;
+	/** Override the process command used to start the RPC agent. */
+	startCommand?: RpcClientStartCommand | ((defaultCommand: RpcClientStartCommand) => RpcClientStartCommand);
 	/** Working directory for the agent */
 	cwd?: string;
 	/** Environment variables */
@@ -73,7 +82,7 @@ export class RpcClient {
 			throw new Error("Client already started");
 		}
 
-		const cliPath = this.options.cliPath ?? "dist/cli.js";
+		const cliPath = this.options.cliPath ?? "dist/cli.ts";
 		const args = ["--mode", "rpc"];
 
 		if (this.options.provider) {
@@ -86,7 +95,13 @@ export class RpcClient {
 			args.push(...this.options.args);
 		}
 
-		this.process = spawn("node", [cliPath, ...args], {
+		const defaultStartCommand: RpcClientStartCommand = { command: "node", args: [cliPath, ...args] };
+		const startCommand =
+			typeof this.options.startCommand === "function"
+				? this.options.startCommand(defaultStartCommand)
+				: (this.options.startCommand ?? defaultStartCommand);
+
+		this.process = spawn(startCommand.command, startCommand.args, {
 			cwd: this.options.cwd,
 			env: { ...process.env, ...this.options.env },
 			stdio: ["pipe", "pipe", "pipe"],
@@ -193,12 +208,18 @@ export class RpcClient {
 	}
 
 	/**
-	 * Start a new session, optionally with parent tracking.
-	 * @param parentSession - Optional parent session path for lineage tracking
+	 * Start a new session, optionally with an explicit id and parent tracking.
 	 * @returns Object with `cancelled: true` if an extension cancelled the new session
 	 */
-	async newSession(parentSession?: string): Promise<{ cancelled: boolean }> {
-		const response = await this.send({ type: "new_session", parentSession });
+	async newSession(
+		options?: string | { sessionId?: string; parentSession?: string },
+	): Promise<{ cancelled: boolean }> {
+		const sessionOptions = typeof options === "string" ? { parentSession: options } : options;
+		const response = await this.send({
+			type: "new_session",
+			sessionId: sessionOptions?.sessionId,
+			parentSession: sessionOptions?.parentSession,
+		});
 		return this.getData(response);
 	}
 

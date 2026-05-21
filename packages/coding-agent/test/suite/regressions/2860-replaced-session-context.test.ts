@@ -4,14 +4,9 @@ import { join } from "node:path";
 import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentSession } from "../../../src/core/agent-session.ts";
-import {
-	type CreateAgentSessionRuntimeFactory,
-	createAgentSessionFromServices,
-	createAgentSessionRuntime,
-	createAgentSessionServices,
-} from "../../../src/core/agent-session-runtime.ts";
 import { AuthStorage } from "../../../src/core/auth-storage.ts";
-import { SessionManager } from "../../../src/core/session-manager.ts";
+import { PiAgent } from "../../../src/core/pi-agent.ts";
+import { LocalSessionManager } from "../../../src/core/session-manager.ts";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionFactory } from "../../../src/index.ts";
 
 function getText(message: AgentSession["messages"][number]): string {
@@ -47,54 +42,39 @@ describe("regression #2860: replaced session callbacks", () => {
 		const authStorage = AuthStorage.inMemory();
 		authStorage.setRuntimeApiKey(faux.getModel().provider, "faux-key");
 
-		const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
-			const services = await createAgentSessionServices({
-				cwd,
-				agentDir: tempDir,
-				authStorage,
-				resourceLoaderOptions: {
-					extensionFactories: [
-						(pi: ExtensionAPI) => {
-							pi.registerProvider(faux.getModel().provider, {
-								baseUrl: faux.getModel().baseUrl,
-								apiKey: "faux-key",
-								api: faux.api,
-								models: faux.models.map((registeredModel) => ({
-									id: registeredModel.id,
-									name: registeredModel.name,
-									api: registeredModel.api,
-									reasoning: registeredModel.reasoning,
-									input: registeredModel.input,
-									cost: registeredModel.cost,
-									contextWindow: registeredModel.contextWindow,
-									maxTokens: registeredModel.maxTokens,
-								})),
-							});
-							extensionFactory(pi);
-						},
-					],
-					noSkills: true,
-					noPromptTemplates: true,
-					noThemes: true,
-				},
-			});
-			return {
-				...(await createAgentSessionFromServices({
-					services,
-					sessionManager,
-					sessionStartEvent,
-					model: faux.getModel(),
-				})),
-				services,
-				diagnostics: services.diagnostics,
-			};
-		};
-
-		const runtime = await createAgentSessionRuntime(createRuntime, {
+		const runtime = await PiAgent.create({
 			cwd: tempDir,
 			agentDir: tempDir,
-			sessionManager: SessionManager.create(tempDir),
+			authStorage,
+			sessionManager: new LocalSessionManager({ cwd: tempDir }),
+			resourceLoaderOptions: {
+				extensionFactories: [
+					(pi: ExtensionAPI) => {
+						pi.registerProvider(faux.getModel().provider, {
+							baseUrl: faux.getModel().baseUrl,
+							apiKey: "faux-key",
+							api: faux.api,
+							models: faux.models.map((registeredModel) => ({
+								id: registeredModel.id,
+								name: registeredModel.name,
+								api: registeredModel.api,
+								reasoning: registeredModel.reasoning,
+								input: registeredModel.input,
+								cost: registeredModel.cost,
+								contextWindow: registeredModel.contextWindow,
+								maxTokens: registeredModel.maxTokens,
+							})),
+						});
+						extensionFactory(pi);
+					},
+				],
+				noSkills: true,
+				noPromptTemplates: true,
+				noThemes: true,
+			},
+			resolveSessionOptions: () => ({ model: faux.getModel() }),
 		});
+		await runtime.createAgentSession();
 
 		const rebindSession = async (): Promise<void> => {
 			const session = runtime.session;
@@ -162,14 +142,14 @@ describe("regression #2860: replaced session callbacks", () => {
 					handler: async (_args, ctx) => {
 						oldCtx = ctx;
 						oldPi = pi;
-						oldSessionFile = ctx.sessionManager.getSessionFile();
+						oldSessionFile = ctx.sessionManager.getSessionReference();
 						await ctx.newSession({
 							parentSession: oldSessionFile,
 							withSession: async (replacedCtx) => {
 								events.push(`with:${currentInstance}`);
-								replacementSessionFile = replacedCtx.sessionManager.getSessionFile();
+								replacementSessionFile = replacedCtx.sessionManager.getSessionReference();
 								try {
-									oldCtx?.sessionManager.getSessionFile();
+									oldCtx?.sessionManager.getSessionReference();
 								} catch {
 									staleCtxThrows = true;
 								}

@@ -4,9 +4,9 @@ import { join } from "node:path";
 import { getModel } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { PiAgent, type PiAgentSessionOptions } from "../src/core/pi-agent.ts";
 import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
-import { createAgentSession } from "../src/core/sdk.ts";
-import { SessionManager } from "../src/core/session-manager.ts";
+import { InMemorySessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 
 describe("AgentSession dynamic tool registration", () => {
@@ -25,9 +25,27 @@ describe("AgentSession dynamic tool registration", () => {
 		}
 	});
 
+	async function createSession(options: {
+		settingsManager: SettingsManager;
+		resourceLoader: DefaultResourceLoader;
+		sessionManager: ReturnType<InMemorySessionManager["create"]>;
+		sessionOptions?: PiAgentSessionOptions;
+	}) {
+		const pi = await PiAgent.create({
+			cwd: tempDir,
+			agentDir,
+			model: getModel("anthropic", "claude-sonnet-4-5")!,
+			settingsManager: options.settingsManager,
+			sessionManager: new InMemorySessionManager(tempDir),
+			resourceLoader: options.resourceLoader,
+			...options.sessionOptions,
+		});
+		return pi.createAgentSession({ session: options.sessionManager });
+	}
+
 	it("refreshes tool registry when tools are registered after initialization", async () => {
 		const settingsManager = SettingsManager.create(tempDir, agentDir);
-		const sessionManager = SessionManager.inMemory();
+		const sessionManager = new InMemorySessionManager().create();
 
 		const resourceLoader = new DefaultResourceLoader({
 			cwd: tempDir,
@@ -54,14 +72,7 @@ describe("AgentSession dynamic tool registration", () => {
 		});
 		await resourceLoader.reload();
 
-		const { session } = await createAgentSession({
-			cwd: tempDir,
-			agentDir,
-			model: getModel("anthropic", "claude-sonnet-4-5")!,
-			settingsManager,
-			sessionManager,
-			resourceLoader,
-		});
+		const session = await createSession({ settingsManager, sessionManager, resourceLoader });
 
 		expect(session.getAllTools().map((tool) => tool.name)).not.toContain("dynamic_tool");
 
@@ -93,7 +104,7 @@ describe("AgentSession dynamic tool registration", () => {
 
 	it("returns source metadata for SDK custom tools", async () => {
 		const settingsManager = SettingsManager.create(tempDir, agentDir);
-		const sessionManager = SessionManager.inMemory();
+		const sessionManager = new InMemorySessionManager().create();
 		const resourceLoader = new DefaultResourceLoader({
 			cwd: tempDir,
 			agentDir,
@@ -101,25 +112,24 @@ describe("AgentSession dynamic tool registration", () => {
 		});
 		await resourceLoader.reload();
 
-		const { session } = await createAgentSession({
-			cwd: tempDir,
-			agentDir,
-			model: getModel("anthropic", "claude-sonnet-4-5")!,
+		const session = await createSession({
 			settingsManager,
 			sessionManager,
 			resourceLoader,
-			customTools: [
-				{
-					name: "sdk_tool",
-					label: "SDK Tool",
-					description: "Tool registered through createAgentSession",
-					parameters: Type.Object({}),
-					execute: async () => ({
-						content: [{ type: "text", text: "ok" }],
-						details: {},
-					}),
-				},
-			],
+			sessionOptions: {
+				customTools: [
+					{
+						name: "sdk_tool",
+						label: "SDK Tool",
+						description: "Tool registered through PiAgent",
+						parameters: Type.Object({}),
+						execute: async () => ({
+							content: [{ type: "text", text: "ok" }],
+							details: {},
+						}),
+					},
+				],
+			},
 		});
 
 		const sdkTool = session.getAllTools().find((tool) => tool.name === "sdk_tool");
@@ -136,7 +146,7 @@ describe("AgentSession dynamic tool registration", () => {
 
 	it("keeps custom tools active but omits them from available tools when promptSnippet is not provided", async () => {
 		const settingsManager = SettingsManager.create(tempDir, agentDir);
-		const sessionManager = SessionManager.inMemory();
+		const sessionManager = new InMemorySessionManager().create();
 
 		const resourceLoader = new DefaultResourceLoader({
 			cwd: tempDir,
@@ -161,14 +171,7 @@ describe("AgentSession dynamic tool registration", () => {
 		});
 		await resourceLoader.reload();
 
-		const { session } = await createAgentSession({
-			cwd: tempDir,
-			agentDir,
-			model: getModel("anthropic", "claude-sonnet-4-5")!,
-			settingsManager,
-			sessionManager,
-			resourceLoader,
-		});
+		const session = await createSession({ settingsManager, sessionManager, resourceLoader });
 
 		await session.bindExtensions({});
 

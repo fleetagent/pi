@@ -9,7 +9,7 @@ import { type Theme, theme } from "../../modes/interactive/theme/theme.ts";
 import type { ResourceDiagnostic } from "../diagnostics.ts";
 import type { KeybindingsConfig } from "../keybindings.ts";
 import type { ModelRegistry } from "../model-registry.ts";
-import type { SessionManager } from "../session-manager.ts";
+import type { Session } from "../session-manager.ts";
 import type { BuildSystemPromptOptions } from "../system-prompt.ts";
 import type {
 	BeforeAgentStartEvent,
@@ -149,8 +149,9 @@ type RunnerEmitResult<TEvent extends RunnerEmitEvent> = TEvent extends { type: "
 export type ExtensionErrorListener = (error: ExtensionError) => void;
 
 export type NewSessionHandler = (options?: {
+	id?: string;
 	parentSession?: string;
-	setup?: (sessionManager: SessionManager) => Promise<void>;
+	setup?: (sessionManager: Session) => Promise<void>;
 	withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
 }) => Promise<{ cancelled: boolean }>;
 
@@ -226,7 +227,7 @@ export class ExtensionRunner {
 	private runtime: ExtensionRuntime;
 	private uiContext: ExtensionUIContext;
 	private cwd: string;
-	private sessionManager: SessionManager;
+	private sessionManager: Session;
 	private modelRegistry: ModelRegistry;
 	private errorListeners: Set<ExtensionErrorListener> = new Set();
 	private getModel: () => Model<any> | undefined = () => undefined;
@@ -252,7 +253,7 @@ export class ExtensionRunner {
 		extensions: Extension[],
 		runtime: ExtensionRuntime,
 		cwd: string,
-		sessionManager: SessionManager,
+		sessionManager: Session,
 		modelRegistry: ModelRegistry,
 	) {
 		this.extensions = extensions;

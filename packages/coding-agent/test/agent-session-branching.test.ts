@@ -13,22 +13,16 @@ import { join } from "node:path";
 import { getModel } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { AgentSession } from "../src/core/agent-session.ts";
-import {
-	type AgentSessionRuntime,
-	type CreateAgentSessionRuntimeFactory,
-	createAgentSessionFromServices,
-	createAgentSessionRuntime,
-	createAgentSessionServices,
-} from "../src/core/agent-session-runtime.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
-import { SessionManager } from "../src/core/session-manager.ts";
+import { PiAgent } from "../src/core/pi-agent.ts";
+import { InMemorySessionManager, LocalSessionManager, type Session } from "../src/core/session-manager.ts";
 import { API_KEY } from "./utilities.ts";
 
 describe.skipIf(!API_KEY)("AgentSession forking", () => {
 	let session: AgentSession;
-	let runtimeHost: AgentSessionRuntime;
+	let runtimeHost: PiAgent;
 	let tempDir: string;
-	let sessionManager: SessionManager;
+	let sessionManager: Session;
 
 	beforeEach(() => {
 		tempDir = join(tmpdir(), `pi-branching-test-${Date.now()}`);
@@ -46,43 +40,29 @@ describe.skipIf(!API_KEY)("AgentSession forking", () => {
 
 	async function createSession(noSession: boolean = false) {
 		const model = getModel("anthropic", "claude-sonnet-4-5")!;
-		sessionManager = noSession ? SessionManager.inMemory(tempDir) : SessionManager.create(tempDir);
+		sessionManager = noSession
+			? new InMemorySessionManager(tempDir).create()
+			: new LocalSessionManager({ cwd: tempDir }).create();
 		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
 		authStorage.setRuntimeApiKey("anthropic", API_KEY!);
 
-		const servicesOptions = {
+		runtimeHost = await PiAgent.create({
+			cwd: tempDir,
 			agentDir: tempDir,
 			authStorage,
+			sessionManager: noSession ? new InMemorySessionManager(tempDir) : new LocalSessionManager({ cwd: tempDir }),
 			resourceLoaderOptions: {
 				noExtensions: true,
 				noSkills: true,
 				noPromptTemplates: true,
 				noThemes: true,
 			},
-		};
-		const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
-			const services = await createAgentSessionServices({
-				...servicesOptions,
-				cwd,
-			});
-			return {
-				...(await createAgentSessionFromServices({
-					services,
-					sessionManager,
-					sessionStartEvent,
-					model,
-					tools: ["read", "bash", "edit", "write"],
-				})),
-				services,
-				diagnostics: services.diagnostics,
-			};
-		};
-		runtimeHost = await createAgentSessionRuntime(createRuntime, {
-			cwd: tempDir,
-			agentDir: tempDir,
-			sessionManager,
+			resolveSessionOptions: () => ({
+				model,
+				tools: ["read", "bash", "edit", "write"],
+			}),
 		});
-		session = runtimeHost.session;
+		session = await runtimeHost.createAgentSession({ session: sessionManager });
 		session.subscribe(() => {});
 		return session;
 	}

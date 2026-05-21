@@ -2,86 +2,51 @@
  * Main entry point for the coding agent CLI.
  *
  * This file handles CLI argument parsing and translates them into
- * createAgentSession() options. The SDK does the heavy lifting.
+ * PiAgent options. PiAgent does the heavy lifting.
  */
 
 import { createInterface } from "node:readline";
 import { type ImageContent, modelsAreEqual } from "@earendil-works/pi-ai";
 import { ProcessTerminal, setKeybindings, TUI } from "@earendil-works/pi-tui";
 import chalk from "chalk";
-import { type Args, type Mode, parseArgs, printHelp } from "./cli/args.ts";
+import { type Args, parseArgs, printHelp } from "./cli/args.ts";
 import { processFileArguments } from "./cli/file-processor.ts";
 import { buildInitialMessage } from "./cli/initial-message.ts";
 import { listModels } from "./cli/list-models.ts";
 import { selectSession } from "./cli/session-picker.ts";
 import { ENV_SESSION_DIR, expandTildePath, getAgentDir, getPackageDir, VERSION } from "./config.ts";
-import { type CreateAgentSessionRuntimeFactory, createAgentSessionRuntime } from "./core/agent-session-runtime.ts";
-import {
-	type AgentSessionRuntimeDiagnostic,
-	createAgentSessionFromServices,
-	createAgentSessionServices,
-} from "./core/agent-session-services.ts";
-import { formatNoModelsAvailableMessage } from "./core/auth-guidance.ts";
 import { AuthStorage } from "./core/auth-storage.ts";
 import { exportFromFile } from "./core/export-html/index.ts";
 import type { ExtensionFactory } from "./core/extensions/types.ts";
-import { configureHttpDispatcher } from "./core/http-dispatcher.ts";
 import { KeybindingsManager } from "./core/keybindings.ts";
 import type { ModelRegistry } from "./core/model-registry.ts";
 import { resolveCliModel, resolveModelScope, type ScopedModel } from "./core/model-resolver.ts";
-import { restoreStdout, takeOverStdout } from "./core/output-guard.ts";
-import type { CreateAgentSessionOptions } from "./core/sdk.ts";
+import type { PiAgentAppMode, PiAgentDiagnostic, PiAgentSessionOptions } from "./core/pi-agent.ts";
+import { PiAgent } from "./core/pi-agent.ts";
 import {
 	formatMissingSessionCwdPrompt,
 	getMissingSessionCwdIssue,
 	MissingSessionCwdError,
 	type SessionCwdIssue,
 } from "./core/session-cwd.ts";
-import { SessionManager } from "./core/session-manager.ts";
+import { InMemorySessionManager, LocalSessionManager, type Session } from "./core/session-manager.ts";
 import { SettingsManager } from "./core/settings-manager.ts";
-import { printTimings, resetTimings, time } from "./core/timings.ts";
+import { resetTimings, time } from "./core/timings.ts";
 import { runMigrations, showDeprecationWarnings } from "./migrations.ts";
-import { InteractiveMode, runPrintMode, runRpcMode } from "./modes/index.ts";
 import { ExtensionSelectorComponent } from "./modes/interactive/components/extension-selector.ts";
 import { initTheme, stopThemeWatcher } from "./modes/interactive/theme/theme.ts";
 import { handleConfigCommand, handlePackageCommand } from "./package-manager-cli.ts";
 import { isLocalPath, normalizePath, resolvePath } from "./utils/paths.ts";
 import { cleanupWindowsSelfUpdateQuarantine } from "./utils/windows-self-update.ts";
 
-/**
- * Read all content from piped stdin.
- * Returns undefined if stdin is a TTY (interactive terminal).
- */
-async function readPipedStdin(): Promise<string | undefined> {
-	// If stdin is a TTY, we're running interactively - don't read stdin
-	if (process.stdin.isTTY) {
-		return undefined;
-	}
-
-	return new Promise((resolve) => {
-		let data = "";
-		process.stdin.setEncoding("utf8");
-		process.stdin.on("data", (chunk) => {
-			data += chunk;
-		});
-		process.stdin.on("end", () => {
-			resolve(data.trim() || undefined);
-		});
-		process.stdin.resume();
-	});
-}
-
-function collectSettingsDiagnostics(
-	settingsManager: SettingsManager,
-	context: string,
-): AgentSessionRuntimeDiagnostic[] {
+function collectSettingsDiagnostics(settingsManager: SettingsManager, context: string): PiAgentDiagnostic[] {
 	return settingsManager.drainErrors().map(({ scope, error }) => ({
 		type: "warning",
 		message: `(${context}, ${scope} settings) ${error.message}`,
 	}));
 }
 
-function reportDiagnostics(diagnostics: readonly AgentSessionRuntimeDiagnostic[]): void {
+function reportDiagnostics(diagnostics: readonly PiAgentDiagnostic[]): void {
 	for (const diagnostic of diagnostics) {
 		const color = diagnostic.type === "error" ? chalk.red : diagnostic.type === "warning" ? chalk.yellow : chalk.dim;
 		const prefix = diagnostic.type === "error" ? "Error: " : diagnostic.type === "warning" ? "Warning: " : "";
@@ -94,9 +59,7 @@ function isTruthyEnvFlag(value: string | undefined): boolean {
 	return value === "1" || value.toLowerCase() === "true" || value.toLowerCase() === "yes";
 }
 
-type AppMode = "interactive" | "print" | "json" | "rpc";
-
-function resolveAppMode(parsed: Args, stdinIsTTY: boolean): AppMode {
+function resolveAppMode(parsed: Args, stdinIsTTY: boolean): PiAgentAppMode {
 	if (parsed.mode === "rpc") {
 		return "rpc";
 	}
@@ -107,10 +70,6 @@ function resolveAppMode(parsed: Args, stdinIsTTY: boolean): AppMode {
 		return "print";
 	}
 	return "interactive";
-}
-
-function toPrintOutputMode(appMode: AppMode): Exclude<Mode, "rpc"> {
-	return appMode === "json" ? "json" : "text";
 }
 
 async function prepareInitialMessage(
@@ -152,7 +111,7 @@ async function resolveSessionPath(sessionArg: string, cwd: string, sessionDir?: 
 	}
 
 	// Try to match as session ID in current project first
-	const localSessions = await SessionManager.list(cwd, sessionDir);
+	const localSessions = await new LocalSessionManager({ cwd: cwd, sessionDir: sessionDir }).list();
 	const localMatches = localSessions.filter((s) => s.id.startsWith(sessionArg));
 
 	if (localMatches.length >= 1) {
@@ -160,7 +119,7 @@ async function resolveSessionPath(sessionArg: string, cwd: string, sessionDir?: 
 	}
 
 	// Try global search across all projects
-	const allSessions = await SessionManager.listAll();
+	const allSessions = await new LocalSessionManager({ cwd: process.cwd() }).listAll();
 	const globalMatches = allSessions.filter((s) => s.id.startsWith(sessionArg));
 
 	if (globalMatches.length >= 1) {
@@ -202,9 +161,9 @@ function validateForkFlags(parsed: Args): void {
 	}
 }
 
-function forkSessionOrExit(sourcePath: string, cwd: string, sessionDir?: string): SessionManager {
+function forkSessionOrExit(sourcePath: string, cwd: string, sessionDir?: string): Session {
 	try {
-		return SessionManager.forkFrom(sourcePath, cwd, sessionDir);
+		return new LocalSessionManager({ cwd: cwd, sessionDir: sessionDir }).forkFrom(sourcePath);
 	} catch (error: unknown) {
 		const message = error instanceof Error ? error.message : String(error);
 		console.error(chalk.red(`Error: ${message}`));
@@ -212,14 +171,14 @@ function forkSessionOrExit(sourcePath: string, cwd: string, sessionDir?: string)
 	}
 }
 
-async function createSessionManager(
+async function resolveInitialSession(
 	parsed: Args,
 	cwd: string,
 	sessionDir: string | undefined,
 	settingsManager: SettingsManager,
-): Promise<SessionManager> {
+): Promise<Session> {
 	if (parsed.noSession) {
-		return SessionManager.inMemory();
+		return new InMemorySessionManager().create();
 	}
 
 	if (parsed.fork) {
@@ -243,7 +202,7 @@ async function createSessionManager(
 		switch (resolved.type) {
 			case "path":
 			case "local":
-				return SessionManager.open(resolved.path, sessionDir);
+				return new LocalSessionManager({ cwd: process.cwd(), sessionDir: sessionDir }).openReference(resolved.path);
 
 			case "global": {
 				console.log(chalk.yellow(`Session found in different project: ${resolved.cwd}`));
@@ -265,24 +224,24 @@ async function createSessionManager(
 		initTheme(settingsManager.getTheme(), true);
 		try {
 			const selectedPath = await selectSession(
-				(onProgress) => SessionManager.list(cwd, sessionDir, onProgress),
-				SessionManager.listAll,
+				(onProgress) => new LocalSessionManager({ cwd: cwd, sessionDir: sessionDir }).list(onProgress),
+				(onProgress) => new LocalSessionManager({ cwd: process.cwd() }).listAll(onProgress),
 			);
 			if (!selectedPath) {
 				console.log(chalk.dim("No session selected"));
 				process.exit(0);
 			}
-			return SessionManager.open(selectedPath, sessionDir);
+			return new LocalSessionManager({ cwd: process.cwd(), sessionDir: sessionDir }).openReference(selectedPath);
 		} finally {
 			stopThemeWatcher();
 		}
 	}
 
 	if (parsed.continue) {
-		return SessionManager.continueRecent(cwd, sessionDir);
+		return new LocalSessionManager({ cwd: cwd, sessionDir: sessionDir }).continueRecent();
 	}
 
-	return SessionManager.create(cwd, sessionDir);
+	return new LocalSessionManager({ cwd: cwd, sessionDir: sessionDir }).create();
 }
 
 function buildSessionOptions(
@@ -292,12 +251,12 @@ function buildSessionOptions(
 	modelRegistry: ModelRegistry,
 	settingsManager: SettingsManager,
 ): {
-	options: CreateAgentSessionOptions;
+	options: PiAgentSessionOptions;
 	cliThinkingFromModel: boolean;
-	diagnostics: AgentSessionRuntimeDiagnostic[];
+	diagnostics: PiAgentDiagnostic[];
 } {
-	const options: CreateAgentSessionOptions = {};
-	const diagnostics: AgentSessionRuntimeDiagnostic[] = [];
+	const options: PiAgentSessionOptions = {};
+	const diagnostics: PiAgentDiagnostic[] = [];
 	let cliThinkingFromModel = false;
 
 	// Model from CLI
@@ -452,11 +411,8 @@ export async function main(args: string[], options?: MainOptions) {
 		}
 	}
 	time("parseArgs");
-	let appMode = resolveAppMode(parsed, process.stdin.isTTY);
-	const shouldTakeOverStdout = appMode !== "interactive";
-	if (shouldTakeOverStdout) {
-		takeOverStdout();
-	}
+	const appMode = resolveAppMode(parsed, process.stdin.isTTY);
+	PiAgent.setupStdio({ mode: appMode });
 
 	if (parsed.version) {
 		console.log(VERSION);
@@ -503,121 +459,95 @@ export async function main(args: string[], options?: MainOptions) {
 		(parsed.sessionDir ? normalizePath(parsed.sessionDir) : undefined) ??
 		(envSessionDir ? expandTildePath(envSessionDir) : undefined) ??
 		startupSettingsManager.getSessionDir();
-	let sessionManager = await createSessionManager(parsed, cwd, sessionDir, startupSettingsManager);
-	const missingSessionCwdIssue = getMissingSessionCwdIssue(sessionManager, cwd);
+	let initialSession = await resolveInitialSession(parsed, cwd, sessionDir, startupSettingsManager);
+	const missingSessionCwdIssue = getMissingSessionCwdIssue(initialSession, cwd);
 	if (missingSessionCwdIssue) {
 		if (appMode === "interactive") {
 			const selectedCwd = await promptForMissingSessionCwd(missingSessionCwdIssue, startupSettingsManager);
 			if (!selectedCwd) {
 				process.exit(0);
 			}
-			sessionManager = SessionManager.open(missingSessionCwdIssue.sessionFile!, sessionDir, selectedCwd);
+			initialSession = new LocalSessionManager({ cwd, sessionDir }).openReference(
+				missingSessionCwdIssue.sessionReference!,
+				{ cwdOverride: selectedCwd },
+			);
 		} else {
 			console.error(chalk.red(new MissingSessionCwdError(missingSessionCwdIssue).message));
 			process.exit(1);
 		}
 	}
-	time("createSessionManager");
+	time("resolveInitialSession");
 
 	const resolvedExtensionPaths = resolveCliPaths(cwd, parsed.extensions);
 	const resolvedSkillPaths = resolveCliPaths(cwd, parsed.skills);
 	const resolvedPromptTemplatePaths = resolveCliPaths(cwd, parsed.promptTemplates);
 	const resolvedThemePaths = resolveCliPaths(cwd, parsed.themes);
 	const authStorage = AuthStorage.create();
-	const createRuntime: CreateAgentSessionRuntimeFactory = async ({
-		cwd,
+	const runtimeSessionManager = parsed.noSession
+		? new InMemorySessionManager(initialSession.getCwd())
+		: new LocalSessionManager({ cwd: initialSession.getCwd(), sessionDir });
+	const piAgent = await PiAgent.create({
+		mode: appMode,
+		cwd: initialSession.getCwd(),
 		agentDir,
-		sessionManager,
-		sessionStartEvent,
-	}) => {
-		const services = await createAgentSessionServices({
-			cwd,
-			agentDir,
-			authStorage,
-			extensionFlagValues: parsed.unknownFlags,
-			resourceLoaderOptions: {
-				additionalExtensionPaths: resolvedExtensionPaths,
-				additionalSkillPaths: resolvedSkillPaths,
-				additionalPromptTemplatePaths: resolvedPromptTemplatePaths,
-				additionalThemePaths: resolvedThemePaths,
-				noExtensions: parsed.noExtensions,
-				noSkills: parsed.noSkills,
-				noPromptTemplates: parsed.noPromptTemplates,
-				noThemes: parsed.noThemes,
-				noContextFiles: parsed.noContextFiles,
-				systemPrompt: parsed.systemPrompt,
-				appendSystemPrompt: parsed.appendSystemPrompt,
-				extensionFactories: options?.extensionFactories,
-			},
-		});
-		const { settingsManager, modelRegistry, resourceLoader } = services;
-		const diagnostics: AgentSessionRuntimeDiagnostic[] = [
-			...services.diagnostics,
-			...collectSettingsDiagnostics(settingsManager, "runtime creation"),
-			...resourceLoader.getExtensions().errors.map(({ path, error }) => ({
-				type: "error" as const,
-				message: `Failed to load extension "${path}": ${error}`,
-			})),
-		];
+		sessionManager: runtimeSessionManager,
+		authStorage,
+		extensionFlagValues: parsed.unknownFlags,
+		resourceLoaderOptions: {
+			additionalExtensionPaths: resolvedExtensionPaths,
+			additionalSkillPaths: resolvedSkillPaths,
+			additionalPromptTemplatePaths: resolvedPromptTemplatePaths,
+			additionalThemePaths: resolvedThemePaths,
+			noExtensions: parsed.noExtensions,
+			noSkills: parsed.noSkills,
+			noPromptTemplates: parsed.noPromptTemplates,
+			noThemes: parsed.noThemes,
+			noContextFiles: parsed.noContextFiles,
+			systemPrompt: parsed.systemPrompt,
+			appendSystemPrompt: parsed.appendSystemPrompt,
+			extensionFactories: options?.extensionFactories,
+		},
+		resolveSessionOptions: async ({ services, session }) => {
+			const { settingsManager, modelRegistry } = services;
+			const diagnostics: PiAgentDiagnostic[] = [...collectSettingsDiagnostics(settingsManager, "runtime creation")];
+			const modelPatterns = parsed.models ?? settingsManager.getEnabledModels();
+			const scopedModels =
+				modelPatterns && modelPatterns.length > 0 ? await resolveModelScope(modelPatterns, modelRegistry) : [];
+			const { options: sessionOptions, diagnostics: sessionOptionDiagnostics } = buildSessionOptions(
+				parsed,
+				scopedModels,
+				session.buildSessionContext().messages.length > 0,
+				modelRegistry,
+				settingsManager,
+			);
+			diagnostics.push(...sessionOptionDiagnostics);
 
-		const modelPatterns = parsed.models ?? settingsManager.getEnabledModels();
-		const scopedModels =
-			modelPatterns && modelPatterns.length > 0 ? await resolveModelScope(modelPatterns, modelRegistry) : [];
-		const {
-			options: sessionOptions,
-			cliThinkingFromModel,
-			diagnostics: sessionOptionDiagnostics,
-		} = buildSessionOptions(
-			parsed,
-			scopedModels,
-			sessionManager.buildSessionContext().messages.length > 0,
-			modelRegistry,
-			settingsManager,
-		);
-		diagnostics.push(...sessionOptionDiagnostics);
-
-		if (parsed.apiKey) {
-			if (!sessionOptions.model) {
-				diagnostics.push({
-					type: "error",
-					message: "--api-key requires a model to be specified via --model, --provider/--model, or --models",
-				});
-			} else {
-				authStorage.setRuntimeApiKey(sessionOptions.model.provider, parsed.apiKey);
+			if (parsed.apiKey) {
+				if (!sessionOptions.model) {
+					diagnostics.push({
+						type: "error",
+						message: "--api-key requires a model to be specified via --model, --provider/--model, or --models",
+					});
+				} else {
+					authStorage.setRuntimeApiKey(sessionOptions.model.provider, parsed.apiKey);
+				}
 			}
-		}
 
-		const created = await createAgentSessionFromServices({
-			services,
-			sessionManager,
-			sessionStartEvent,
-			model: sessionOptions.model,
-			thinkingLevel: sessionOptions.thinkingLevel,
-			scopedModels: sessionOptions.scopedModels,
-			tools: sessionOptions.tools,
-			noTools: sessionOptions.noTools,
-			customTools: sessionOptions.customTools,
-		});
-		const cliThinkingOverride = parsed.thinking !== undefined || cliThinkingFromModel;
-		if (created.session.model && cliThinkingOverride) {
-			created.session.setThinkingLevel(created.session.thinkingLevel);
-		}
-
-		return {
-			...created,
-			services,
-			diagnostics,
-		};
-	};
-	time("createRuntime");
-	const runtime = await createAgentSessionRuntime(createRuntime, {
-		cwd: sessionManager.getCwd(),
-		agentDir,
-		sessionManager,
+			return {
+				model: sessionOptions.model,
+				thinkingLevel: sessionOptions.thinkingLevel,
+				scopedModels: sessionOptions.scopedModels,
+				tools: sessionOptions.tools,
+				noTools: sessionOptions.noTools,
+				customTools: sessionOptions.customTools,
+				diagnostics,
+			};
+		},
 	});
-	const { services, session, modelFallbackMessage } = runtime;
+	await piAgent.createAgentSession({ session: initialSession });
+	const runtime = piAgent;
+	const { services } = runtime;
 	const { settingsManager, modelRegistry, resourceLoader } = services;
-	configureHttpDispatcher(settingsManager.getHttpIdleTimeoutMs());
 
 	if (parsed.help) {
 		const extensionFlags = resourceLoader
@@ -633,14 +563,7 @@ export async function main(args: string[], options?: MainOptions) {
 		process.exit(0);
 	}
 
-	// Read piped stdin content (if any) - skip for RPC mode which uses stdin for JSON-RPC
-	let stdinContent: string | undefined;
-	if (appMode !== "rpc") {
-		stdinContent = await readPipedStdin();
-		if (stdinContent !== undefined && appMode === "interactive") {
-			appMode = "print";
-		}
-	}
+	const stdinContent = await piAgent.readPipedStdin();
 	time("readPipedStdin");
 
 	const { initialMessage, initialImages } = await prepareInitialMessage(
@@ -649,11 +572,11 @@ export async function main(args: string[], options?: MainOptions) {
 		stdinContent,
 	);
 	time("prepareInitialMessage");
-	initTheme(settingsManager.getTheme(), appMode === "interactive");
+	initTheme(settingsManager.getTheme(), piAgent.mode === "interactive");
 	time("initTheme");
 
 	// Show deprecation warnings in interactive mode
-	if (appMode === "interactive" && deprecationWarnings.length > 0) {
+	if (piAgent.mode === "interactive" && deprecationWarnings.length > 0) {
 		await showDeprecationWarnings(deprecationWarnings);
 	}
 
@@ -664,59 +587,12 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 	time("createAgentSession");
 
-	if (appMode !== "interactive" && !session.model) {
-		console.error(chalk.red(formatNoModelsAvailableMessage()));
-		process.exit(1);
-	}
-
-	const startupBenchmark = isTruthyEnvFlag(process.env.PI_STARTUP_BENCHMARK);
-	if (startupBenchmark && appMode !== "interactive") {
-		console.error(chalk.red("Error: PI_STARTUP_BENCHMARK only supports interactive mode"));
-		process.exit(1);
-	}
-
-	if (appMode === "rpc") {
-		printTimings();
-		await runRpcMode(runtime);
-	} else if (appMode === "interactive") {
-		const interactiveMode = new InteractiveMode(runtime, {
-			migratedProviders,
-			modelFallbackMessage,
-			initialMessage,
-			initialImages,
-			initialMessages: parsed.messages,
-			verbose: parsed.verbose,
-		});
-		if (startupBenchmark) {
-			await interactiveMode.init();
-			time("interactiveMode.init");
-			printTimings();
-			interactiveMode.stop();
-			stopThemeWatcher();
-			if (process.stdout.writableLength > 0) {
-				await new Promise<void>((resolve) => process.stdout.once("drain", resolve));
-			}
-			if (process.stderr.writableLength > 0) {
-				await new Promise<void>((resolve) => process.stderr.once("drain", resolve));
-			}
-			return;
-		}
-
-		printTimings();
-		await interactiveMode.run();
-	} else {
-		printTimings();
-		const exitCode = await runPrintMode(runtime, {
-			mode: toPrintOutputMode(appMode),
-			messages: parsed.messages,
-			initialMessage,
-			initialImages,
-		});
-		stopThemeWatcher();
-		restoreStdout();
-		if (exitCode !== 0) {
-			process.exitCode = exitCode;
-		}
-		return;
-	}
+	await piAgent.runMode({
+		migratedProviders,
+		initialMessage,
+		initialImages,
+		initialMessages: parsed.messages,
+		verbose: parsed.verbose,
+		startupBenchmark: isTruthyEnvFlag(process.env.PI_STARTUP_BENCHMARK),
+	});
 }

@@ -5,12 +5,12 @@
  */
 
 import {
-	createAgentSession,
 	createSyntheticSourceInfo,
 	DefaultResourceLoader,
 	getAgentDir,
+	InMemorySessionManager,
+	PiAgent,
 	type PromptTemplate,
-	SessionManager,
 } from "@earendil-works/pi-coding-agent";
 
 // Define custom templates
@@ -26,9 +26,11 @@ const deployTemplate: PromptTemplate = {
 3. Deploy: npm run deploy`,
 };
 
+const cwd = process.cwd();
+const agentDir = getAgentDir();
 const loader = new DefaultResourceLoader({
-	cwd: process.cwd(),
-	agentDir: getAgentDir(),
+	cwd,
+	agentDir,
 	promptsOverride: (current) => ({
 		prompts: [...current.prompts, deployTemplate],
 		diagnostics: current.diagnostics,
@@ -43,9 +45,12 @@ for (const template of discovered) {
 	console.log(`  /${template.name}: ${template.description}`);
 }
 
-const { session } = await createAgentSession({
+const pi = await PiAgent.create({
+	cwd,
+	agentDir,
 	resourceLoader: loader,
-	sessionManager: SessionManager.inMemory(),
+	sessionManager: new InMemorySessionManager(),
 });
+await pi.createAgentSession();
 console.log(`Session created with ${discovered.length + 1} prompt templates`);
-session.dispose();
+await pi.dispose();

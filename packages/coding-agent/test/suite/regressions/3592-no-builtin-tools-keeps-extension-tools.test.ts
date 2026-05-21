@@ -4,13 +4,9 @@ import { join } from "node:path";
 import { getModel } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import {
-	createAgentSessionFromServices,
-	createAgentSessionServices,
-} from "../../../src/core/agent-session-services.ts";
+import { PiAgent } from "../../../src/core/pi-agent.ts";
 import { DefaultResourceLoader } from "../../../src/core/resource-loader.ts";
-import { createAgentSession } from "../../../src/core/sdk.ts";
-import { SessionManager } from "../../../src/core/session-manager.ts";
+import { InMemorySessionManager } from "../../../src/core/session-manager.ts";
 import { SettingsManager } from "../../../src/core/settings-manager.ts";
 
 describe("regression #3592: no-builtin-tools keeps extension tools enabled", () => {
@@ -31,7 +27,7 @@ describe("regression #3592: no-builtin-tools keeps extension tools enabled", () 
 
 	async function createSession(options?: { noTools?: "all" | "builtin"; tools?: string[] }) {
 		const settingsManager = SettingsManager.create(tempDir, agentDir);
-		const sessionManager = SessionManager.inMemory(tempDir);
+		const sessionManager = new InMemorySessionManager(tempDir).create();
 		const resourceLoader = new DefaultResourceLoader({
 			cwd: tempDir,
 			agentDir,
@@ -56,16 +52,17 @@ describe("regression #3592: no-builtin-tools keeps extension tools enabled", () 
 		});
 		await resourceLoader.reload();
 
-		const { session } = await createAgentSession({
+		const pi = await PiAgent.create({
 			cwd: tempDir,
 			agentDir,
 			model: getModel("anthropic", "claude-sonnet-4-5")!,
 			settingsManager,
-			sessionManager,
+			sessionManager: new InMemorySessionManager(tempDir),
 			resourceLoader,
 			noTools: options?.noTools,
 			tools: options?.tools,
 		});
+		const session = await pi.createAgentSession({ session: sessionManager });
 		await session.bindExtensions({});
 		return session;
 	}
@@ -95,21 +92,19 @@ describe("regression #3592: no-builtin-tools keeps extension tools enabled", () 
 		session.dispose();
 	});
 
-	it("propagates noTools through service-based session creation", async () => {
+	it("propagates noTools through direct session creation", async () => {
 		const settingsManager = SettingsManager.create(tempDir, agentDir);
-		const sessionManager = SessionManager.inMemory(tempDir);
-		const services = await createAgentSessionServices({
+		const sessionManager = new InMemorySessionManager(tempDir).create();
+
+		const pi = await PiAgent.create({
 			cwd: tempDir,
 			agentDir,
 			settingsManager,
-		});
-
-		const { session } = await createAgentSessionFromServices({
-			services,
-			sessionManager,
+			sessionManager: new InMemorySessionManager(tempDir),
 			model: getModel("anthropic", "claude-sonnet-4-5")!,
 			noTools: "builtin",
 		});
+		const session = await pi.createAgentSession({ session: sessionManager });
 
 		expect(session.getActiveToolNames()).toEqual([]);
 		expect(session.systemPrompt).toContain("Available tools:\n(none)");

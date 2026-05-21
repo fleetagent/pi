@@ -4,7 +4,7 @@
  * Override settings using SettingsManager.
  */
 
-import { createAgentSession, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { InMemorySessionManager, PiAgent, SettingsManager } from "@earendil-works/pi-coding-agent";
 
 const cwd = process.cwd();
 
@@ -19,12 +19,14 @@ settingsManager.applyOverrides({
 	retry: { enabled: true, maxRetries: 5, baseDelayMs: 1000 },
 });
 
-const { session: customSettingsSession } = await createAgentSession({
+const customSettingsPi = await PiAgent.create({
+	cwd,
 	settingsManager,
-	sessionManager: SessionManager.inMemory(),
+	sessionManager: new InMemorySessionManager(cwd),
 });
+await customSettingsPi.createAgentSession();
 console.log("Session created with custom settings");
-customSettingsSession.dispose();
+await customSettingsPi.dispose();
 
 // Setters update memory immediately and queue persistence writes.
 // Call flush() when you need a durability boundary.
@@ -45,9 +47,11 @@ const inMemorySettings = SettingsManager.inMemory({
 	retry: { enabled: false },
 });
 
-const { session: testSession } = await createAgentSession({
+const testPi = await PiAgent.create({
+	cwd,
 	settingsManager: inMemorySettings,
-	sessionManager: SessionManager.inMemory(),
+	sessionManager: new InMemorySessionManager(cwd),
 });
+await testPi.createAgentSession();
 console.log("Test session created with in-memory settings");
-testSession.dispose();
+await testPi.dispose();

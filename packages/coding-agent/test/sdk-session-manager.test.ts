@@ -3,10 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getModel } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createAgentSession } from "../src/core/sdk.ts";
-import { SessionManager } from "../src/core/session-manager.ts";
+import { PiAgent } from "../src/core/pi-agent.ts";
+import { InMemorySessionManager } from "../src/core/session-manager.ts";
 
-describe("createAgentSession session manager defaults", () => {
+describe("PiAgent session manager defaults", () => {
 	let tempDir: string;
 	let cwd: string;
 	let agentDir: string;
@@ -29,53 +29,52 @@ describe("createAgentSession session manager defaults", () => {
 		const model = getModel("anthropic", "claude-sonnet-4-5");
 		expect(model).toBeTruthy();
 
-		const { session } = await createAgentSession({
-			cwd,
-			agentDir,
-			model: model!,
-		});
+		const pi = await PiAgent.create({ cwd, agentDir, model: model! });
+		const session = await pi.createAgentSession();
 
 		const safePath = `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
 		const expectedSessionDir = join(agentDir, "sessions", safePath);
 		const sessionDir = session.sessionManager.getSessionDir();
-		const sessionFile = session.sessionManager.getSessionFile();
+		const sessionFile = session.sessionManager.getSessionReference();
 
 		expect(sessionDir).toBe(expectedSessionDir);
 		expect(sessionFile?.startsWith(`${expectedSessionDir}/`)).toBe(true);
 
-		session.dispose();
+		await pi.dispose();
 	});
 
-	it("keeps an explicit sessionManager override", async () => {
+	it("keeps an explicit session override", async () => {
 		const model = getModel("anthropic", "claude-sonnet-4-5");
 		expect(model).toBeTruthy();
 
-		const sessionManager = SessionManager.inMemory(cwd);
-		const { session } = await createAgentSession({
+		const sessionManager = new InMemorySessionManager(cwd).create();
+		const pi = await PiAgent.create({
 			cwd,
 			agentDir,
 			model: model!,
-			sessionManager,
+			sessionManager: new InMemorySessionManager(cwd),
 		});
+		const session = await pi.createAgentSession({ session: sessionManager });
 
 		expect(session.sessionManager).toBe(sessionManager);
 		expect(session.sessionManager.isPersisted()).toBe(false);
 
-		session.dispose();
+		await pi.dispose();
 	});
 
-	it("derives cwd from an explicit sessionManager when cwd is omitted", async () => {
+	it("derives cwd from an explicit session when cwd is omitted", async () => {
 		const model = getModel("anthropic", "claude-sonnet-4-5");
 		expect(model).toBeTruthy();
 
 		const sessionCwd = join(tempDir, "session-project");
 		mkdirSync(sessionCwd, { recursive: true });
-		const sessionManager = SessionManager.inMemory(sessionCwd);
-		const { session } = await createAgentSession({
+		const sessionManager = new InMemorySessionManager(sessionCwd).create();
+		const pi = await PiAgent.create({
 			agentDir,
 			model: model!,
-			sessionManager,
+			sessionManager: new InMemorySessionManager(sessionCwd),
 		});
+		const session = await pi.createAgentSession({ session: sessionManager });
 
 		expect(session.sessionManager).toBe(sessionManager);
 		expect(session.systemPrompt).toContain(`Current working directory: ${sessionCwd}`);
@@ -90,6 +89,6 @@ describe("createAgentSession session manager defaults", () => {
 
 		expect(realpathSync(output.trim())).toBe(realpathSync(sessionCwd));
 
-		session.dispose();
+		await pi.dispose();
 	});
 });

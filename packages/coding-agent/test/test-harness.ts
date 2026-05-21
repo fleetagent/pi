@@ -29,7 +29,7 @@ import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { AgentSession, type AgentSessionEvent } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
-import { SessionManager } from "../src/core/session-manager.ts";
+import { InMemorySessionManager, type Session } from "../src/core/session-manager.ts";
 import type { Settings } from "../src/core/settings-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import type { ExtensionFactory, ResourceLoader } from "../src/index.ts";
@@ -341,7 +341,7 @@ export interface HarnessOptions {
 export interface Harness {
 	session: AgentSession;
 	agent: Agent;
-	sessionManager: SessionManager;
+	sessionManager: Session;
 	settingsManager: SettingsManager;
 	/** Faux stream function state (call count, captured contexts). */
 	faux: FauxStreamFnState;
@@ -381,7 +381,7 @@ function createHarnessWithResourceLoader(
 		streamFn,
 	});
 
-	const sessionManager = SessionManager.inMemory();
+	const sessionManager = new InMemorySessionManager().create();
 	const settingsManager = SettingsManager.create(tempDir, tempDir);
 
 	if (options.settings) {

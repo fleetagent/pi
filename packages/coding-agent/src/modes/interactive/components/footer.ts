@@ -74,7 +74,7 @@ export class FooterComponent implements Component {
 		let totalCacheWrite = 0;
 		let totalCost = 0;
 
-		for (const entry of this.session.sessionManager.getEntries()) {
+		for (const entry of this.session.session.getEntries()) {
 			if (entry.type === "message" && entry.message.role === "assistant") {
 				totalInput += entry.message.usage.input;
 				totalOutput += entry.message.usage.output;
@@ -92,7 +92,7 @@ export class FooterComponent implements Component {
 		const contextPercent = contextUsage?.percent !== null ? contextPercentValue.toFixed(1) : "?";
 
 		// Replace home directory with ~
-		let pwd = this.session.sessionManager.getCwd();
+		let pwd = this.session.session.getCwd();
 		const home = process.env.HOME || process.env.USERPROFILE;
 		if (home && pwd.startsWith(home)) {
 			pwd = `~${pwd.slice(home.length)}`;
@@ -105,7 +105,7 @@ export class FooterComponent implements Component {
 		}
 
 		// Add session name if set
-		const sessionName = this.session.sessionManager.getSessionName();
+		const sessionName = this.session.session.getSessionName();
 		if (sessionName) {
 			pwd = `${pwd} • ${sessionName}`;
 		}

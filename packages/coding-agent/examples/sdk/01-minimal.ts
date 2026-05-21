@@ -5,9 +5,10 @@
  * from cwd and ~/.pi/agent. Model chosen from settings or first available.
  */
 
-import { createAgentSession } from "@earendil-works/pi-coding-agent";
+import { PiAgent } from "@earendil-works/pi-coding-agent";
 
-const { session } = await createAgentSession();
+const pi = await PiAgent.create();
+const session = await pi.createAgentSession();
 
 try {
 	session.subscribe((event) => {
@@ -22,5 +23,5 @@ try {
 	});
 	console.log();
 } finally {
-	session.dispose();
+	await pi.dispose();
 }

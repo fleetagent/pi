@@ -158,36 +158,19 @@ export type {
 	ResolvedResource,
 } from "./core/package-manager.ts";
 export { DefaultPackageManager } from "./core/package-manager.ts";
+export {
+	type CreatePiAgentOptions,
+	PiAgent,
+	type PiAgentDiagnostic,
+	type PiAgentRuntimeHost,
+	type PiAgentServices,
+	type PiAgentSessionOptions,
+	type ResolvePiAgentSessionOptionsContext,
+	type ResolvePiAgentSessionOptionsResult,
+} from "./core/pi-agent.ts";
+export type { PromptTemplate } from "./core/prompt-templates.ts";
 export type { ResourceCollision, ResourceDiagnostic, ResourceLoader } from "./core/resource-loader.ts";
 export { DefaultResourceLoader, loadProjectContextFiles } from "./core/resource-loader.ts";
-// SDK for programmatic usage
-export {
-	AgentSessionRuntime,
-	type AgentSessionRuntimeDiagnostic,
-	type AgentSessionServices,
-	type CreateAgentSessionFromServicesOptions,
-	type CreateAgentSessionOptions,
-	type CreateAgentSessionResult,
-	type CreateAgentSessionRuntimeFactory,
-	type CreateAgentSessionRuntimeResult,
-	type CreateAgentSessionServicesOptions,
-	// Factory
-	createAgentSession,
-	createAgentSessionFromServices,
-	createAgentSessionRuntime,
-	createAgentSessionServices,
-	createBashTool,
-	// Tool factories (for custom cwd)
-	createCodingTools,
-	createEditTool,
-	createFindTool,
-	createGrepTool,
-	createLsTool,
-	createReadOnlyTools,
-	createReadTool,
-	createWriteTool,
-	type PromptTemplate,
-} from "./core/sdk.ts";
 export {
 	type BranchSummaryEntry,
 	buildSessionContext,
@@ -197,6 +180,8 @@ export {
 	type CustomMessageEntry,
 	type FileEntry,
 	getLatestCompactionEntry,
+	InMemorySessionManager,
+	LocalSessionManager,
 	type ModelChangeEntry,
 	migrateSessionEntries,
 	type NewSessionOptions,
@@ -237,13 +222,22 @@ export {
 	type BashToolDetails,
 	type BashToolInput,
 	type BashToolOptions,
+	createBashTool,
 	createBashToolDefinition,
+	createCodingTools,
+	createEditTool,
 	createEditToolDefinition,
+	createFindTool,
 	createFindToolDefinition,
+	createGrepTool,
 	createGrepToolDefinition,
 	createLocalBashOperations,
+	createLsTool,
 	createLsToolDefinition,
+	createReadOnlyTools,
+	createReadTool,
 	createReadToolDefinition,
+	createWriteTool,
 	createWriteToolDefinition,
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
@@ -349,6 +343,5 @@ export {
 // Clipboard utilities
 export { copyToClipboard } from "./utils/clipboard.ts";
 export { parseFrontmatter, stripFrontmatter } from "./utils/frontmatter.ts";
-export { formatDimensionNote, type ResizedImage, resizeImage } from "./utils/image-resize.ts";
 // Shell utilities
 export { getShellConfig } from "./utils/shell.ts";
