@@ -136,6 +136,20 @@ describe("parseArgs", () => {
 			expect(result.messages).toEqual([]);
 		});
 
+		test("parses remote session flags", () => {
+			const result = parseArgs([
+				"--remote-session-base-url",
+				"https://sessions.example.test",
+				"--remote-session-token",
+				"secret-token",
+				"--remote-project-id",
+				"project-1",
+			]);
+			expect(result.remoteSessionBaseUrl).toBe("https://sessions.example.test");
+			expect(result.remoteSessionToken).toBe("secret-token");
+			expect(result.remoteProjectId).toBe("project-1");
+		});
+
 		test("parses --export", () => {
 			const result = parseArgs(["--export", "session.jsonl"]);
 			expect(result.export).toBe("session.jsonl");

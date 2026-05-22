@@ -8,13 +8,19 @@ export type {
 	AppendRemoteSessionEntriesResponse,
 	CreateRemoteSessionRequest,
 	ForkRemoteSessionRequest,
+	ImportRemoteSessionJsonlRequest,
 	ListRemoteSessionsResponse,
 	RemoteSessionClientOptions,
 	RemoteSessionSnapshot,
 	ReplaceRemoteSessionSnapshotRequest,
 	ReplaceRemoteSessionSnapshotResponse,
 } from "./remote-session-client.ts";
-export { RemoteSessionClient, RemoteSessionClientError } from "./remote-session-client.ts";
+export {
+	formatRemoteSessionReference,
+	parseRemoteSessionId,
+	RemoteSessionClient,
+	RemoteSessionClientError,
+} from "./remote-session-client.ts";
 export { RemoteSessionManager } from "./remote-session-manager.ts";
 export * from "./session.ts";
 export type { OpenSessionOptions, SessionManager, SessionResult } from "./session-manager.ts";

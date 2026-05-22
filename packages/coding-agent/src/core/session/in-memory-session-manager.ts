@@ -1,7 +1,7 @@
 import { InMemorySession } from "./in-memory-session.ts";
 import type { Session } from "./session.ts";
 import type { OpenSessionOptions, SessionManager } from "./session-manager.ts";
-import type { SessionInfo, SessionListProgress } from "./types.ts";
+import type { NewSessionOptions, SessionInfo, SessionListProgress } from "./types.ts";
 
 export class InMemorySessionManager implements SessionManager {
 	private readonly cwd: string;
@@ -10,8 +10,12 @@ export class InMemorySessionManager implements SessionManager {
 		this.cwd = cwd;
 	}
 
-	create(): InMemorySession {
-		return new InMemorySession(this.cwd);
+	create(options?: NewSessionOptions): InMemorySession {
+		const session = new InMemorySession(this.cwd);
+		if (options?.id || options?.parentSession) {
+			session.newSession(options);
+		}
+		return session;
 	}
 
 	openReference(_reference: string, _options?: OpenSessionOptions): InMemorySession {

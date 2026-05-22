@@ -239,7 +239,7 @@ function applyExtensionFlagValues(
  * session lifecycle/discovery stays in SessionManager implementations.
  */
 export class PiAgent {
-	readonly cwd: string;
+	private readonly initialCwd: string;
 	readonly agentDir: string;
 	readonly sessionManager: SessionManager;
 	readonly authStorage: AuthStorage;
@@ -264,7 +264,7 @@ export class PiAgent {
 	) {
 		this.options = options;
 		this._mode = options.mode ?? "embedded";
-		this.cwd = resolved.cwd;
+		this.initialCwd = resolved.cwd;
 		this.agentDir = resolved.agentDir;
 		this.sessionManager = resolved.sessionManager;
 		this.authStorage = resolved.authStorage;
@@ -287,6 +287,10 @@ export class PiAgent {
 
 	get mode(): PiAgentAppMode {
 		return this._mode;
+	}
+
+	get cwd(): string {
+		return this._services?.cwd ?? this.initialCwd;
 	}
 
 	async readPipedStdin(): Promise<string | undefined> {
@@ -668,12 +672,20 @@ export class PiAgent {
 		return { cancelled: result?.cancel === true };
 	}
 
+	private async flushActiveSession(): Promise<void> {
+		const flushPendingSync = (this.session.session as { flushPendingSync?: () => Promise<void> }).flushPendingSync;
+		if (flushPendingSync) {
+			await flushPendingSync.call(this.session.session);
+		}
+	}
+
 	private async teardownCurrent(reason: SessionShutdownEvent["reason"], targetSessionFile?: string): Promise<void> {
 		await emitSessionShutdownEvent(this.session.extensionRunner, {
 			type: "session_shutdown",
 			reason,
 			targetSessionFile,
 		});
+		await this.flushActiveSession();
 		this.beforeSessionInvalidate?.();
 		this.session.dispose();
 	}
@@ -719,10 +731,7 @@ export class PiAgent {
 		}
 
 		const previousSessionFile = this.session.sessionFile;
-		const nextSession = await this.sessionManager.create();
-		if (options?.id || options?.parentSession) {
-			nextSession.newSession({ id: options.id, parentSession: options.parentSession });
-		}
+		const nextSession = await this.sessionManager.create({ id: options?.id, parentSession: options?.parentSession });
 
 		await this.teardownCurrent("new", nextSession.getSessionReference());
 		this.apply(
@@ -892,6 +901,7 @@ export class PiAgent {
 			type: "session_shutdown",
 			reason: "quit",
 		});
+		await this.flushActiveSession();
 		this.beforeSessionInvalidate?.();
 		this.session.dispose();
 		this._session = undefined;

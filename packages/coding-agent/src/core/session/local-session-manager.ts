@@ -11,7 +11,7 @@ import {
 import { LocalSession } from "./local-session.ts";
 import type { Session } from "./session.ts";
 import type { OpenSessionOptions, SessionManager } from "./session-manager.ts";
-import type { SessionHeader, SessionInfo, SessionListProgress } from "./types.ts";
+import type { NewSessionOptions, SessionHeader, SessionInfo, SessionListProgress } from "./types.ts";
 
 export interface LocalSessionManagerOptions {
 	cwd: string;
@@ -27,9 +27,13 @@ export class LocalSessionManager implements SessionManager {
 		this.sessionDir = options.sessionDir;
 	}
 
-	create(): LocalSession {
+	create(options?: NewSessionOptions): LocalSession {
 		const dir = this.sessionDir ?? getDefaultSessionDir(this.cwd);
-		return new LocalSession(this.cwd, dir, undefined);
+		const session = new LocalSession(this.cwd, dir, undefined);
+		if (options?.id || options?.parentSession) {
+			session.newSession(options);
+		}
+		return session;
 	}
 
 	openReference(reference: string, options?: OpenSessionOptions): LocalSession {

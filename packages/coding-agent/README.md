@@ -631,6 +631,9 @@ pi --thinking high "Solve this complex problem"
 |----------|-------------|
 | `PI_CODING_AGENT_DIR` | Override config directory (default: `~/.pi/agent`) |
 | `PI_CODING_AGENT_SESSION_DIR` | Override session storage directory (overridden by `--session-dir`) |
+| `PI_REMOTE_SESSION_BASE_URL` | Remote session service URL (overridden by `--remote-session-base-url`) |
+| `PI_REMOTE_SESSION_TOKEN` | Bearer token for remote session service (overridden by `--remote-session-token`) |
+| `PI_REMOTE_PROJECT_ID` | Project id sent to remote session service (overridden by `--remote-project-id`) |
 | `PI_PACKAGE_DIR` | Override package directory (useful for Nix/Guix where store paths tokenize poorly) |
 | `PI_OFFLINE` | Disable startup network operations, including update checks, package update checks, and install/update telemetry |
 | `PI_SKIP_VERSION_CHECK` | Skip the Pi version update check at startup. This prevents the `pi.dev` latest-version request |

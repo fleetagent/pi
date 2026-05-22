@@ -15,6 +15,7 @@ export interface RemoteSessionSnapshot {
 }
 
 export interface CreateRemoteSessionRequest {
+	id?: string;
 	cwd: string;
 	projectId?: string;
 	parentSession?: string;
@@ -44,6 +45,14 @@ export interface ForkRemoteSessionRequest {
 	cwd: string;
 	projectId?: string;
 	leafId?: string;
+}
+
+export interface ImportRemoteSessionJsonlRequest {
+	cwd: string;
+	projectId?: string;
+	sourceName?: string;
+	entries: FileEntry[];
+	metadata?: Record<string, unknown>;
 }
 
 export interface ListRemoteSessionsResponse {
@@ -117,6 +126,10 @@ export class RemoteSessionClient {
 			`/v1/sessions/${encodeURIComponent(parseRemoteSessionId(sessionIdOrReference))}/fork`,
 			request,
 		);
+	}
+
+	importJsonl(request: ImportRemoteSessionJsonlRequest): Promise<RemoteSessionSnapshot> {
+		return this.request("POST", "/v1/sessions/import-jsonl", request);
 	}
 
 	private async request<T>(method: string, path: string, body?: unknown): Promise<T> {

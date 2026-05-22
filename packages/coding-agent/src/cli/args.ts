@@ -4,7 +4,15 @@
 
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import chalk from "chalk";
-import { APP_NAME, CONFIG_DIR_NAME, ENV_AGENT_DIR, ENV_SESSION_DIR } from "../config.ts";
+import {
+	APP_NAME,
+	CONFIG_DIR_NAME,
+	ENV_AGENT_DIR,
+	ENV_REMOTE_PROJECT_ID,
+	ENV_REMOTE_SESSION_BASE_URL,
+	ENV_REMOTE_SESSION_TOKEN,
+	ENV_SESSION_DIR,
+} from "../config.ts";
 import type { ExtensionFlag } from "../core/extensions/types.ts";
 
 export type Mode = "text" | "json" | "rpc";
@@ -25,6 +33,9 @@ export interface Args {
 	session?: string;
 	fork?: string;
 	sessionDir?: string;
+	remoteSessionBaseUrl?: string;
+	remoteSessionToken?: string;
+	remoteProjectId?: string;
 	models?: string[];
 	tools?: string[];
 	noTools?: boolean;
@@ -99,6 +110,12 @@ export function parseArgs(args: string[]): Args {
 			result.fork = args[++i];
 		} else if (arg === "--session-dir" && i + 1 < args.length) {
 			result.sessionDir = args[++i];
+		} else if (arg === "--remote-session-base-url" && i + 1 < args.length) {
+			result.remoteSessionBaseUrl = args[++i];
+		} else if (arg === "--remote-session-token" && i + 1 < args.length) {
+			result.remoteSessionToken = args[++i];
+		} else if (arg === "--remote-project-id" && i + 1 < args.length) {
+			result.remoteProjectId = args[++i];
 		} else if (arg === "--models" && i + 1 < args.length) {
 			result.models = args[++i].split(",").map((s) => s.trim());
 		} else if (arg === "--no-tools" || arg === "-nt") {
@@ -226,6 +243,9 @@ ${chalk.bold("Options:")}
   --session <path|id>            Use specific session file or partial UUID
   --fork <path|id>               Fork specific session file or partial UUID into a new session
   --session-dir <dir>            Directory for session storage and lookup
+  --remote-session-base-url <url> Use remote session service for persistence
+  --remote-session-token <token> Bearer token for remote session service
+  --remote-project-id <id>       Project id sent to remote session service
   --no-session                   Don't save session (ephemeral)
   --models <patterns>            Comma-separated model patterns for Ctrl+P cycling
                                  Supports globs (anthropic/*, *sonnet*) and fuzzy matching
@@ -337,6 +357,9 @@ ${chalk.bold("Environment Variables:")}
   AWS_REGION                       - AWS region for Amazon Bedrock (e.g., us-east-1)
   ${ENV_AGENT_DIR.padEnd(32)} - Config directory (default: ~/${CONFIG_DIR_NAME}/agent)
   ${ENV_SESSION_DIR.padEnd(32)} - Session storage directory (overridden by --session-dir)
+  ${ENV_REMOTE_SESSION_BASE_URL.padEnd(32)} - Remote session service URL
+  ${ENV_REMOTE_SESSION_TOKEN.padEnd(32)} - Bearer token for remote session service
+  ${ENV_REMOTE_PROJECT_ID.padEnd(32)} - Project id sent to remote session service
   PI_PACKAGE_DIR                   - Override package directory (for Nix/Guix store paths)
   PI_OFFLINE                       - Disable startup network operations when set to 1/true/yes
   PI_TELEMETRY                     - Override install telemetry when set to 1/true/yes or 0/false/no

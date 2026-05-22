@@ -1,5 +1,5 @@
 import type { Session } from "./session.ts";
-import type { SessionInfo, SessionListProgress } from "./types.ts";
+import type { NewSessionOptions, SessionInfo, SessionListProgress } from "./types.ts";
 
 export type SessionResult = Session | Promise<Session>;
 
@@ -8,7 +8,7 @@ export interface OpenSessionOptions {
 }
 
 export interface SessionManager {
-	create(): SessionResult;
+	create(options?: NewSessionOptions): SessionResult;
 	openReference(reference: string, options?: OpenSessionOptions): SessionResult;
 	continueRecent(): SessionResult;
 	forkFrom(reference: string): SessionResult;

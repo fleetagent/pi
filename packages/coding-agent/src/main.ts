@@ -14,7 +14,16 @@ import { processFileArguments } from "./cli/file-processor.ts";
 import { buildInitialMessage } from "./cli/initial-message.ts";
 import { listModels } from "./cli/list-models.ts";
 import { selectSession } from "./cli/session-picker.ts";
-import { ENV_SESSION_DIR, expandTildePath, getAgentDir, getPackageDir, VERSION } from "./config.ts";
+import {
+	ENV_REMOTE_PROJECT_ID,
+	ENV_REMOTE_SESSION_BASE_URL,
+	ENV_REMOTE_SESSION_TOKEN,
+	ENV_SESSION_DIR,
+	expandTildePath,
+	getAgentDir,
+	getPackageDir,
+	VERSION,
+} from "./config.ts";
 import { AuthStorage } from "./core/auth-storage.ts";
 import { exportFromFile } from "./core/export-html/index.ts";
 import type { ExtensionFactory } from "./core/extensions/types.ts";
@@ -29,7 +38,13 @@ import {
 	MissingSessionCwdError,
 	type SessionCwdIssue,
 } from "./core/session-cwd.ts";
-import { InMemorySessionManager, LocalSessionManager, type Session } from "./core/session-manager.ts";
+import {
+	InMemorySessionManager,
+	LocalSessionManager,
+	RemoteSessionManager,
+	type Session,
+	type SessionManager,
+} from "./core/session-manager.ts";
 import { SettingsManager } from "./core/settings-manager.ts";
 import { resetTimings, time } from "./core/timings.ts";
 import { runMigrations, showDeprecationWarnings } from "./migrations.ts";
@@ -171,14 +186,93 @@ function forkSessionOrExit(sourcePath: string, cwd: string, sessionDir?: string)
 	}
 }
 
+interface RemoteSessionCliOptions {
+	baseUrl: string;
+	token: string;
+	projectId?: string;
+}
+
+function resolveRemoteSessionCliOptions(parsed: Args): RemoteSessionCliOptions | undefined {
+	const baseUrl = parsed.remoteSessionBaseUrl ?? process.env[ENV_REMOTE_SESSION_BASE_URL];
+	const token = parsed.remoteSessionToken ?? process.env[ENV_REMOTE_SESSION_TOKEN];
+	const projectId = parsed.remoteProjectId ?? process.env[ENV_REMOTE_PROJECT_ID];
+
+	if (!baseUrl && !token && !projectId) {
+		return undefined;
+	}
+	if (!baseUrl || !token) {
+		console.error(
+			chalk.red(
+				`Error: remote sessions require both --remote-session-base-url and --remote-session-token, or ${ENV_REMOTE_SESSION_BASE_URL} and ${ENV_REMOTE_SESSION_TOKEN}`,
+			),
+		);
+		process.exit(1);
+	}
+
+	return { baseUrl, token, projectId };
+}
+
+function createLifecycleSessionManager(options: {
+	cwd: string;
+	sessionDir?: string;
+	remote?: RemoteSessionCliOptions;
+}): SessionManager {
+	if (options.remote) {
+		return new RemoteSessionManager({
+			baseUrl: options.remote.baseUrl,
+			token: options.remote.token,
+			cwd: options.cwd,
+			projectId: options.remote.projectId,
+		});
+	}
+	return new LocalSessionManager({ cwd: options.cwd, sessionDir: options.sessionDir });
+}
+
+async function resolveRemoteInitialSession(parsed: Args, manager: SessionManager): Promise<Session> {
+	if (parsed.fork) {
+		return await manager.forkFrom(parsed.fork);
+	}
+	if (parsed.session) {
+		return await manager.openReference(parsed.session);
+	}
+	if (parsed.resume) {
+		const selectedReference = await selectSession(
+			(onProgress) => manager.list(onProgress),
+			(onProgress) => manager.listAll(onProgress),
+		);
+		if (!selectedReference) {
+			console.log(chalk.dim("No session selected"));
+			process.exit(0);
+		}
+		return await manager.openReference(selectedReference);
+	}
+	if (parsed.continue) {
+		return await manager.continueRecent();
+	}
+	return await manager.create();
+}
+
 async function resolveInitialSession(
 	parsed: Args,
 	cwd: string,
 	sessionDir: string | undefined,
 	settingsManager: SettingsManager,
+	remoteOptions?: RemoteSessionCliOptions,
 ): Promise<Session> {
 	if (parsed.noSession) {
 		return new InMemorySessionManager().create();
+	}
+
+	if (remoteOptions) {
+		return resolveRemoteInitialSession(
+			parsed,
+			new RemoteSessionManager({
+				baseUrl: remoteOptions.baseUrl,
+				token: remoteOptions.token,
+				cwd,
+				projectId: remoteOptions.projectId,
+			}),
+		);
 	}
 
 	if (parsed.fork) {
@@ -459,7 +553,14 @@ export async function main(args: string[], options?: MainOptions) {
 		(parsed.sessionDir ? normalizePath(parsed.sessionDir) : undefined) ??
 		(envSessionDir ? expandTildePath(envSessionDir) : undefined) ??
 		startupSettingsManager.getSessionDir();
-	let initialSession = await resolveInitialSession(parsed, cwd, sessionDir, startupSettingsManager);
+	const remoteSessionOptions = resolveRemoteSessionCliOptions(parsed);
+	let initialSession = await resolveInitialSession(
+		parsed,
+		cwd,
+		sessionDir,
+		startupSettingsManager,
+		remoteSessionOptions,
+	);
 	const missingSessionCwdIssue = getMissingSessionCwdIssue(initialSession, cwd);
 	if (missingSessionCwdIssue) {
 		if (appMode === "interactive") {
@@ -467,10 +568,11 @@ export async function main(args: string[], options?: MainOptions) {
 			if (!selectedCwd) {
 				process.exit(0);
 			}
-			initialSession = new LocalSessionManager({ cwd, sessionDir }).openReference(
-				missingSessionCwdIssue.sessionReference!,
-				{ cwdOverride: selectedCwd },
-			);
+			initialSession = await createLifecycleSessionManager({
+				cwd,
+				sessionDir,
+				remote: remoteSessionOptions,
+			}).openReference(missingSessionCwdIssue.sessionReference!, { cwdOverride: selectedCwd });
 		} else {
 			console.error(chalk.red(new MissingSessionCwdError(missingSessionCwdIssue).message));
 			process.exit(1);
@@ -485,7 +587,7 @@ export async function main(args: string[], options?: MainOptions) {
 	const authStorage = AuthStorage.create();
 	const runtimeSessionManager = parsed.noSession
 		? new InMemorySessionManager(initialSession.getCwd())
-		: new LocalSessionManager({ cwd: initialSession.getCwd(), sessionDir });
+		: createLifecycleSessionManager({ cwd: initialSession.getCwd(), sessionDir, remote: remoteSessionOptions });
 	const piAgent = await PiAgent.create({
 		mode: appMode,
 		cwd: initialSession.getCwd(),

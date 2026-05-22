@@ -1,4 +1,4 @@
-import hljs from "highlight.js/lib/index.ts";
+import hljs from "highlight.js/lib/index.js";
 import { decodeHtmlEntityAt } from "./html.ts";
 
 export type HighlightFormatter = (text: string) => string;
