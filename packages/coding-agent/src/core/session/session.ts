@@ -1,4 +1,4 @@
-import type { ImageContent, Message, TextContent } from "@earendil-works/pi-ai";
+import type { ImageContent, Message, TextContent } from "@fleetagent/pi-ai";
 import type { BashExecutionMessage, CustomMessage } from "../messages.ts";
 import { CURRENT_SESSION_VERSION } from "./constants.ts";
 import { buildSessionContext } from "./context.ts";

@@ -10,7 +10,7 @@
  * extensions system using pi.registerTool().
  */
 
-import { InMemorySessionManager, PiAgent } from "@earendil-works/pi-coding-agent";
+import { InMemorySessionManager, PiAgent } from "@fleetagent/pi-coding-agent";
 
 async function createToolSession(options: { cwd?: string; tools: string[] }) {
 	const cwd = options.cwd ?? process.cwd();

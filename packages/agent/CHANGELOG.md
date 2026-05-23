@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Renamed the npm package scope from `@earendil-works` to `@fleetagent`.
+
 ## [0.75.4] - 2026-05-20
 
 ### Changed

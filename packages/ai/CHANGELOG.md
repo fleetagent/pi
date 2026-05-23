@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Renamed the npm package scope from `@earendil-works` to `@fleetagent`.
+
 ### Fixed
 
 - Fixed Amazon Bedrock Claude requests to send the model output token cap by default, matching Anthropic requests and avoiding Bedrock's 4096-token default truncation ([#4848](https://github.com/earendil-works/pi/issues/4848)).

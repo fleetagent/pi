@@ -9,7 +9,7 @@ See [examples/sdk/](../examples/sdk/) for working examples from minimal to full 
 ## Quick Start
 
 ```typescript
-import { AuthStorage, InMemorySessionManager, ModelRegistry, PiAgent } from "@earendil-works/pi-coding-agent";
+import { AuthStorage, InMemorySessionManager, ModelRegistry, PiAgent } from "@fleetagent/pi-coding-agent";
 
 const authStorage = AuthStorage.create();
 const modelRegistry = ModelRegistry.create(authStorage);
@@ -38,7 +38,7 @@ await pi.dispose();
 `PiAgent` owns shared app services, the session lifecycle backend, and the current active `AgentSession`.
 
 ```typescript
-import { InMemorySessionManager, PiAgent } from "@earendil-works/pi-coding-agent";
+import { InMemorySessionManager, PiAgent } from "@fleetagent/pi-coding-agent";
 
 const pi = await PiAgent.create({
   sessionManager: new InMemorySessionManager(),
@@ -111,7 +111,7 @@ Subscriptions are attached to a specific `AgentSession`. Re-subscribe after `PiA
 ## Session Replacement
 
 ```typescript
-import { LocalSessionManager, PiAgent } from "@earendil-works/pi-coding-agent";
+import { LocalSessionManager, PiAgent } from "@fleetagent/pi-coding-agent";
 
 const pi = await PiAgent.create({
   cwd: process.cwd(),
@@ -133,8 +133,8 @@ After replacement, use `pi.session` for the new active `AgentSession`.
 ### Model
 
 ```typescript
-import { getModel } from "@earendil-works/pi-ai";
-import { AuthStorage, ModelRegistry, PiAgent } from "@earendil-works/pi-coding-agent";
+import { getModel } from "@fleetagent/pi-ai";
+import { AuthStorage, ModelRegistry, PiAgent } from "@fleetagent/pi-coding-agent";
 
 const authStorage = AuthStorage.create();
 const modelRegistry = ModelRegistry.create(authStorage);
@@ -206,7 +206,7 @@ await pi.createAgentSession();
 The SDK exports run mode utilities for building custom interfaces on top of `PiAgent`.
 
 ```typescript
-import { InteractiveMode, LocalSessionManager, PiAgent, runPrintMode, runRpcMode } from "@earendil-works/pi-coding-agent";
+import { InteractiveMode, LocalSessionManager, PiAgent, runPrintMode, runRpcMode } from "@fleetagent/pi-coding-agent";
 
 const pi = await PiAgent.create({
   cwd: process.cwd(),

@@ -4,7 +4,7 @@
  * Configure API key resolution via AuthStorage and ModelRegistry.
  */
 
-import { AuthStorage, InMemorySessionManager, ModelRegistry, PiAgent } from "@earendil-works/pi-coding-agent";
+import { AuthStorage, InMemorySessionManager, ModelRegistry, PiAgent } from "@fleetagent/pi-coding-agent";
 
 async function createAuthExample(options: { authStorage: AuthStorage; modelRegistry: ModelRegistry }) {
 	const pi = await PiAgent.create({

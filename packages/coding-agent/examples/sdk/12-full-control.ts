@@ -4,7 +4,7 @@
  * Replace everything - no discovery, explicit configuration.
  */
 
-import { getModel } from "@earendil-works/pi-ai";
+import { getModel } from "@fleetagent/pi-ai";
 import {
 	AuthStorage,
 	createExtensionRuntime,
@@ -13,7 +13,7 @@ import {
 	PiAgent,
 	type ResourceLoader,
 	SettingsManager,
-} from "@earendil-works/pi-coding-agent";
+} from "@fleetagent/pi-coding-agent";
 
 // Custom auth storage location
 const authStorage = AuthStorage.create("/tmp/my-agent/auth.json");

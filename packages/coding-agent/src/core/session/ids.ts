@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { uuidv7 } from "@earendil-works/pi-agent-core";
+import { uuidv7 } from "@fleetagent/pi-agent-core";
 
 export function createSessionId(): string {
 	return uuidv7();

@@ -32,7 +32,7 @@ npx tsx examples/sdk/01-minimal.ts
 ## Quick Reference
 
 ```typescript
-import { getModel } from "@earendil-works/pi-ai";
+import { getModel } from "@fleetagent/pi-ai";
 import {
   AuthStorage,
   DefaultResourceLoader,
@@ -40,7 +40,7 @@ import {
   ModelRegistry,
   PiAgent,
   SettingsManager,
-} from "@earendil-works/pi-coding-agent";
+} from "@fleetagent/pi-coding-agent";
 
 const authStorage = AuthStorage.create();
 const modelRegistry = ModelRegistry.create(authStorage);

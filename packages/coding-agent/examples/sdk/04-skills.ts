@@ -12,7 +12,7 @@ import {
 	InMemorySessionManager,
 	PiAgent,
 	type Skill,
-} from "@earendil-works/pi-coding-agent";
+} from "@fleetagent/pi-coding-agent";
 
 // Or define custom skills inline
 const customSkill: Skill = {

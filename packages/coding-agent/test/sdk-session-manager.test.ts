@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getModel } from "@earendil-works/pi-ai";
+import { getModel } from "@fleetagent/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { PiAgent } from "../src/core/pi-agent.ts";
 import { InMemorySessionManager } from "../src/core/session-manager.ts";

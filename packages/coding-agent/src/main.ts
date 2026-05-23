@@ -6,8 +6,8 @@
  */
 
 import { createInterface } from "node:readline";
-import { type ImageContent, modelsAreEqual } from "@earendil-works/pi-ai";
-import { ProcessTerminal, setKeybindings, TUI } from "@earendil-works/pi-tui";
+import { type ImageContent, modelsAreEqual } from "@fleetagent/pi-ai";
+import { ProcessTerminal, setKeybindings, TUI } from "@fleetagent/pi-tui";
 import chalk from "chalk";
 import { type Args, parseArgs, printHelp } from "./cli/args.ts";
 import { processFileArguments } from "./cli/file-processor.ts";

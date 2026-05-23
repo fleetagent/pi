@@ -11,7 +11,7 @@ import {
 	InMemorySessionManager,
 	PiAgent,
 	type PromptTemplate,
-} from "@earendil-works/pi-coding-agent";
+} from "@fleetagent/pi-coding-agent";
 
 // Define custom templates
 const deployTemplate: PromptTemplate = {

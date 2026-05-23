@@ -1,5 +1,5 @@
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { Message, TextContent } from "@earendil-works/pi-ai";
+import type { AgentMessage } from "@fleetagent/pi-agent-core";
+import type { Message, TextContent } from "@fleetagent/pi-ai";
 import {
 	appendFileSync,
 	closeSync,

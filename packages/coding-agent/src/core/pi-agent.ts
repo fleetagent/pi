@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { Agent, type AgentMessage, type ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { clampThinkingLevel, type ImageContent, type Message, type Model, streamSimple } from "@earendil-works/pi-ai";
+import { Agent, type AgentMessage, type ThinkingLevel } from "@fleetagent/pi-agent-core";
+import { clampThinkingLevel, type ImageContent, type Message, type Model, streamSimple } from "@fleetagent/pi-ai";
 import chalk from "chalk";
 import { getAgentDir } from "../config.ts";
 import { InteractiveMode, runPrintMode, runRpcMode } from "../modes/index.ts";

@@ -1,0 +1,6 @@
+{
+	"packages/agent": "0.0.0",
+	"packages/ai": "0.0.0",
+	"packages/coding-agent": "0.0.0",
+	"packages/tui": "0.0.0"
+}

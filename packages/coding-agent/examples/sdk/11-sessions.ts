@@ -4,7 +4,7 @@
  * Control session persistence: in-memory, new file, continue, or open specific.
  */
 
-import { InMemorySessionManager, LocalSessionManager, PiAgent } from "@earendil-works/pi-coding-agent";
+import { InMemorySessionManager, LocalSessionManager, PiAgent } from "@fleetagent/pi-coding-agent";
 
 const cwd = process.cwd();
 

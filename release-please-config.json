@@ -1,0 +1,48 @@
+{
+	"$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+	"release-type": "node",
+	"bump-minor-pre-major": true,
+	"bump-patch-for-minor-pre-major": true,
+	"separate-pull-requests": false,
+	"plugins": [
+		{
+			"type": "node-workspace"
+		},
+		{
+			"type": "linked-versions",
+			"groupName": "pi",
+			"components": [
+				"@fleetagent/pi-ai",
+				"@fleetagent/pi-agent-core",
+				"@fleetagent/pi-tui",
+				"@fleetagent/pi-coding-agent"
+			]
+		}
+	],
+	"packages": {
+		"packages/ai": {
+			"component": "@fleetagent/pi-ai",
+			"package-name": "@fleetagent/pi-ai",
+			"release-type": "node",
+			"changelog-path": "CHANGELOG.md"
+		},
+		"packages/agent": {
+			"component": "@fleetagent/pi-agent-core",
+			"package-name": "@fleetagent/pi-agent-core",
+			"release-type": "node",
+			"changelog-path": "CHANGELOG.md"
+		},
+		"packages/tui": {
+			"component": "@fleetagent/pi-tui",
+			"package-name": "@fleetagent/pi-tui",
+			"release-type": "node",
+			"changelog-path": "CHANGELOG.md"
+		},
+		"packages/coding-agent": {
+			"component": "@fleetagent/pi-coding-agent",
+			"package-name": "@fleetagent/pi-coding-agent",
+			"release-type": "node",
+			"changelog-path": "CHANGELOG.md"
+		}
+	}
+}

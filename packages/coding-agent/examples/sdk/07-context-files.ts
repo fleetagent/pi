@@ -4,7 +4,7 @@
  * Context files provide project-specific instructions loaded into the system prompt.
  */
 
-import { DefaultResourceLoader, getAgentDir, InMemorySessionManager, PiAgent } from "@earendil-works/pi-coding-agent";
+import { DefaultResourceLoader, getAgentDir, InMemorySessionManager, PiAgent } from "@fleetagent/pi-coding-agent";
 
 // Disable context files entirely by returning an empty list in agentsFilesOverride.
 const cwd = process.cwd();

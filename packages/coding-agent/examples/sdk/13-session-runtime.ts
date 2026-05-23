@@ -9,7 +9,7 @@
  * any session-local subscriptions and extension bindings to `pi.session`.
  */
 
-import { LocalSessionManager, PiAgent } from "@earendil-works/pi-coding-agent";
+import { LocalSessionManager, PiAgent } from "@fleetagent/pi-coding-agent";
 
 const pi = await PiAgent.create({
 	cwd: process.cwd(),

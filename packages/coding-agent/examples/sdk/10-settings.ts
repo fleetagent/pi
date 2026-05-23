@@ -4,7 +4,7 @@
  * Override settings using SettingsManager.
  */
 
-import { InMemorySessionManager, PiAgent, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { InMemorySessionManager, PiAgent, SettingsManager } from "@fleetagent/pi-coding-agent";
 
 const cwd = process.cwd();
 
