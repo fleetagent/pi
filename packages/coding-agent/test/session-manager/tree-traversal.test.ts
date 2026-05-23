@@ -431,7 +431,7 @@ describe("createBranchedSession", () => {
 
 		// Create branched session from id2 (should only have 1 -> 2)
 		const result = session.createBranchedSession(id2);
-		expect(result).toBeUndefined(); // in-memory returns null
+		expect(result).toMatch(/^memory:/);
 
 		// Session should now only have entries 1 and 2
 		const entries = session.getEntries();
