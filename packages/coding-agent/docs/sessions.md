@@ -16,7 +16,7 @@ pi --fork <path|id>    # Fork a session file or partial session ID into a new se
 
 Use `/session` in interactive mode to see the current session file, session ID, message count, tokens, and cost.
 
-For the JSONL file format and SessionManager API, see [Session Format](session-format.md).
+For the JSONL file format, active `Session` API, and `SessionManager` lifecycle API, see [Session Format](session-format.md).
 
 ## Session Commands
 
@@ -134,4 +134,4 @@ See [Compaction](compaction.md) for branch summarization internals and extension
 
 Session files are JSONL and contain message entries, model changes, thinking-level changes, labels, compactions, branch summaries, and extension entries.
 
-For parsers, extensions, SDK usage, and the full SessionManager API, see [Session Format](session-format.md).
+For parsers, extensions, SDK usage, and the full session APIs, see [Session Format](session-format.md).

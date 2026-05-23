@@ -11,16 +11,13 @@ interface SessionCwdSource {
 	getSessionReference(): string | undefined;
 }
 
-export function getMissingSessionCwdIssue(
-	sessionManager: SessionCwdSource,
-	fallbackCwd: string,
-): SessionCwdIssue | undefined {
-	const sessionReference = sessionManager.getSessionReference();
+export function getMissingSessionCwdIssue(session: SessionCwdSource, fallbackCwd: string): SessionCwdIssue | undefined {
+	const sessionReference = session.getSessionReference();
 	if (!sessionReference) {
 		return undefined;
 	}
 
-	const sessionCwd = sessionManager.getCwd();
+	const sessionCwd = session.getCwd();
 	if (!sessionCwd || existsSync(sessionCwd)) {
 		return undefined;
 	}
@@ -51,8 +48,8 @@ export class MissingSessionCwdError extends Error {
 	}
 }
 
-export function assertSessionCwdExists(sessionManager: SessionCwdSource, fallbackCwd: string): void {
-	const issue = getMissingSessionCwdIssue(sessionManager, fallbackCwd);
+export function assertSessionCwdExists(session: SessionCwdSource, fallbackCwd: string): void {
+	const issue = getMissingSessionCwdIssue(session, fallbackCwd);
 	if (issue) {
 		throw new MissingSessionCwdError(issue);
 	}

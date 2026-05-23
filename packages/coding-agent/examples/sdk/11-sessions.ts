@@ -11,14 +11,14 @@ const cwd = process.cwd();
 // In-memory (no persistence)
 const inMemoryPi = await PiAgent.create({ sessionManager: new InMemorySessionManager(cwd) });
 const inMemory = await inMemoryPi.createAgentSession();
-console.log("In-memory session:", inMemory.sessionFile ?? "(none)");
+console.log("In-memory session:", inMemory.sessionReference ?? "(none)");
 await inMemoryPi.dispose();
 
 // New persistent session
 const newSessionManager = new LocalSessionManager({ cwd });
 const newSessionPi = await PiAgent.create({ cwd, sessionManager: newSessionManager });
 const newSession = await newSessionPi.createAgentSession();
-console.log("New session file:", newSession.sessionFile);
+console.log("New session reference:", newSession.sessionReference);
 await newSessionPi.dispose();
 
 // Continue most recent session (or create new if none)
@@ -26,7 +26,7 @@ const continuedSessionManager = new LocalSessionManager({ cwd });
 const continuedPi = await PiAgent.create({ cwd, sessionManager: continuedSessionManager });
 const continued = await continuedPi.createAgentSession({ session: continuedSessionManager.continueRecent() });
 if (continuedPi.modelFallbackMessage) console.log("Note:", continuedPi.modelFallbackMessage);
-console.log("Continued session:", continued.sessionFile);
+console.log("Continued session:", continued.sessionReference);
 await continuedPi.dispose();
 
 // List and open specific session

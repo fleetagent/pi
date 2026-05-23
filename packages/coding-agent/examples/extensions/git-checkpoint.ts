@@ -13,7 +13,7 @@ export default function (pi: ExtensionAPI) {
 
 	// Track the current entry ID when user messages are saved
 	pi.on("tool_result", async (_event, ctx) => {
-		const leaf = ctx.sessionManager.getLeafEntry();
+		const leaf = ctx.session.getLeafEntry();
 		if (leaf) currentEntryId = leaf.id;
 	});
 

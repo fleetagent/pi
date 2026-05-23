@@ -126,7 +126,7 @@ describe("PiAgent session replacement characterization", () => {
 		}
 		expect(sessionAssistant.usage.cost.total).toBe(0.123);
 
-		const persistedAssistant = runtime.session.sessionManager
+		const persistedAssistant = runtime.session.session
 			.getEntries()
 			.filter((entry) => entry.type === "message")
 			.map((entry) => entry.message)
@@ -166,9 +166,24 @@ describe("PiAgent session replacement characterization", () => {
 		expect(runtime.session.messages).toEqual([]);
 		const secondSessionFile = runtime.session.sessionFile;
 		expect(events).toEqual([
-			{ type: "session_before_switch", reason: "new", targetSessionFile: undefined },
-			{ type: "session_shutdown", reason: "new", targetSessionFile: secondSessionFile },
-			{ type: "session_start", reason: "new", previousSessionFile: originalSessionFile },
+			{
+				type: "session_before_switch",
+				reason: "new",
+				targetSessionReference: undefined,
+				targetSessionFile: undefined,
+			},
+			{
+				type: "session_shutdown",
+				reason: "new",
+				targetSessionReference: secondSessionFile,
+				targetSessionFile: secondSessionFile,
+			},
+			{
+				type: "session_start",
+				reason: "new",
+				previousSessionReference: originalSessionFile,
+				previousSessionFile: originalSessionFile,
+			},
 		]);
 
 		events.length = 0;
@@ -177,9 +192,24 @@ describe("PiAgent session replacement characterization", () => {
 		expect(switchResult.cancelled).toBe(false);
 		await runtime.session.bindExtensions({});
 		expect(events).toEqual([
-			{ type: "session_before_switch", reason: "resume", targetSessionFile: originalSessionFile },
-			{ type: "session_shutdown", reason: "resume", targetSessionFile: originalSessionFile },
-			{ type: "session_start", reason: "resume", previousSessionFile: secondSessionFile },
+			{
+				type: "session_before_switch",
+				reason: "resume",
+				targetSessionReference: originalSessionFile,
+				targetSessionFile: originalSessionFile,
+			},
+			{
+				type: "session_shutdown",
+				reason: "resume",
+				targetSessionReference: originalSessionFile,
+				targetSessionFile: originalSessionFile,
+			},
+			{
+				type: "session_start",
+				reason: "resume",
+				previousSessionReference: secondSessionFile,
+				previousSessionFile: secondSessionFile,
+			},
 		]);
 	});
 
@@ -248,8 +278,13 @@ describe("PiAgent session replacement characterization", () => {
 		await runtime.session.bindExtensions({});
 		expect(events).toEqual([
 			{ type: "session_before_fork", entryId: userMessage.entryId, position: "before" },
-			{ type: "session_shutdown", reason: "fork", targetSessionFile: runtime.session.sessionFile },
-			{ type: "session_start", reason: "fork", previousSessionFile },
+			{
+				type: "session_shutdown",
+				reason: "fork",
+				targetSessionReference: runtime.session.sessionReference,
+				targetSessionFile: runtime.session.sessionReference,
+			},
+			{ type: "session_start", reason: "fork", previousSessionReference: previousSessionFile, previousSessionFile },
 		]);
 
 		events.length = 0;
@@ -283,7 +318,7 @@ describe("PiAgent session replacement characterization", () => {
 					: undefined,
 		}));
 		const previousSessionFile = runtime.session.sessionFile;
-		const leafId = runtime.session.sessionManager.getLeafId();
+		const leafId = runtime.session.session.getLeafId();
 		expect(leafId).toBeTruthy();
 
 		const result = await runtime.fork(leafId!, { position: "at" });
@@ -376,13 +411,13 @@ describe("PiAgent session replacement characterization", () => {
 								.join("")
 					: undefined,
 		}));
-		const leafId = runtime.session.sessionManager.getLeafId();
+		const leafId = runtime.session.session.getLeafId();
 		expect(leafId).toBeTruthy();
-		expect(runtime.session.sessionFile).toBeUndefined();
+		expect(runtime.session.sessionReference).toMatch(/^memory:/);
 
 		const result = await runtime.fork(leafId!, { position: "at" });
 		expect(result).toEqual({ cancelled: false, selectedText: undefined });
-		expect(runtime.session.sessionFile).toBeUndefined();
+		expect(runtime.session.sessionReference).toMatch(/^memory:/);
 		expect(
 			runtime.session.messages.map((message) => ({
 				role: message.role,
@@ -452,7 +487,7 @@ describe("PiAgent session replacement characterization", () => {
 
 		await runtime.switchSession(otherSessionFile);
 
-		expect(realpathSync(runtime.session.sessionManager.getCwd())).toBe(realpathSync(secondDir));
+		expect(realpathSync(runtime.session.session.getCwd())).toBe(realpathSync(secondDir));
 		expect(realpathSync(runtime.cwd)).toBe(realpathSync(secondDir));
 	});
 

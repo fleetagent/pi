@@ -63,7 +63,7 @@ function createSession() {
 				thinkingLevel: "high",
 			},
 		}),
-		sessionManager,
+		session: sessionManager,
 		settingsManager,
 		cwd: process.cwd(),
 		modelRegistry: ModelRegistry.inMemory(authStorage),

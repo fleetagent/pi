@@ -394,7 +394,7 @@ function createHarnessWithResourceLoader(
 
 	const session = new AgentSession({
 		agent,
-		sessionManager,
+		session: sessionManager,
 		settingsManager,
 		cwd: tempDir,
 		modelRegistry,

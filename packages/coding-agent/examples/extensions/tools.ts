@@ -40,7 +40,7 @@ export default function toolsExtension(pi: ExtensionAPI) {
 		allTools = pi.getAllTools();
 
 		// Get entries in current branch only
-		const branchEntries = ctx.sessionManager.getBranch();
+		const branchEntries = ctx.session.getBranch();
 		let savedTools: string[] | undefined;
 
 		for (const entry of branchEntries) {

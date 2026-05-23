@@ -32,17 +32,17 @@ async function bindSession() {
 
 await pi.createAgentSession();
 let session = await bindSession();
-const originalSessionFile = session.sessionFile;
-console.log("Initial session:", originalSessionFile);
+const originalSessionReference = session.sessionReference;
+console.log("Initial session:", originalSessionReference);
 
 await pi.newSession();
 session = await bindSession();
-console.log("After newSession():", session.sessionFile);
+console.log("After newSession():", session.sessionReference);
 
-if (originalSessionFile) {
-	await pi.switchSession(originalSessionFile);
+if (originalSessionReference) {
+	await pi.switchSession(originalSessionReference);
 	session = await bindSession();
-	console.log("After switchSession():", session.sessionFile);
+	console.log("After switchSession():", session.sessionReference);
 }
 
 unsubscribe?.();

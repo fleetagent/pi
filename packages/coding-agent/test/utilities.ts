@@ -259,7 +259,7 @@ export function createTestSession(options: TestSessionOptions = {}): TestSession
 
 	const session = new AgentSession({
 		agent,
-		sessionManager,
+		session: sessionManager,
 		settingsManager,
 		cwd: tempDir,
 		modelRegistry,

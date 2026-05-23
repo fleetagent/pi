@@ -4,6 +4,7 @@ import { CURRENT_SESSION_VERSION } from "./constants.ts";
 import { buildSessionContext } from "./context.ts";
 import { createSessionId, generateId } from "./ids.ts";
 import { migrateToCurrentVersion } from "./migrations.ts";
+import type { SessionManager, SessionResult } from "./session-manager.ts";
 import type { SessionStore } from "./stores/session-store.ts";
 import type {
 	BranchSummaryEntry,
@@ -47,7 +48,7 @@ export type {
 	ThinkingLevelChangeEntry,
 } from "./types.ts";
 
-export type ReadonlySessionManager = Pick<
+export type ReadonlySession = Pick<
 	Session,
 	| "getCwd"
 	| "getSessionDir"
@@ -67,7 +68,7 @@ export type ReadonlySessionManager = Pick<
 export { findMostRecentSession, getDefaultSessionDir, loadEntriesFromFile } from "./jsonl-helpers.ts";
 
 /**
- * Manages conversation sessions as append-only trees stored in JSONL files.
+ * Represents one active conversation session as an append-only tree.
  *
  * Each session entry has an id and parentId forming a tree structure. The "leaf"
  * pointer tracks the current position. Appending creates a child of the current leaf.
@@ -82,11 +83,19 @@ export abstract class Session {
 	private sessionDir: string;
 	private cwd: string;
 	private store: SessionStore;
+	private sessionManager: SessionManager | undefined;
 
-	protected constructor(cwd: string, sessionDir: string, sessionReference: string | undefined, store: SessionStore) {
+	protected constructor(
+		cwd: string,
+		sessionDir: string,
+		sessionReference: string | undefined,
+		store: SessionStore,
+		sessionManager?: SessionManager,
+	) {
 		this.cwd = cwd;
 		this.sessionDir = sessionDir;
 		this.store = store;
+		this.sessionManager = sessionManager;
 		if (sessionDir) {
 			this.store.ensureDir(sessionDir);
 		}
@@ -98,17 +107,23 @@ export abstract class Session {
 		}
 	}
 
+	protected abstract prepareNewSessionReference(
+		sessionDir: string,
+		sessionId: string,
+		timestamp: string,
+	): string | undefined;
+
 	/** Switch to a different session reference (used for resume and branching). */
 	setSessionReference(sessionReference: string): void {
-		const opened = this.store.openSession(sessionReference);
-		if (opened.exists) {
-			this.store.setEntries(opened.entries);
+		this.store.setSessionReference(sessionReference);
+		if (this.store.exists(sessionReference)) {
+			this.store.setEntries(this.store.load(sessionReference));
 
 			// If the opened session has no valid header, start fresh to avoid
 			// appending messages without a session header.
 			if (this.store.getFileEntries().length === 0) {
 				this.newSession();
-				this.store.setSessionReference(opened.reference);
+				this.store.setSessionReference(sessionReference);
 				this.store.saveSnapshot();
 				return;
 			}
@@ -122,7 +137,7 @@ export abstract class Session {
 			}
 		} else {
 			this.newSession();
-			this.store.setSessionReference(opened.reference); // preserve explicit path from --session flag
+			this.store.setSessionReference(sessionReference); // preserve explicit reference from --session flag
 		}
 	}
 
@@ -137,8 +152,12 @@ export abstract class Session {
 			cwd: this.cwd,
 			parentSession: options?.parentSession,
 		};
+		const sessionReference = this.prepareNewSessionReference(this.getSessionDir(), this.sessionId, timestamp);
+		if (sessionReference) {
+			this.store.setSessionReference(sessionReference);
+		}
 		this.store.setEntries([header]);
-		return this.store.prepareSessionReference(this.getSessionDir(), this.sessionId, timestamp);
+		return sessionReference;
 	}
 
 	isPersisted(): boolean {
@@ -442,7 +461,7 @@ export abstract class Session {
 	 * Returns the new session reference, or undefined if the store does not expose one.
 	 */
 	createBranchedSession(leafId: string): string | undefined {
-		const parentSession = this.store.getParentSessionReference();
+		const parentSession = this.getSessionReference();
 		const path = this.getBranch(leafId);
 		if (path.length === 0) {
 			throw new Error(`Entry ${leafId} not found`);
@@ -453,7 +472,10 @@ export abstract class Session {
 
 		const newSessionId = createSessionId();
 		const timestamp = new Date().toISOString();
-		const newSessionReference = this.store.prepareSessionReference(this.getSessionDir(), newSessionId, timestamp);
+		const newSessionReference = this.prepareNewSessionReference(this.getSessionDir(), newSessionId, timestamp);
+		if (newSessionReference) {
+			this.store.setSessionReference(newSessionReference);
+		}
 
 		const header: SessionHeader = {
 			type: "session",
@@ -487,5 +509,56 @@ export abstract class Session {
 		this.sessionId = newSessionId;
 		this.store.commitSnapshot();
 		return newSessionReference;
+	}
+
+	copyBranchFrom(source: Session, leafId: string, parentSession?: string): void {
+		const path = source.getBranch(leafId);
+		if (path.length === 0) {
+			throw new Error(`Entry ${leafId} not found`);
+		}
+
+		const header = this.getHeader();
+		if (!header) {
+			throw new Error("Target session has no header");
+		}
+
+		const pathWithoutLabels = structuredClone(path.filter((entry) => entry.type !== "label"));
+		const pathEntryIds = new Set(pathWithoutLabels.map((entry) => entry.id));
+		const labelsToWrite = source.store.getLabelsForEntryIds(pathEntryIds);
+		const labelEntries: LabelEntry[] = [];
+		let nextParentId = pathWithoutLabels[pathWithoutLabels.length - 1]?.id ?? null;
+		for (const { targetId, label, timestamp } of labelsToWrite) {
+			const labelEntry: LabelEntry = {
+				type: "label",
+				id: generateId(new Set([...pathEntryIds, ...labelEntries.map((entry) => entry.id)])),
+				parentId: nextParentId,
+				timestamp,
+				targetId,
+				label,
+			};
+			pathEntryIds.add(labelEntry.id);
+			labelEntries.push(labelEntry);
+			nextParentId = labelEntry.id;
+		}
+
+		this.store.setEntries([{ ...header, parentSession }, ...pathWithoutLabels, ...labelEntries]);
+		this.store.commitSnapshot();
+	}
+
+	createSubSession(options?: NewSessionOptions): SessionResult {
+		if (!this.sessionManager) {
+			throw new Error("Session manager unavailable");
+		}
+		return this.sessionManager.create({
+			...options,
+			parentSession: options?.parentSession ?? this.getSessionReference(),
+		});
+	}
+
+	forkSubSession(targetLeafId: string | null): SessionResult {
+		if (!this.sessionManager) {
+			throw new Error("Session manager unavailable");
+		}
+		return this.sessionManager.forkSession(this, targetLeafId);
 	}
 }

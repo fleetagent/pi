@@ -69,6 +69,8 @@ Use `pi.createAgentSession({ session })` when you already have an opened or crea
 
 `AgentSession` owns active conversation behavior: prompts, message history, model state, compaction, event streaming, and in-place tree navigation.
 
+Use `session.sessionReference` when you need the backend-neutral active session reference. For local JSONL sessions this is the session file path; for in-memory sessions it is `undefined`. `session.sessionFile` remains available as a local-file-oriented alias.
+
 Session replacement APIs such as new-session, resume, fork, clone, and import live on `PiAgent`, not on `AgentSession`.
 
 ### SessionManager and Session

@@ -2,7 +2,6 @@ import type { RemoteSessionClient, RemoteSessionSnapshot } from "../remote-sessi
 import { formatRemoteSessionReference, parseRemoteSessionId } from "../remote-session-client.ts";
 import type { FileEntry, SessionEntry } from "../types.ts";
 import { InMemorySessionStore } from "./in-memory-session-store.ts";
-import type { SessionOpenResult } from "./session-store.ts";
 
 export interface RemoteSessionStoreOptions {
 	client: RemoteSessionClient;
@@ -24,7 +23,7 @@ function getSnapshotReference(snapshot: RemoteSessionSnapshot): string {
  */
 export class RemoteSessionStore extends InMemorySessionStore {
 	private readonly client: RemoteSessionClient;
-	private sessionReference: string | undefined;
+	private reference: string | undefined;
 	private etag: string | undefined;
 	private pendingSync: Promise<void> = Promise.resolve();
 	private dirtyEntries: FileEntry[] = [];
@@ -35,8 +34,7 @@ export class RemoteSessionStore extends InMemorySessionStore {
 		super();
 		this.client = options.client;
 		this.snapshot = options.snapshot;
-		this.sessionReference =
-			options.reference ?? (options.snapshot ? getSnapshotReference(options.snapshot) : undefined);
+		this.reference = options.reference ?? (options.snapshot ? getSnapshotReference(options.snapshot) : undefined);
 		this.etag = options.snapshot?.etag;
 	}
 
@@ -45,42 +43,26 @@ export class RemoteSessionStore extends InMemorySessionStore {
 	}
 
 	override getSessionReference(): string | undefined {
-		return this.sessionReference;
+		return this.reference;
 	}
 
 	override setSessionReference(reference: string): void {
-		this.sessionReference = formatRemoteSessionReference(parseRemoteSessionId(reference));
+		this.reference = formatRemoteSessionReference(parseRemoteSessionId(reference));
 	}
 
-	override openSession(reference: string): SessionOpenResult {
-		this.setSessionReference(reference);
-		if (!this.snapshot) {
-			return { reference: this.sessionReference!, exists: false, entries: [] };
-		}
-
+	override exists(reference: string): boolean {
+		if (!this.snapshot) return false;
 		const snapshotReference = getSnapshotReference(this.snapshot);
-		const requestedId = parseRemoteSessionId(reference);
-		const snapshotId = parseRemoteSessionId(snapshotReference);
-		if (requestedId !== snapshotId) {
-			return { reference: this.sessionReference!, exists: false, entries: [] };
-		}
+		return parseRemoteSessionId(reference) === parseRemoteSessionId(snapshotReference);
+	}
 
-		this.sessionReference = snapshotReference;
+	override load(reference: string): FileEntry[] {
+		if (!this.snapshot || !this.exists(reference)) return [];
+		this.reference = getSnapshotReference(this.snapshot);
 		this.etag = this.snapshot.etag;
 		const entries = [...this.snapshot.entries];
 		this.snapshot = undefined;
-		return { reference: this.sessionReference, exists: true, entries };
-	}
-
-	override prepareSessionReference(_sessionDir: string, sessionId: string, _timestamp: string): string | undefined {
-		if (!this.sessionReference) {
-			this.sessionReference = formatRemoteSessionReference(sessionId);
-		}
-		return this.sessionReference;
-	}
-
-	override getParentSessionReference(): string | undefined {
-		return this.sessionReference;
+		return entries;
 	}
 
 	override appendEntry(entry: SessionEntry): void {
@@ -125,10 +107,9 @@ export class RemoteSessionStore extends InMemorySessionStore {
 	}
 
 	private async flushDirtyEntries(): Promise<void> {
-		if (!this.sessionReference || this.dirtyEntries.length === 0) return;
-
+		if (!this.reference || this.dirtyEntries.length === 0) return;
 		const entries = [...this.dirtyEntries];
-		const response = await this.client.appendEntries(this.sessionReference, {
+		const response = await this.client.appendEntries(this.reference, {
 			baseEtag: this.etag,
 			entries,
 		});
@@ -140,9 +121,9 @@ export class RemoteSessionStore extends InMemorySessionStore {
 	}
 
 	private async replaceSnapshot(): Promise<void> {
-		if (!this.sessionReference) return;
+		if (!this.reference) return;
 
-		const response = await this.client.replaceSnapshot(this.sessionReference, {
+		const response = await this.client.replaceSnapshot(this.reference, {
 			baseEtag: this.etag,
 			entries: this.getFileEntries(),
 		});

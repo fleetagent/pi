@@ -11,7 +11,7 @@ export class InMemorySessionManager implements SessionManager {
 	}
 
 	create(options?: NewSessionOptions): InMemorySession {
-		const session = new InMemorySession(this.cwd);
+		const session = new InMemorySession(this.cwd, this);
 		if (options?.id || options?.parentSession) {
 			session.newSession(options);
 		}
@@ -31,12 +31,11 @@ export class InMemorySessionManager implements SessionManager {
 	}
 
 	forkSession(source: Session, targetLeafId: string | null): Session {
-		if (!targetLeafId) {
-			source.newSession({ parentSession: source.getSessionReference() });
-		} else {
-			source.createBranchedSession(targetLeafId);
+		const session = this.create({ parentSession: source.getSessionReference() });
+		if (targetLeafId) {
+			session.copyBranchFrom(source, targetLeafId, source.getSessionReference());
 		}
-		return source;
+		return session;
 	}
 
 	importJsonl(_inputPath: string, _options?: OpenSessionOptions): InMemorySession {

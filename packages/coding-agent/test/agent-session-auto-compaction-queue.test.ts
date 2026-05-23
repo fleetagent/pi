@@ -80,7 +80,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 
 		session = new AgentSession({
 			agent,
-			sessionManager,
+			session: sessionManager,
 			settingsManager,
 			cwd: tempDir,
 			modelRegistry,

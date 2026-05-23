@@ -167,7 +167,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 
 	const session = new AgentSession({
 		agent,
-		sessionManager,
+		session: sessionManager,
 		settingsManager,
 		cwd: tempDir,
 		modelRegistry,

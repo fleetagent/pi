@@ -1,5 +1,11 @@
 import type { FileEntry, SessionInfo } from "./types.ts";
 
+export type RemoteSessionInfo = Omit<SessionInfo, "path" | "created" | "modified"> & {
+	path?: string;
+	created: Date | string;
+	modified: Date | string;
+};
+
 export interface RemoteSessionClientOptions {
 	baseUrl: string;
 	token: string;
@@ -56,7 +62,7 @@ export interface ImportRemoteSessionJsonlRequest {
 }
 
 export interface ListRemoteSessionsResponse {
-	sessions: SessionInfo[];
+	sessions: RemoteSessionInfo[];
 }
 
 export class RemoteSessionClientError extends Error {

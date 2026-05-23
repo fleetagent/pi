@@ -36,7 +36,7 @@ type RenderSessionContextThis = {
 		getShowImages(): boolean;
 		getImageWidthCells(): number;
 	};
-	sessionManager: { getCwd(): string };
+	activeSession: { getCwd(): string };
 	session: { retryAttempt: number };
 	toolOutputExpanded: boolean;
 	isInitialized: boolean;
@@ -64,7 +64,7 @@ function createFakeInteractiveModeThis(): RenderSessionContextThis {
 			getShowImages: () => false,
 			getImageWidthCells: () => 60,
 		},
-		sessionManager: { getCwd: () => process.cwd() },
+		activeSession: { getCwd: () => process.cwd() },
 		session: { retryAttempt: 0 },
 		toolOutputExpanded: false,
 		isInitialized: true,

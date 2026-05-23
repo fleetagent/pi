@@ -2,7 +2,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import type { FileEntry, SessionHeader } from "../../src/core/session-manager.ts";
+import type { FileEntry, RemoteSessionInfo, SessionHeader } from "../../src/core/session-manager.ts";
 import {
 	formatRemoteSessionReference,
 	parseRemoteSessionId,
@@ -109,6 +109,31 @@ describe("RemoteSessionManager", () => {
 			baseEtag: "v1",
 			entries: [{ type: "message", id: entryId }],
 		});
+	});
+
+	it("normalizes listed sessions from JSON responses", async () => {
+		const listedSession: RemoteSessionInfo = {
+			reference: "remote:session-1",
+			id: "session-1",
+			cwd: "/repo",
+			created: "2026-01-01T00:00:00.000Z",
+			modified: "2026-01-02T00:00:00.000Z",
+			messageCount: 1,
+			firstMessage: "hello",
+			allMessagesText: "hello",
+		};
+		const manager = new RemoteSessionManager({
+			baseUrl: "https://sessions.example.test",
+			token: "secret-token",
+			cwd: "/repo",
+			fetch: async () => jsonResponse({ sessions: [listedSession] }),
+		});
+
+		const sessions = await manager.list();
+
+		expect(sessions[0]).toMatchObject({ reference: "remote:session-1", path: "remote:session-1" });
+		expect(sessions[0]!.created).toBeInstanceOf(Date);
+		expect(sessions[0]!.modified).toBeInstanceOf(Date);
 	});
 
 	it("sends explicit ids when creating remote sessions", async () => {

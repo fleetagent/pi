@@ -1,6 +1,7 @@
 import type { RemoteSessionClient, RemoteSessionSnapshot } from "./remote-session-client.ts";
 import { formatRemoteSessionReference } from "./remote-session-client.ts";
 import { Session } from "./session.ts";
+import type { SessionManager } from "./session-manager.ts";
 import { RemoteSessionStore } from "./stores/remote-session-store.ts";
 import type { NewSessionOptions } from "./types.ts";
 
@@ -9,6 +10,7 @@ export interface RemoteSessionOptions {
 	cwd: string;
 	reference?: string;
 	snapshot?: RemoteSessionSnapshot;
+	sessionManager?: SessionManager;
 }
 
 export class RemoteSession extends Session {
@@ -24,8 +26,16 @@ export class RemoteSession extends Session {
 			reference,
 			snapshot: options.snapshot,
 		});
-		super(options.cwd, "", reference, store);
+		super(options.cwd, "", reference, store, options.sessionManager);
 		this.remoteStore = store;
+	}
+
+	protected prepareNewSessionReference(
+		_sessionDir: string,
+		sessionId: string,
+		_timestamp: string,
+	): string | undefined {
+		return this.getSessionReference() ?? formatRemoteSessionReference(sessionId);
 	}
 
 	override newSession(options?: NewSessionOptions): string | undefined {

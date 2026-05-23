@@ -813,7 +813,7 @@ ctx.ui.setFooter((tui, theme, footerData) => ({
 ctx.ui.setFooter(undefined); // restore default
 ```
 
-Token stats available via `ctx.sessionManager.getBranch()` and `ctx.model`.
+Token stats available via `ctx.session.getBranch()` and `ctx.model`.
 
 **Examples:** [custom-footer.ts](../examples/extensions/custom-footer.ts)
 

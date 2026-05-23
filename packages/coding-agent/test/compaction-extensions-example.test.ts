@@ -12,8 +12,8 @@ describe("Documentation example", () => {
 			pi.on("session_before_compact", async (event: SessionBeforeCompactEvent, ctx) => {
 				// All these should be accessible on the event
 				const { preparation, branchEntries } = event;
-				// sessionManager, modelRegistry, and model come from ctx
-				const { sessionManager, modelRegistry } = ctx;
+				// session, modelRegistry, and model come from ctx
+				const { session, modelRegistry } = ctx;
 				const { messagesToSummarize, turnPrefixMessages, tokensBefore, firstKeptEntryId, isSplitTurn } =
 					preparation;
 
@@ -22,7 +22,7 @@ describe("Documentation example", () => {
 				expect(Array.isArray(turnPrefixMessages)).toBe(true);
 				expect(typeof isSplitTurn).toBe("boolean");
 				expect(typeof tokensBefore).toBe("number");
-				expect(typeof sessionManager.getEntries).toBe("function");
+				expect(typeof session.getEntries).toBe("function");
 				expect(typeof modelRegistry.getApiKeyAndHeaders).toBe("function");
 				expect(typeof firstKeptEntryId).toBe("string");
 				expect(Array.isArray(branchEntries)).toBe(true);
@@ -32,7 +32,7 @@ describe("Documentation example", () => {
 					.map((m) => `- ${typeof m.content === "string" ? m.content.slice(0, 100) : "[complex]"}`)
 					.join("\n");
 
-				// Extensions return compaction content - SessionManager adds id/parentId
+				// Extensions return compaction content - Session adds id/parentId
 				return {
 					compaction: {
 						summary: `User requests:\n${summary}`,

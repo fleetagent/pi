@@ -2,15 +2,18 @@ import { copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { CURRENT_SESSION_VERSION } from "./constants.ts";
 import { createSessionId } from "./ids.ts";
-import {
-	findMostRecentSession,
-	getDefaultSessionDir,
-	jsonlSessionStore,
-	loadEntriesFromFile,
-} from "./jsonl-helpers.ts";
+import { findMostRecentSession, getDefaultSessionDir, loadEntriesFromFile } from "./jsonl-helpers.ts";
 import { LocalSession } from "./local-session.ts";
 import type { Session } from "./session.ts";
 import type { OpenSessionOptions, SessionManager } from "./session-manager.ts";
+import {
+	ensureDir,
+	forkSession as forkJsonlSession,
+	getSessionDirForReference,
+	getSessionsRoot,
+	listAll as listAllJsonlSessions,
+	list as listJsonlSessions,
+} from "./stores/jsonl-session-store.ts";
 import type { NewSessionOptions, SessionHeader, SessionInfo, SessionListProgress } from "./types.ts";
 
 export interface LocalSessionManagerOptions {
@@ -29,7 +32,7 @@ export class LocalSessionManager implements SessionManager {
 
 	create(options?: NewSessionOptions): LocalSession {
 		const dir = this.sessionDir ?? getDefaultSessionDir(this.cwd);
-		const session = new LocalSession(this.cwd, dir, undefined);
+		const session = new LocalSession(this.cwd, dir, undefined, this);
 		if (options?.id || options?.parentSession) {
 			session.newSession(options);
 		}
@@ -40,17 +43,17 @@ export class LocalSessionManager implements SessionManager {
 		const entries = loadEntriesFromFile(reference);
 		const header = entries.find((entry) => entry.type === "session") as SessionHeader | undefined;
 		const cwd = options?.cwdOverride ?? header?.cwd ?? this.cwd;
-		const dir = this.sessionDir ?? jsonlSessionStore.getSessionDirForReference(reference);
-		return new LocalSession(cwd, dir, reference);
+		const dir = this.sessionDir ?? getSessionDirForReference(reference);
+		return new LocalSession(cwd, dir, reference, this);
 	}
 
 	continueRecent(): LocalSession {
 		const dir = this.sessionDir ?? getDefaultSessionDir(this.cwd);
 		const mostRecent = findMostRecentSession(dir);
 		if (mostRecent) {
-			return new LocalSession(this.cwd, dir, mostRecent);
+			return new LocalSession(this.cwd, dir, mostRecent, this);
 		}
-		return new LocalSession(this.cwd, dir, undefined);
+		return new LocalSession(this.cwd, dir, undefined, this);
 	}
 
 	forkFrom(reference: string): LocalSession {
@@ -65,7 +68,7 @@ export class LocalSessionManager implements SessionManager {
 		}
 
 		const dir = this.sessionDir ?? getDefaultSessionDir(this.cwd);
-		jsonlSessionStore.ensureDir(dir);
+		ensureDir(dir);
 
 		const newSessionId = createSessionId();
 		const timestamp = new Date().toISOString();
@@ -77,9 +80,9 @@ export class LocalSessionManager implements SessionManager {
 			cwd: this.cwd,
 			parentSession: reference,
 		};
-		const newSessionReference = jsonlSessionStore.forkSession(dir, newHeader, sourceEntries);
+		const newSessionReference = forkJsonlSession(dir, newHeader, sourceEntries);
 
-		return new LocalSession(this.cwd, dir, newSessionReference);
+		return new LocalSession(this.cwd, dir, newSessionReference, this);
 	}
 
 	forkSession(source: Session, targetLeafId: string | null): LocalSession {
@@ -118,13 +121,13 @@ export class LocalSessionManager implements SessionManager {
 
 	async list(onProgress?: SessionListProgress): Promise<SessionInfo[]> {
 		const dir = this.sessionDir ?? getDefaultSessionDir(this.cwd);
-		const sessions = await jsonlSessionStore.list(dir, onProgress);
+		const sessions = await listJsonlSessions(dir, onProgress);
 		sessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());
 		return sessions;
 	}
 
 	async listAll(onProgress?: SessionListProgress): Promise<SessionInfo[]> {
-		const sessions = await jsonlSessionStore.listAll(jsonlSessionStore.getSessionsRoot(), onProgress);
+		const sessions = await listAllJsonlSessions(getSessionsRoot(), onProgress);
 		sessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());
 		return sessions;
 	}

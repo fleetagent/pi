@@ -109,7 +109,7 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 
 		session = new AgentSession({
 			agent,
-			sessionManager,
+			session: sessionManager,
 			settingsManager,
 			cwd: tempDir,
 			modelRegistry,
@@ -219,8 +219,8 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 
 		const afterEvent = compactEvents[0];
 		if (afterEvent.type === "session_compact") {
-			// sessionManager is now on ctx, use session.sessionManager directly
-			const entries = session.sessionManager.getEntries();
+			// sessionManager is now on ctx, use session.session directly
+			const entries = session.session.getEntries();
 			const hasCompactionEntry = entries.some((e: { type: string }) => e.type === "compaction");
 			expect(hasCompactionEntry).toBe(true);
 		}
@@ -379,10 +379,10 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 
 		// sessionManager, modelRegistry, and model are now on ctx, not event
 		// Verify they're accessible via session
-		expect(typeof session.sessionManager.getEntries).toBe("function");
+		expect(typeof session.session.getEntries).toBe("function");
 		expect(typeof session.modelRegistry.getApiKeyAndHeaders).toBe("function");
 
-		const entries = session.sessionManager.getEntries();
+		const entries = session.session.getEntries();
 		expect(Array.isArray(entries)).toBe(true);
 		expect(entries.length).toBeGreaterThan(0);
 	}, 120000);

@@ -52,7 +52,7 @@ import type { ModelRegistry } from "../model-registry.ts";
 import type {
 	BranchSummaryEntry,
 	CompactionEntry,
-	ReadonlySessionManager,
+	ReadonlySession,
 	Session,
 	SessionEntry,
 } from "../session-manager.ts";
@@ -171,7 +171,7 @@ export interface ExtensionUIContext {
 	 *
 	 * The factory receives a FooterDataProvider for data not otherwise accessible:
 	 * git branch and extension statuses from setStatus(). Token stats, model info,
-	 * etc. are available via ctx.sessionManager and ctx.model.
+	 * etc. are available via ctx.session and ctx.model.
 	 */
 	setFooter(
 		factory:
@@ -302,8 +302,8 @@ export interface ExtensionContext {
 	hasUI: boolean;
 	/** Current working directory */
 	cwd: string;
-	/** Session manager (read-only) */
-	sessionManager: ReadonlySessionManager;
+	/** Current session (read-only) */
+	session: ReadonlySession;
 	/** Model registry for API key resolution */
 	modelRegistry: ModelRegistry;
 	/** Current model (may be undefined) */
@@ -338,7 +338,7 @@ export interface ExtensionCommandContext extends ExtensionContext {
 	newSession(options?: {
 		id?: string;
 		parentSession?: string;
-		setup?: (sessionManager: Session) => Promise<void>;
+		setup?: (session: Session) => Promise<void>;
 		withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
 	}): Promise<{ cancelled: boolean }>;
 
@@ -515,7 +515,9 @@ export interface SessionStartEvent {
 	type: "session_start";
 	/** Why this session start happened. */
 	reason: "startup" | "reload" | "new" | "resume" | "fork";
-	/** Previously active session file. Present for "new", "resume", and "fork". */
+	/** Previously active session reference. Present for "new", "resume", and "fork". */
+	previousSessionReference?: string;
+	/** @deprecated Use previousSessionReference. For local JSONL sessions this is the same file path. */
 	previousSessionFile?: string;
 }
 
@@ -523,6 +525,9 @@ export interface SessionStartEvent {
 export interface SessionBeforeSwitchEvent {
 	type: "session_before_switch";
 	reason: "new" | "resume";
+	/** Target session reference when switching to an existing session. */
+	targetSessionReference?: string;
+	/** @deprecated Use targetSessionReference. For local JSONL sessions this is the same file path. */
 	targetSessionFile?: string;
 }
 
@@ -553,7 +558,9 @@ export interface SessionCompactEvent {
 export interface SessionShutdownEvent {
 	type: "session_shutdown";
 	reason: "quit" | "reload" | "new" | "resume" | "fork";
-	/** Destination session file when shutting down due to session replacement. */
+	/** Destination session reference when shutting down due to session replacement. */
+	targetSessionReference?: string;
+	/** @deprecated Use targetSessionReference. For local JSONL sessions this is the same file path. */
 	targetSessionFile?: string;
 }
 
@@ -1512,7 +1519,7 @@ export interface ExtensionCommandContextActions {
 	newSession: (options?: {
 		id?: string;
 		parentSession?: string;
-		setup?: (sessionManager: Session) => Promise<void>;
+		setup?: (session: Session) => Promise<void>;
 		withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
 	}) => Promise<{ cancelled: boolean }>;
 	fork: (

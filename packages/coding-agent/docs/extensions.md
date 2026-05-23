@@ -306,13 +306,13 @@ user sends another prompt ◄─────────────────
 /new (new session) or /resume (switch session)
   ├─► session_before_switch (can cancel)
   ├─► session_shutdown
-  ├─► session_start { reason: "new" | "resume", previousSessionFile? }
+  ├─► session_start { reason: "new" | "resume", previousSessionReference? }
   └─► resources_discover { reason: "startup" }
 
 /fork or /clone
   ├─► session_before_fork (can cancel)
   ├─► session_shutdown
-  ├─► session_start { reason: "fork", previousSessionFile }
+  ├─► session_start { reason: "fork", previousSessionReference }
   └─► resources_discover { reason: "startup" }
 
 /compact or auto-compaction
@@ -355,7 +355,7 @@ pi.on("resources_discover", async (event, _ctx) => {
 
 ### Session Events
 
-See [Session Format](session-format.md) for session storage internals and the SessionManager API.
+See [Session Format](session-format.md) for session storage internals, active `Session` APIs, and `SessionManager` lifecycle APIs.
 
 #### session_start
 
@@ -364,8 +364,9 @@ Fired when a session is started, loaded, or reloaded.
 ```typescript
 pi.on("session_start", async (event, ctx) => {
   // event.reason - "startup" | "reload" | "new" | "resume" | "fork"
-  // event.previousSessionFile - present for "new", "resume", and "fork"
-  ctx.ui.notify(`Session: ${ctx.sessionManager.getSessionFile() ?? "ephemeral"}`, "info");
+  // event.previousSessionReference - present for "new", "resume", and "fork"
+  // event.previousSessionFile - deprecated alias for local-file-oriented compatibility
+  ctx.ui.notify(`Session: ${ctx.session.getSessionReference() ?? "ephemeral"}`, "info");
 });
 ```
 
@@ -376,7 +377,8 @@ Fired before starting a new session (`/new`) or switching sessions (`/resume`).
 ```typescript
 pi.on("session_before_switch", async (event, ctx) => {
   // event.reason - "new" or "resume"
-  // event.targetSessionFile - session we're switching to (only for "resume")
+  // event.targetSessionReference - session we're switching to (only for "resume")
+  // event.targetSessionFile - deprecated alias for local-file-oriented compatibility
 
   if (event.reason === "new") {
     const ok = await ctx.ui.confirm("Clear?", "Delete all messages?");
@@ -385,7 +387,7 @@ pi.on("session_before_switch", async (event, ctx) => {
 });
 ```
 
-After a successful switch or new-session action, pi emits `session_shutdown` for the old extension instance, reloads and rebinds extensions for the new session, then emits `session_start` with `reason: "new" | "resume"` and `previousSessionFile`.
+After a successful switch or new-session action, pi emits `session_shutdown` for the old extension instance, reloads and rebinds extensions for the new session, then emits `session_start` with `reason: "new" | "resume"` and `previousSessionReference`.
 Do cleanup work in `session_shutdown`, then reestablish any in-memory state in `session_start`.
 
 #### session_before_fork
@@ -402,7 +404,7 @@ pi.on("session_before_fork", async (event, ctx) => {
 });
 ```
 
-After a successful fork or clone, pi emits `session_shutdown` for the old extension instance, reloads and rebinds extensions for the new session, then emits `session_start` with `reason: "fork"` and `previousSessionFile`.
+After a successful fork or clone, pi emits `session_shutdown` for the old extension instance, reloads and rebinds extensions for the new session, then emits `session_start` with `reason: "fork"` and `previousSessionReference`.
 Do cleanup work in `session_shutdown`, then reestablish any in-memory state in `session_start`.
 
 #### session_before_compact / session_compact
@@ -456,7 +458,8 @@ Fired before an extension runtime is torn down.
 ```typescript
 pi.on("session_shutdown", async (event, ctx) => {
   // event.reason - "quit" | "reload" | "new" | "resume" | "fork"
-  // event.targetSessionFile - destination session for session replacement flows
+  // event.targetSessionReference - destination session for session replacement flows
+  // event.targetSessionFile - deprecated alias for local-file-oriented compatibility
   // Cleanup, save state, etc.
 });
 ```
@@ -675,9 +678,9 @@ Use this to update extension UI when `pi.setThinkingLevel()`, model changes, or 
 
 Fired after `tool_execution_start`, before the tool executes. **Can block.** Use `isToolCallEventType` to narrow and get typed inputs.
 
-Before `tool_call` runs, pi waits for previously emitted Agent events to finish draining through `AgentSession`. This means `ctx.sessionManager` is up to date through the current assistant tool-calling message.
+Before `tool_call` runs, pi waits for previously emitted Agent events to finish draining through `AgentSession`. This means `ctx.session` is up to date through the current assistant tool-calling message.
 
-In the default parallel tool execution mode, sibling tool calls from the same assistant message are preflighted sequentially, then executed concurrently. `tool_call` is not guaranteed to see sibling tool results from that same assistant message in `ctx.sessionManager`.
+In the default parallel tool execution mode, sibling tool calls from the same assistant message are preflighted sequentially, then executed concurrently. `tool_call` is not guaranteed to see sibling tool results from that same assistant message in `ctx.session`.
 
 `event.input` is mutable. Mutate it in place to patch tool arguments before execution.
 
@@ -865,16 +868,16 @@ UI methods for user interaction. See [Custom UI](#custom-ui) for full details.
 
 Current working directory.
 
-### ctx.sessionManager
+### ctx.session
 
-Read-only access to session state. See [Session Format](session-format.md) for the full SessionManager API and entry types.
+Read-only access to active session state. See [Session Format](session-format.md) for the full `Session` API and entry types.
 
 For `tool_call`, this state is synchronized through the current assistant message before handlers run. In parallel tool execution mode it is still not guaranteed to include sibling tool results from the same assistant message.
 
 ```typescript
-ctx.sessionManager.getEntries()       // All entries
-ctx.sessionManager.getBranch()        // Current branch
-ctx.sessionManager.getLeafId()        // Current leaf entry ID
+ctx.session.getEntries()       // All entries
+ctx.session.getBranch()        // Current branch
+ctx.session.getLeafId()        // Current leaf entry ID
 ```
 
 ### ctx.modelRegistry / ctx.model
@@ -993,13 +996,13 @@ pi.registerCommand("my-cmd", {
 Create a new session:
 
 ```typescript
-const parentSession = ctx.sessionManager.getSessionFile();
+const parentSession = ctx.session.getSessionReference();
 const kickoff = "Continue in the replacement session";
 
 const result = await ctx.newSession({
   parentSession,
-  setup: async (sm) => {
-    sm.appendMessage({
+  setup: async (session) => {
+    session.appendMessage({
       role: "user",
       content: [{ type: "text", text: "Context from previous session..." }],
       timestamp: Date.now(),
@@ -1018,7 +1021,7 @@ if (result.cancelled) {
 
 Options:
 - `parentSession`: parent session file to record in the new session header
-- `setup`: mutate the new session's `SessionManager` before `withSession` runs
+- `setup`: mutate the new active `Session` before `withSession` runs
 - `withSession`: run post-switch work against a fresh replacement-session context. Do not use captured old `pi` / command `ctx`; see [Session replacement lifecycle and footguns](#session-replacement-lifecycle-and-footguns).
 
 ### ctx.fork(entryId, options?)
@@ -1084,19 +1087,19 @@ if (result.cancelled) {
 Options:
 - `withSession`: run post-switch work against a fresh replacement-session context. Do not use captured old `pi` / command `ctx`; see [Session replacement lifecycle and footguns](#session-replacement-lifecycle-and-footguns).
 
-To discover available sessions, use the static `LocalSessionManager.list()` or `LocalSessionManager.listAll()` methods:
+To discover available sessions, create a `LocalSessionManager` and call `list()` or `listAll()`:
 
 ```typescript
-import { SessionManager } from "@fleetagent/pi-coding-agent";
+import { LocalSessionManager } from "@fleetagent/pi-coding-agent";
 
 pi.registerCommand("switch", {
   description: "Switch to another session",
   handler: async (args, ctx) => {
-    const sessions = await LocalSessionManager.list(ctx.cwd);
+    const sessions = await new LocalSessionManager({ cwd: ctx.cwd }).list();
     if (sessions.length === 0) return;
     const choice = await ctx.ui.select(
       "Pick session:",
-      sessions.map(s => s.file),
+      sessions.map(s => s.reference),
     );
     if (choice) {
       await ctx.switchSession(choice, {
@@ -1117,7 +1120,7 @@ Lifecycle and footguns:
 - `withSession` runs only after the old session has emitted `session_shutdown`, the old runtime has been torn down, the replacement session has been rebound, and the new extension instance has already received `session_start`.
 - The callback still executes in the original closure, not inside the new extension instance. That means your old extension instance may already have run its shutdown cleanup before `withSession` starts.
 - Captured old `pi` / old command `ctx` session-bound objects are stale after replacement and will throw if used. Use only the `ctx` passed to `withSession` for session-bound work.
-- Previously extracted raw objects are still your responsibility. For example, if you capture `const sm = ctx.sessionManager` before replacement, `sm` is still the old `SessionManager` object. Do not reuse it after replacement.
+- Previously extracted raw objects are still your responsibility. For example, if you capture `const oldSession = ctx.session` before replacement, `oldSession` is still the old `Session` object. Do not reuse it after replacement.
 - Code in `withSession` should assume any state invalidated by your `session_shutdown` handler is already gone. Only capture plain data that survives shutdown cleanly, such as strings, ids, and serialized config.
 
 Safe pattern:
@@ -1140,11 +1143,11 @@ Unsafe pattern:
 ```typescript
 pi.registerCommand("handoff", {
   handler: async (_args, ctx) => {
-    const oldSessionManager = ctx.sessionManager;
+    const oldSession = ctx.session;
     await ctx.newSession({
       withSession: async (_ctx) => {
         // stale old objects: do not do this
-        oldSessionManager.getSessionFile();
+        oldSession.getSessionReference();
         pi.sendUserMessage("wrong");
       },
     });
@@ -1325,7 +1328,7 @@ pi.appendEntry("my-state", { count: 42 });
 
 // Restore on reload
 pi.on("session_start", async (_event, ctx) => {
-  for (const entry of ctx.sessionManager.getEntries()) {
+  for (const entry of ctx.session.getEntries()) {
     if (entry.type === "custom" && entry.customType === "my-state") {
       // Reconstruct from entry.data
     }
@@ -1363,8 +1366,8 @@ pi.setLabel(entryId, "checkpoint-before-refactor");
 // Clear a label
 pi.setLabel(entryId, undefined);
 
-// Read labels via sessionManager
-const label = ctx.sessionManager.getLabel(entryId);
+// Read labels via the active session
+const label = ctx.session.getLabel(entryId);
 ```
 
 Labels persist in the session and survive restarts. Use them to mark important points (turns, checkpoints) in the conversation tree.
@@ -1379,7 +1382,7 @@ If multiple extensions register the same command name, pi keeps them all and ass
 pi.registerCommand("stats", {
   description: "Show session statistics",
   handler: async (args, ctx) => {
-    const count = ctx.sessionManager.getEntries().length;
+    const count = ctx.session.getEntries().length;
     ctx.ui.notify(`${count} entries`, "info");
   }
 });
@@ -1634,7 +1637,7 @@ export default function (pi: ExtensionAPI) {
   // Reconstruct state from session
   pi.on("session_start", async (_event, ctx) => {
     items = [];
-    for (const entry of ctx.sessionManager.getBranch()) {
+    for (const entry of ctx.session.getBranch()) {
       if (entry.type === "message" && entry.message.role === "toolResult") {
         if (entry.message.toolName === "my_tool") {
           items = entry.message.details?.items ?? [];

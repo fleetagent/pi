@@ -11,6 +11,7 @@ export type {
 	ImportRemoteSessionJsonlRequest,
 	ListRemoteSessionsResponse,
 	RemoteSessionClientOptions,
+	RemoteSessionInfo,
 	RemoteSessionSnapshot,
 	ReplaceRemoteSessionSnapshotRequest,
 	ReplaceRemoteSessionSnapshotResponse,
@@ -27,5 +28,5 @@ export type { OpenSessionOptions, SessionManager, SessionResult } from "./sessio
 export { InMemorySessionStore } from "./stores/in-memory-session-store.ts";
 export { JsonlSessionStore } from "./stores/jsonl-session-store.ts";
 export { RemoteSessionStore } from "./stores/remote-session-store.ts";
-export type { SessionOpenResult, SessionStore } from "./stores/session-store.ts";
+export type { SessionStore } from "./stores/session-store.ts";
 export * from "./types.ts";

@@ -151,7 +151,7 @@ export type ExtensionErrorListener = (error: ExtensionError) => void;
 export type NewSessionHandler = (options?: {
 	id?: string;
 	parentSession?: string;
-	setup?: (sessionManager: Session) => Promise<void>;
+	setup?: (session: Session) => Promise<void>;
 	withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
 }) => Promise<{ cancelled: boolean }>;
 
@@ -227,7 +227,7 @@ export class ExtensionRunner {
 	private runtime: ExtensionRuntime;
 	private uiContext: ExtensionUIContext;
 	private cwd: string;
-	private sessionManager: Session;
+	private session: Session;
 	private modelRegistry: ModelRegistry;
 	private errorListeners: Set<ExtensionErrorListener> = new Set();
 	private getModel: () => Model<any> | undefined = () => undefined;
@@ -253,14 +253,14 @@ export class ExtensionRunner {
 		extensions: Extension[],
 		runtime: ExtensionRuntime,
 		cwd: string,
-		sessionManager: Session,
+		session: Session,
 		modelRegistry: ModelRegistry,
 	) {
 		this.extensions = extensions;
 		this.runtime = runtime;
 		this.uiContext = noOpUIContext;
 		this.cwd = cwd;
-		this.sessionManager = sessionManager;
+		this.session = session;
 		this.modelRegistry = modelRegistry;
 	}
 
@@ -587,9 +587,9 @@ export class ExtensionRunner {
 				runner.assertActive();
 				return runner.cwd;
 			},
-			get sessionManager() {
+			get session() {
 				runner.assertActive();
-				return runner.sessionManager;
+				return runner.session;
 			},
 			get modelRegistry() {
 				runner.assertActive();

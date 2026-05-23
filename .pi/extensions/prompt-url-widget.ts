@@ -108,10 +108,6 @@ export default function promptUrlWidgetExtension(pi: ExtensionAPI) {
 		});
 	});
 
-	pi.on("session_switch", async (_event, ctx) => {
-		rebuildFromSession(ctx);
-	});
-
 	const getUserText = (content: string | { type: string; text?: string }[] | undefined): string => {
 		if (!content) return "";
 		if (typeof content === "string") return content;
@@ -126,7 +122,7 @@ export default function promptUrlWidgetExtension(pi: ExtensionAPI) {
 	const rebuildFromSession = (ctx: ExtensionContext) => {
 		if (!ctx.hasUI) return;
 
-		const entries = ctx.sessionManager.getEntries();
+		const entries = ctx.session.getEntries();
 		const lastMatch = [...entries].reverse().find((entry) => {
 			if (entry.type !== "message" || entry.message.role !== "user") return false;
 			const text = getUserText(entry.message.content);

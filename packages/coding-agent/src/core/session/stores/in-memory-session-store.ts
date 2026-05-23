@@ -1,13 +1,5 @@
-import type {
-	FileEntry,
-	LabelEntry,
-	SessionEntry,
-	SessionHeader,
-	SessionInfo,
-	SessionListProgress,
-	SessionTreeNode,
-} from "../types.ts";
-import type { SessionOpenResult, SessionStore } from "./session-store.ts";
+import type { FileEntry, LabelEntry, SessionEntry, SessionHeader, SessionTreeNode } from "../types.ts";
+import type { SessionStore } from "./session-store.ts";
 
 export class InMemorySessionStore implements SessionStore {
 	protected fileEntries: FileEntry[] = [];
@@ -15,65 +7,30 @@ export class InMemorySessionStore implements SessionStore {
 	protected labelsById: Map<string, string> = new Map();
 	protected labelTimestampsById: Map<string, string> = new Map();
 	protected leafId: string | null = null;
+	private sessionReference: string | undefined;
 
 	isPersisted(): boolean {
 		return false;
 	}
 
 	getSessionReference(): string | undefined {
-		return undefined;
+		return this.sessionReference;
 	}
 
-	setSessionReference(_reference: string): void {
-		// No-op for in-memory sessions.
+	setSessionReference(reference: string): void {
+		this.sessionReference = reference;
 	}
 
-	openSession(reference: string): SessionOpenResult {
-		return { reference, exists: false, entries: [] };
-	}
-
-	getSessionDirForReference(_reference: string): string {
-		return "";
-	}
-
-	getDefaultSessionDir(_cwd: string, _agentDir?: string): string {
-		return "";
-	}
-
-	getSessionsRoot(): string {
-		return "";
-	}
-
-	prepareSessionReference(_sessionDir: string, _sessionId: string, _timestamp: string): string | undefined {
-		return undefined;
-	}
-
-	getParentSessionReference(): string | undefined {
-		return undefined;
-	}
-
-	exists(_path: string): boolean {
-		return false;
+	exists(reference: string): boolean {
+		return reference === this.sessionReference && this.fileEntries.length > 0;
 	}
 
 	ensureDir(_path: string): void {
 		// No-op for in-memory sessions.
 	}
 
-	load(_filePath: string): FileEntry[] {
-		return [];
-	}
-
-	findMostRecent(_sessionDir: string): string | null {
-		return null;
-	}
-
-	async list(_dir: string, _onProgress?: SessionListProgress): Promise<SessionInfo[]> {
-		return [];
-	}
-
-	async listAll(_sessionsDir: string, _onProgress?: SessionListProgress): Promise<SessionInfo[]> {
-		return [];
+	load(reference: string): FileEntry[] {
+		return reference === this.sessionReference ? [...this.fileEntries] : [];
 	}
 
 	setEntries(entries: FileEntry[]): void {

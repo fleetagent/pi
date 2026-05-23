@@ -142,14 +142,14 @@ describe("regression #2860: replaced session callbacks", () => {
 					handler: async (_args, ctx) => {
 						oldCtx = ctx;
 						oldPi = pi;
-						oldSessionFile = ctx.sessionManager.getSessionReference();
+						oldSessionFile = ctx.session.getSessionReference();
 						await ctx.newSession({
 							parentSession: oldSessionFile,
 							withSession: async (replacedCtx) => {
 								events.push(`with:${currentInstance}`);
-								replacementSessionFile = replacedCtx.sessionManager.getSessionReference();
+								replacementSessionFile = replacedCtx.session.getSessionReference();
 								try {
-									oldCtx?.sessionManager.getSessionReference();
+									oldCtx?.session.getSessionReference();
 								} catch {
 									staleCtxThrows = true;
 								}
@@ -188,7 +188,7 @@ describe("regression #2860: replaced session callbacks", () => {
 				pi.registerCommand("fork-it", {
 					description: "fork-it",
 					handler: async (_args, ctx) => {
-						const leafId = ctx.sessionManager.getLeafId();
+						const leafId = ctx.session.getLeafId();
 						if (!leafId) {
 							throw new Error("Missing leaf id");
 						}

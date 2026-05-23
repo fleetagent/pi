@@ -26,7 +26,6 @@ import type {
 	SessionMessageEntry,
 } from "../types.ts";
 import { InMemorySessionStore } from "./in-memory-session-store.ts";
-import type { SessionOpenResult } from "./session-store.ts";
 
 function isMessageWithContent(message: AgentMessage): message is Message {
 	return typeof (message as Message).role === "string" && "content" in message;
@@ -168,6 +167,163 @@ async function buildSessionInfo(filePath: string): Promise<SessionInfo | null> {
 
 const MAX_CONCURRENT_SESSION_INFO_LOADS = 10;
 
+export function getSessionDirForReference(reference: string): string {
+	return resolve(reference, "..");
+}
+
+export function getDefaultSessionDir(cwd: string, agentDir: string = getDefaultAgentDir()): string {
+	const safePath = `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
+	const sessionDir = join(agentDir, "sessions", safePath);
+	ensureDir(sessionDir);
+	return sessionDir;
+}
+
+export function getSessionsRoot(): string {
+	return getSessionsDir();
+}
+
+export function prepareSessionReference(sessionDir: string, sessionId: string, timestamp: string): string {
+	const fileTimestamp = timestamp.replace(/[:.]/g, "-");
+	return join(sessionDir, `${fileTimestamp}_${sessionId}.jsonl`);
+}
+
+export function exists(path: string): boolean {
+	return existsSync(path);
+}
+
+export function ensureDir(path: string): void {
+	if (!existsSync(path)) {
+		mkdirSync(path, { recursive: true });
+	}
+}
+
+export function load(filePath: string): FileEntry[] {
+	if (!existsSync(filePath)) return [];
+
+	const content = readFileSync(filePath, "utf8");
+	const entries: FileEntry[] = [];
+	const lines = content.trim().split("\n");
+
+	for (const line of lines) {
+		if (!line.trim()) continue;
+		try {
+			const entry = JSON.parse(line) as FileEntry;
+			entries.push(entry);
+		} catch {
+			// Skip malformed lines
+		}
+	}
+
+	if (entries.length === 0) return entries;
+	const header = entries[0];
+	if (header.type !== "session" || typeof (header as Partial<SessionHeader>).id !== "string") {
+		return [];
+	}
+
+	return entries;
+}
+
+export function append(filePath: string, entry: FileEntry): void {
+	appendFileSync(filePath, `${JSON.stringify(entry)}\n`);
+}
+
+export function rewrite(filePath: string, entries: FileEntry[]): void {
+	const content = `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`;
+	writeFileSync(filePath, content);
+}
+
+export function forkSession(sessionDir: string, header: SessionHeader, sourceEntries: FileEntry[]): string {
+	const reference = prepareSessionReference(sessionDir, header.id, header.timestamp);
+	append(reference, header);
+	for (const entry of sourceEntries) {
+		if (entry.type !== "session") {
+			append(reference, entry);
+		}
+	}
+	return reference;
+}
+
+export function findMostRecent(sessionDir: string): string | null {
+	try {
+		const files = readdirSync(sessionDir)
+			.filter((file) => file.endsWith(".jsonl"))
+			.map((file) => join(sessionDir, file))
+			.filter(isValidSessionFile)
+			.map((path) => ({ path, mtime: statSync(path).mtime }))
+			.sort((a, b) => b.mtime.getTime() - a.mtime.getTime());
+
+		return files[0]?.path || null;
+	} catch {
+		return null;
+	}
+}
+
+export async function list(dir: string, onProgress?: SessionListProgress): Promise<SessionInfo[]> {
+	const sessions: SessionInfo[] = [];
+	if (!existsSync(dir)) {
+		return sessions;
+	}
+
+	try {
+		const dirEntries = await readdir(dir);
+		const files = dirEntries.filter((file) => file.endsWith(".jsonl")).map((file) => join(dir, file));
+		let loaded = 0;
+		const results = await buildSessionInfosWithConcurrency(files, () => {
+			loaded++;
+			onProgress?.(loaded, files.length);
+		});
+		for (const info of results) {
+			if (info) {
+				sessions.push(info);
+			}
+		}
+	} catch {
+		// Return empty list on error
+	}
+
+	return sessions;
+}
+
+export async function listAll(sessionsDir: string, onProgress?: SessionListProgress): Promise<SessionInfo[]> {
+	try {
+		if (!existsSync(sessionsDir)) {
+			return [];
+		}
+		const entries = await readdir(sessionsDir, { withFileTypes: true });
+		const dirs = entries.filter((entry) => entry.isDirectory()).map((entry) => join(sessionsDir, entry.name));
+
+		let totalFiles = 0;
+		const dirFiles: string[][] = [];
+		for (const dir of dirs) {
+			try {
+				const files = (await readdir(dir)).filter((file) => file.endsWith(".jsonl"));
+				dirFiles.push(files.map((file) => join(dir, file)));
+				totalFiles += files.length;
+			} catch {
+				dirFiles.push([]);
+			}
+		}
+
+		let loaded = 0;
+		const sessions: SessionInfo[] = [];
+		const allFiles = dirFiles.flat();
+		const results = await buildSessionInfosWithConcurrency(allFiles, () => {
+			loaded++;
+			onProgress?.(loaded, totalFiles);
+		});
+
+		for (const info of results) {
+			if (info) {
+				sessions.push(info);
+			}
+		}
+
+		return sessions;
+	} catch {
+		return [];
+	}
+}
+
 async function buildSessionInfosWithConcurrency(
 	files: string[],
 	onLoaded: () => void,
@@ -209,7 +365,7 @@ async function buildSessionInfosWithConcurrency(
 }
 
 export class JsonlSessionStore extends InMemorySessionStore {
-	private sessionReference: string | undefined;
+	private reference: string | undefined;
 	private flushed = false;
 
 	isPersisted(): boolean {
@@ -217,95 +373,26 @@ export class JsonlSessionStore extends InMemorySessionStore {
 	}
 
 	getSessionReference(): string | undefined {
-		return this.sessionReference;
+		return this.reference;
 	}
 
 	setSessionReference(reference: string): void {
-		this.sessionReference = resolve(reference);
+		this.reference = resolve(reference);
 		this.flushed = false;
-	}
-
-	openSession(reference: string): SessionOpenResult {
-		this.setSessionReference(reference);
-		const currentReference = this.sessionReference!;
-		const fileExists = this.exists(currentReference);
-		return {
-			reference: currentReference,
-			exists: fileExists,
-			entries: fileExists ? this.load(currentReference) : [],
-		};
-	}
-
-	getSessionDirForReference(reference: string): string {
-		return resolve(reference, "..");
-	}
-
-	getDefaultSessionDir(cwd: string, agentDir: string = getDefaultAgentDir()): string {
-		const safePath = `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
-		const sessionDir = join(agentDir, "sessions", safePath);
-		this.ensureDir(sessionDir);
-		return sessionDir;
-	}
-
-	getSessionsRoot(): string {
-		return getSessionsDir();
-	}
-
-	prepareSessionReference(sessionDir: string, sessionId: string, timestamp: string): string | undefined {
-		const fileTimestamp = timestamp.replace(/[:.]/g, "-");
-		this.sessionReference = join(sessionDir, `${fileTimestamp}_${sessionId}.jsonl`);
-		this.flushed = false;
-		return this.sessionReference;
-	}
-
-	getParentSessionReference(): string | undefined {
-		return this.sessionReference;
 	}
 
 	exists(path: string): boolean {
-		return existsSync(path);
+		return exists(path);
 	}
 
 	ensureDir(path: string): void {
-		if (!existsSync(path)) {
-			mkdirSync(path, { recursive: true });
-		}
+		ensureDir(path);
 	}
 
 	load(filePath: string): FileEntry[] {
-		if (!existsSync(filePath)) return [];
+		if (!exists(filePath)) return [];
 		this.flushed = true;
-
-		const content = readFileSync(filePath, "utf8");
-		const entries: FileEntry[] = [];
-		const lines = content.trim().split("\n");
-
-		for (const line of lines) {
-			if (!line.trim()) continue;
-			try {
-				const entry = JSON.parse(line) as FileEntry;
-				entries.push(entry);
-			} catch {
-				// Skip malformed lines
-			}
-		}
-
-		if (entries.length === 0) return entries;
-		const header = entries[0];
-		if (header.type !== "session" || typeof (header as Partial<SessionHeader>).id !== "string") {
-			return [];
-		}
-
-		return entries;
-	}
-
-	append(filePath: string, entry: FileEntry): void {
-		appendFileSync(filePath, `${JSON.stringify(entry)}\n`);
-	}
-
-	rewrite(filePath: string, entries: FileEntry[]): void {
-		const content = `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`;
-		writeFileSync(filePath, content);
+		return load(filePath);
 	}
 
 	appendEntry(entry: SessionEntry): void {
@@ -314,7 +401,7 @@ export class JsonlSessionStore extends InMemorySessionStore {
 	}
 
 	private persistAppendedEntry(entry: SessionEntry): void {
-		if (!this.sessionReference) return;
+		if (!this.reference) return;
 
 		if (!this.hasAssistantMessage()) {
 			this.flushed = false;
@@ -323,17 +410,17 @@ export class JsonlSessionStore extends InMemorySessionStore {
 
 		if (!this.flushed) {
 			for (const fileEntry of this.getFileEntries()) {
-				this.append(this.sessionReference, fileEntry);
+				append(this.reference, fileEntry);
 			}
 			this.flushed = true;
 		} else {
-			this.append(this.sessionReference, entry);
+			append(this.reference, entry);
 		}
 	}
 
 	saveSnapshot(): void {
-		if (!this.sessionReference) return;
-		this.rewrite(this.sessionReference, this.getFileEntries());
+		if (!this.reference) return;
+		rewrite(this.reference, this.getFileEntries());
 		this.flushed = true;
 	}
 
@@ -343,102 +430,5 @@ export class JsonlSessionStore extends InMemorySessionStore {
 			return;
 		}
 		this.saveSnapshot();
-	}
-
-	forkSession(sessionDir: string, header: SessionHeader, sourceEntries: FileEntry[]): string {
-		this.prepareSessionReference(sessionDir, header.id, header.timestamp);
-		const reference = this.getSessionReference();
-		if (!reference) {
-			throw new Error("Failed to prepare forked session reference");
-		}
-		this.append(reference, header);
-		for (const entry of sourceEntries) {
-			if (entry.type !== "session") {
-				this.append(reference, entry);
-			}
-		}
-		this.flushed = true;
-		return reference;
-	}
-
-	findMostRecent(sessionDir: string): string | null {
-		try {
-			const files = readdirSync(sessionDir)
-				.filter((file) => file.endsWith(".jsonl"))
-				.map((file) => join(sessionDir, file))
-				.filter(isValidSessionFile)
-				.map((path) => ({ path, mtime: statSync(path).mtime }))
-				.sort((a, b) => b.mtime.getTime() - a.mtime.getTime());
-
-			return files[0]?.path || null;
-		} catch {
-			return null;
-		}
-	}
-
-	async list(dir: string, onProgress?: SessionListProgress): Promise<SessionInfo[]> {
-		const sessions: SessionInfo[] = [];
-		if (!existsSync(dir)) {
-			return sessions;
-		}
-
-		try {
-			const dirEntries = await readdir(dir);
-			const files = dirEntries.filter((file) => file.endsWith(".jsonl")).map((file) => join(dir, file));
-			let loaded = 0;
-			const results = await buildSessionInfosWithConcurrency(files, () => {
-				loaded++;
-				onProgress?.(loaded, files.length);
-			});
-			for (const info of results) {
-				if (info) {
-					sessions.push(info);
-				}
-			}
-		} catch {
-			// Return empty list on error
-		}
-
-		return sessions;
-	}
-
-	async listAll(sessionsDir: string, onProgress?: SessionListProgress): Promise<SessionInfo[]> {
-		try {
-			if (!existsSync(sessionsDir)) {
-				return [];
-			}
-			const entries = await readdir(sessionsDir, { withFileTypes: true });
-			const dirs = entries.filter((entry) => entry.isDirectory()).map((entry) => join(sessionsDir, entry.name));
-
-			let totalFiles = 0;
-			const dirFiles: string[][] = [];
-			for (const dir of dirs) {
-				try {
-					const files = (await readdir(dir)).filter((file) => file.endsWith(".jsonl"));
-					dirFiles.push(files.map((file) => join(dir, file)));
-					totalFiles += files.length;
-				} catch {
-					dirFiles.push([]);
-				}
-			}
-
-			let loaded = 0;
-			const sessions: SessionInfo[] = [];
-			const allFiles = dirFiles.flat();
-			const results = await buildSessionInfosWithConcurrency(allFiles, () => {
-				loaded++;
-				onProgress?.(loaded, totalFiles);
-			});
-
-			for (const info of results) {
-				if (info) {
-					sessions.push(info);
-				}
-			}
-
-			return sessions;
-		} catch {
-			return [];
-		}
 	}
 }

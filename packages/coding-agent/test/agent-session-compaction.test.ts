@@ -67,7 +67,7 @@ describe.skipIf(!API_KEY)("AgentSession compaction e2e", () => {
 
 		session = new AgentSession({
 			agent,
-			sessionManager,
+			session: sessionManager,
 			settingsManager,
 			cwd: tempDir,
 			modelRegistry,

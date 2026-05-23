@@ -108,7 +108,7 @@ describe("AgentSession retry", () => {
 
 		session = new AgentSession({
 			agent,
-			sessionManager,
+			session: sessionManager,
 			settingsManager,
 			cwd: tempDir,
 			modelRegistry,
@@ -209,7 +209,7 @@ describe("AgentSession retry", () => {
 		settingsManager.applyOverrides({ retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 } });
 		session = new AgentSession({
 			agent,
-			sessionManager,
+			session: sessionManager,
 			settingsManager,
 			cwd: tempDir,
 			modelRegistry,
@@ -295,7 +295,7 @@ describe("AgentSession retry", () => {
 
 		session = new AgentSession({
 			agent,
-			sessionManager,
+			session: sessionManager,
 			settingsManager,
 			cwd: tempDir,
 			modelRegistry,

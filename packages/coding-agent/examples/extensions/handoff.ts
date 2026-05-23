@@ -99,7 +99,7 @@ export default function (pi: ExtensionAPI) {
 
 			// Gather conversation context from current branch. If the branch was compacted,
 			// include the compaction summary plus entries from firstKeptEntryId onward.
-			const messages = getHandoffMessages(ctx.sessionManager.getBranch());
+			const messages = getHandoffMessages(ctx.session.getBranch());
 
 			if (messages.length === 0) {
 				ctx.ui.notify("No conversation to hand off", "error");
@@ -109,7 +109,7 @@ export default function (pi: ExtensionAPI) {
 			// Convert to LLM format and serialize
 			const llmMessages = convertToLlm(messages);
 			const conversationText = serializeConversation(llmMessages);
-			const currentSessionFile = ctx.sessionManager.getSessionReference();
+			const currentSessionFile = ctx.session.getSessionReference();
 
 			// Generate the handoff prompt with loader UI
 			const result = await ctx.ui.custom<string | null>((tui, theme, _kb, done) => {

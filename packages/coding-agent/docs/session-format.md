@@ -29,7 +29,7 @@ Existing sessions are automatically migrated to the current version (v3) when lo
 ## Source Files
 
 Source on GitHub ([pi-mono](https://github.com/earendil-works/pi-mono)):
-- [`packages/coding-agent/src/core/session-manager.ts`](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/src/core/session-manager.ts) - Session entry types and SessionManager
+- [`packages/coding-agent/src/core/session-manager.ts`](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/src/core/session-manager.ts) - Session entry types, `Session`, and `SessionManager`
 - [`packages/coding-agent/src/core/messages.ts`](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/src/core/messages.ts) - Extended message types (BashExecutionMessage, CustomMessage, etc.)
 - [`packages/ai/src/types.ts`](https://github.com/earendil-works/pi-mono/blob/main/packages/ai/src/types.ts) - Base message types (UserMessage, AssistantMessage, ToolResultMessage)
 - [`packages/agent/src/types.ts`](https://github.com/earendil-works/pi-mono/blob/main/packages/agent/src/types.ts) - AgentMessage union type
@@ -358,27 +358,27 @@ for (const line of lines) {
 }
 ```
 
-## SessionManager API
+## Programmatic APIs
 
-Key methods for working with sessions programmatically.
+`SessionManager` handles lifecycle and discovery. It creates, opens, forks, imports, and lists `Session` objects. `Session` represents one active conversation tree and owns entry append/read/navigation operations.
 
-### Static Creation Methods
-- `LocalSessionManager.create(cwd, sessionDir?)` - New session
-- `LocalSessionManager.openReference(path, sessionDir?)` - Open existing session file
-- `LocalSessionManager.continueRecent(cwd, sessionDir?)` - Continue most recent or create new
-- `InMemorySessionManager.create(cwd?)` - No file persistence
-- `LocalSessionManager.forkFrom(sourcePath, targetCwd, sessionDir?)` - Fork session from another project
+### SessionManager Methods
+- `create(options?)` - Create a new session
+- `openReference(reference, options?)` - Open an existing session reference
+- `continueRecent()` - Continue the most recent session or create a new one
+- `forkFrom(reference)` - Fork from an existing session reference
+- `forkSession(source, targetLeafId)` - Fork from an active `Session`
+- `importJsonl(inputPath, options?)` - Import a JSONL session file
+- `list(onProgress?)` - List sessions for the manager's scope
+- `listAll(onProgress?)` - List all sessions across scopes supported by the backend
 
-### Static Listing Methods
-- `LocalSessionManager.list(cwd, sessionDir?, onProgress?)` - List sessions for a directory
-- `LocalSessionManager.listAll(onProgress?)` - List all sessions across all projects
+### Session Methods - Lifecycle Helpers
+- `createSubSession(options?)` - Create a child session via the session's private manager
+- `forkSubSession(targetLeafId)` - Fork the active session via the session's private manager
+- `copyBranchFrom(source, leafId, parentSession?)` - Copy one branch into this session
+- `createBranchedSession(leafId)` - Extract branch to a new session reference; this mutates the current `Session` to point at the new reference
 
-### Instance Methods - Session Management
-- `newSession(options?)` - Start a new session (options: `{ parentSession?: string }`)
-- `setSessionFile(path)` - Switch to a different session file
-- `createBranchedSession(leafId)` - Extract branch to new session file
-
-### Instance Methods - Appending (all return entry ID)
+### Session Methods - Appending (all return entry ID)
 - `appendMessage(message)` - Add message
 - `appendThinkingLevelChange(level)` - Record thinking change
 - `appendModelChange(provider, modelId)` - Record model change
@@ -388,7 +388,7 @@ Key methods for working with sessions programmatically.
 - `appendCustomMessageEntry(customType, content, display, details?)` - Extension message (in context)
 - `appendLabelChange(targetId, label)` - Set/clear label
 
-### Instance Methods - Tree Navigation
+### Session Methods - Tree Navigation
 - `getLeafId()` - Current position
 - `getLeafEntry()` - Get current leaf entry
 - `getEntry(id)` - Get entry by ID
@@ -400,7 +400,7 @@ Key methods for working with sessions programmatically.
 - `resetLeaf()` - Reset leaf to null (before any entries)
 - `branchWithSummary(entryId, summary, details?, fromHook?)` - Branch with context summary
 
-### Instance Methods - Context & Info
+### Session Methods - Context & Info
 - `buildSessionContext()` - Get messages, thinkingLevel, and model for LLM
 - `getEntries()` - All entries (excluding header)
 - `getHeader()` - Session header metadata
@@ -408,5 +408,5 @@ Key methods for working with sessions programmatically.
 - `getCwd()` - Working directory
 - `getSessionDir()` - Session storage directory
 - `getSessionId()` - Session UUID
-- `getSessionFile()` - Session file path (undefined for in-memory)
+- `getSessionReference()` - Backend session reference (local file path for JSONL, remote reference for remote sessions, undefined for in-memory)
 - `isPersisted()` - Whether session is saved to disk

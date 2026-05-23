@@ -92,9 +92,24 @@ describe("PiAgent session lifecycle events", () => {
 		await runtimeHost.session.bindExtensions({});
 		const secondSessionFile = runtimeHost.session.sessionFile;
 		expect(events).toEqual([
-			{ type: "session_before_switch", reason: "new", targetSessionFile: undefined },
-			{ type: "session_shutdown", reason: "new", targetSessionFile: secondSessionFile },
-			{ type: "session_start", reason: "new", previousSessionFile: originalSessionFile },
+			{
+				type: "session_before_switch",
+				reason: "new",
+				targetSessionReference: undefined,
+				targetSessionFile: undefined,
+			},
+			{
+				type: "session_shutdown",
+				reason: "new",
+				targetSessionReference: secondSessionFile,
+				targetSessionFile: secondSessionFile,
+			},
+			{
+				type: "session_start",
+				reason: "new",
+				previousSessionReference: originalSessionFile,
+				previousSessionFile: originalSessionFile,
+			},
 		]);
 
 		events.length = 0;
@@ -104,9 +119,24 @@ describe("PiAgent session lifecycle events", () => {
 		expect(switchResult.cancelled).toBe(false);
 		await runtimeHost.session.bindExtensions({});
 		expect(events).toEqual([
-			{ type: "session_before_switch", reason: "resume", targetSessionFile: originalSessionFile },
-			{ type: "session_shutdown", reason: "resume", targetSessionFile: originalSessionFile },
-			{ type: "session_start", reason: "resume", previousSessionFile: secondSessionFile },
+			{
+				type: "session_before_switch",
+				reason: "resume",
+				targetSessionReference: originalSessionFile,
+				targetSessionFile: originalSessionFile,
+			},
+			{
+				type: "session_shutdown",
+				reason: "resume",
+				targetSessionReference: originalSessionFile,
+				targetSessionFile: originalSessionFile,
+			},
+			{
+				type: "session_start",
+				reason: "resume",
+				previousSessionReference: secondSessionFile,
+				previousSessionFile: secondSessionFile,
+			},
 		]);
 	});
 
@@ -131,7 +161,14 @@ describe("PiAgent session lifecycle events", () => {
 		const result = await runtimeHost.newSession();
 		expect(result.cancelled).toBe(true);
 		expect(runtimeHost.session.sessionFile).toBe(originalSessionFile);
-		expect(events).toEqual([{ type: "session_before_switch", reason: "new", targetSessionFile: undefined }]);
+		expect(events).toEqual([
+			{
+				type: "session_before_switch",
+				reason: "new",
+				targetSessionReference: undefined,
+				targetSessionFile: undefined,
+			},
+		]);
 	});
 
 	it("runs beforeSessionInvalidate after session_shutdown and before rebindSession", async () => {
@@ -144,7 +181,7 @@ describe("PiAgent session lifecycle events", () => {
 		const oldSession = runtimeHost.session;
 		runtimeHost.setBeforeSessionInvalidate(() => {
 			phases.push("beforeSessionInvalidate");
-			expect(oldSession.extensionRunner.createContext().cwd).toBe(oldSession.sessionManager.getCwd());
+			expect(oldSession.extensionRunner.createContext().cwd).toBe(oldSession.session.getCwd());
 		});
 		runtimeHost.setRebindSession(async () => {
 			phases.push("rebindSession");
@@ -192,8 +229,13 @@ describe("PiAgent session lifecycle events", () => {
 		await runtimeHost.session.bindExtensions({});
 		expect(events).toEqual([
 			{ type: "session_before_fork", entryId: userMessage.entryId, position: "before" },
-			{ type: "session_shutdown", reason: "fork", targetSessionFile: runtimeHost.session.sessionFile },
-			{ type: "session_start", reason: "fork", previousSessionFile },
+			{
+				type: "session_shutdown",
+				reason: "fork",
+				targetSessionReference: runtimeHost.session.sessionReference,
+				targetSessionFile: runtimeHost.session.sessionReference,
+			},
+			{ type: "session_start", reason: "fork", previousSessionReference: previousSessionFile, previousSessionFile },
 		]);
 
 		events.length = 0;

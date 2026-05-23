@@ -3,7 +3,7 @@ import { basename, resolve } from "node:path";
 import { loadEntriesFromFile } from "./jsonl-helpers.ts";
 import { migrateToCurrentVersion } from "./migrations.ts";
 import { RemoteSession } from "./remote-session.ts";
-import type { RemoteSessionSnapshot } from "./remote-session-client.ts";
+import type { RemoteSessionInfo, RemoteSessionSnapshot } from "./remote-session-client.ts";
 import { RemoteSessionClient } from "./remote-session-client.ts";
 import type { Session } from "./session.ts";
 import type { OpenSessionOptions, SessionManager } from "./session-manager.ts";
@@ -20,6 +20,17 @@ export interface RemoteSessionManagerOptions {
 function getSnapshotCwd(snapshot: RemoteSessionSnapshot, fallback: string): string {
 	const header = snapshot.entries.find((entry) => entry.type === "session") as SessionHeader | undefined;
 	return header?.cwd ?? fallback;
+}
+
+function normalizeRemoteSessionInfo(session: RemoteSessionInfo): SessionInfo {
+	const reference = session.reference ?? session.path;
+	return {
+		...session,
+		reference,
+		path: session.path ?? reference ?? session.id,
+		created: session.created instanceof Date ? session.created : new Date(session.created),
+		modified: session.modified instanceof Date ? session.modified : new Date(session.modified),
+	};
 }
 
 /**
@@ -46,7 +57,7 @@ export class RemoteSessionManager implements SessionManager {
 			projectId: this.projectId,
 			parentSession: options?.parentSession,
 		});
-		return new RemoteSession({ client: this.client, cwd: this.cwd, snapshot });
+		return new RemoteSession({ client: this.client, cwd: this.cwd, snapshot, sessionManager: this });
 	}
 
 	async openReference(reference: string, options?: OpenSessionOptions): Promise<RemoteSession> {
@@ -55,17 +66,23 @@ export class RemoteSessionManager implements SessionManager {
 			client: this.client,
 			cwd: options?.cwdOverride ?? getSnapshotCwd(snapshot, this.cwd),
 			snapshot,
+			sessionManager: this,
 		});
 	}
 
 	async continueRecent(): Promise<RemoteSession> {
 		const snapshot = await this.client.getRecentSession();
-		return new RemoteSession({ client: this.client, cwd: getSnapshotCwd(snapshot, this.cwd), snapshot });
+		return new RemoteSession({
+			client: this.client,
+			cwd: getSnapshotCwd(snapshot, this.cwd),
+			snapshot,
+			sessionManager: this,
+		});
 	}
 
 	async forkFrom(reference: string): Promise<RemoteSession> {
 		const snapshot = await this.client.forkSession(reference, { cwd: this.cwd, projectId: this.projectId });
-		return new RemoteSession({ client: this.client, cwd: this.cwd, snapshot });
+		return new RemoteSession({ client: this.client, cwd: this.cwd, snapshot, sessionManager: this });
 	}
 
 	async forkSession(source: Session, targetLeafId: string | null): Promise<RemoteSession> {
@@ -78,7 +95,7 @@ export class RemoteSessionManager implements SessionManager {
 			projectId: this.projectId,
 			leafId: targetLeafId ?? undefined,
 		});
-		return new RemoteSession({ client: this.client, cwd: this.cwd, snapshot });
+		return new RemoteSession({ client: this.client, cwd: this.cwd, snapshot, sessionManager: this });
 	}
 
 	async importJsonl(inputPath: string, options?: OpenSessionOptions): Promise<RemoteSession> {
@@ -100,16 +117,21 @@ export class RemoteSessionManager implements SessionManager {
 			sourceName: basename(resolvedPath),
 			entries,
 		});
-		return new RemoteSession({ client: this.client, cwd: getSnapshotCwd(snapshot, cwd), snapshot });
+		return new RemoteSession({
+			client: this.client,
+			cwd: getSnapshotCwd(snapshot, cwd),
+			snapshot,
+			sessionManager: this,
+		});
 	}
 
 	async list(_onProgress?: SessionListProgress): Promise<SessionInfo[]> {
 		const response = await this.client.listSessions();
-		return response.sessions;
+		return response.sessions.map((session) => normalizeRemoteSessionInfo(session));
 	}
 
 	async listAll(_onProgress?: SessionListProgress): Promise<SessionInfo[]> {
 		const response = await this.client.listSessions();
-		return response.sessions;
+		return response.sessions.map((session) => normalizeRemoteSessionInfo(session));
 	}
 }

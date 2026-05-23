@@ -240,7 +240,7 @@ describe("InteractiveMode.showLoadedResources", () => {
 			settingsManager: {
 				getQuietStartup: () => options.quietStartup,
 			},
-			sessionManager: {
+			activeSession: {
 				getCwd: () => options.cwd ?? "/tmp/project",
 			},
 			session: {

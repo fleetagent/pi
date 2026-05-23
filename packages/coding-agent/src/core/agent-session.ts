@@ -8,7 +8,7 @@
  * - Model and thinking level management
  * - Compaction (manual and auto)
  * - Bash execution
- * - Session switching and branching
+ * - Tree navigation and branching
  *
  * Modes use this class and add their own I/O layer on top.
  */
@@ -148,8 +148,7 @@ export type AgentSessionEventListener = (event: AgentSessionEvent) => void;
 
 export interface AgentSessionConfig {
 	agent: Agent;
-	session?: Session;
-	sessionManager?: Session;
+	session: Session;
 	settingsManager: SettingsManager;
 	cwd: string;
 	/** Models to cycle through with Ctrl+P (from --models flag) */
@@ -310,17 +309,9 @@ export class AgentSession {
 	private _baseSystemPrompt = "";
 	private _baseSystemPromptOptions!: BuildSystemPromptOptions;
 
-	get sessionManager(): Session {
-		return this.session;
-	}
-
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
-		const session = config.session ?? config.sessionManager;
-		if (!session) {
-			throw new Error("AgentSession requires a session");
-		}
-		this.session = session;
+		this.session = config.session;
 		this.settingsManager = config.settingsManager;
 		this._scopedModels = config.scopedModels ?? [];
 		this._resourceLoader = config.resourceLoader;
@@ -823,9 +814,14 @@ export class AgentSession {
 		return this.agent.followUpMode;
 	}
 
-	/** Current session file path, or undefined if sessions are disabled */
-	get sessionFile(): string | undefined {
+	/** Current session reference, or undefined for ephemeral sessions. */
+	get sessionReference(): string | undefined {
 		return this.session.getSessionReference();
+	}
+
+	/** Current local session file path, or undefined for non-file-backed sessions. Prefer sessionReference for backend-neutral code. */
+	get sessionFile(): string | undefined {
+		return this.sessionReference;
 	}
 
 	/** Current session ID */

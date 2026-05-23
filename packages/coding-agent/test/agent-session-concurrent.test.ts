@@ -117,7 +117,7 @@ describe("AgentSession concurrent prompt guard", () => {
 
 		session = new AgentSession({
 			agent,
-			sessionManager,
+			session: sessionManager,
 			settingsManager,
 			cwd: tempDir,
 			modelRegistry,
@@ -252,7 +252,7 @@ describe("AgentSession concurrent prompt guard", () => {
 
 		session = new AgentSession({
 			agent,
-			sessionManager,
+			session: sessionManager,
 			settingsManager,
 			cwd: tempDir,
 			modelRegistry,
@@ -319,7 +319,7 @@ describe("AgentSession concurrent prompt guard", () => {
 
 		session = new AgentSession({
 			agent,
-			sessionManager,
+			session: sessionManager,
 			settingsManager,
 			cwd: tempDir,
 			modelRegistry,
@@ -425,7 +425,7 @@ describe("AgentSession concurrent prompt guard", () => {
 
 		session = new AgentSession({
 			agent,
-			sessionManager,
+			session: sessionManager,
 			settingsManager,
 			cwd: tempDir,
 			modelRegistry,
@@ -571,7 +571,7 @@ describe("AgentSession concurrent prompt guard", () => {
 
 		session = new AgentSession({
 			agent,
-			sessionManager,
+			session: sessionManager,
 			settingsManager,
 			cwd: tempDir,
 			modelRegistry,

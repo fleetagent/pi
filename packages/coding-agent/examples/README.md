@@ -18,6 +18,9 @@ Example extensions demonstrating:
 - External integrations (SSH, file watchers, system theme sync)
 - Custom providers (Anthropic with custom streaming, GitLab Duo)
 
+### [remote-session-server/](remote-session-server/)
+Hono-based remote session storage server. It uses static bearer auth and stores sessions as JSONL files for debugging the remote session protocol end-to-end.
+
 ## Documentation
 
 - [SDK Reference](sdk/README.md)

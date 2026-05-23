@@ -29,6 +29,7 @@ import {
 	LocalSessionManager,
 	type Session,
 	type SessionInfo,
+	type SessionListProgress,
 	type SessionManager,
 } from "./session-manager.ts";
 import { SettingsManager } from "./settings-manager.ts";
@@ -129,6 +130,8 @@ export interface PiAgentRuntimeHost {
 		options?: { position?: "before" | "at"; withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
 	): Promise<{ cancelled: boolean; selectedText?: string }>;
 	importFromJsonl(inputPath: string, cwdOverride?: string): Promise<{ cancelled: boolean }>;
+	listSessions(onProgress?: SessionListProgress): Promise<SessionInfo[]>;
+	listAllSessions(onProgress?: SessionListProgress): Promise<SessionInfo[]>;
 	dispose(): Promise<void>;
 }
 
@@ -644,7 +647,7 @@ export class PiAgent {
 
 	private async emitBeforeSwitch(
 		reason: "new" | "resume",
-		targetSessionFile?: string,
+		targetSessionReference?: string,
 	): Promise<{ cancelled: boolean }> {
 		const runner = this.session.extensionRunner;
 		if (!runner.hasHandlers("session_before_switch")) {
@@ -654,7 +657,8 @@ export class PiAgent {
 		const result = await runner.emit({
 			type: "session_before_switch",
 			reason,
-			targetSessionFile,
+			targetSessionReference,
+			targetSessionFile: targetSessionReference,
 		});
 		return { cancelled: result?.cancel === true };
 	}
@@ -683,11 +687,15 @@ export class PiAgent {
 		}
 	}
 
-	private async teardownCurrent(reason: SessionShutdownEvent["reason"], targetSessionFile?: string): Promise<void> {
+	private async teardownCurrent(
+		reason: SessionShutdownEvent["reason"],
+		targetSessionReference?: string,
+	): Promise<void> {
 		await emitSessionShutdownEvent(this.session.extensionRunner, {
 			type: "session_shutdown",
 			reason,
-			targetSessionFile,
+			targetSessionReference,
+			targetSessionFile: targetSessionReference,
 		});
 		await this.flushActiveSession();
 		this.beforeSessionInvalidate?.();
@@ -712,12 +720,17 @@ export class PiAgent {
 			return beforeResult;
 		}
 
-		const previousSessionFile = this.session.sessionFile;
+		const previousSessionReference = this.session.sessionReference;
 		const nextSession = await this.sessionManager.openReference(sessionPath, { cwdOverride: options?.cwdOverride });
 		assertSessionCwdExists(nextSession, this.services.cwd);
 		await this.teardownCurrent("resume", nextSession.getSessionReference());
 		this.apply(
-			await this.buildAgentSession(nextSession, { type: "session_start", reason: "resume", previousSessionFile }),
+			await this.buildAgentSession(nextSession, {
+				type: "session_start",
+				reason: "resume",
+				previousSessionReference,
+				previousSessionFile: previousSessionReference,
+			}),
 		);
 		await this.finishSessionReplacement(options?.withSession);
 		return { cancelled: false };
@@ -734,12 +747,30 @@ export class PiAgent {
 			return beforeResult;
 		}
 
-		const previousSessionFile = this.session.sessionFile;
-		const nextSession = await this.sessionManager.create({ id: options?.id, parentSession: options?.parentSession });
+		const previousSessionReference = this.session.sessionReference;
+		const activeSession = this.session.session;
+		const newSessionOptions = {
+			id: options?.id,
+			parentSession: options?.parentSession ?? activeSession.getSessionReference(),
+		};
+		let nextSession: Session;
+		try {
+			nextSession = await activeSession.createSubSession(newSessionOptions);
+		} catch (error) {
+			if (!(error instanceof Error && error.message === "Session manager unavailable")) {
+				throw error;
+			}
+			nextSession = await this.sessionManager.create(newSessionOptions);
+		}
 
 		await this.teardownCurrent("new", nextSession.getSessionReference());
 		this.apply(
-			await this.buildAgentSession(nextSession, { type: "session_start", reason: "new", previousSessionFile }),
+			await this.buildAgentSession(nextSession, {
+				type: "session_start",
+				reason: "new",
+				previousSessionReference,
+				previousSessionFile: previousSessionReference,
+			}),
 		);
 		if (options?.setup) {
 			await options.setup(this.session.session);
@@ -776,11 +807,25 @@ export class PiAgent {
 			selectedText = extractUserMessageText(selectedEntry.message.content);
 		}
 
-		const previousSessionFile = this.session.sessionFile;
-		const nextSession = await this.sessionManager.forkSession(this.session.session, targetLeafId);
+		const previousSessionReference = this.session.sessionReference;
+		const activeSession = this.session.session;
+		let nextSession: Session;
+		try {
+			nextSession = await activeSession.forkSubSession(targetLeafId);
+		} catch (error) {
+			if (!(error instanceof Error && error.message === "Session manager unavailable")) {
+				throw error;
+			}
+			nextSession = await this.sessionManager.forkSession(activeSession, targetLeafId);
+		}
 		await this.teardownCurrent("fork", nextSession.getSessionReference());
 		this.apply(
-			await this.buildAgentSession(nextSession, { type: "session_start", reason: "fork", previousSessionFile }),
+			await this.buildAgentSession(nextSession, {
+				type: "session_start",
+				reason: "fork",
+				previousSessionReference,
+				previousSessionFile: previousSessionReference,
+			}),
 		);
 		await this.finishSessionReplacement(options?.withSession);
 		return { cancelled: false, selectedText };
@@ -797,12 +842,17 @@ export class PiAgent {
 			return beforeResult;
 		}
 
-		const previousSessionFile = this.session.sessionFile;
+		const previousSessionReference = this.session.sessionReference;
 		const nextSession = await this.sessionManager.importJsonl(resolvedPath, { cwdOverride: cwdOverride });
 		assertSessionCwdExists(nextSession, this.services.cwd);
 		await this.teardownCurrent("resume", nextSession.getSessionReference());
 		this.apply(
-			await this.buildAgentSession(nextSession, { type: "session_start", reason: "resume", previousSessionFile }),
+			await this.buildAgentSession(nextSession, {
+				type: "session_start",
+				reason: "resume",
+				previousSessionReference,
+				previousSessionFile: previousSessionReference,
+			}),
 		);
 		await this.finishSessionReplacement();
 		return { cancelled: false };
@@ -889,12 +939,12 @@ export class PiAgent {
 		return this.sessionManager.forkFrom(reference);
 	}
 
-	async listSessions(): Promise<SessionInfo[]> {
-		return this.sessionManager.list();
+	async listSessions(onProgress?: SessionListProgress): Promise<SessionInfo[]> {
+		return this.sessionManager.list(onProgress);
 	}
 
-	async listAllSessions(): Promise<SessionInfo[]> {
-		return this.sessionManager.listAll();
+	async listAllSessions(onProgress?: SessionListProgress): Promise<SessionInfo[]> {
+		return this.sessionManager.listAll(onProgress);
 	}
 
 	async dispose(): Promise<void> {

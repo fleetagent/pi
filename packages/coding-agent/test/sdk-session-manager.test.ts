@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { getModel } from "@fleetagent/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { PiAgent } from "../src/core/pi-agent.ts";
-import { InMemorySessionManager } from "../src/core/session-manager.ts";
+import { InMemorySession, InMemorySessionManager } from "../src/core/session-manager.ts";
 
 describe("PiAgent session manager defaults", () => {
 	let tempDir: string;
@@ -34,8 +34,8 @@ describe("PiAgent session manager defaults", () => {
 
 		const safePath = `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
 		const expectedSessionDir = join(agentDir, "sessions", safePath);
-		const sessionDir = session.sessionManager.getSessionDir();
-		const sessionFile = session.sessionManager.getSessionReference();
+		const sessionDir = session.session.getSessionDir();
+		const sessionFile = session.session.getSessionReference();
 
 		expect(sessionDir).toBe(expectedSessionDir);
 		expect(sessionFile?.startsWith(`${expectedSessionDir}/`)).toBe(true);
@@ -56,10 +56,47 @@ describe("PiAgent session manager defaults", () => {
 		});
 		const session = await pi.createAgentSession({ session: sessionManager });
 
-		expect(session.sessionManager).toBe(sessionManager);
-		expect(session.sessionManager.isPersisted()).toBe(false);
+		expect(session.session).toBe(sessionManager);
+		expect(session.session.isPersisted()).toBe(false);
 
 		await pi.dispose();
+	});
+
+	it("creates a new session from an explicit unmanaged session", async () => {
+		const model = getModel("anthropic", "claude-sonnet-4-5");
+		expect(model).toBeTruthy();
+
+		const initialSession = new InMemorySession(cwd);
+		const pi = await PiAgent.create({
+			cwd,
+			agentDir,
+			model: model!,
+			sessionManager: new InMemorySessionManager(cwd),
+		});
+		const session = await pi.createAgentSession({ session: initialSession });
+
+		const result = await pi.newSession();
+
+		expect(result.cancelled).toBe(false);
+		expect(initialSession.getSessionReference()).toMatch(/^memory:/);
+		expect(pi.session.session).not.toBe(session.session);
+		expect(pi.session.session.getHeader()?.parentSession).toBe(initialSession.getSessionReference());
+
+		await pi.dispose();
+	});
+
+	it("forks in-memory sessions without mutating the source session", () => {
+		const sessionManager = new InMemorySessionManager(cwd);
+		const source = sessionManager.create();
+		const entryId = source.appendMessage({ role: "user", content: "hello", timestamp: Date.now() });
+
+		const forked = sessionManager.forkSession(source, entryId);
+
+		expect(forked).not.toBe(source);
+		expect(forked.getEntries()).toHaveLength(1);
+		expect(source.getEntries()).toHaveLength(1);
+		expect(forked.getEntry(entryId)).toBeTruthy();
+		expect(forked.getHeader()?.parentSession).toBe(source.getSessionReference());
 	});
 
 	it("derives cwd from an explicit session when cwd is omitted", async () => {
@@ -76,7 +113,7 @@ describe("PiAgent session manager defaults", () => {
 		});
 		const session = await pi.createAgentSession({ session: sessionManager });
 
-		expect(session.sessionManager).toBe(sessionManager);
+		expect(session.session).toBe(sessionManager);
 		expect(session.systemPrompt).toContain(`Current working directory: ${sessionCwd}`);
 
 		const bashTool = session.agent.state.tools.find((tool) => tool.name === "bash");

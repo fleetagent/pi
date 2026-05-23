@@ -99,7 +99,7 @@ function getMessageFromEntryForCompaction(entry: SessionEntry): AgentMessage | u
 	return getMessageFromEntry(entry);
 }
 
-/** Result from compact() - SessionManager adds uuid/parentUuid when saving */
+/** Result from compact() - Session adds uuid/parentUuid when saving */
 export interface CompactionResult<T = unknown> {
 	summary: string;
 	firstKeptEntryId: string;
@@ -739,7 +739,7 @@ Be concise. Focus on what's needed to understand the kept suffix.`;
 
 /**
  * Generate summaries for compaction using prepared data.
- * Returns CompactionResult - SessionManager adds uuid/parentUuid when saving.
+ * Returns CompactionResult - Session adds uuid/parentUuid when saving.
  *
  * @param preparation - Pre-calculated preparation from prepareCompaction()
  * @param customInstructions - Optional custom focus for the summary

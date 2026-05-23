@@ -1,34 +1,12 @@
-import type {
-	FileEntry,
-	SessionEntry,
-	SessionHeader,
-	SessionInfo,
-	SessionListProgress,
-	SessionTreeNode,
-} from "../types.ts";
-
-export interface SessionOpenResult {
-	reference: string;
-	exists: boolean;
-	entries: FileEntry[];
-}
+import type { FileEntry, SessionEntry, SessionHeader, SessionTreeNode } from "../types.ts";
 
 export interface SessionStore {
 	isPersisted(): boolean;
 	getSessionReference(): string | undefined;
 	setSessionReference(reference: string): void;
-	openSession(reference: string): SessionOpenResult;
-	getSessionDirForReference(reference: string): string;
-	getDefaultSessionDir(cwd: string, agentDir?: string): string;
-	getSessionsRoot(): string;
-	prepareSessionReference(sessionDir: string, sessionId: string, timestamp: string): string | undefined;
-	getParentSessionReference(): string | undefined;
 	exists(path: string): boolean;
 	ensureDir(path: string): void;
 	load(filePath: string): FileEntry[];
-	findMostRecent(sessionDir: string): string | null;
-	list(dir: string, onProgress?: SessionListProgress): Promise<SessionInfo[]>;
-	listAll(sessionsDir: string, onProgress?: SessionListProgress): Promise<SessionInfo[]>;
 	setEntries(entries: FileEntry[]): void;
 	getFileEntries(): FileEntry[];
 	getHeader(): SessionHeader | null;

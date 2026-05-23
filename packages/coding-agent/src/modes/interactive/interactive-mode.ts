@@ -347,7 +347,7 @@ export class InteractiveMode {
 	private get agent() {
 		return this.session.agent;
 	}
-	private get sessionManager() {
+	private get activeSession() {
 		return this.session.session;
 	}
 	private get settingsManager() {
@@ -383,7 +383,7 @@ export class InteractiveMode {
 		this.editor = this.defaultEditor;
 		this.editorContainer = new Container();
 		this.editorContainer.addChild(this.editor as Component);
-		this.footerDataProvider = new FooterDataProvider(this.sessionManager.getCwd());
+		this.footerDataProvider = new FooterDataProvider(this.activeSession.getCwd());
 		this.footer = new FooterComponent(this.session, this.footerDataProvider);
 		this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);
 
@@ -515,7 +515,7 @@ export class InteractiveMode {
 
 		return new CombinedAutocompleteProvider(
 			[...slashCommands, ...templateCommands, ...extensionCommands, ...skillCommandList],
-			this.sessionManager.getCwd(),
+			this.activeSession.getCwd(),
 			this.fdPath,
 		);
 	}
@@ -698,8 +698,8 @@ export class InteractiveMode {
 	 * Update terminal title with session name and cwd.
 	 */
 	private updateTerminalTitle(): void {
-		const cwdBasename = path.basename(this.sessionManager.getCwd());
-		const sessionName = this.sessionManager.getSessionName();
+		const cwdBasename = path.basename(this.activeSession.getCwd());
+		const sessionName = this.activeSession.getSessionName();
 		if (sessionName) {
 			this.ui.terminal.setTitle(`${APP_TITLE} - ${sessionName} - ${cwdBasename}`);
 		} else {
@@ -793,7 +793,7 @@ export class InteractiveMode {
 
 		try {
 			const packageManager = new DefaultPackageManager({
-				cwd: this.sessionManager.getCwd(),
+				cwd: this.activeSession.getCwd(),
 				agentDir: getAgentDir(),
 				settingsManager: this.settingsManager,
 			});
@@ -931,7 +931,7 @@ export class InteractiveMode {
 	}
 
 	private formatContextPath(p: string): string {
-		const cwd = path.resolve(this.sessionManager.getCwd());
+		const cwd = path.resolve(this.activeSession.getCwd());
 		const absolutePath = path.isAbsolute(p) ? path.resolve(p) : path.resolve(cwd, p);
 		const relativePath = getCwdRelativePath(absolutePath, cwd);
 		if (relativePath !== undefined) {
@@ -1567,7 +1567,7 @@ export class InteractiveMode {
 	private applyRuntimeSettings(): void {
 		this.footer.setSession(this.session);
 		this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);
-		this.footerDataProvider.setCwd(this.sessionManager.getCwd());
+		this.footerDataProvider.setCwd(this.activeSession.getCwd());
 		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
 		this.ui.setShowHardwareCursor(this.settingsManager.getShowHardwareCursor());
 		this.ui.setClearOnShrink(this.settingsManager.getClearOnShrink());
@@ -1628,8 +1628,8 @@ export class InteractiveMode {
 		const createContext = (): ExtensionContext => ({
 			ui: this.createExtensionUIContext(),
 			hasUI: true,
-			cwd: this.sessionManager.getCwd(),
-			sessionManager: this.sessionManager,
+			cwd: this.activeSession.getCwd(),
+			session: this.activeSession,
 			modelRegistry: this.session.modelRegistry,
 			model: this.session.model,
 			isIdle: () => !this.session.isStreaming,
@@ -2736,7 +2736,7 @@ export class InteractiveMode {
 									},
 									this.getRegisteredToolDefinition(content.name),
 									this.ui,
-									this.sessionManager.getCwd(),
+									this.activeSession.getCwd(),
 								);
 								component.setExpanded(this.toolOutputExpanded);
 								this.chatContainer.addChild(component);
@@ -2805,7 +2805,7 @@ export class InteractiveMode {
 						},
 						this.getRegisteredToolDefinition(event.toolName),
 						this.ui,
-						this.sessionManager.getCwd(),
+						this.activeSession.getCwd(),
 					);
 					component.setExpanded(this.toolOutputExpanded);
 					this.chatContainer.addChild(component);
@@ -3146,7 +3146,7 @@ export class InteractiveMode {
 							},
 							this.getRegisteredToolDefinition(content.name),
 							this.ui,
-							this.sessionManager.getCwd(),
+							this.activeSession.getCwd(),
 						);
 						component.setExpanded(this.toolOutputExpanded);
 						this.chatContainer.addChild(component);
@@ -3189,14 +3189,14 @@ export class InteractiveMode {
 
 	renderInitialMessages(): void {
 		// Get aligned messages and entries from session context
-		const context = this.sessionManager.buildSessionContext();
+		const context = this.activeSession.buildSessionContext();
 		this.renderSessionContext(context, {
 			updateFooter: true,
 			populateHistory: true,
 		});
 
 		// Show compaction info if session was compacted
-		const allEntries = this.sessionManager.getEntries();
+		const allEntries = this.activeSession.getEntries();
 		const compactionCount = allEntries.filter((e) => e.type === "compaction").length;
 		if (compactionCount > 0) {
 			const times = compactionCount === 1 ? "1 time" : `${compactionCount} times`;
@@ -3215,7 +3215,7 @@ export class InteractiveMode {
 
 	private rebuildChatFromMessages(): void {
 		this.chatContainer.clear();
-		const context = this.sessionManager.buildSessionContext();
+		const context = this.activeSession.buildSessionContext();
 		this.renderSessionContext(context);
 	}
 
@@ -4223,7 +4223,7 @@ export class InteractiveMode {
 	}
 
 	private async handleCloneCommand(): Promise<void> {
-		const leafId = this.sessionManager.getLeafId();
+		const leafId = this.activeSession.getLeafId();
 		if (!leafId) {
 			this.showStatus("Nothing to clone yet");
 			return;
@@ -4245,8 +4245,8 @@ export class InteractiveMode {
 	}
 
 	private showTreeSelector(initialSelectedId?: string): void {
-		const tree = this.sessionManager.getTree();
-		const realLeafId = this.sessionManager.getLeafId();
+		const tree = this.activeSession.getTree();
+		const realLeafId = this.activeSession.getLeafId();
 		const initialFilterMode = this.settingsManager.getTreeFilterMode();
 
 		if (tree.length === 0) {
@@ -4363,7 +4363,7 @@ export class InteractiveMode {
 					this.ui.requestRender();
 				},
 				(entryId, label) => {
-					this.sessionManager.appendLabelChange(entryId, label);
+					this.activeSession.appendLabelChange(entryId, label);
 					this.ui.requestRender();
 				},
 				initialSelectedId,
@@ -4375,13 +4375,19 @@ export class InteractiveMode {
 
 	private showSessionSelector(): void {
 		this.showSelector((done) => {
+			const activeSessionReference = this.activeSession.getSessionReference();
+			const isRemoteSession = activeSessionReference?.startsWith("remote:") ?? false;
+			const renameSession = isRemoteSession
+				? undefined
+				: async (sessionFilePath: string, nextName: string | undefined) => {
+						const next = (nextName ?? "").trim();
+						if (!next) return;
+						const mgr = new LocalSessionManager({ cwd: process.cwd() }).openReference(sessionFilePath);
+						mgr.appendSessionInfo(next);
+					};
 			const selector = new SessionSelectorComponent(
-				(onProgress) =>
-					new LocalSessionManager({
-						cwd: this.sessionManager.getCwd(),
-						sessionDir: this.sessionManager.getSessionDir(),
-					}).list(onProgress),
-				new LocalSessionManager({ cwd: process.cwd() }).listAll,
+				(onProgress) => this.runtimeHost.listSessions(onProgress),
+				(onProgress) => this.runtimeHost.listAllSessions(onProgress),
 				async (sessionPath) => {
 					done();
 					await this.handleResumeSession(sessionPath);
@@ -4395,17 +4401,12 @@ export class InteractiveMode {
 				},
 				() => this.ui.requestRender(),
 				{
-					renameSession: async (sessionFilePath: string, nextName: string | undefined) => {
-						const next = (nextName ?? "").trim();
-						if (!next) return;
-						const mgr = new LocalSessionManager({ cwd: process.cwd() }).openReference(sessionFilePath);
-						mgr.appendSessionInfo(next);
-					},
-					showRenameHint: true,
+					renameSession,
+					showRenameHint: !isRemoteSession,
 					keybindings: this.keybindings,
 				},
 
-				this.sessionManager.getSessionReference(),
+				activeSessionReference,
 			);
 			return { component: selector, focus: selector };
 		});
@@ -5148,7 +5149,7 @@ export class InteractiveMode {
 	private handleNameCommand(text: string): void {
 		const name = text.replace(/^\/name\s*/, "").trim();
 		if (!name) {
-			const currentName = this.sessionManager.getSessionName();
+			const currentName = this.activeSession.getSessionName();
 			if (currentName) {
 				this.chatContainer.addChild(new Spacer(1));
 				this.chatContainer.addChild(new Text(theme.fg("dim", `Session name: ${currentName}`), 1, 0));
@@ -5167,7 +5168,7 @@ export class InteractiveMode {
 
 	private handleSessionCommand(): void {
 		const stats = this.session.getSessionStats();
-		const sessionName = this.sessionManager.getSessionName();
+		const sessionName = this.activeSession.getSessionName();
 
 		let info = `${theme.bold("Session Info")}\n\n`;
 		if (sessionName) {
@@ -5437,7 +5438,7 @@ export class InteractiveMode {
 			type: "user_bash",
 			command,
 			excludeFromContext,
-			cwd: this.sessionManager.getCwd(),
+			cwd: this.activeSession.getCwd(),
 		});
 
 		// If extension returned a full result, use it directly
@@ -5517,7 +5518,7 @@ export class InteractiveMode {
 	}
 
 	private async handleCompactCommand(customInstructions?: string): Promise<void> {
-		const entries = this.sessionManager.getEntries();
+		const entries = this.activeSession.getEntries();
 		const messageCount = entries.filter((e) => e.type === "message").length;
 
 		if (messageCount < 2) {

@@ -108,7 +108,7 @@ ${conversationText}
 				return;
 			}
 
-			// Return compaction content - SessionManager adds id/parentId
+			// Return compaction content - Session adds id/parentId
 			// Use firstKeptEntryId from preparation to keep recent messages
 			return {
 				compaction: {
