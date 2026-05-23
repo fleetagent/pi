@@ -400,6 +400,17 @@ export async function runRpcMode(runtimeHost: PiAgentRuntimeHost): Promise<never
 				return undefined;
 			}
 
+			case "get_structured_response": {
+				const result = await session.getStructuredResponse({
+					schema: command.schema,
+					name: command.name,
+					description: command.description,
+					maxCorrections: command.maxCorrections,
+					scope: command.scope,
+				});
+				return success(id, "get_structured_response", result);
+			}
+
 			case "steer": {
 				await session.steer(command.message, command.images);
 				return success(id, "steer");

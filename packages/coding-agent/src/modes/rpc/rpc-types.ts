@@ -7,7 +7,8 @@
 
 import type { AgentMessage, ThinkingLevel } from "@fleetagent/pi-agent-core";
 import type { ImageContent, Model } from "@fleetagent/pi-ai";
-import type { SessionStats } from "../../core/agent-session.ts";
+import type { TSchema } from "typebox";
+import type { SessionStats, StructuredResponse } from "../../core/agent-session.ts";
 import type { BashResult } from "../../core/bash-executor.ts";
 import type { CompactionResult } from "../../core/compaction/index.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
@@ -19,6 +20,15 @@ import type { SourceInfo } from "../../core/source-info.ts";
 export type RpcCommand =
 	// Prompting
 	| { id?: string; type: "prompt"; message: string; images?: ImageContent[]; streamingBehavior?: "steer" | "followUp" }
+	| {
+			id?: string;
+			type: "get_structured_response";
+			schema: TSchema;
+			name?: string;
+			description?: string;
+			maxCorrections?: number;
+			scope?: "latest" | "conversation";
+	  }
 	| { id?: string; type: "steer"; message: string; images?: ImageContent[] }
 	| { id?: string; type: "follow_up"; message: string; images?: ImageContent[] }
 	| { id?: string; type: "abort" }
@@ -111,6 +121,13 @@ export interface RpcSessionState {
 export type RpcResponse =
 	// Prompting (async - events follow)
 	| { id?: string; type: "response"; command: "prompt"; success: true }
+	| {
+			id?: string;
+			type: "response";
+			command: "get_structured_response";
+			success: true;
+			data: StructuredResponse<unknown>;
+	  }
 	| { id?: string; type: "response"; command: "steer"; success: true }
 	| { id?: string; type: "response"; command: "follow_up"; success: true }
 	| { id?: string; type: "response"; command: "abort"; success: true }

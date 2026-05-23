@@ -1,13 +1,14 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Agent } from "@fleetagent/pi-agent-core";
+import { Agent, type StreamFn } from "@fleetagent/pi-agent-core";
 import {
 	type AssistantMessage,
 	type AssistantMessageEvent,
 	EventStream,
 	getModel,
 	type Model,
+	Type,
 } from "@fleetagent/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
@@ -55,9 +56,13 @@ class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMe
 }
 
 function createAssistantMessage(text: string): AssistantMessage {
+	return createAssistantContentMessage([{ type: "text", text }]);
+}
+
+function createAssistantContentMessage(content: AssistantMessage["content"]): AssistantMessage {
 	return {
 		role: "assistant",
-		content: [{ type: "text", text }],
+		content,
 		api: "anthropic-messages",
 		provider: "anthropic",
 		model: "claude-sonnet-4-5",
@@ -89,11 +94,22 @@ function getPromptResponses(outputLines: string[], id: string): ParsedOutputLine
 	);
 }
 
+function getResponses(outputLines: string[], id: string, command: string): ParsedOutputLine[] {
+	return parseOutputLines(outputLines).filter(
+		(record) => record.id === id && record.type === "response" && record.command === command,
+	);
+}
+
 function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function createRuntimeHost(options: { withAuth: boolean; responseDelayMs: number; model?: Model<any> }): {
+function createRuntimeHost(options: {
+	withAuth: boolean;
+	responseDelayMs: number;
+	model?: Model<any>;
+	streamFn?: StreamFn;
+}): {
 	runtimeHost: PiAgentRuntimeHost;
 	cleanup: () => Promise<void>;
 } {
@@ -105,14 +121,9 @@ function createRuntimeHost(options: { withAuth: boolean; responseDelayMs: number
 		throw new Error("Test model not found");
 	}
 
-	const agent = new Agent({
-		getApiKey: () => "test-key",
-		initialState: {
-			model,
-			systemPrompt: "Test",
-			tools: [],
-		},
-		streamFn: (_model, _context, _options) => {
+	const streamFn: StreamFn =
+		options.streamFn ??
+		((_model, _context, _options) => {
 			const stream = new MockAssistantStream();
 			queueMicrotask(() => {
 				stream.push({ type: "start", partial: createAssistantMessage("") });
@@ -121,7 +132,16 @@ function createRuntimeHost(options: { withAuth: boolean; responseDelayMs: number
 				}, options.responseDelayMs);
 			});
 			return stream;
+		});
+
+	const agent = new Agent({
+		getApiKey: () => "test-key",
+		initialState: {
+			model,
+			systemPrompt: "Test",
+			tools: [],
 		},
+		streamFn,
 	});
 
 	const sessionManager = new InMemorySessionManager().create();
@@ -168,7 +188,12 @@ function createRuntimeHost(options: { withAuth: boolean; responseDelayMs: number
 	};
 }
 
-async function startRpcMode(options: { withAuth: boolean; responseDelayMs: number; model?: Model<any> }): Promise<{
+async function startRpcMode(options: {
+	withAuth: boolean;
+	responseDelayMs: number;
+	model?: Model<any>;
+	streamFn?: StreamFn;
+}): Promise<{
 	lineHandler: (line: string) => void;
 	cleanup: () => Promise<void>;
 }> {
@@ -279,6 +304,66 @@ describe("RPC prompt response semantics", () => {
 			});
 
 			await sleep(150);
+		} finally {
+			await cleanup();
+		}
+	});
+
+	it("returns structured response data", async () => {
+		let callCount = 0;
+		const streamFn: StreamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				callCount++;
+				const message =
+					callCount === 1
+						? createAssistantMessage("The answer is positive.")
+						: createAssistantContentMessage([
+								{
+									type: "toolCall",
+									id: "structured-call-1",
+									name: "structured_output",
+									arguments: { answer: "positive", score: 1 },
+								},
+							]);
+				stream.push({ type: "start", partial: createAssistantMessage("") });
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		};
+		const { lineHandler, cleanup } = await startRpcMode({ withAuth: true, responseDelayMs: 0, streamFn });
+
+		try {
+			lineHandler(JSON.stringify({ id: "structured-prompt", type: "prompt", message: "Analyze" }));
+			await vi.waitFor(() => expect(getPromptResponses(rpcIo.outputLines, "structured-prompt")).toHaveLength(1));
+			await vi.waitFor(() =>
+				expect(parseOutputLines(rpcIo.outputLines).some((record) => record.type === "agent_end")).toBe(true),
+			);
+
+			rpcIo.outputLines = [];
+			lineHandler(
+				JSON.stringify({
+					id: "structured",
+					type: "get_structured_response",
+					schema: Type.Object({ answer: Type.String(), score: Type.Number() }),
+				}),
+			);
+
+			await vi.waitFor(() => {
+				const responses = getResponses(rpcIo.outputLines, "structured", "get_structured_response");
+				expect(responses).toHaveLength(1);
+				expect(responses[0]).toMatchObject({
+					id: "structured",
+					type: "response",
+					command: "get_structured_response",
+					success: true,
+					data: {
+						output: { answer: "positive", score: 1 },
+						source: "tool",
+						attempts: 1,
+					},
+				});
+			});
 		} finally {
 			await cleanup();
 		}

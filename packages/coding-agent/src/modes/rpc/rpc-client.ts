@@ -7,7 +7,8 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import type { AgentEvent, AgentMessage, ThinkingLevel } from "@fleetagent/pi-agent-core";
 import type { ImageContent } from "@fleetagent/pi-ai";
-import type { SessionStats } from "../../core/agent-session.ts";
+import type { Static, TSchema } from "typebox";
+import type { SessionStats, StructuredResponse } from "../../core/agent-session.ts";
 import type { BashResult } from "../../core/bash-executor.ts";
 import type { CompactionResult } from "../../core/compaction/index.ts";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
@@ -184,6 +185,20 @@ export class RpcClient {
 	 */
 	async prompt(message: string, images?: ImageContent[]): Promise<void> {
 		await this.send({ type: "prompt", message, images });
+	}
+
+	/**
+	 * Extract a structured response from the latest assistant response.
+	 */
+	async getStructuredResponse<TSchemaValue extends TSchema>(options: {
+		schema: TSchemaValue;
+		name?: string;
+		description?: string;
+		maxCorrections?: number;
+		scope?: "latest" | "conversation";
+	}): Promise<StructuredResponse<Static<TSchemaValue>>> {
+		const response = await this.send({ type: "get_structured_response", ...options });
+		return this.getData(response);
 	}
 
 	/**
