@@ -1,12 +1,12 @@
 {
 	"name": "@fleetagent/pi-coding-agent",
-	"version": "0.0.2",
+	"version": "0.0.3",
 	"lockfileVersion": 3,
 	"requires": true,
 	"packages": {
 		"": {
 			"name": "@fleetagent/pi-coding-agent",
-			"version": "0.0.2",
+			"version": "0.0.3",
 			"license": "MIT",
 			"dependencies": {
 				"@fleetagent/pi-agent-core": "^0.0.2",
