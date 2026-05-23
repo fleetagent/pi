@@ -91,7 +91,7 @@
 	"license": "MIT",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/earendil-works/pi-mono.git",
+		"url": "https://github.com/fleetagent/pi",
 		"directory": "packages/ai"
 	},
 	"engines": {
