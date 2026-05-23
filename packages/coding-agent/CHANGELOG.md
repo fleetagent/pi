@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.0.3](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.0.2...@fleetagent/pi-coding-agent-v0.0.3) (2026-05-23)
+
+
+### Features
+
+* **coding-agent:** add session forking support ([e9c0896](https://github.com/fleetagent/pi/commit/e9c0896ef61863d83029d4f18e929a1e64c7ae22))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @fleetagent/pi-agent-core bumped from ^0.0.2 to ^0.0.3
+    * @fleetagent/pi-ai bumped from ^0.0.2 to ^0.0.3
+    * @fleetagent/pi-tui bumped from ^0.0.2 to ^0.0.3
+
 ## [0.0.2](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.0.1...@fleetagent/pi-coding-agent-v0.0.2) (2026-05-23)
 
 
