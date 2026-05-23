@@ -16,7 +16,15 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname } from "node:path";
 import type { Agent, AgentEvent, AgentMessage, AgentState, AgentTool, ThinkingLevel } from "@fleetagent/pi-agent-core";
-import type { AssistantMessage, ImageContent, Message, Model, TextContent } from "@fleetagent/pi-ai";
+import type {
+	AssistantMessage,
+	ImageContent,
+	Message,
+	Model,
+	TextContent,
+	Tool,
+	ToolResultMessage,
+} from "@fleetagent/pi-ai";
 import {
 	clampThinkingLevel,
 	cleanupSessionResources,
@@ -25,7 +33,9 @@ import {
 	modelsAreEqual,
 	resetApiProviders,
 	streamSimple,
+	validateToolArguments,
 } from "@fleetagent/pi-ai";
+import type { Static, TSchema } from "typebox";
 import { theme } from "../modes/interactive/theme/theme.ts";
 import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { resolvePath } from "../utils/paths.ts";
@@ -71,7 +81,7 @@ import {
 	wrapRegisteredTools,
 } from "./extensions/index.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
-import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
+import { type BashExecutionMessage, type CustomMessage, STRUCTURED_RESPONSE_INTERNAL_CUSTOM_TYPE } from "./messages.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
@@ -198,6 +208,26 @@ export interface PromptOptions {
 	preflightResult?: (success: boolean) => void;
 }
 
+export interface StructuredResponseOptions<TSchemaValue extends TSchema> {
+	/** TypeBox object schema for the structured response. */
+	schema: TSchemaValue;
+	/** Schema/tool name shown to the model. Defaults to "structured_output". */
+	name?: string;
+	/** Optional description for the temporary structured output tool. */
+	description?: string;
+	/** Maximum correction calls after an invalid response. Defaults to 2. */
+	maxCorrections?: number;
+	/** Source context for extraction. Defaults to the latest assistant answer. */
+	scope?: "latest" | "conversation";
+}
+
+export interface StructuredResponse<T> {
+	output: T;
+	attempts: number;
+	source: "json" | "tool";
+	message: AssistantMessage;
+}
+
 /** Result from cycleModel() */
 export interface ModelCycleResult {
 	model: Model<any>;
@@ -231,12 +261,57 @@ interface ToolDefinitionEntry {
 	sourceInfo: SourceInfo;
 }
 
+interface StructuredInternalDetails {
+	stage: "request" | "assistant" | "tool_result" | "result";
+	schemaName: string;
+	attempt: number;
+	source?: "json" | "tool";
+	validationError?: string;
+}
+
 // ============================================================================
 // Constants
 // ============================================================================
 
 /** Standard thinking levels */
 const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high"];
+const DEFAULT_STRUCTURED_RESPONSE_TOOL_NAME = "structured_output";
+const DEFAULT_STRUCTURED_RESPONSE_CORRECTIONS = 2;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function getAssistantText(message: AssistantMessage): string {
+	return message.content
+		.filter((block) => block.type === "text")
+		.map((block) => block.text)
+		.join("\n");
+}
+
+function extractJsonCandidates(text: string): unknown[] {
+	const candidates: unknown[] = [];
+	const trimmed = text.trim();
+	if (trimmed) {
+		try {
+			candidates.push(JSON.parse(trimmed));
+		} catch {
+			// Try fenced JSON blocks below.
+		}
+	}
+
+	const fencePattern = /```(?:json)?\s*([\s\S]*?)```/gi;
+	let match = fencePattern.exec(text);
+	while (match) {
+		try {
+			candidates.push(JSON.parse(match[1].trim()));
+		} catch {
+			// Ignore invalid fenced blocks.
+		}
+		match = fencePattern.exec(text);
+	}
+	return candidates;
+}
 
 // ============================================================================
 // AgentSession Class
@@ -946,6 +1021,250 @@ export class AgentSession {
 		}
 
 		return await this._checkCompaction(msg);
+	}
+
+	async getStructuredResponse<TSchemaValue extends TSchema>(
+		options: StructuredResponseOptions<TSchemaValue>,
+	): Promise<StructuredResponse<Static<TSchemaValue>>> {
+		if (this.isStreaming) {
+			throw new Error("Agent is already processing. Wait for completion before requesting structured output.");
+		}
+		if (!this.model) {
+			throw new Error(formatNoModelSelectedMessage());
+		}
+		if (!this._modelRegistry.hasConfiguredAuth(this.model)) {
+			throw new Error(formatNoApiKeyFoundMessage(this.model.provider));
+		}
+
+		const schemaName = options.name ?? DEFAULT_STRUCTURED_RESPONSE_TOOL_NAME;
+		const tool: Tool<TSchemaValue> = {
+			name: schemaName,
+			description:
+				options.description ??
+				"Return the requested structured response. Call this tool exactly once with arguments matching the schema.",
+			parameters: options.schema,
+		};
+		const lastAssistant = this._findLastAssistantMessage();
+		if (!lastAssistant) {
+			throw new Error("No assistant response is available to structure.");
+		}
+
+		const direct = this._tryParseStructuredAssistantText(tool, lastAssistant);
+		if (direct.ok) {
+			this._appendStructuredInternalEntry(
+				"result",
+				schemaName,
+				0,
+				"Validated structured response from assistant JSON.",
+				{
+					stage: "result",
+					schemaName,
+					attempt: 0,
+					source: "json",
+				},
+			);
+			return { output: direct.output, attempts: 0, source: "json", message: lastAssistant };
+		}
+
+		const maxCorrections = options.maxCorrections ?? DEFAULT_STRUCTURED_RESPONSE_CORRECTIONS;
+		const maxAttempts = maxCorrections + 1;
+		const { apiKey, headers } = await this._getRequiredRequestAuth(this.model);
+		const messages = this._buildStructuredResponseMessages(options.scope ?? "latest", lastAssistant, schemaName);
+		let lastError = direct.error;
+
+		for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+			const requestText =
+				attempt === 1
+					? `Extract the structured response by calling ${schemaName} exactly once.`
+					: `Correct the structured response by calling ${schemaName} exactly once.\n\nValidation error:\n${lastError}`;
+			const userMessage: Message = {
+				role: "user",
+				content: [{ type: "text", text: requestText }],
+				timestamp: Date.now(),
+			};
+			messages.push(userMessage);
+			this._appendStructuredInternalEntry("request", schemaName, attempt, requestText, {
+				stage: "request",
+				schemaName,
+				attempt,
+				validationError: attempt === 1 ? undefined : lastError,
+			});
+
+			const responseStream = await this.agent.streamFn(
+				this.model,
+				{
+					systemPrompt:
+						"You are a structured data extraction assistant. Do not answer in prose. Use the provided tool to return the structured data.",
+					messages,
+					tools: [tool],
+				},
+				{
+					apiKey,
+					headers,
+					sessionId: this.agent.sessionId,
+					transport: this.agent.transport,
+					thinkingBudgets: this.agent.thinkingBudgets,
+					maxRetryDelayMs: this.agent.maxRetryDelayMs,
+				},
+			);
+			const assistantMessage = await responseStream.result();
+			messages.push(assistantMessage);
+			this._appendStructuredInternalEntry(
+				"assistant",
+				schemaName,
+				attempt,
+				this._formatStructuredAssistantLog(assistantMessage),
+				{
+					stage: "assistant",
+					schemaName,
+					attempt,
+				},
+			);
+
+			const toolCall = assistantMessage.content.find(
+				(block): block is Extract<AssistantMessage["content"][number], { type: "toolCall" }> =>
+					block.type === "toolCall" && block.name === schemaName,
+			);
+			if (toolCall) {
+				const validation = this._validateStructuredArguments(tool, toolCall.arguments);
+				if (validation.ok) {
+					this._appendStructuredInternalEntry(
+						"result",
+						schemaName,
+						attempt,
+						"Validated structured tool response.",
+						{
+							stage: "result",
+							schemaName,
+							attempt,
+							source: "tool",
+						},
+					);
+					return { output: validation.output, attempts: attempt, source: "tool", message: assistantMessage };
+				}
+				lastError = validation.error;
+				const toolResult: ToolResultMessage = {
+					role: "toolResult",
+					toolCallId: toolCall.id,
+					toolName: toolCall.name,
+					content: [{ type: "text", text: validation.error }],
+					isError: true,
+					timestamp: Date.now(),
+				};
+				messages.push(toolResult);
+				this._appendStructuredInternalEntry("tool_result", schemaName, attempt, validation.error, {
+					stage: "tool_result",
+					schemaName,
+					attempt,
+					validationError: validation.error,
+				});
+				continue;
+			}
+
+			const textValidation = this._tryParseStructuredAssistantText(tool, assistantMessage);
+			if (textValidation.ok) {
+				this._appendStructuredInternalEntry("result", schemaName, attempt, "Validated structured JSON response.", {
+					stage: "result",
+					schemaName,
+					attempt,
+					source: "json",
+				});
+				return { output: textValidation.output, attempts: attempt, source: "json", message: assistantMessage };
+			}
+			lastError = textValidation.error;
+		}
+
+		throw new Error(`Structured response validation failed after ${maxAttempts} attempt(s):\n${lastError}`);
+	}
+
+	private _buildStructuredResponseMessages(
+		scope: "latest" | "conversation",
+		lastAssistant: AssistantMessage,
+		schemaName: string,
+	): Message[] {
+		if (scope === "conversation") {
+			return this.agent.state.messages.filter(
+				(message): message is Message =>
+					message.role === "user" || message.role === "assistant" || message.role === "toolResult",
+			);
+		}
+
+		return [
+			{
+				role: "user",
+				content: [
+					{
+						type: "text",
+						text:
+							`Extract structured data from the latest assistant response below. Call ${schemaName} exactly once.\n\n` +
+							`<assistant_response>\n${getAssistantText(lastAssistant)}\n</assistant_response>`,
+					},
+				],
+				timestamp: Date.now(),
+			},
+		];
+	}
+
+	private _tryParseStructuredAssistantText<TSchemaValue extends TSchema>(
+		tool: Tool<TSchemaValue>,
+		message: AssistantMessage,
+	): { ok: true; output: Static<TSchemaValue> } | { ok: false; error: string } {
+		const text = getAssistantText(message);
+		for (const candidate of extractJsonCandidates(text)) {
+			if (!isRecord(candidate)) {
+				continue;
+			}
+			const validation = this._validateStructuredArguments(tool, candidate);
+			if (validation.ok) {
+				return validation;
+			}
+		}
+		return { ok: false, error: "Assistant response did not contain valid JSON matching the requested schema." };
+	}
+
+	private _validateStructuredArguments<TSchemaValue extends TSchema>(
+		tool: Tool<TSchemaValue>,
+		arguments_: Record<string, unknown>,
+	): { ok: true; output: Static<TSchemaValue> } | { ok: false; error: string } {
+		try {
+			const output = validateToolArguments(tool, {
+				type: "toolCall",
+				id: "structured-response-validation",
+				name: tool.name,
+				arguments: arguments_,
+			}) as Static<TSchemaValue>;
+			return { ok: true, output };
+		} catch (error) {
+			return { ok: false, error: error instanceof Error ? error.message : String(error) };
+		}
+	}
+
+	private _appendStructuredInternalEntry(
+		stage: StructuredInternalDetails["stage"],
+		schemaName: string,
+		attempt: number,
+		content: string,
+		details: StructuredInternalDetails,
+	): void {
+		this.session.appendCustomMessageEntry(STRUCTURED_RESPONSE_INTERNAL_CUSTOM_TYPE, content, false, {
+			...details,
+			stage,
+			schemaName,
+			attempt,
+		});
+	}
+
+	private _formatStructuredAssistantLog(message: AssistantMessage): string {
+		const parts = message.content.map((block) => {
+			if (block.type === "text") {
+				return block.text;
+			}
+			if (block.type === "thinking") {
+				return "[thinking omitted]";
+			}
+			return `tool:${block.name} ${JSON.stringify(block.arguments)}`;
+		});
+		return parts.join("\n");
 	}
 
 	/**

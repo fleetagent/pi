@@ -23,6 +23,8 @@ export const BRANCH_SUMMARY_PREFIX = `The following is a summary of a branch tha
 
 export const BRANCH_SUMMARY_SUFFIX = `</summary>`;
 
+export const STRUCTURED_RESPONSE_INTERNAL_CUSTOM_TYPE = "structured_response_internal";
+
 /**
  * Message type for bash executions via the ! command.
  */
@@ -160,6 +162,9 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 						timestamp: m.timestamp,
 					};
 				case "custom": {
+					if (m.customType === STRUCTURED_RESPONSE_INTERNAL_CUSTOM_TYPE) {
+						return undefined;
+					}
 					const content = typeof m.content === "string" ? [{ type: "text" as const, text: m.content }] : m.content;
 					return {
 						role: "user",

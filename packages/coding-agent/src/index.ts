@@ -12,6 +12,8 @@ export {
 	type PromptOptions,
 	parseSkillBlock,
 	type SessionStats,
+	type StructuredResponse,
+	type StructuredResponseOptions,
 } from "./core/agent-session.ts";
 // Auth and model registry
 export {
