@@ -11,7 +11,7 @@ type FakeExtensionRunner = {
 };
 
 type FakeSession = {
-	sessionManager: { getHeader: () => object | undefined };
+	session: { getHeader: () => object | undefined };
 	agent: { waitForIdle: () => Promise<void> };
 	state: { messages: AssistantMessage[] };
 	extensionRunner: FakeExtensionRunner;
@@ -64,7 +64,7 @@ function createRuntimeHost(assistantMessage: AssistantMessage): FakeRuntimeHost 
 	const state = { messages: [assistantMessage] };
 
 	const session: FakeSession = {
-		sessionManager: { getHeader: () => undefined },
+		session: { getHeader: () => undefined },
 		agent: { waitForIdle: async () => {} },
 		state,
 		extensionRunner,

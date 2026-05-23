@@ -144,7 +144,7 @@ function generateHtml(sessionData: SessionData, themeName?: string): string {
 	const templateDir = getExportTemplateDir();
 	const template = readFileSync(join(templateDir, "template.html"), "utf-8");
 	const templateCss = readFileSync(join(templateDir, "template.css"), "utf-8");
-	const templateJs = readFileSync(join(templateDir, "template.ts"), "utf-8");
+	const templateJs = readFileSync(join(templateDir, "template.js"), "utf-8");
 	const markedJs = readFileSync(join(templateDir, "vendor", "marked.min.ts"), "utf-8");
 	const hljsJs = readFileSync(join(templateDir, "vendor", "highlight.min.ts"), "utf-8");
 

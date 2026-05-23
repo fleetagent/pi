@@ -393,6 +393,10 @@ export class PiAgent {
 		let model = sessionOptions.model;
 		let modelFallbackMessage: string | undefined;
 
+		if (model) {
+			model = services.modelRegistry.find(model.provider, model.id) ?? model;
+		}
+
 		if (!model && hasExistingSession && existingSession.model) {
 			const restoredModel = services.modelRegistry.find(
 				existingSession.model.provider,

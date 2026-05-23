@@ -45,7 +45,7 @@ function createSession(options: {
 			},
 			thinkingLevel: options.thinkingLevel ?? "off",
 		},
-		sessionManager: {
+		session: {
 			getEntries: () => entries,
 			getSessionName: () => options.sessionName,
 			getCwd: () => "/tmp/project",
