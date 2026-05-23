@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.0.0 (2026-05-23)
+
+
+### Features
+
+* **tui:** wrap list items with indent ([3d5cbe9](https://github.com/fleetagent/pi/commit/3d5cbe98c3bc67ef8433bdeee45fbe5f0d8a24db))
+* **tui:** wrap list items with indent ([116bffe](https://github.com/fleetagent/pi/commit/116bffeb8893eb7663cd336599ce735b51284b5c))
+
+
+### Bug Fixes
+
+* align theme truecolor detection ([dafcf61](https://github.com/fleetagent/pi/commit/dafcf61a34f74ba1ce90ed4f610121ffc68c755f))
+* **coding-agent:** remove global fetch override closes [#4619](https://github.com/fleetagent/pi/issues/4619) ([c9e7049](https://github.com/fleetagent/pi/commit/c9e70492125806053e0ea31ad00eef6822d4a268))
+* **tui:** bound kitty image id parsing ([801db80](https://github.com/fleetagent/pi/commit/801db80b65210b25462bce1700675e073fe3dbe5))
+* **tui:** cap portrait image render height ([e3faf41](https://github.com/fleetagent/pi/commit/e3faf4180114b8de227ab3d5bce76c76a18643e7))
+* **tui:** decode CSI-u Ctrl+letter inside bracketed paste, fixes [#3599](https://github.com/fleetagent/pi/issues/3599) ([#3623](https://github.com/fleetagent/pi/issues/3623)) ([d06db09](https://github.com/fleetagent/pi/commit/d06db09a53958e485131527db25c1293f29b9367))
+* **tui:** deduplicate kitty printable input ([bdb416c](https://github.com/fleetagent/pi/commit/bdb416cbc04af02abe620e65f75a46817fc64c95)), closes [#3780](https://github.com/fleetagent/pi/issues/3780)
+* **tui:** disable inline images in cmux ([c9e87d2](https://github.com/fleetagent/pi/commit/c9e87d2aa628a0644d3f1a92cdae7e441b46ef29)), closes [#4208](https://github.com/fleetagent/pi/issues/4208)
+* **tui:** handle Thai Sara Am width ([bc66882](https://github.com/fleetagent/pi/commit/bc668826edb2fdfdd66b33a755a691326fc7560e)), closes [#3904](https://github.com/fleetagent/pi/issues/3904)
+* **tui:** initialize loader before starting indicator ([23b361c](https://github.com/fleetagent/pi/commit/23b361cfd08d252a814c70cdf305fd297ae9495a))
+* **tui:** keep kitty image redraws inside TUI ([2c28e2e](https://github.com/fleetagent/pi/commit/2c28e2e2ca51a24253457b18e46e237a23d3d950))
+* **tui:** keep kitty image redraws inside TUI ([b871245](https://github.com/fleetagent/pi/commit/b8712457d2c46987b5f8ad33de5465d2cb3a47e3))
+* **tui:** keep terminal progress alive ([76bc605](https://github.com/fleetagent/pi/commit/76bc605ad17fca377d82c6151b8bbd7fad18916a)), closes [#3610](https://github.com/fleetagent/pi/issues/3610)
+* **tui:** Make markdown.ts more robust to large markdown files  ([#4463](https://github.com/fleetagent/pi/issues/4463)) ([8da1f3d](https://github.com/fleetagent/pi/commit/8da1f3d1319bbb1263210befc19cc5497ea919c8))
+* **tui:** normalize Thai AM terminal output ([338ce3a](https://github.com/fleetagent/pi/commit/338ce3a365842abe4fe80dc45292ed1109bddc0f)), closes [#3904](https://github.com/fleetagent/pi/issues/3904)
+* **tui:** place image correctly when viewport height &lt; image height ([#4461](https://github.com/fleetagent/pi/issues/4461)) ([c08c462](https://github.com/fleetagent/pi/commit/c08c4624619f30eb210a9d1fea16205909e845fd)), closes [#4415](https://github.com/fleetagent/pi/issues/4415)
+* **tui:** preserve OSC 8 hyperlink terminators ([c806dea](https://github.com/fleetagent/pi/commit/c806dea15ebfcf4144e794ad46c19a6cd3f585e2))
+* **tui:** prioritize exact fuzzy matches ([1bc640e](https://github.com/fleetagent/pi/commit/1bc640e53a9844253e1bb0a77f85125797fa380a))
+* **tui:** remove explicit image ids ([83a9170](https://github.com/fleetagent/pi/commit/83a917073c986673839efc66ca6b473e32e91152))
+* **tui:** render the checkboxes in the to-do list items ([f2b105d](https://github.com/fleetagent/pi/commit/f2b105dd56bb88752cb2c80e8a538b24ccbe6a7c))
+* **tui:** render the checkboxes in the to-do list items ([863341f](https://github.com/fleetagent/pi/commit/863341fbf5e80afa0c12428cf3933f30b255ff7d))
+* **tui:** respect environment terminal dimensions ([32f7fc6](https://github.com/fleetagent/pi/commit/32f7fc6aa517cd02569046ce385edd639cebff61)), closes [#4004](https://github.com/fleetagent/pi/issues/4004)
+* **tui:** skip Thai AM normalization when absent ([20ca45d](https://github.com/fleetagent/pi/commit/20ca45d5746672df3efae0521fa101eb47c7b897)), closes [#3904](https://github.com/fleetagent/pi/issues/3904)
+
 ## [Unreleased]
 
 ### Breaking Changes
