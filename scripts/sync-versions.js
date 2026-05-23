@@ -3,9 +3,10 @@
 /**
  * Syncs all workspace package versions and local dependency ranges.
  *
- * By default this verifies lockstep versioning and syncs inter-package
- * dependency ranges. Pass --set x.y.z to set the root package and every
- * versioned workspace package to an explicit version first.
+ * By default this syncs versioned packages to the highest package version
+ * already present and syncs inter-package dependency ranges. Pass --set x.y.z
+ * to set the root package and every versioned workspace package to an explicit
+ * version first.
  */
 
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
@@ -45,16 +46,30 @@ if (explicitVersion && bumpType) {
 	process.exit(1);
 }
 
-function bumpVersion(version, type) {
+function parseVersion(version) {
 	const match = /^(\d+)\.(\d+)\.(\d+)/.exec(version);
 	if (!match) {
-		console.error(`Can not bump non-semver version: ${version}`);
+		console.error(`Can not read non-semver version: ${version}`);
 		process.exit(1);
 	}
 
-	let major = Number(match[1]);
-	let minor = Number(match[2]);
-	let patch = Number(match[3]);
+	return [Number(match[1]), Number(match[2]), Number(match[3])];
+}
+
+function compareVersions(a, b) {
+	const aParts = parseVersion(a);
+	const bParts = parseVersion(b);
+	for (let index = 0; index < aParts.length; index++) {
+		const diff = aParts[index] - bParts[index];
+		if (diff !== 0) {
+			return diff;
+		}
+	}
+	return 0;
+}
+
+function bumpVersion(version, type) {
+	let [major, minor, patch] = parseVersion(version);
 	if (type === "major") {
 		major++;
 		minor = 0;
@@ -159,6 +174,20 @@ if (explicitVersion) {
 	}
 }
 
+if (!explicitVersion) {
+	const currentVersions = new Set(versionedPackages.map((pkg) => pkg.data.version));
+	if (currentVersions.size > 1) {
+		explicitVersion = [...currentVersions].toSorted(compareVersions).at(-1);
+		console.log(`Syncing all versioned packages to highest detected version ${explicitVersion}`);
+		for (const pkg of versionedPackages) {
+			if (pkg.data.version !== explicitVersion) {
+				console.log(`  ${pkg.data.name}: ${pkg.data.version} → ${explicitVersion}`);
+				pkg.data.version = explicitVersion;
+			}
+		}
+	}
+}
+
 const versionMap = new Map();
 for (const pkg of versionedPackages) {
 	versionMap.set(pkg.data.name, pkg.data.version);
@@ -172,12 +201,6 @@ for (const pkg of versionedPackages.toSorted((a, b) => a.data.name.localeCompare
 const versions = new Set(versionMap.values());
 if (versions.size > 1) {
 	console.error("\nERROR: Not all packages have the same version.");
-	console.error("Expected lockstep versioning. Run one of:");
-	console.error("  npm run version:patch");
-	console.error("  npm run version:minor");
-	console.error("  npm run version:major");
-	console.error("  node scripts/sync-versions.js --set <x.y.z>");
-	console.error("  node scripts/sync-versions.js --bump <major|minor|patch>");
 	process.exit(1);
 }
 
