@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.2](https://github.com/fleetagent/pi/compare/@fleetagent/pi-ai-v0.0.1...@fleetagent/pi-ai-v0.0.2) (2026-05-23)
+
+
+### Bug Fixes
+
+* update pi config and generated models ([2fe3604](https://github.com/fleetagent/pi/commit/2fe36047b91e7bfa3b5606ecf249c08a656839a6))
+
 ## 0.0.1 (2026-05-23)
 
 
