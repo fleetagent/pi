@@ -192,7 +192,7 @@ export {
 	type SessionHeader,
 	type SessionInfo,
 	type SessionInfoEntry,
-	SessionManager,
+	type SessionManager,
 	type SessionMessageEntry,
 	type ThinkingLevelChangeEntry,
 } from "./core/session-manager.ts";
