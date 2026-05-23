@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.0.5](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.0.4...@fleetagent/pi-coding-agent-v0.0.5) (2026-05-23)
+
+
+### Features
+
+* **coding-agent:** expose structured responses over rpc ([8ba9a44](https://github.com/fleetagent/pi/commit/8ba9a444d94b6b1ed79f6a44bae8fec3449e2414))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @fleetagent/pi-agent-core bumped from ^0.0.4 to ^0.0.5
+    * @fleetagent/pi-ai bumped from ^0.0.4 to ^0.0.5
+    * @fleetagent/pi-tui bumped from ^0.0.4 to ^0.0.5
+
 ## [0.0.4](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.0.3...@fleetagent/pi-coding-agent-v0.0.4) (2026-05-23)
 
 
