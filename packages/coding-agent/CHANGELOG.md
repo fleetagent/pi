@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.0.4](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.0.3...@fleetagent/pi-coding-agent-v0.0.4) (2026-05-23)
+
+
+### Features
+
+* **coding-agent:** add structured response extraction ([04fb861](https://github.com/fleetagent/pi/commit/04fb8617bff69c98bc04afaeadbd4782f46e4691))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @fleetagent/pi-agent-core bumped from ^0.0.3 to ^0.0.4
+    * @fleetagent/pi-ai bumped from ^0.0.3 to ^0.0.4
+    * @fleetagent/pi-tui bumped from ^0.0.3 to ^0.0.4
+
 ## [0.0.3](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.0.2...@fleetagent/pi-coding-agent-v0.0.3) (2026-05-23)
 
 
