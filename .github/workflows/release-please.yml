@@ -54,7 +54,7 @@ jobs:
 
       - name: Sync generated release files
         run: |
-          VERSION=$(node -p "require('./package.json').version")
+          VERSION=$(node -e 'const manifest=require("./.release-please-manifest.json"); const versions=[...new Set(Object.values(manifest))]; if (versions.length !== 1) throw new Error(`Release Please manifest versions are out of sync: ${versions.join(", ")}`); console.log(versions[0]);')
           node scripts/sync-versions.js --set "$VERSION"
           npm install --package-lock-only --ignore-scripts
           node scripts/generate-coding-agent-shrinkwrap.mjs
