@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.0.6](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.0.5...@fleetagent/pi-coding-agent-v0.0.6) (2026-05-24)
+
+
+### Features
+
+* **coding-agent:** add on-demand rules ([82852c3](https://github.com/fleetagent/pi/commit/82852c3caebc63d2333d79638ab4ccf2174f2e6b))
+
+
+### Bug Fixes
+
+* **coding-agent:** reset RPC idle timeout on events ([8ec7d65](https://github.com/fleetagent/pi/commit/8ec7d6511559bb7f1f1a845d735694e47e7a63ec))
+* **release:** sync generated release files ([0b77702](https://github.com/fleetagent/pi/commit/0b77702c90ef27b3288e77e34f33881e73916ded))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @fleetagent/pi-agent-core bumped from ^0.0.5 to ^0.0.6
+    * @fleetagent/pi-ai bumped from ^0.0.5 to ^0.0.6
+    * @fleetagent/pi-tui bumped from ^0.0.5 to ^0.0.6
+
 ## [Unreleased]
 
 ### Added
