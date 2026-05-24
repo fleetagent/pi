@@ -18,6 +18,9 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       releases_created: ${{ steps.release.outputs.releases_created }}
+      prs_created: ${{ steps.release.outputs.prs_created }}
+      pr: ${{ steps.release.outputs.pr }}
+      prs: ${{ steps.release.outputs.prs }}
     steps:
       - name: Run release-please
         id: release
@@ -26,6 +29,60 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
           token: ${{ secrets.GITHUB_TOKEN }}
+
+  sync-release-pr:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.prs_created == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Resolve release PR branch
+        id: branch
+        env:
+          RELEASE_PR: ${{ needs.release-please.outputs.pr }}
+          RELEASE_PRS: ${{ needs.release-please.outputs.prs }}
+        run: |
+          BRANCH=$(node -e '
+            const prs = process.env.RELEASE_PRS ? JSON.parse(process.env.RELEASE_PRS) : [];
+            const pr = process.env.RELEASE_PR ? JSON.parse(process.env.RELEASE_PR) : prs[0];
+            if (!pr) throw new Error("release-please did not return PR metadata");
+            const branch = pr.headBranchName || pr.headRefName || pr.head_branch_name || pr.head?.ref;
+            if (!branch) throw new Error(`Can not resolve release PR branch from ${JSON.stringify(pr)}`);
+            console.log(branch);
+          ')
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout release PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.branch.outputs.branch }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Sync generated release files
+        run: |
+          VERSION=$(node -e 'const manifest=require("./.release-please-manifest.json"); const versions=[...new Set(Object.values(manifest))]; if (versions.length !== 1) throw new Error(`Release Please manifest versions are out of sync: ${versions.join(", ")}`); console.log(versions[0]);')
+          node scripts/sync-versions.js --set "$VERSION"
+          npm install --package-lock-only --ignore-scripts
+          node scripts/generate-coding-agent-shrinkwrap.mjs
+
+      - name: Commit generated release files
+        run: |
+          if git diff --quiet; then
+            echo "Generated release files are already in sync."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json packages/*/package.json packages/coding-agent/examples/extensions/*/package.json packages/coding-agent/npm-shrinkwrap.json
+          git commit -m "chore(release): sync generated release files"
+          git push origin HEAD:${{ steps.branch.outputs.branch }}
 
   publish-npm:
     needs: release-please
