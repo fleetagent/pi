@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Added on-demand `RULES.md` resources for mandatory task and file constraints.
+
+### Fixed
+
+- Changed RPC client idle waits to use a five-minute inactivity timeout that resets when events arrive.
+
 ## [0.0.5](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.0.4...@fleetagent/pi-coding-agent-v0.0.5) (2026-05-23)
 
 

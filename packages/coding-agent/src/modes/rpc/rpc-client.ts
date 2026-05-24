@@ -436,50 +436,64 @@ export class RpcClient {
 	/**
 	 * Wait for agent to become idle (no streaming).
 	 * Resolves when agent_end event is received.
+	 * The timeout is an inactivity timeout that resets each time an event is received.
 	 */
-	waitForIdle(timeout = 60000): Promise<void> {
+	waitForIdle(timeout = 5 * 60 * 1000): Promise<void> {
 		return new Promise((resolve, reject) => {
-			const timer = setTimeout(() => {
-				unsubscribe();
-				reject(new Error(`Timeout waiting for agent to become idle. Stderr: ${this.stderr}`));
-			}, timeout);
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			const resetTimer = () => {
+				if (timer) clearTimeout(timer);
+				timer = setTimeout(() => {
+					unsubscribe();
+					reject(new Error(`Timeout waiting for agent to become idle. Stderr: ${this.stderr}`));
+				}, timeout);
+			};
 
 			const unsubscribe = this.onEvent((event) => {
+				resetTimer();
 				if (event.type === "agent_end") {
 					clearTimeout(timer);
 					unsubscribe();
 					resolve();
 				}
 			});
+			resetTimer();
 		});
 	}
 
 	/**
 	 * Collect events until agent becomes idle.
+	 * The timeout is an inactivity timeout that resets each time an event is received.
 	 */
-	collectEvents(timeout = 60000): Promise<AgentEvent[]> {
+	collectEvents(timeout = 5 * 60 * 1000): Promise<AgentEvent[]> {
 		return new Promise((resolve, reject) => {
 			const events: AgentEvent[] = [];
-			const timer = setTimeout(() => {
-				unsubscribe();
-				reject(new Error(`Timeout collecting events. Stderr: ${this.stderr}`));
-			}, timeout);
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			const resetTimer = () => {
+				if (timer) clearTimeout(timer);
+				timer = setTimeout(() => {
+					unsubscribe();
+					reject(new Error(`Timeout collecting events. Stderr: ${this.stderr}`));
+				}, timeout);
+			};
 
 			const unsubscribe = this.onEvent((event) => {
 				events.push(event);
+				resetTimer();
 				if (event.type === "agent_end") {
 					clearTimeout(timer);
 					unsubscribe();
 					resolve(events);
 				}
 			});
+			resetTimer();
 		});
 	}
 
 	/**
 	 * Send prompt and wait for completion, returning all events.
 	 */
-	async promptAndWait(message: string, images?: ImageContent[], timeout = 60000): Promise<AgentEvent[]> {
+	async promptAndWait(message: string, images?: ImageContent[], timeout = 5 * 60 * 1000): Promise<AgentEvent[]> {
 		const eventsPromise = this.collectEvents(timeout);
 		await this.prompt(message, images);
 		return eventsPromise;
