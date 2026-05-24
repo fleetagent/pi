@@ -46,6 +46,8 @@ export interface Args {
 	export?: string;
 	noSkills?: boolean;
 	skills?: string[];
+	noRules?: boolean;
+	rules?: string[];
 	promptTemplates?: string[];
 	noPromptTemplates?: boolean;
 	themes?: string[];
@@ -154,6 +156,9 @@ export function parseArgs(args: string[]): Args {
 		} else if (arg === "--skill" && i + 1 < args.length) {
 			result.skills = result.skills ?? [];
 			result.skills.push(args[++i]);
+		} else if (arg === "--rule" && i + 1 < args.length) {
+			result.rules = result.rules ?? [];
+			result.rules.push(args[++i]);
 		} else if (arg === "--prompt-template" && i + 1 < args.length) {
 			result.promptTemplates = result.promptTemplates ?? [];
 			result.promptTemplates.push(args[++i]);
@@ -162,6 +167,8 @@ export function parseArgs(args: string[]): Args {
 			result.themes.push(args[++i]);
 		} else if (arg === "--no-skills" || arg === "-ns") {
 			result.noSkills = true;
+		} else if (arg === "--no-rules" || arg === "-nr") {
+			result.noRules = true;
 		} else if (arg === "--no-prompt-templates" || arg === "-np") {
 			result.noPromptTemplates = true;
 		} else if (arg === "--no-themes") {
@@ -258,6 +265,8 @@ ${chalk.bold("Options:")}
   --no-extensions, -ne           Disable extension discovery (explicit -e paths still work)
   --skill <path>                 Load a skill file or directory (can be used multiple times)
   --no-skills, -ns               Disable skills discovery and loading
+  --rule <path>                  Load a rule file or directory (can be used multiple times)
+  --no-rules, -nr                Disable rules discovery and loading
   --prompt-template <path>       Load a prompt template file or directory (can be used multiple times)
   --no-prompt-templates, -np     Disable prompt template discovery and loading
   --theme <path>                 Load a theme file or directory (can be used multiple times)

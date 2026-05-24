@@ -102,7 +102,7 @@ cp permission-gate.ts ~/.pi/agent/extensions/
 
 | Extension | Description |
 |-----------|-------------|
-| `dynamic-resources/` | Loads skills, prompts, and themes using `resources_discover` |
+| `dynamic-resources/` | Loads skills, rules, prompts, and themes using `resources_discover` |
 
 ### Messages & Communication
 

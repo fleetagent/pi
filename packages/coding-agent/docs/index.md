@@ -1,6 +1,6 @@
 # Pi Documentation
 
-Pi is a minimal terminal coding harness. It is designed to stay small at the core while being extended through TypeScript extensions, skills, prompt templates, themes, and pi packages.
+Pi is a minimal terminal coding harness. It is designed to stay small at the core while being extended through TypeScript extensions, skills, rules, prompt templates, themes, and pi packages.
 
 ## Quick start
 
@@ -50,9 +50,10 @@ For the full first-run flow, see [Quickstart](quickstart.md).
 
 - [Extensions](extensions.md) - TypeScript modules for tools, commands, events, and custom UI.
 - [Skills](skills.md) - Agent Skills for reusable on-demand capabilities.
+- [Rules](rules.md) - on-demand mandatory constraints and policies.
 - [Prompt templates](prompt-templates.md) - reusable prompts that expand from slash commands.
 - [Themes](themes.md) - built-in and custom terminal themes.
-- [Pi packages](packages.md) - bundle and share extensions, skills, prompts, and themes.
+- [Pi packages](packages.md) - bundle and share extensions, skills, rules, prompts, and themes.
 - [Custom models](models.md) - add model entries for supported provider APIs.
 - [Custom providers](custom-provider.md) - implement custom APIs and OAuth flows.
 

@@ -256,6 +256,7 @@ describe("InteractiveMode.showLoadedResources", () => {
 						skills: options.skills ?? [],
 						diagnostics: options.skillDiagnostics ?? [],
 					}),
+					getRules: () => ({ rules: [], diagnostics: [] }),
 					getPrompts: () => ({ prompts: [], diagnostics: [] }),
 					getExtensions: () => ({ extensions: options.extensions ?? [], errors: [], runtime: {} }),
 					getThemes: () => ({ themes: [], diagnostics: [] }),

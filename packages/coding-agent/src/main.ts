@@ -582,6 +582,7 @@ export async function main(args: string[], options?: MainOptions) {
 
 	const resolvedExtensionPaths = resolveCliPaths(cwd, parsed.extensions);
 	const resolvedSkillPaths = resolveCliPaths(cwd, parsed.skills);
+	const resolvedRulePaths = resolveCliPaths(cwd, parsed.rules);
 	const resolvedPromptTemplatePaths = resolveCliPaths(cwd, parsed.promptTemplates);
 	const resolvedThemePaths = resolveCliPaths(cwd, parsed.themes);
 	const authStorage = AuthStorage.create();
@@ -598,10 +599,12 @@ export async function main(args: string[], options?: MainOptions) {
 		resourceLoaderOptions: {
 			additionalExtensionPaths: resolvedExtensionPaths,
 			additionalSkillPaths: resolvedSkillPaths,
+			additionalRulePaths: resolvedRulePaths,
 			additionalPromptTemplatePaths: resolvedPromptTemplatePaths,
 			additionalThemePaths: resolvedThemePaths,
 			noExtensions: parsed.noExtensions,
 			noSkills: parsed.noSkills,
+			noRules: parsed.noRules,
 			noPromptTemplates: parsed.noPromptTemplates,
 			noThemes: parsed.noThemes,
 			noContextFiles: parsed.noContextFiles,

@@ -173,6 +173,16 @@ export {
 export type { PromptTemplate } from "./core/prompt-templates.ts";
 export type { ResourceCollision, ResourceDiagnostic, ResourceLoader } from "./core/resource-loader.ts";
 export { DefaultResourceLoader, loadProjectContextFiles } from "./core/resource-loader.ts";
+// Rules
+export {
+	formatRulesForPrompt,
+	type LoadRulesFromDirOptions,
+	type LoadRulesResult,
+	loadRules,
+	loadRulesFromDir,
+	type Rule,
+	type RuleFrontmatter,
+} from "./core/rules.ts";
 export {
 	type BranchSummaryEntry,
 	buildSessionContext,

@@ -88,7 +88,7 @@ Most one-off session options can be passed directly to `PiAgent.create()`:
 | `tools` | `[
 "read", "bash", "edit", "write"]` built-ins | Allowlist tool names across built-in, extension, and custom tools |
 | `customTools` | `[]` | Additional tool definitions |
-| `resourceLoader` | DefaultResourceLoader | Resource loader for extensions, skills, prompts, themes |
+| `resourceLoader` | DefaultResourceLoader | Resource loader for extensions, skills, rules, prompts, themes |
 | `settingsManager` | SettingsManager.create(cwd, agentDir) | Settings source |
 | `resolveSessionOptions` | undefined | Per-session override hook for model, tools, and diagnostics |
 

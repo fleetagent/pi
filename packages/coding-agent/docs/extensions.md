@@ -338,7 +338,7 @@ exit (Ctrl+C, Ctrl+D, SIGHUP, SIGTERM)
 
 #### resources_discover
 
-Fired after `session_start` so extensions can contribute additional skill, prompt, and theme paths.
+Fired after `session_start` so extensions can contribute additional skill, rule, prompt, and theme paths.
 The startup path uses `reason: "startup"`. Reload uses `reason: "reload"`.
 
 ```typescript
@@ -347,6 +347,7 @@ pi.on("resources_discover", async (event, _ctx) => {
   // event.reason - "startup" | "reload"
   return {
     skillPaths: ["/path/to/skills"],
+    rulePaths: ["/path/to/rules"],
     promptPaths: ["/path/to/prompts"],
     themePaths: ["/path/to/themes"],
   };
@@ -813,7 +814,7 @@ Fired when user input is received, after extension commands are checked but befo
 **Processing order:**
 1. Extension commands (`/cmd`) checked first - if found, handler runs and input event is skipped
 2. `input` event fires - can intercept, transform, or handle
-3. If not handled: skill commands (`/skill:name`) expanded to skill content
+3. If not handled: skill/rule commands (`/skill:name`, `/rule:name`) expanded to their content
 4. If not handled: prompt templates (`/template`) expanded to template content
 5. Agent processing begins (`before_agent_start`, etc.)
 
@@ -836,8 +837,8 @@ pi.on("input", async (event, ctx) => {
   // Route by source: skip processing for extension-injected messages
   if (event.source === "extension") return { action: "continue" };
 
-  // Intercept skill commands before expansion
-  if (event.text.startsWith("/skill:")) {
+  // Intercept skill/rule commands before expansion
+  if (event.text.startsWith("/skill:") || event.text.startsWith("/rule:")) {
     // Could transform, block, or let pass through
   }
 
@@ -1161,7 +1162,7 @@ Run the same reload flow as `/reload`.
 
 ```typescript
 pi.registerCommand("reload-runtime", {
-  description: "Reload extensions, skills, prompts, and themes",
+  description: "Reload extensions, skills, rules, prompts, and themes",
   handler: async (_args, ctx) => {
     await ctx.reload();
     return;
@@ -1189,7 +1190,7 @@ import { Type } from "typebox";
 
 export default function (pi: ExtensionAPI) {
   pi.registerCommand("reload-runtime", {
-    description: "Reload extensions, skills, prompts, and themes",
+    description: "Reload extensions, skills, rules, prompts, and themes",
     handler: async (_args, ctx) => {
       await ctx.reload();
       return;
@@ -1199,7 +1200,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "reload_runtime",
     label: "Reload Runtime",
-    description: "Reload extensions, skills, prompts, and themes",
+    description: "Reload extensions, skills, rules, prompts, and themes",
     parameters: Type.Object({}),
     async execute() {
       pi.sendUserMessage("/reload-runtime", { deliverAs: "followUp" });
@@ -1409,7 +1410,7 @@ pi.registerCommand("deploy", {
 
 ### pi.getCommands()
 
-Get the slash commands available for invocation via `prompt` in the current session. Includes extension commands, prompt templates, and skill commands.
+Get the slash commands available for invocation via `prompt` in the current session. Includes extension commands, prompt templates, skill commands, and rule commands.
 The list matches the RPC `get_commands` ordering: extensions first, then templates, then skills.
 
 ```typescript

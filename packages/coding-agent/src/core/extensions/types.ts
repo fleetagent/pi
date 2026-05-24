@@ -360,7 +360,7 @@ export interface ExtensionCommandContext extends ExtensionContext {
 		options?: { withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
 	): Promise<{ cancelled: boolean }>;
 
-	/** Reload extensions, skills, prompts, and themes. */
+	/** Reload extensions, skills, rules, prompts, and themes. */
 	reload(): Promise<void>;
 }
 
@@ -502,6 +502,7 @@ export interface ResourcesDiscoverEvent {
 /** Result from resources_discover event handler */
 export interface ResourcesDiscoverResult {
 	skillPaths?: string[];
+	rulePaths?: string[];
 	promptPaths?: string[];
 	themePaths?: string[];
 }

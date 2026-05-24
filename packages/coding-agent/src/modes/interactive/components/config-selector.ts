@@ -22,11 +22,12 @@ import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { rawKeyHint } from "./keybinding-hints.ts";
 
-type ResourceType = "extensions" | "skills" | "prompts" | "themes";
+type ResourceType = "extensions" | "skills" | "rules" | "prompts" | "themes";
 
 const RESOURCE_TYPE_LABELS: Record<ResourceType, string> = {
 	extensions: "Extensions",
 	skills: "Skills",
+	rules: "Rules",
 	prompts: "Prompts",
 	themes: "Themes",
 };
@@ -126,7 +127,10 @@ function buildGroups(resolved: ResolvedPaths): ResourceGroup[] {
 			let displayName: string;
 			if (resourceType === "extensions" && parentFolder !== "extensions") {
 				displayName = `${parentFolder}/${fileName}`;
-			} else if (resourceType === "skills" && fileName === "SKILL.md") {
+			} else if (
+				(resourceType === "skills" && fileName === "SKILL.md") ||
+				(resourceType === "rules" && fileName === "RULES.md")
+			) {
 				displayName = parentFolder;
 			} else {
 				displayName = fileName;
@@ -145,6 +149,7 @@ function buildGroups(resolved: ResolvedPaths): ResourceGroup[] {
 
 	addToGroup(resolved.extensions, "extensions");
 	addToGroup(resolved.skills, "skills");
+	addToGroup(resolved.rules, "rules");
 	addToGroup(resolved.prompts, "prompts");
 	addToGroup(resolved.themes, "themes");
 
@@ -161,7 +166,7 @@ function buildGroups(resolved: ResolvedPaths): ResourceGroup[] {
 	});
 
 	// Sort subgroups within each group by type order, and items by name
-	const typeOrder: Record<ResourceType, number> = { extensions: 0, skills: 1, prompts: 2, themes: 3 };
+	const typeOrder: Record<ResourceType, number> = { extensions: 0, skills: 1, rules: 2, prompts: 3, themes: 4 };
 	for (const group of groups) {
 		group.subgroups.sort((a, b) => typeOrder[a.type] - typeOrder[b.type]);
 		for (const subgroup of group.subgroups) {
@@ -459,7 +464,7 @@ class ResourceList implements Component, Focusable {
 		const settings =
 			scope === "project" ? this.settingsManager.getProjectSettings() : this.settingsManager.getGlobalSettings();
 
-		const arrayKey = item.resourceType as "extensions" | "skills" | "prompts" | "themes";
+		const arrayKey = item.resourceType;
 		const current = (settings[arrayKey] ?? []) as string[];
 
 		// Generate pattern for this resource
@@ -484,6 +489,8 @@ class ResourceList implements Component, Focusable {
 				this.settingsManager.setProjectExtensionPaths(updated);
 			} else if (arrayKey === "skills") {
 				this.settingsManager.setProjectSkillPaths(updated);
+			} else if (arrayKey === "rules") {
+				this.settingsManager.setProjectRulePaths(updated);
 			} else if (arrayKey === "prompts") {
 				this.settingsManager.setProjectPromptTemplatePaths(updated);
 			} else if (arrayKey === "themes") {
@@ -494,6 +501,8 @@ class ResourceList implements Component, Focusable {
 				this.settingsManager.setExtensionPaths(updated);
 			} else if (arrayKey === "skills") {
 				this.settingsManager.setSkillPaths(updated);
+			} else if (arrayKey === "rules") {
+				this.settingsManager.setRulePaths(updated);
 			} else if (arrayKey === "prompts") {
 				this.settingsManager.setPromptTemplatePaths(updated);
 			} else if (arrayKey === "themes") {
@@ -524,7 +533,7 @@ class ResourceList implements Component, Focusable {
 		}
 
 		// Get the resource array for this type
-		const arrayKey = item.resourceType as "extensions" | "skills" | "prompts" | "themes";
+		const arrayKey = item.resourceType;
 		const current = (pkg[arrayKey] ?? []) as string[];
 
 		// Generate pattern relative to package root
@@ -547,7 +556,7 @@ class ResourceList implements Component, Focusable {
 		(pkg as Record<string, unknown>)[arrayKey] = updated.length > 0 ? updated : undefined;
 
 		// Clean up empty filter object
-		const hasFilters = ["extensions", "skills", "prompts", "themes"].some(
+		const hasFilters = ["extensions", "skills", "rules", "prompts", "themes"].some(
 			(k) => (pkg as Record<string, unknown>)[k] !== undefined,
 		);
 		if (!hasFilters) {

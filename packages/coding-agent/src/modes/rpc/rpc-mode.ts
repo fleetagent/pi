@@ -663,6 +663,15 @@ export async function runRpcMode(runtimeHost: PiAgentRuntimeHost): Promise<never
 					});
 				}
 
+				for (const rule of session.resourceLoader.getRules().rules) {
+					commands.push({
+						name: `rule:${rule.name}`,
+						description: rule.description,
+						source: "rule",
+						sourceInfo: rule.sourceInfo,
+					});
+				}
+
 				return success(id, "get_commands", { commands });
 			}
 

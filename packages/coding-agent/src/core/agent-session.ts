@@ -163,7 +163,7 @@ export interface AgentSessionConfig {
 	cwd: string;
 	/** Models to cycle through with Ctrl+P (from --models flag) */
 	scopedModels?: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
-	/** Resource loader for skills, prompts, themes, context files, system prompt */
+	/** Resource loader for skills, rules, prompts, themes, context files, system prompt */
 	resourceLoader: ResourceLoader;
 	/** SDK custom tools registered outside extensions */
 	customTools?: ToolDefinition[];
@@ -969,11 +969,13 @@ export class AgentSession {
 		const appendSystemPrompt =
 			loaderAppendSystemPrompt.length > 0 ? loaderAppendSystemPrompt.join("\n\n") : undefined;
 		const loadedSkills = this._resourceLoader.getSkills().skills;
+		const loadedRules = this._resourceLoader.getRules().rules;
 		const loadedContextFiles = this._resourceLoader.getAgentsFiles().agentsFiles;
 
 		this._baseSystemPromptOptions = {
 			cwd: this._cwd,
 			skills: loadedSkills,
+			rules: loadedRules,
 			contextFiles: loadedContextFiles,
 			customPrompt: loaderSystemPrompt,
 			appendSystemPrompt,
@@ -1312,10 +1314,11 @@ export class AgentSession {
 				}
 			}
 
-			// Expand skill commands (/skill:name args) and prompt templates (/template args)
+			// Expand skill/rule commands (/skill:name or /rule:name args) and prompt templates (/template args)
 			let expandedText = currentText;
 			if (expandPromptTemplates) {
 				expandedText = this._expandSkillCommand(expandedText);
+				expandedText = this._expandRuleCommand(expandedText);
 				expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
 			}
 
@@ -1488,11 +1491,36 @@ export class AgentSession {
 		}
 	}
 
+	private _expandRuleCommand(text: string): string {
+		if (!text.startsWith("/rule:")) return text;
+
+		const spaceIndex = text.indexOf(" ");
+		const ruleName = spaceIndex === -1 ? text.slice(6) : text.slice(6, spaceIndex);
+		const args = spaceIndex === -1 ? "" : text.slice(spaceIndex + 1).trim();
+
+		const rule = this.resourceLoader.getRules().rules.find((r) => r.name === ruleName);
+		if (!rule) return text; // Unknown rule, pass through
+
+		try {
+			const content = readFileSync(rule.filePath, "utf-8");
+			const body = stripFrontmatter(content).trim();
+			const ruleBlock = `<rule name="${rule.name}" location="${rule.filePath}">\nReferences are relative to ${rule.baseDir}.\n\n${body}\n</rule>`;
+			return args ? `${ruleBlock}\n\n${args}` : ruleBlock;
+		} catch (err) {
+			this._extensionRunner.emitError({
+				extensionPath: rule.filePath,
+				event: "rule_expansion",
+				error: err instanceof Error ? err.message : String(err),
+			});
+			return text;
+		}
+	}
+
 	/**
 	 * Queue a steering message while the agent is running.
 	 * Delivered after the current assistant turn finishes executing its tool calls,
 	 * before the next LLM call.
-	 * Expands skill commands and prompt templates. Errors on extension commands.
+	 * Expands skill/rule commands and prompt templates. Errors on extension commands.
 	 * @param images Optional image attachments to include with the message
 	 * @throws Error if text is an extension command
 	 */
@@ -1502,8 +1530,9 @@ export class AgentSession {
 			this._throwIfExtensionCommand(text);
 		}
 
-		// Expand skill commands and prompt templates
+		// Expand skill/rule commands and prompt templates
 		let expandedText = this._expandSkillCommand(text);
+		expandedText = this._expandRuleCommand(expandedText);
 		expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
 
 		await this._queueSteer(expandedText, images);
@@ -1512,7 +1541,7 @@ export class AgentSession {
 	/**
 	 * Queue a follow-up message to be processed after the agent finishes.
 	 * Delivered only when agent has no more tool calls or steering messages.
-	 * Expands skill commands and prompt templates. Errors on extension commands.
+	 * Expands skill/rule commands and prompt templates. Errors on extension commands.
 	 * @param images Optional image attachments to include with the message
 	 * @throws Error if text is an extension command
 	 */
@@ -1522,8 +1551,9 @@ export class AgentSession {
 			this._throwIfExtensionCommand(text);
 		}
 
-		// Expand skill commands and prompt templates
+		// Expand skill/rule commands and prompt templates
 		let expandedText = this._expandSkillCommand(text);
+		expandedText = this._expandRuleCommand(expandedText);
 		expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
 
 		await this._queueFollowUp(expandedText, images);
@@ -2377,17 +2407,18 @@ export class AgentSession {
 			return;
 		}
 
-		const { skillPaths, promptPaths, themePaths } = await this._extensionRunner.emitResourcesDiscover(
+		const { skillPaths, rulePaths, promptPaths, themePaths } = await this._extensionRunner.emitResourcesDiscover(
 			this._cwd,
 			reason,
 		);
 
-		if (skillPaths.length === 0 && promptPaths.length === 0 && themePaths.length === 0) {
+		if (skillPaths.length === 0 && rulePaths.length === 0 && promptPaths.length === 0 && themePaths.length === 0) {
 			return;
 		}
 
 		const extensionPaths: ResourceExtensionPaths = {
 			skillPaths: this.buildExtensionResourcePaths(skillPaths),
+			rulePaths: this.buildExtensionResourcePaths(rulePaths),
 			promptPaths: this.buildExtensionResourcePaths(promptPaths),
 			themePaths: this.buildExtensionResourcePaths(themePaths),
 		};
@@ -2472,7 +2503,14 @@ export class AgentSession {
 				sourceInfo: skill.sourceInfo,
 			}));
 
-			return [...extensionCommands, ...templates, ...skills];
+			const rules: SlashCommandInfo[] = this._resourceLoader.getRules().rules.map((rule) => ({
+				name: `rule:${rule.name}`,
+				description: rule.description,
+				source: "rule",
+				sourceInfo: rule.sourceInfo,
+			}));
+
+			return [...extensionCommands, ...templates, ...skills, ...rules];
 		};
 
 		runner.bindCore(

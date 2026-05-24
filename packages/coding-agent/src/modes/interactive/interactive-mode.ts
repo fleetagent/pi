@@ -499,9 +499,10 @@ export class InteractiveMode {
 				getArgumentCompletions: cmd.getArgumentCompletions,
 			}));
 
-		// Build skill commands from session.skills (if enabled)
+		// Build skill/rule commands from loaded resources (if enabled)
 		this.skillCommands.clear();
 		const skillCommandList: SlashCommand[] = [];
+		const ruleCommandList: SlashCommand[] = [];
 		if (this.settingsManager.getEnableSkillCommands()) {
 			for (const skill of this.session.resourceLoader.getSkills().skills) {
 				const commandName = `skill:${skill.name}`;
@@ -511,10 +512,17 @@ export class InteractiveMode {
 					description: this.prefixAutocompleteDescription(skill.description, skill.sourceInfo),
 				});
 			}
+			for (const rule of this.session.resourceLoader.getRules().rules) {
+				const commandName = `rule:${rule.name}`;
+				ruleCommandList.push({
+					name: commandName,
+					description: this.prefixAutocompleteDescription(rule.description, rule.sourceInfo),
+				});
+			}
 		}
 
 		return new CombinedAutocompleteProvider(
-			[...slashCommands, ...templateCommands, ...extensionCommands, ...skillCommandList],
+			[...slashCommands, ...templateCommands, ...extensionCommands, ...skillCommandList, ...ruleCommandList],
 			this.activeSession.getCwd(),
 			this.fdPath,
 		);
@@ -1314,6 +1322,7 @@ export class InteractiveMode {
 		};
 
 		const skillsResult = this.session.resourceLoader.getSkills();
+		const rulesResult = this.session.resourceLoader.getRules();
 		const promptsResult = this.session.resourceLoader.getPrompts();
 		const themesResult = this.session.resourceLoader.getThemes();
 		const extensions =
@@ -1331,6 +1340,11 @@ export class InteractiveMode {
 		for (const skill of skillsResult.skills) {
 			if (skill.sourceInfo) {
 				sourceInfos.set(skill.filePath, skill.sourceInfo);
+			}
+		}
+		for (const rule of rulesResult.rules) {
+			if (rule.sourceInfo) {
+				sourceInfos.set(rule.filePath, rule.sourceInfo);
 			}
 		}
 		for (const prompt of promptsResult.prompts) {
@@ -1369,6 +1383,19 @@ export class InteractiveMode {
 				});
 				const skillCompactList = formatCompactList(skills.map((skill) => skill.name));
 				addLoadedSection("Skills", skillCompactList, skillList);
+			}
+
+			const rules = rulesResult.rules;
+			if (rules.length > 0) {
+				const groups = this.buildScopeGroups(
+					rules.map((rule) => ({ path: rule.filePath, sourceInfo: rule.sourceInfo })),
+				);
+				const ruleList = this.formatScopeGroups(groups, {
+					formatPath: (item) => this.formatDisplayPath(item.path),
+					formatPackagePath: (item) => this.getShortPath(item.path, item.sourceInfo),
+				});
+				const ruleCompactList = formatCompactList(rules.map((rule) => rule.name));
+				addLoadedSection("Rules", ruleCompactList, ruleList);
 			}
 
 			const templates = this.session.promptTemplates;
@@ -1431,6 +1458,13 @@ export class InteractiveMode {
 			if (skillDiagnostics.length > 0) {
 				const warningLines = this.formatDiagnostics(skillDiagnostics, sourceInfos);
 				this.chatContainer.addChild(new Text(`${theme.fg("warning", "[Skill conflicts]")}\n${warningLines}`, 0, 0));
+				this.chatContainer.addChild(new Spacer(1));
+			}
+
+			const ruleDiagnostics = rulesResult.diagnostics;
+			if (ruleDiagnostics.length > 0) {
+				const warningLines = this.formatDiagnostics(ruleDiagnostics, sourceInfos);
+				this.chatContainer.addChild(new Text(`${theme.fg("warning", "[Rule conflicts]")}\n${warningLines}`, 0, 0));
 				this.chatContainer.addChild(new Spacer(1));
 			}
 
@@ -4879,7 +4913,7 @@ export class InteractiveMode {
 		reloadBox.addChild(new DynamicBorder(borderColor));
 		reloadBox.addChild(new Spacer(1));
 		reloadBox.addChild(
-			new Text(theme.fg("muted", "Reloading keybindings, extensions, skills, prompts, themes..."), 1, 0),
+			new Text(theme.fg("muted", "Reloading keybindings, extensions, skills, rules, prompts, themes..."), 1, 0),
 		);
 		reloadBox.addChild(new Spacer(1));
 		reloadBox.addChild(new DynamicBorder(borderColor));
@@ -4935,7 +4969,7 @@ export class InteractiveMode {
 			if (modelsJsonError) {
 				this.showError(`models.json error: ${modelsJsonError}`);
 			}
-			this.showStatus("Reloaded keybindings, extensions, skills, prompts, themes");
+			this.showStatus("Reloaded keybindings, extensions, skills, rules, prompts, themes");
 		} catch (error) {
 			dismissReloadBox(previousEditor as Component);
 			this.showError(`Reload failed: ${error instanceof Error ? error.message : String(error)}`);

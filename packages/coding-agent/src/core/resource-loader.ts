@@ -14,6 +14,8 @@ import type { Extension, ExtensionFactory, ExtensionRuntime, LoadExtensionsResul
 import { DefaultPackageManager, type PathMetadata } from "./package-manager.ts";
 import type { PromptTemplate } from "./prompt-templates.ts";
 import { loadPromptTemplates } from "./prompt-templates.ts";
+import type { Rule } from "./rules.ts";
+import { loadRules } from "./rules.ts";
 import { SettingsManager } from "./settings-manager.ts";
 import type { Skill } from "./skills.ts";
 import { loadSkills } from "./skills.ts";
@@ -21,6 +23,7 @@ import { createSourceInfo, type SourceInfo } from "./source-info.ts";
 
 export interface ResourceExtensionPaths {
 	skillPaths?: Array<{ path: string; metadata: PathMetadata }>;
+	rulePaths?: Array<{ path: string; metadata: PathMetadata }>;
 	promptPaths?: Array<{ path: string; metadata: PathMetadata }>;
 	themePaths?: Array<{ path: string; metadata: PathMetadata }>;
 }
@@ -28,6 +31,7 @@ export interface ResourceExtensionPaths {
 export interface ResourceLoader {
 	getExtensions(): LoadExtensionsResult;
 	getSkills(): { skills: Skill[]; diagnostics: ResourceDiagnostic[] };
+	getRules(): { rules: Rule[]; diagnostics: ResourceDiagnostic[] };
 	getPrompts(): { prompts: PromptTemplate[]; diagnostics: ResourceDiagnostic[] };
 	getThemes(): { themes: Theme[]; diagnostics: ResourceDiagnostic[] };
 	getAgentsFiles(): { agentsFiles: Array<{ path: string; content: string }> };
@@ -119,11 +123,13 @@ export interface DefaultResourceLoaderOptions {
 	eventBus?: EventBus;
 	additionalExtensionPaths?: string[];
 	additionalSkillPaths?: string[];
+	additionalRulePaths?: string[];
 	additionalPromptTemplatePaths?: string[];
 	additionalThemePaths?: string[];
 	extensionFactories?: ExtensionFactory[];
 	noExtensions?: boolean;
 	noSkills?: boolean;
+	noRules?: boolean;
 	noPromptTemplates?: boolean;
 	noThemes?: boolean;
 	noContextFiles?: boolean;
@@ -132,6 +138,10 @@ export interface DefaultResourceLoaderOptions {
 	extensionsOverride?: (base: LoadExtensionsResult) => LoadExtensionsResult;
 	skillsOverride?: (base: { skills: Skill[]; diagnostics: ResourceDiagnostic[] }) => {
 		skills: Skill[];
+		diagnostics: ResourceDiagnostic[];
+	};
+	rulesOverride?: (base: { rules: Rule[]; diagnostics: ResourceDiagnostic[] }) => {
+		rules: Rule[];
 		diagnostics: ResourceDiagnostic[];
 	};
 	promptsOverride?: (base: { prompts: PromptTemplate[]; diagnostics: ResourceDiagnostic[] }) => {
@@ -157,11 +167,13 @@ export class DefaultResourceLoader implements ResourceLoader {
 	private packageManager: DefaultPackageManager;
 	private additionalExtensionPaths: string[];
 	private additionalSkillPaths: string[];
+	private additionalRulePaths: string[];
 	private additionalPromptTemplatePaths: string[];
 	private additionalThemePaths: string[];
 	private extensionFactories: ExtensionFactory[];
 	private noExtensions: boolean;
 	private noSkills: boolean;
+	private noRules: boolean;
 	private noPromptTemplates: boolean;
 	private noThemes: boolean;
 	private noContextFiles: boolean;
@@ -170,6 +182,10 @@ export class DefaultResourceLoader implements ResourceLoader {
 	private extensionsOverride?: (base: LoadExtensionsResult) => LoadExtensionsResult;
 	private skillsOverride?: (base: { skills: Skill[]; diagnostics: ResourceDiagnostic[] }) => {
 		skills: Skill[];
+		diagnostics: ResourceDiagnostic[];
+	};
+	private rulesOverride?: (base: { rules: Rule[]; diagnostics: ResourceDiagnostic[] }) => {
+		rules: Rule[];
 		diagnostics: ResourceDiagnostic[];
 	};
 	private promptsOverride?: (base: { prompts: PromptTemplate[]; diagnostics: ResourceDiagnostic[] }) => {
@@ -189,6 +205,8 @@ export class DefaultResourceLoader implements ResourceLoader {
 	private extensionsResult: LoadExtensionsResult;
 	private skills: Skill[];
 	private skillDiagnostics: ResourceDiagnostic[];
+	private rules: Rule[];
+	private ruleDiagnostics: ResourceDiagnostic[];
 	private prompts: PromptTemplate[];
 	private promptDiagnostics: ResourceDiagnostic[];
 	private themes: Theme[];
@@ -197,7 +215,9 @@ export class DefaultResourceLoader implements ResourceLoader {
 	private systemPrompt?: string;
 	private appendSystemPrompt: string[];
 	private lastSkillPaths: string[];
+	private lastRulePaths: string[];
 	private extensionSkillSourceInfos: Map<string, SourceInfo>;
+	private extensionRuleSourceInfos: Map<string, SourceInfo>;
 	private extensionPromptSourceInfos: Map<string, SourceInfo>;
 	private extensionThemeSourceInfos: Map<string, SourceInfo>;
 	private lastPromptPaths: string[];
@@ -215,11 +235,13 @@ export class DefaultResourceLoader implements ResourceLoader {
 		});
 		this.additionalExtensionPaths = options.additionalExtensionPaths ?? [];
 		this.additionalSkillPaths = options.additionalSkillPaths ?? [];
+		this.additionalRulePaths = options.additionalRulePaths ?? [];
 		this.additionalPromptTemplatePaths = options.additionalPromptTemplatePaths ?? [];
 		this.additionalThemePaths = options.additionalThemePaths ?? [];
 		this.extensionFactories = options.extensionFactories ?? [];
 		this.noExtensions = options.noExtensions ?? false;
 		this.noSkills = options.noSkills ?? false;
+		this.noRules = options.noRules ?? false;
 		this.noPromptTemplates = options.noPromptTemplates ?? false;
 		this.noThemes = options.noThemes ?? false;
 		this.noContextFiles = options.noContextFiles ?? false;
@@ -227,6 +249,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 		this.appendSystemPromptSource = options.appendSystemPrompt;
 		this.extensionsOverride = options.extensionsOverride;
 		this.skillsOverride = options.skillsOverride;
+		this.rulesOverride = options.rulesOverride;
 		this.promptsOverride = options.promptsOverride;
 		this.themesOverride = options.themesOverride;
 		this.agentsFilesOverride = options.agentsFilesOverride;
@@ -236,6 +259,8 @@ export class DefaultResourceLoader implements ResourceLoader {
 		this.extensionsResult = { extensions: [], errors: [], runtime: createExtensionRuntime() };
 		this.skills = [];
 		this.skillDiagnostics = [];
+		this.rules = [];
+		this.ruleDiagnostics = [];
 		this.prompts = [];
 		this.promptDiagnostics = [];
 		this.themes = [];
@@ -243,7 +268,9 @@ export class DefaultResourceLoader implements ResourceLoader {
 		this.agentsFiles = [];
 		this.appendSystemPrompt = [];
 		this.lastSkillPaths = [];
+		this.lastRulePaths = [];
 		this.extensionSkillSourceInfos = new Map();
+		this.extensionRuleSourceInfos = new Map();
 		this.extensionPromptSourceInfos = new Map();
 		this.extensionThemeSourceInfos = new Map();
 		this.lastPromptPaths = [];
@@ -256,6 +283,10 @@ export class DefaultResourceLoader implements ResourceLoader {
 
 	getSkills(): { skills: Skill[]; diagnostics: ResourceDiagnostic[] } {
 		return { skills: this.skills, diagnostics: this.skillDiagnostics };
+	}
+
+	getRules(): { rules: Rule[]; diagnostics: ResourceDiagnostic[] } {
+		return { rules: this.rules, diagnostics: this.ruleDiagnostics };
 	}
 
 	getPrompts(): { prompts: PromptTemplate[]; diagnostics: ResourceDiagnostic[] } {
@@ -280,11 +311,15 @@ export class DefaultResourceLoader implements ResourceLoader {
 
 	extendResources(paths: ResourceExtensionPaths): void {
 		const skillPaths = this.normalizeExtensionPaths(paths.skillPaths ?? []);
+		const rulePaths = this.normalizeExtensionPaths(paths.rulePaths ?? []);
 		const promptPaths = this.normalizeExtensionPaths(paths.promptPaths ?? []);
 		const themePaths = this.normalizeExtensionPaths(paths.themePaths ?? []);
 
 		for (const entry of skillPaths) {
 			this.extensionSkillSourceInfos.set(entry.path, createSourceInfo(entry.path, entry.metadata));
+		}
+		for (const entry of rulePaths) {
+			this.extensionRuleSourceInfos.set(entry.path, createSourceInfo(entry.path, entry.metadata));
 		}
 		for (const entry of promptPaths) {
 			this.extensionPromptSourceInfos.set(entry.path, createSourceInfo(entry.path, entry.metadata));
@@ -299,6 +334,14 @@ export class DefaultResourceLoader implements ResourceLoader {
 				skillPaths.map((entry) => entry.path),
 			);
 			this.updateSkillsFromPaths(this.lastSkillPaths);
+		}
+
+		if (rulePaths.length > 0) {
+			this.lastRulePaths = this.mergePaths(
+				this.lastRulePaths,
+				rulePaths.map((entry) => entry.path),
+			);
+			this.updateRulesFromPaths(this.lastRulePaths);
 		}
 
 		if (promptPaths.length > 0) {
@@ -327,6 +370,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 		const metadataByPath = new Map<string, PathMetadata>();
 
 		this.extensionSkillSourceInfos = new Map();
+		this.extensionRuleSourceInfos = new Map();
 		this.extensionPromptSourceInfos = new Map();
 		this.extensionThemeSourceInfos = new Map();
 
@@ -347,6 +391,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 		): string[] => getEnabledResources(resources).map((r) => r.path);
 		const enabledExtensions = getEnabledPaths(resolvedPaths.extensions);
 		const enabledSkillResources = getEnabledResources(resolvedPaths.skills);
+		const enabledRuleResources = getEnabledResources(resolvedPaths.rules);
 		const enabledPrompts = getEnabledPaths(resolvedPaths.prompts);
 		const enabledThemes = getEnabledPaths(resolvedPaths.themes);
 
@@ -373,6 +418,28 @@ export class DefaultResourceLoader implements ResourceLoader {
 		};
 
 		const enabledSkills = enabledSkillResources.map(mapSkillPath);
+		const mapRulePath = (resource: { path: string; metadata: PathMetadata }): string => {
+			if (resource.metadata.source !== "auto" && resource.metadata.origin !== "package") {
+				return resource.path;
+			}
+			try {
+				const stats = statSync(resource.path);
+				if (!stats.isDirectory()) {
+					return resource.path;
+				}
+			} catch {
+				return resource.path;
+			}
+			const ruleFile = join(resource.path, "RULES.md");
+			if (existsSync(ruleFile)) {
+				if (!metadataByPath.has(ruleFile)) {
+					metadataByPath.set(ruleFile, resource.metadata);
+				}
+				return ruleFile;
+			}
+			return resource.path;
+		};
+		const enabledRules = enabledRuleResources.map(mapRulePath);
 
 		// Add CLI paths metadata
 		for (const r of cliExtensionPaths.extensions) {
@@ -385,9 +452,15 @@ export class DefaultResourceLoader implements ResourceLoader {
 				metadataByPath.set(r.path, { source: "cli", scope: "temporary", origin: "top-level" });
 			}
 		}
+		for (const r of cliExtensionPaths.rules) {
+			if (!metadataByPath.has(r.path)) {
+				metadataByPath.set(r.path, { source: "cli", scope: "temporary", origin: "top-level" });
+			}
+		}
 
 		const cliEnabledExtensions = getEnabledPaths(cliExtensionPaths.extensions);
 		const cliEnabledSkills = getEnabledPaths(cliExtensionPaths.skills);
+		const cliEnabledRules = getEnabledPaths(cliExtensionPaths.rules);
 		const cliEnabledPrompts = getEnabledPaths(cliExtensionPaths.prompts);
 		const cliEnabledThemes = getEnabledPaths(cliExtensionPaths.themes);
 
@@ -429,6 +502,21 @@ export class DefaultResourceLoader implements ResourceLoader {
 				const resolved = this.resolveResourcePath(p);
 				if (!existsSync(resolved) && !this.skillDiagnostics.some((d) => d.path === resolved)) {
 					this.skillDiagnostics.push({ type: "error", message: "Skill path does not exist", path: resolved });
+				}
+			}
+		}
+
+		const rulePaths = this.noRules
+			? this.mergePaths(cliEnabledRules, this.additionalRulePaths)
+			: this.mergePaths([...cliEnabledRules, ...enabledRules], this.additionalRulePaths);
+
+		this.lastRulePaths = rulePaths;
+		this.updateRulesFromPaths(rulePaths, metadataByPath);
+		for (const p of this.additionalRulePaths) {
+			if (isLocalPath(p)) {
+				const resolved = this.resolveResourcePath(p);
+				if (!existsSync(resolved) && !this.ruleDiagnostics.some((d) => d.path === resolved)) {
+					this.ruleDiagnostics.push({ type: "error", message: "Rule path does not exist", path: resolved });
 				}
 			}
 		}
@@ -523,6 +611,29 @@ export class DefaultResourceLoader implements ResourceLoader {
 				this.getDefaultSourceInfoForPath(skill.filePath),
 		}));
 		this.skillDiagnostics = resolvedSkills.diagnostics;
+	}
+
+	private updateRulesFromPaths(rulePaths: string[], metadataByPath?: Map<string, PathMetadata>): void {
+		let rulesResult: { rules: Rule[]; diagnostics: ResourceDiagnostic[] };
+		if (this.noRules && rulePaths.length === 0) {
+			rulesResult = { rules: [], diagnostics: [] };
+		} else {
+			rulesResult = loadRules({
+				cwd: this.cwd,
+				agentDir: this.agentDir,
+				rulePaths,
+				includeDefaults: false,
+			});
+		}
+		const resolvedRules = this.rulesOverride ? this.rulesOverride(rulesResult) : rulesResult;
+		this.rules = resolvedRules.rules.map((rule) => ({
+			...rule,
+			sourceInfo:
+				this.findSourceInfoForPath(rule.filePath, this.extensionRuleSourceInfos, metadataByPath) ??
+				rule.sourceInfo ??
+				this.getDefaultSourceInfoForPath(rule.filePath),
+		}));
+		this.ruleDiagnostics = resolvedRules.diagnostics;
 	}
 
 	private updatePromptsFromPaths(promptPaths: string[], metadataByPath?: Map<string, PathMetadata>): void {
@@ -644,12 +755,14 @@ export class DefaultResourceLoader implements ResourceLoader {
 		const normalizedPath = resolve(filePath);
 		const agentRoots = [
 			join(this.agentDir, "skills"),
+			join(this.agentDir, "rules"),
 			join(this.agentDir, "prompts"),
 			join(this.agentDir, "themes"),
 			join(this.agentDir, "extensions"),
 		];
 		const projectRoots = [
 			join(this.cwd, CONFIG_DIR_NAME, "skills"),
+			join(this.cwd, CONFIG_DIR_NAME, "rules"),
 			join(this.cwd, CONFIG_DIR_NAME, "prompts"),
 			join(this.cwd, CONFIG_DIR_NAME, "themes"),
 			join(this.cwd, CONFIG_DIR_NAME, "extensions"),

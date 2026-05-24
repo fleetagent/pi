@@ -30,7 +30,7 @@ export interface ReadToolDetails {
 }
 
 interface CompactReadClassification {
-	kind: "docs" | "resource" | "skill";
+	kind: "docs" | "resource" | "skill" | "rule";
 	label: string;
 }
 
@@ -129,6 +129,9 @@ function getCompactReadClassification(
 	if (fileName === "SKILL.md") {
 		return { kind: "skill", label: basename(dirname(absolutePath)) || fileName };
 	}
+	if (fileName === "RULES.md") {
+		return { kind: "rule", label: basename(dirname(absolutePath)) || fileName };
+	}
 
 	const docsClassification = getPiDocsClassification(absolutePath);
 	if (docsClassification) return docsClassification;
@@ -146,9 +149,10 @@ function formatCompactReadCall(
 	theme: Theme,
 ): string {
 	const expandHint = theme.fg("dim", ` (${keyText("app.tools.expand")} to expand)`);
-	if (classification.kind === "skill") {
+	if (classification.kind === "skill" || classification.kind === "rule") {
+		const label = classification.kind === "skill" ? "skill" : "rule";
 		return (
-			theme.fg("customMessageLabel", `\x1b[1m[skill]\x1b[22m `) +
+			theme.fg("customMessageLabel", `\x1b[1m[${label}]\x1b[22m `) +
 			theme.fg("customMessageText", classification.label) +
 			formatReadLineRange(args, theme) +
 			expandHint

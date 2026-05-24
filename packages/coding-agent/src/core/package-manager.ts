@@ -60,6 +60,7 @@ export interface ResolvedResource {
 export interface ResolvedPaths {
 	extensions: ResolvedResource[];
 	skills: ResolvedResource[];
+	rules: ResolvedResource[];
 	prompts: ResolvedResource[];
 	themes: ResolvedResource[];
 }
@@ -147,6 +148,7 @@ interface GitUpdateTarget extends ConfiguredUpdateSource {
 interface PiManifest {
 	extensions?: string[];
 	skills?: string[];
+	rules?: string[];
 	prompts?: string[];
 	themes?: string[];
 }
@@ -154,6 +156,7 @@ interface PiManifest {
 interface ResourceAccumulator {
 	extensions: Map<string, { metadata: PathMetadata; enabled: boolean }>;
 	skills: Map<string, { metadata: PathMetadata; enabled: boolean }>;
+	rules: Map<string, { metadata: PathMetadata; enabled: boolean }>;
 	prompts: Map<string, { metadata: PathMetadata; enabled: boolean }>;
 	themes: Map<string, { metadata: PathMetadata; enabled: boolean }>;
 }
@@ -179,17 +182,19 @@ function resourcePrecedenceRank(m: PathMetadata): number {
 interface PackageFilter {
 	extensions?: string[];
 	skills?: string[];
+	rules?: string[];
 	prompts?: string[];
 	themes?: string[];
 }
 
-type ResourceType = "extensions" | "skills" | "prompts" | "themes";
+type ResourceType = "extensions" | "skills" | "rules" | "prompts" | "themes";
 
-const RESOURCE_TYPES: ResourceType[] = ["extensions", "skills", "prompts", "themes"];
+const RESOURCE_TYPES: ResourceType[] = ["extensions", "skills", "rules", "prompts", "themes"];
 
 const FILE_PATTERNS: Record<ResourceType, RegExp> = {
 	extensions: /\.(ts|js)$/,
 	skills: /\.md$/,
+	rules: /\.md$/,
 	prompts: /\.md$/,
 	themes: /\.json$/,
 };
@@ -405,6 +410,82 @@ function collectAutoSkillEntries(dir: string, mode: SkillDiscoveryMode): string[
 	return collectSkillEntries(dir, mode);
 }
 
+function collectRuleEntries(
+	dir: string,
+	mode: SkillDiscoveryMode,
+	ignoreMatcher?: IgnoreMatcher,
+	rootDir?: string,
+): string[] {
+	const entries: string[] = [];
+	if (!existsSync(dir)) return entries;
+
+	const root = rootDir ?? dir;
+	const ig = ignoreMatcher ?? ignore();
+	addIgnoreRules(ig, dir, root);
+
+	try {
+		const dirEntries = readdirSync(dir, { withFileTypes: true });
+
+		for (const entry of dirEntries) {
+			if (entry.name !== "RULES.md") continue;
+
+			const fullPath = join(dir, entry.name);
+			let isFile = entry.isFile();
+			if (entry.isSymbolicLink()) {
+				try {
+					isFile = statSync(fullPath).isFile();
+				} catch {
+					continue;
+				}
+			}
+
+			const relPath = toPosixPath(relative(root, fullPath));
+			if (isFile && !ig.ignores(relPath)) {
+				entries.push(fullPath);
+				return entries;
+			}
+		}
+
+		for (const entry of dirEntries) {
+			if (entry.name.startsWith(".")) continue;
+			if (entry.name === "node_modules") continue;
+
+			const fullPath = join(dir, entry.name);
+			let isDir = entry.isDirectory();
+			let isFile = entry.isFile();
+
+			if (entry.isSymbolicLink()) {
+				try {
+					const stats = statSync(fullPath);
+					isDir = stats.isDirectory();
+					isFile = stats.isFile();
+				} catch {
+					continue;
+				}
+			}
+
+			const relPath = toPosixPath(relative(root, fullPath));
+			if (mode === "pi" && dir === root && isFile && entry.name.endsWith(".md") && !ig.ignores(relPath)) {
+				entries.push(fullPath);
+				continue;
+			}
+
+			if (!isDir) continue;
+			if (ig.ignores(`${relPath}/`)) continue;
+
+			entries.push(...collectRuleEntries(fullPath, mode, ig, root));
+		}
+	} catch {
+		// Ignore errors
+	}
+
+	return entries;
+}
+
+function collectAutoRuleEntries(dir: string, mode: SkillDiscoveryMode): string[] {
+	return collectRuleEntries(dir, mode);
+}
+
 function findGitRepoRoot(startDir: string): string | null {
 	let dir = resolve(startDir);
 	while (true) {
@@ -438,6 +519,27 @@ function collectAncestorAgentsSkillDirs(startDir: string): string[] {
 	}
 
 	return skillDirs;
+}
+
+function collectAncestorAgentsRuleDirs(startDir: string): string[] {
+	const ruleDirs: string[] = [];
+	const resolvedStartDir = resolve(startDir);
+	const gitRepoRoot = findGitRepoRoot(resolvedStartDir);
+
+	let dir = resolvedStartDir;
+	while (true) {
+		ruleDirs.push(join(dir, ".agents", "rules"));
+		if (gitRepoRoot && dir === gitRepoRoot) {
+			break;
+		}
+		const parent = dirname(dir);
+		if (parent === dir) {
+			break;
+		}
+		dir = parent;
+	}
+
+	return ruleDirs;
 }
 
 function collectAutoPromptEntries(dir: string): string[] {
@@ -616,6 +718,9 @@ function collectResourceFiles(dir: string, resourceType: ResourceType): string[]
 	if (resourceType === "skills") {
 		return collectSkillEntries(dir, "pi");
 	}
+	if (resourceType === "rules") {
+		return collectRuleEntries(dir, "pi");
+	}
 	if (resourceType === "extensions") {
 		return collectAutoExtensionEntries(dir);
 	}
@@ -626,11 +731,11 @@ function matchesAnyPattern(filePath: string, patterns: string[], baseDir: string
 	const rel = toPosixPath(relative(baseDir, filePath));
 	const name = basename(filePath);
 	const filePathPosix = toPosixPath(filePath);
-	const isSkillFile = name === "SKILL.md";
-	const parentDir = isSkillFile ? dirname(filePath) : undefined;
-	const parentRel = isSkillFile ? toPosixPath(relative(baseDir, parentDir!)) : undefined;
-	const parentName = isSkillFile ? basename(parentDir!) : undefined;
-	const parentDirPosix = isSkillFile ? toPosixPath(parentDir!) : undefined;
+	const isDirectoryResourceFile = name === "SKILL.md" || name === "RULES.md";
+	const parentDir = isDirectoryResourceFile ? dirname(filePath) : undefined;
+	const parentRel = isDirectoryResourceFile ? toPosixPath(relative(baseDir, parentDir!)) : undefined;
+	const parentName = isDirectoryResourceFile ? basename(parentDir!) : undefined;
+	const parentDirPosix = isDirectoryResourceFile ? toPosixPath(parentDir!) : undefined;
 
 	return patterns.some((pattern) => {
 		const normalizedPattern = toPosixPath(pattern);
@@ -641,7 +746,7 @@ function matchesAnyPattern(filePath: string, patterns: string[], baseDir: string
 		) {
 			return true;
 		}
-		if (!isSkillFile) return false;
+		if (!isDirectoryResourceFile) return false;
 		return (
 			minimatch(parentRel!, normalizedPattern) ||
 			minimatch(parentName!, normalizedPattern) ||
@@ -660,17 +765,17 @@ function matchesAnyExactPattern(filePath: string, patterns: string[], baseDir: s
 	const rel = toPosixPath(relative(baseDir, filePath));
 	const name = basename(filePath);
 	const filePathPosix = toPosixPath(filePath);
-	const isSkillFile = name === "SKILL.md";
-	const parentDir = isSkillFile ? dirname(filePath) : undefined;
-	const parentRel = isSkillFile ? toPosixPath(relative(baseDir, parentDir!)) : undefined;
-	const parentDirPosix = isSkillFile ? toPosixPath(parentDir!) : undefined;
+	const isDirectoryResourceFile = name === "SKILL.md" || name === "RULES.md";
+	const parentDir = isDirectoryResourceFile ? dirname(filePath) : undefined;
+	const parentRel = isDirectoryResourceFile ? toPosixPath(relative(baseDir, parentDir!)) : undefined;
+	const parentDirPosix = isDirectoryResourceFile ? toPosixPath(parentDir!) : undefined;
 
 	return patterns.some((pattern) => {
 		const normalized = normalizeExactPattern(pattern);
 		if (normalized === rel || normalized === filePathPosix) {
 			return true;
 		}
-		if (!isSkillFile) return false;
+		if (!isDirectoryResourceFile) return false;
 		return normalized === parentRel || normalized === parentDirPosix;
 	});
 }
@@ -2197,12 +2302,14 @@ export class DefaultPackageManager implements PackageManager {
 		const userOverrides = {
 			extensions: (globalSettings.extensions ?? []) as string[],
 			skills: (globalSettings.skills ?? []) as string[],
+			rules: (globalSettings.rules ?? []) as string[],
 			prompts: (globalSettings.prompts ?? []) as string[],
 			themes: (globalSettings.themes ?? []) as string[],
 		};
 		const projectOverrides = {
 			extensions: (projectSettings.extensions ?? []) as string[],
 			skills: (projectSettings.skills ?? []) as string[],
+			rules: (projectSettings.rules ?? []) as string[],
 			prompts: (projectSettings.prompts ?? []) as string[],
 			themes: (projectSettings.themes ?? []) as string[],
 		};
@@ -2210,18 +2317,24 @@ export class DefaultPackageManager implements PackageManager {
 		const userDirs = {
 			extensions: join(globalBaseDir, "extensions"),
 			skills: join(globalBaseDir, "skills"),
+			rules: join(globalBaseDir, "rules"),
 			prompts: join(globalBaseDir, "prompts"),
 			themes: join(globalBaseDir, "themes"),
 		};
 		const projectDirs = {
 			extensions: join(projectBaseDir, "extensions"),
 			skills: join(projectBaseDir, "skills"),
+			rules: join(projectBaseDir, "rules"),
 			prompts: join(projectBaseDir, "prompts"),
 			themes: join(projectBaseDir, "themes"),
 		};
 		const userAgentsSkillsDir = join(getHomeDir(), ".agents", "skills");
+		const userAgentsRulesDir = join(getHomeDir(), ".agents", "rules");
 		const projectAgentsSkillDirs = collectAncestorAgentsSkillDirs(this.cwd).filter(
 			(dir) => resolve(dir) !== resolve(userAgentsSkillsDir),
+		);
+		const projectAgentsRuleDirs = collectAncestorAgentsRuleDirs(this.cwd).filter(
+			(dir) => resolve(dir) !== resolve(userAgentsRulesDir),
 		);
 
 		const addResources = (
@@ -2256,6 +2369,15 @@ export class DefaultPackageManager implements PackageManager {
 			projectBaseDir,
 		);
 
+		// Project rules from .pi/
+		addResources(
+			"rules",
+			collectAutoRuleEntries(projectDirs.rules, "pi"),
+			projectMetadata,
+			projectOverrides.rules,
+			projectBaseDir,
+		);
+
 		// Project skills from .agents/ (each with its own baseDir)
 		for (const agentsSkillsDir of projectAgentsSkillDirs) {
 			const agentsBaseDir = dirname(agentsSkillsDir); // the .agents directory
@@ -2268,6 +2390,22 @@ export class DefaultPackageManager implements PackageManager {
 				collectAutoSkillEntries(agentsSkillsDir, "agents"),
 				agentsMetadata,
 				projectOverrides.skills,
+				agentsBaseDir,
+			);
+		}
+
+		// Project rules from .agents/ (each with its own baseDir)
+		for (const agentsRulesDir of projectAgentsRuleDirs) {
+			const agentsBaseDir = dirname(agentsRulesDir); // the .agents directory
+			const agentsMetadata: PathMetadata = {
+				...projectMetadata,
+				baseDir: agentsBaseDir,
+			};
+			addResources(
+				"rules",
+				collectAutoRuleEntries(agentsRulesDir, "agents"),
+				agentsMetadata,
+				projectOverrides.rules,
 				agentsBaseDir,
 			);
 		}
@@ -2305,6 +2443,15 @@ export class DefaultPackageManager implements PackageManager {
 			globalBaseDir,
 		);
 
+		// User rules from ~/.pi/agent/
+		addResources(
+			"rules",
+			collectAutoRuleEntries(userDirs.rules, "pi"),
+			userMetadata,
+			userOverrides.rules,
+			globalBaseDir,
+		);
+
 		// User skills from ~/.agents/ (with its own baseDir)
 		const userAgentsBaseDir = dirname(userAgentsSkillsDir);
 		const userAgentsMetadata: PathMetadata = {
@@ -2317,6 +2464,20 @@ export class DefaultPackageManager implements PackageManager {
 			userAgentsMetadata,
 			userOverrides.skills,
 			userAgentsBaseDir,
+		);
+
+		// User rules from ~/.agents/ (with its own baseDir)
+		const userAgentsRulesBaseDir = dirname(userAgentsRulesDir);
+		const userAgentsRulesMetadata: PathMetadata = {
+			...userMetadata,
+			baseDir: userAgentsRulesBaseDir,
+		};
+		addResources(
+			"rules",
+			collectAutoRuleEntries(userAgentsRulesDir, "agents"),
+			userAgentsRulesMetadata,
+			userOverrides.rules,
+			userAgentsRulesBaseDir,
 		);
 
 		addResources(
@@ -2363,6 +2524,8 @@ export class DefaultPackageManager implements PackageManager {
 				return accumulator.extensions;
 			case "skills":
 				return accumulator.skills;
+			case "rules":
+				return accumulator.rules;
 			case "prompts":
 				return accumulator.prompts;
 			case "themes":
@@ -2388,6 +2551,7 @@ export class DefaultPackageManager implements PackageManager {
 		return {
 			extensions: new Map(),
 			skills: new Map(),
+			rules: new Map(),
 			prompts: new Map(),
 			themes: new Map(),
 		};
@@ -2416,6 +2580,7 @@ export class DefaultPackageManager implements PackageManager {
 		return {
 			extensions: mapToResolved(accumulator.extensions),
 			skills: mapToResolved(accumulator.skills),
+			rules: mapToResolved(accumulator.rules),
 			prompts: mapToResolved(accumulator.prompts),
 			themes: mapToResolved(accumulator.themes),
 		};

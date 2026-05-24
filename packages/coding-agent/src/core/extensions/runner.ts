@@ -993,11 +993,13 @@ export class ExtensionRunner {
 		reason: ResourcesDiscoverEvent["reason"],
 	): Promise<{
 		skillPaths: Array<{ path: string; extensionPath: string }>;
+		rulePaths: Array<{ path: string; extensionPath: string }>;
 		promptPaths: Array<{ path: string; extensionPath: string }>;
 		themePaths: Array<{ path: string; extensionPath: string }>;
 	}> {
 		const ctx = this.createContext();
 		const skillPaths: Array<{ path: string; extensionPath: string }> = [];
+		const rulePaths: Array<{ path: string; extensionPath: string }> = [];
 		const promptPaths: Array<{ path: string; extensionPath: string }> = [];
 		const themePaths: Array<{ path: string; extensionPath: string }> = [];
 
@@ -1013,6 +1015,9 @@ export class ExtensionRunner {
 
 					if (result?.skillPaths?.length) {
 						skillPaths.push(...result.skillPaths.map((path) => ({ path, extensionPath: ext.path })));
+					}
+					if (result?.rulePaths?.length) {
+						rulePaths.push(...result.rulePaths.map((path) => ({ path, extensionPath: ext.path })));
 					}
 					if (result?.promptPaths?.length) {
 						promptPaths.push(...result.promptPaths.map((path) => ({ path, extensionPath: ext.path })));
@@ -1033,7 +1038,7 @@ export class ExtensionRunner {
 			}
 		}
 
-		return { skillPaths, promptPaths, themePaths };
+		return { skillPaths, rulePaths, promptPaths, themePaths };
 	}
 
 	/** Emit input event. Transforms chain, "handled" short-circuits. */

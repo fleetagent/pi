@@ -70,6 +70,7 @@ export type PackageSource =
 			source: string;
 			extensions?: string[];
 			skills?: string[];
+			rules?: string[];
 			prompts?: string[];
 			themes?: string[];
 	  };
@@ -96,9 +97,10 @@ export interface Settings {
 	packages?: PackageSource[]; // Array of npm/git package sources (string or object with filtering)
 	extensions?: string[]; // Array of local extension file paths or directories
 	skills?: string[]; // Array of local skill file paths or directories
+	rules?: string[]; // Array of local rule file paths or directories
 	prompts?: string[]; // Array of local prompt template paths or directories
 	themes?: string[]; // Array of local theme file paths or directories
-	enableSkillCommands?: boolean; // default: true - register skills as /skill:name commands
+	enableSkillCommands?: boolean; // default: true - register skills and rules as /skill:name and /rule:name commands
 	terminal?: TerminalSettings;
 	images?: ImageSettings;
 	enabledModels?: string[]; // Model patterns for cycling (same format as --models CLI flag)
@@ -868,6 +870,23 @@ export class SettingsManager {
 		const projectSettings = structuredClone(this.projectSettings);
 		projectSettings.skills = paths;
 		this.markProjectModified("skills");
+		this.saveProjectSettings(projectSettings);
+	}
+
+	getRulePaths(): string[] {
+		return [...(this.settings.rules ?? [])];
+	}
+
+	setRulePaths(paths: string[]): void {
+		this.globalSettings.rules = paths;
+		this.markModified("rules");
+		this.save();
+	}
+
+	setProjectRulePaths(paths: string[]): void {
+		const projectSettings = structuredClone(this.projectSettings);
+		projectSettings.rules = paths;
+		this.markProjectModified("rules");
 		this.saveProjectSettings(projectSettings);
 	}
 

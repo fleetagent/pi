@@ -700,7 +700,7 @@ The current session name is available via `get_state` in the `sessionName` field
 
 #### get_commands
 
-Get available commands (extension commands, prompt templates, and skills). These can be invoked via the `prompt` command by prefixing with `/`.
+Get available commands (extension commands, prompt templates, skills, and rules). These can be invoked via the `prompt` command by prefixing with `/`.
 
 ```json
 {"type": "get_commands"}
@@ -716,7 +716,8 @@ Response:
     "commands": [
       {"name": "session-name", "description": "Set or clear session name", "source": "extension", "path": "/home/user/.pi/agent/extensions/session.ts"},
       {"name": "fix-tests", "description": "Fix failing tests", "source": "prompt", "location": "project", "path": "/home/user/myproject/.pi/agent/prompts/fix-tests.md"},
-      {"name": "skill:brave-search", "description": "Web search via Brave API", "source": "skill", "location": "user", "path": "/home/user/.pi/agent/skills/brave-search/SKILL.md"}
+      {"name": "skill:brave-search", "description": "Web search via Brave API", "source": "skill", "location": "user", "path": "/home/user/.pi/agent/skills/brave-search/SKILL.md"},
+      {"name": "rule:typescript", "description": "Mandatory TypeScript rules", "source": "rule", "location": "project", "path": "/home/user/myproject/.pi/rules/typescript/RULES.md"}
     ]
   }
 }
@@ -729,6 +730,7 @@ Each command has:
   - `"extension"`: Registered via `pi.registerCommand()` in an extension
   - `"prompt"`: Loaded from a prompt template `.md` file
   - `"skill"`: Loaded from a skill directory (name is prefixed with `skill:`)
+  - `"rule"`: Loaded from a rule directory (name is prefixed with `rule:`)
 - `location`: Where it was loaded from (optional, not present for extensions):
   - `"user"`: User-level (`~/.pi/agent/`)
   - `"project"`: Project-level (`./.pi/agent/`)

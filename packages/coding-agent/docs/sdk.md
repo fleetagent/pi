@@ -164,7 +164,7 @@ await pi.createAgentSession();
 
 ### Resource loading
 
-Use `DefaultResourceLoader` to override or discover extensions, skills, prompt templates, themes, and context files.
+Use `DefaultResourceLoader` to override or discover extensions, skills, rules, prompt templates, themes, and context files.
 
 ```typescript
 const loader = new DefaultResourceLoader({

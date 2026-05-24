@@ -1,6 +1,6 @@
 export interface ResourceCollision {
-	resourceType: "extension" | "skill" | "prompt" | "theme";
-	name: string; // skill name, command/tool/flag name, prompt name, theme name
+	resourceType: "extension" | "skill" | "rule" | "prompt" | "theme";
+	name: string; // skill/rule name, command/tool/flag name, prompt name, theme name
 	winnerPath: string;
 	loserPath: string;
 	winnerSource?: string; // e.g., "npm:foo", "git:...", "local"
