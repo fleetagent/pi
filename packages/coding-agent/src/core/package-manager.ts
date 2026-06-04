@@ -1152,14 +1152,15 @@ export class DefaultPackageManager implements PackageManager {
 
 		for (const entry of sources) {
 			const parsed = this.parseSource(entry.source);
-			if (parsed.type === "local" || parsed.pinned) {
-				continue;
-			}
+			// Pinned npm versions are fixed. Pinned git refs are configured checkout targets,
+			// so include them to reconcile an existing clone when the configured ref changes.
 			if (parsed.type === "npm") {
-				npmCandidates.push({ ...entry, parsed });
-				continue;
+				if (!parsed.pinned) {
+					npmCandidates.push({ ...entry, parsed });
+				}
+			} else if (parsed.type === "git") {
+				gitCandidates.push({ ...entry, parsed });
 			}
-			gitCandidates.push({ ...entry, parsed });
 		}
 
 		const npmCheckTasks = npmCandidates.map((entry) => async () => ({
@@ -1810,13 +1811,25 @@ export class DefaultPackageManager implements PackageManager {
 
 	private getNpmInstallArgs(specs: string[], installRoot: string): string[] {
 		const packageManagerName = this.getPackageManagerName();
+		// Extension packages run inside pi and resolve pi APIs through loader aliases/virtual modules.
+		// Disable peer dependency resolution for managed installs (npm's --legacy-peer-deps, and
+		// equivalent bun/pnpm settings) so package managers do not install or solve host-provided
+		// @earendil-works/pi-* peers. Stale auto-installed pi peers can otherwise block updates.
 		if (packageManagerName === "bun") {
-			return ["install", ...specs, "--cwd", installRoot];
+			return ["install", ...specs, "--cwd", installRoot, "--omit=peer"];
 		}
 		if (packageManagerName === "pnpm") {
-			return ["install", ...specs, "--prefix", installRoot, "--config.strict-dep-builds=false"];
+			return [
+				"install",
+				...specs,
+				"--prefix",
+				installRoot,
+				"--config.auto-install-peers=false",
+				"--config.strict-peer-dependencies=false",
+				"--config.strict-dep-builds=false",
+			];
 		}
-		return ["install", ...specs, "--prefix", installRoot];
+		return ["install", ...specs, "--prefix", installRoot, "--legacy-peer-deps"];
 	}
 
 	private async installNpm(source: NpmSource, scope: SourceScope, temporary: boolean): Promise<void> {
@@ -1871,6 +1884,11 @@ export class DefaultPackageManager implements PackageManager {
 			return;
 		}
 
+		if (source.ref) {
+			await this.ensureGitRef(targetDir, ["fetch", "origin", source.ref], "FETCH_HEAD");
+			return;
+		}
+
 		const target = await this.getLocalGitUpdateTarget(targetDir);
 		await this.ensureGitRef(targetDir, target.fetchArgs, target.ref);
 	}
@@ -1883,7 +1901,8 @@ export class DefaultPackageManager implements PackageManager {
 			cwd: targetDir,
 			timeoutMs: NETWORK_TIMEOUT_MS,
 		});
-		const targetHead = await this.runCommandCapture("git", ["rev-parse", ref], {
+		const commitRef = `${ref}^{commit}`;
+		const targetHead = await this.runCommandCapture("git", ["rev-parse", commitRef], {
 			cwd: targetDir,
 			timeoutMs: NETWORK_TIMEOUT_MS,
 		});
@@ -1891,7 +1910,7 @@ export class DefaultPackageManager implements PackageManager {
 			return;
 		}
 
-		await this.runCommand("git", ["reset", "--hard", ref], { cwd: targetDir });
+		await this.runCommand("git", ["reset", "--hard", commitRef], { cwd: targetDir });
 
 		// Clean untracked files (extensions should be pristine)
 		await this.runCommand("git", ["clean", "-fdx"], { cwd: targetDir });

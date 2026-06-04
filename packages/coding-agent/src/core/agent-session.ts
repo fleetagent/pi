@@ -56,6 +56,7 @@ import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
 import {
+	type CompactOptions,
 	type ContextUsage,
 	type ExtensionCommandContextActions,
 	type ExtensionErrorListener,
@@ -338,6 +339,9 @@ export class AgentSession {
 	// Compaction state
 	private _compactionAbortController: AbortController | undefined = undefined;
 	private _autoCompactionAbortController: AbortController | undefined = undefined;
+	private _extensionCompactionQueue: CompactOptions[] = [];
+	private _extensionCompactionTimer: ReturnType<typeof setTimeout> | undefined = undefined;
+	private _extensionCompactionRunning = false;
 	private _overflowRecoveryAttempted = false;
 
 	// Branch summarization state
@@ -562,6 +566,9 @@ export class AgentSession {
 
 		// Notify all listeners
 		this._emit(event.type === "agent_end" ? { ...event, willRetry: this._willRetryAfterAgentEnd(event) } : event);
+		if (event.type === "agent_end") {
+			this._scheduleExtensionCompactions();
+		}
 
 		// Handle session persistence
 		if (event.type === "message_end") {
@@ -776,6 +783,22 @@ export class AgentSession {
 	 * Call this when completely done with the session.
 	 */
 	dispose(): void {
+		try {
+			this.abortRetry();
+			this.abortCompaction();
+			this.abortBranchSummary();
+			this.abortBash();
+			this.agent.abort();
+		} catch {
+			// Dispose must succeed even if an abort hook throws.
+		}
+
+		if (this._extensionCompactionTimer !== undefined) {
+			clearTimeout(this._extensionCompactionTimer);
+			this._extensionCompactionTimer = undefined;
+		}
+		this._extensionCompactionQueue = [];
+
 		this._extensionRunner.invalidate(
 			"This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For reload, do not use the old ctx after await ctx.reload().",
 		);
@@ -1022,7 +1045,13 @@ export class AgentSession {
 			this._retryAttempt = 0;
 		}
 
-		return await this._checkCompaction(msg);
+		if (await this._checkCompaction(msg)) {
+			return true;
+		}
+
+		// The agent loop drains both queues before emitting agent_end. Any messages
+		// here were queued by agent_end extension handlers and need a continuation.
+		return this.agent.hasQueuedMessages();
 	}
 
 	async getStructuredResponse<TSchemaValue extends TSchema>(
@@ -1303,6 +1332,7 @@ export class AgentSession {
 					currentText,
 					currentImages,
 					options?.source ?? "interactive",
+					this.isStreaming ? options?.streamingBehavior : undefined,
 				);
 				if (inputResult.action === "handled") {
 					preflightResult?.(true);
@@ -1645,8 +1675,8 @@ export class AgentSession {
 		} else {
 			this.agent.state.messages.push(appMessage);
 			this.session.appendCustomMessageEntry(message.customType, message.content, message.display, message.details);
-			this._emit({ type: "message_start", message: appMessage });
-			this._emit({ type: "message_end", message: appMessage });
+			await this._emit({ type: "message_start", message: appMessage });
+			await this._emit({ type: "message_end", message: appMessage });
 		}
 	}
 
@@ -1944,6 +1974,57 @@ export class AgentSession {
 	// =========================================================================
 	// Compaction
 	// =========================================================================
+
+	/** Queue extension-triggered compaction outside the currently active agent turn. */
+	private _requestExtensionCompaction(options?: CompactOptions): void {
+		this._extensionCompactionQueue.push(options ?? {});
+		if (this.isStreaming) {
+			return;
+		}
+		this._scheduleExtensionCompactions();
+	}
+
+	private _scheduleExtensionCompactions(): void {
+		const alreadyScheduled = this._extensionCompactionTimer !== undefined;
+		if (this._extensionCompactionRunning || alreadyScheduled || this._extensionCompactionQueue.length === 0) {
+			return;
+		}
+		this._extensionCompactionTimer = setTimeout(() => {
+			this._extensionCompactionTimer = undefined;
+			void this._drainExtensionCompactionQueue();
+		}, 0);
+	}
+
+	private async _drainExtensionCompactionQueue(): Promise<void> {
+		if (this._extensionCompactionRunning) {
+			return;
+		}
+		this._extensionCompactionRunning = true;
+		try {
+			while (!this.isStreaming) {
+				const options = this._extensionCompactionQueue.shift();
+				if (!options) {
+					break;
+				}
+				await this._runRequestedExtensionCompaction(options);
+			}
+		} finally {
+			this._extensionCompactionRunning = false;
+		}
+		if (!this.isStreaming) {
+			this._scheduleExtensionCompactions();
+		}
+	}
+
+	private async _runRequestedExtensionCompaction(options: CompactOptions): Promise<void> {
+		try {
+			const result = await this.compact(options.customInstructions);
+			options.onComplete?.(result);
+		} catch (error) {
+			const err = error instanceof Error ? error : new Error(String(error));
+			options.onError?.(err);
+		}
+	}
 
 	/**
 	 * Manually compact the session context.
@@ -2575,15 +2656,7 @@ export class AgentSession {
 				},
 				getContextUsage: () => this.getContextUsage(),
 				compact: (options) => {
-					void (async () => {
-						try {
-							const result = await this.compact(options?.customInstructions);
-							options?.onComplete?.(result);
-						} catch (error) {
-							const err = error instanceof Error ? error : new Error(String(error));
-							options?.onError?.(err);
-						}
-					})();
+					this._requestExtensionCompaction(options);
 				},
 				getSystemPrompt: () => this.systemPrompt,
 			},
@@ -2772,6 +2845,12 @@ export class AgentSession {
 	// Auto-Retry
 	// =========================================================================
 
+	private _isNonRetryableProviderLimitError(errorMessage: string): boolean {
+		return /GoUsageLimitError|FreeUsageLimitError|Monthly usage limit reached|available balance|insufficient_quota|out of budget|quota exceeded|billing/i.test(
+			errorMessage,
+		);
+	}
+
 	/**
 	 * Check if an error is retryable (overloaded, rate limit, server errors).
 	 * Context overflow errors are NOT retryable (handled by compaction instead).
@@ -2784,6 +2863,7 @@ export class AgentSession {
 		if (isContextOverflow(message, contextWindow)) return false;
 
 		const err = message.errorMessage;
+		if (this._isNonRetryableProviderLimitError(err)) return false;
 		// Match: overloaded_error, provider returned error, rate limit, 429, 500, 502, 503, 504, service unavailable, network/connection errors (including connection lost), WebSocket transport closes/errors, fetch failed, premature stream endings, HTTP/2 closed before response, terminated, retry delay exceeded
 		return /overloaded|provider.?returned.?error|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server.?error|internal.?error|network.?error|connection.?error|connection.?refused|connection.?lost|websocket.?closed|websocket.?error|other side closed|fetch failed|upstream.?connect|reset before headers|socket hang up|ended without|stream ended before message_stop|http2 request did not get a response|timed? out|timeout|terminated|retry delay/i.test(
 			err,
@@ -2986,7 +3066,7 @@ export class AgentSession {
 	 */
 	setSessionName(name: string): void {
 		this.session.appendSessionInfo(name);
-		this._emit({ type: "session_info_changed", name: this.session.getSessionName() });
+		void this._emit({ type: "session_info_changed", name: this.session.getSessionName() });
 	}
 
 	// =========================================================================

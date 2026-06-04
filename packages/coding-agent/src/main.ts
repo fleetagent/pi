@@ -134,7 +134,7 @@ async function resolveSessionPath(sessionArg: string, cwd: string, sessionDir?: 
 	}
 
 	// Try global search across all projects
-	const allSessions = await new LocalSessionManager({ cwd: process.cwd() }).listAll();
+	const allSessions = await new LocalSessionManager({ cwd: process.cwd(), sessionDir }).listAll();
 	const globalMatches = allSessions.filter((s) => s.id.startsWith(sessionArg));
 
 	if (globalMatches.length >= 1) {
@@ -318,8 +318,8 @@ async function resolveInitialSession(
 		initTheme(settingsManager.getTheme(), true);
 		try {
 			const selectedPath = await selectSession(
-				(onProgress) => new LocalSessionManager({ cwd: cwd, sessionDir: sessionDir }).list(onProgress),
-				(onProgress) => new LocalSessionManager({ cwd: process.cwd() }).listAll(onProgress),
+				(onProgress) => new LocalSessionManager({ cwd, sessionDir }).list(onProgress),
+				(onProgress) => new LocalSessionManager({ cwd: process.cwd(), sessionDir }).listAll(onProgress),
 			);
 			if (!selectedPath) {
 				console.log(chalk.dim("No session selected"));
@@ -650,6 +650,7 @@ export async function main(args: string[], options?: MainOptions) {
 		},
 	});
 	await piAgent.createAgentSession({ session: initialSession });
+	time("createAgentSessionRuntime");
 	const runtime = piAgent;
 	const { services } = runtime;
 	const { settingsManager, modelRegistry, resourceLoader } = services;

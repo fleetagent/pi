@@ -2,7 +2,12 @@ import { copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { CURRENT_SESSION_VERSION } from "./constants.ts";
 import { createSessionId } from "./ids.ts";
-import { findMostRecentSession, getDefaultSessionDir, loadEntriesFromFile } from "./jsonl-helpers.ts";
+import {
+	findMostRecentSession,
+	getDefaultSessionDir,
+	getDefaultSessionDirPath,
+	loadEntriesFromFile,
+} from "./jsonl-helpers.ts";
 import { LocalSession } from "./local-session.ts";
 import type { Session } from "./session.ts";
 import type { OpenSessionOptions, SessionManager } from "./session-manager.ts";
@@ -49,11 +54,16 @@ export class LocalSessionManager implements SessionManager {
 
 	continueRecent(): LocalSession {
 		const dir = this.sessionDir ?? getDefaultSessionDir(this.cwd);
-		const mostRecent = findMostRecentSession(dir);
+		const filterCwd = this.sessionDir !== undefined && dir !== getDefaultSessionDirPath(this.cwd);
+		const mostRecent = findMostRecentSession(dir, filterCwd ? this.cwd : undefined);
 		if (mostRecent) {
 			return new LocalSession(this.cwd, dir, mostRecent, this);
 		}
 		return new LocalSession(this.cwd, dir, undefined, this);
+	}
+
+	usesDefaultSessionDir(): boolean {
+		return (this.sessionDir ?? getDefaultSessionDir(this.cwd)) === getDefaultSessionDirPath(this.cwd);
 	}
 
 	forkFrom(reference: string): LocalSession {
@@ -121,13 +131,19 @@ export class LocalSessionManager implements SessionManager {
 
 	async list(onProgress?: SessionListProgress): Promise<SessionInfo[]> {
 		const dir = this.sessionDir ?? getDefaultSessionDir(this.cwd);
-		const sessions = await listJsonlSessions(dir, onProgress);
+		const filterCwd = this.sessionDir !== undefined && dir !== getDefaultSessionDirPath(this.cwd);
+		const resolvedCwd = resolve(this.cwd);
+		const sessions = (await listJsonlSessions(dir, onProgress)).filter(
+			(session) => !filterCwd || (session.cwd !== undefined && resolve(session.cwd) === resolvedCwd),
+		);
 		sessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());
 		return sessions;
 	}
 
 	async listAll(onProgress?: SessionListProgress): Promise<SessionInfo[]> {
-		const sessions = await listAllJsonlSessions(getSessionsRoot(), onProgress);
+		const sessions = this.sessionDir
+			? await listJsonlSessions(this.sessionDir, onProgress)
+			: await listAllJsonlSessions(getSessionsRoot(), onProgress);
 		sessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());
 		return sessions;
 	}

@@ -47,6 +47,52 @@ const pi = await PiAgent.create({
 const session = await pi.createAgentSession();
 ```
 
+The session manages agent lifecycle, message history, model state, compaction, and event streaming.
+
+```typescript
+interface AgentSession {
+  // Send a prompt and wait for completion
+  prompt(text: string, options?: PromptOptions): Promise<void>;
+
+  // Queue messages during streaming
+  steer(text: string): Promise<void>;
+  followUp(text: string): Promise<void>;
+
+  // Subscribe to events (returns unsubscribe function)
+  subscribe(listener: (event: AgentSessionEvent) => void): () => void;
+
+  // Session info
+  sessionFile: string | undefined;
+  sessionId: string;
+
+  // Model control
+  setModel(model: Model): Promise<void>;
+  setThinkingLevel(level: ThinkingLevel): void;
+  cycleModel(): Promise<ModelCycleResult | undefined>;
+  cycleThinkingLevel(): ThinkingLevel | undefined;
+
+  // State access
+  agent: Agent;
+  model: Model | undefined;
+  thinkingLevel: ThinkingLevel;
+  messages: AgentMessage[];
+  isStreaming: boolean;
+
+  // In-place tree navigation within the current session file
+  navigateTree(targetId: string, options?: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string }): Promise<{ editorText?: string; cancelled: boolean }>;
+
+  // Compaction
+  compact(customInstructions?: string): Promise<CompactionResult>;
+  abortCompaction(): void;
+
+  // Abort current operation
+  abort(): Promise<void>;
+
+  // Cleanup
+  dispose(): void;
+}
+```
+
 Most one-off session options can be passed directly to `PiAgent.create()`:
 
 ```typescript
@@ -72,6 +118,16 @@ Use `pi.createAgentSession({ session })` when you already have an opened or crea
 Use `session.sessionReference` when you need the backend-neutral active session reference. For local JSONL sessions this is the session file path; for in-memory sessions it is `undefined`. `session.sessionFile` remains available as a local-file-oriented alias.
 
 Session replacement APIs such as new-session, resume, fork, clone, and import live on `PiAgent`, not on `AgentSession`.
+
+```typescript
+interface PromptOptions {
+  expandPromptTemplates?: boolean;
+  images?: ImageContent[];
+  streamingBehavior?: "steer" | "followUp";
+  source?: InputSource;
+  preflightResult?: (success: boolean) => void;
+}
+```
 
 ### SessionManager and Session
 
