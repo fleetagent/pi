@@ -178,6 +178,29 @@ function isGoogleThinkingApi(model: Model<any>): boolean {
 	return model.api === "google-generative-ai" || model.api === "google-vertex";
 }
 
+function isAnthropicAdaptiveThinkingModel(modelId: string): boolean {
+	return (
+		modelId.includes("opus-4-6") ||
+		modelId.includes("opus-4.6") ||
+		modelId.includes("opus-4-7") ||
+		modelId.includes("opus-4.7") ||
+		modelId.includes("opus-4-8") ||
+		modelId.includes("opus-4.8") ||
+		modelId.includes("sonnet-4-6") ||
+		modelId.includes("sonnet-4.6")
+	);
+}
+
+function isAnthropicTemperatureUnsupportedModel(modelId: string): boolean {
+	const id = modelId.toLowerCase();
+	return id.includes("opus-4-7") || id.includes("opus-4.7") || id.includes("opus-4-8") || id.includes("opus-4.8");
+}
+
+function mergeAnthropicMessagesCompat(model: Model<Api>, compat: AnthropicMessagesCompat): void {
+	model.compat = { ...(model.compat as AnthropicMessagesCompat | undefined), ...compat };
+}
+
+
 function isGemini3ProModel(modelId: string): boolean {
 	return /gemini-3(?:\.\d+)?-pro/.test(modelId.toLowerCase());
 }
@@ -210,14 +233,33 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 	if (supportsOpenAiXhigh(model.id)) {
 		mergeThinkingLevelMap(model, { xhigh: "xhigh" });
 	}
+	if (model.provider === "openai" && model.id === "gpt-5.5") {
+		mergeThinkingLevelMap(model, { minimal: null });
+	}
+	if (model.id.endsWith("gpt-5.5-pro")) {
+		mergeThinkingLevelMap(model, { off: null, minimal: null, low: null });
+	}
+
 	if (model.id.includes("opus-4-6") || model.id.includes("opus-4.6")) {
 		mergeThinkingLevelMap(model, { xhigh: "max" });
 	}
 	if (model.id.includes("opus-4-7") || model.id.includes("opus-4.7")) {
 		mergeThinkingLevelMap(model, { xhigh: "xhigh" });
 	}
+	if (model.api === "anthropic-messages" && isAnthropicAdaptiveThinkingModel(model.id)) {
+		mergeAnthropicMessagesCompat(model, { forceAdaptiveThinking: true });
+	}
+	if (model.api === "anthropic-messages" && isAnthropicTemperatureUnsupportedModel(model.id)) {
+		mergeAnthropicMessagesCompat(model, { supportsTemperature: false });
+	}
+
 	if (model.api === "openai-completions" && model.id.includes("deepseek-v4")) {
-		mergeThinkingLevelMap(model, DEEPSEEK_V4_THINKING_LEVEL_MAP);
+		mergeThinkingLevelMap(
+			model,
+			model.provider === "openrouter"
+				? { ...DEEPSEEK_V4_THINKING_LEVEL_MAP, xhigh: "xhigh" }
+				: DEEPSEEK_V4_THINKING_LEVEL_MAP,
+		);
 	}
 	if (isGoogleThinkingApi(model) && isGemini3ProModel(model.id)) {
 		mergeThinkingLevelMap(model, { off: null, minimal: null, low: "LOW", medium: null, high: "HIGH" });
@@ -241,12 +283,25 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 		// Pi's low/medium/high pass through verbatim; OpenRouter normalizes to Mercury's vocabulary.
 		mergeThinkingLevelMap(model, { off: null });
 	}
+	if (model.provider === "opencode-go" && model.id === "kimi-k2.6") {
+		// OpenCode Go exposes Kimi K2.6 thinking as on/off, not distinct effort tiers.
+		mergeThinkingLevelMap(model, { minimal: null, low: null, medium: null });
+	}
+	if (model.provider === "opencode" && model.id === "grok-build-0.1") {
+		// OpenCode Zen Grok Build reasons by default but rejects explicit reasoningEffort.
+		mergeThinkingLevelMap(model, { off: null, minimal: null, low: null, medium: null });
+	}
 }
 
 function getAnthropicMessagesCompat(provider: string, modelId: string): AnthropicMessagesCompat | undefined {
-	return EAGER_TOOL_INPUT_STREAMING_UNSUPPORTED_ANTHROPIC_MODELS.has(`${provider}:${modelId}`)
-		? { supportsEagerToolInputStreaming: false }
-		: undefined;
+	const compat: AnthropicMessagesCompat = {};
+	if (EAGER_TOOL_INPUT_STREAMING_UNSUPPORTED_ANTHROPIC_MODELS.has(`${provider}:${modelId}`)) {
+		compat.supportsEagerToolInputStreaming = false;
+	}
+	if (provider === "xiaomi" || provider.startsWith("xiaomi-token-plan-")) {
+		compat.allowEmptySignature = true;
+	}
+	return Object.keys(compat).length > 0 ? compat : undefined;
 }
 
 function getBedrockBaseUrl(modelId: string): string {
@@ -855,6 +910,16 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					baseUrl = `${variant.basePath}/v1`;
 				}
 
+				if (variant.provider === "opencode" && modelId === "grok-build-0.1") {
+					compat = { ...(compat ?? {}), supportsReasoningEffort: false };
+				}
+
+				if ((variant.provider === "opencode" || variant.provider === "opencode-go") && modelId === "kimi-k2.6") {
+					// OpenCode Kimi K2.6 accepts Anthropic-style thinking objects
+					// and rejects string thinking values or combined reasoning_effort.
+					compat = { ...(compat ?? {}), thinkingFormat: "deepseek", supportsReasoningEffort: false };
+				}
+
 				// Fix known mismatches between models.dev npm data and actual
 				// OpenCode Go endpoint behaviour. models.dev reports these models
 				// as @ai-sdk/anthropic, but the OpenCode Go endpoints either don't
@@ -1083,6 +1148,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 				for (const [modelId, model] of Object.entries(data.xiaomi.models)) {
 					const m = model as ModelsDevModel;
 					if (m.tool_call !== true) continue;
+					if (provider.startsWith("xiaomi-token-plan-") && modelId === "mimo-v2-flash") continue;
 
 					models.push({
 						id: modelId,
@@ -1177,6 +1243,9 @@ async function generateModels() {
 			candidate.cost.output = 2.06;
 			candidate.cost.cacheRead = 0.07;
 			candidate.maxTokens = 4096;
+		}
+		if (candidate.provider === "openrouter" && candidate.id.startsWith("moonshotai/kimi-k2.6")) {
+			candidate.compat = { ...candidate.compat, supportsDeveloperRole: false };
 		}
 		if (candidate.provider === "openrouter" && candidate.id === "z-ai/glm-5") {
 			candidate.cost.input = 0.6;
@@ -1459,11 +1528,9 @@ async function generateModels() {
 					? {
 							requiresReasoningContentOnAssistantMessages:
 								deepseekCompat.requiresReasoningContentOnAssistantMessages,
-							thinkingFormat: deepseekCompat.thinkingFormat,
 						}
 					: deepseekCompat),
 			};
-			mergeThinkingLevelMap(candidate, DEEPSEEK_V4_THINKING_LEVEL_MAP);
 		}
 	}
 
@@ -1494,6 +1561,7 @@ async function generateModels() {
 	// Context window is based on observed server limits (400s above ~272k), not marketing numbers.
 	const CODEX_BASE_URL = "https://chatgpt.com/backend-api";
 	const CODEX_CONTEXT = 272000;
+	const CODEX_SPARK_CONTEXT = 128000;
 	const CODEX_MAX_TOKENS = 128000;
 	const codexModels: Model<"openai-codex-responses">[] = [
 		{
@@ -1529,7 +1597,7 @@ async function generateModels() {
 			reasoning: true,
 			input: ["text"],
 			cost: { input: 1.75, output: 14, cacheRead: 0.175, cacheWrite: 0 },
-			contextWindow: CODEX_CONTEXT,
+			contextWindow: CODEX_SPARK_CONTEXT,
 			maxTokens: CODEX_MAX_TOKENS,
 		},
 		{

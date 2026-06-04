@@ -159,7 +159,15 @@ function extractUserMessageText(content: string | Array<{ type: string; text?: s
 function getAttributionHeaders(
 	model: Model<any>,
 	settingsManager: SettingsManager,
+	sessionId?: string,
 ): Record<string, string> | undefined {
+	if (
+		sessionId &&
+		(model.provider === "opencode" || model.provider === "opencode-go" || model.baseUrl.includes("opencode.ai"))
+	) {
+		return { "x-opencode-session": sessionId, "x-opencode-client": "pi" };
+	}
+
 	if (!isInstallTelemetryEnabled(settingsManager)) {
 		return undefined;
 	}
@@ -497,11 +505,18 @@ export class PiAgent {
 					throw new Error(auth.error);
 				}
 				const providerRetrySettings = services.settingsManager.getProviderRetrySettings();
-				const attributionHeaders = getAttributionHeaders(model, services.settingsManager);
+				const timeoutMs =
+					options?.timeoutMs ??
+					providerRetrySettings.timeoutMs ??
+					(model.api === "openai-codex-responses" ? services.settingsManager.getHttpIdleTimeoutMs() : undefined);
+				const websocketConnectTimeoutMs =
+					options?.websocketConnectTimeoutMs ?? services.settingsManager.getWebSocketConnectTimeoutMs();
+				const attributionHeaders = getAttributionHeaders(model, services.settingsManager, options?.sessionId);
 				return streamSimple(model, context, {
 					...options,
 					apiKey: auth.apiKey,
-					timeoutMs: options?.timeoutMs ?? providerRetrySettings.timeoutMs,
+					timeoutMs,
+					websocketConnectTimeoutMs,
 					maxRetries: options?.maxRetries ?? providerRetrySettings.maxRetries,
 					maxRetryDelayMs: options?.maxRetryDelayMs ?? providerRetrySettings.maxRetryDelayMs,
 					headers:

@@ -16,4 +16,5 @@ export interface SessionManager {
 	importJsonl(inputPath: string, options?: OpenSessionOptions): SessionResult;
 	list(onProgress?: SessionListProgress): Promise<SessionInfo[]>;
 	listAll(onProgress?: SessionListProgress): Promise<SessionInfo[]>;
+	usesDefaultSessionDir?(): boolean;
 }

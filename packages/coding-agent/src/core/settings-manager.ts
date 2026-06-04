@@ -114,6 +114,18 @@ export interface Settings {
 	warnings?: WarningSettings;
 	sessionDir?: string; // Custom session storage directory (same format as --session-dir CLI flag)
 	httpIdleTimeoutMs?: number; // HTTP header/body idle timeout in milliseconds; 0 disables it
+	websocketConnectTimeoutMs?: number; // WebSocket connect/open handshake timeout in milliseconds; 0 disables it
+}
+
+function parseTimeoutSetting(value: unknown, settingName: string): number | undefined {
+	const timeoutMs = parseHttpIdleTimeoutMs(value);
+	if (timeoutMs !== undefined) {
+		return timeoutMs;
+	}
+	if (value !== undefined) {
+		throw new Error(`Invalid ${settingName} setting: ${String(value)}`);
+	}
+	return undefined;
 }
 
 /** Deep merge settings: project/overrides take precedence, nested objects merge recursively */
@@ -724,15 +736,7 @@ export class SettingsManager {
 	}
 
 	getHttpIdleTimeoutMs(): number {
-		const value = this.settings.httpIdleTimeoutMs;
-		const timeoutMs = parseHttpIdleTimeoutMs(value);
-		if (timeoutMs !== undefined) {
-			return timeoutMs;
-		}
-		if (value !== undefined) {
-			throw new Error(`Invalid httpIdleTimeoutMs setting: ${String(value)}`);
-		}
-		return DEFAULT_HTTP_IDLE_TIMEOUT_MS;
+		return parseTimeoutSetting(this.settings.httpIdleTimeoutMs, "httpIdleTimeoutMs") ?? DEFAULT_HTTP_IDLE_TIMEOUT_MS;
 	}
 
 	setHttpIdleTimeoutMs(timeoutMs: number): void {
@@ -742,6 +746,10 @@ export class SettingsManager {
 		this.globalSettings.httpIdleTimeoutMs = Math.floor(timeoutMs);
 		this.markModified("httpIdleTimeoutMs");
 		this.save();
+	}
+
+	getWebSocketConnectTimeoutMs(): number | undefined {
+		return parseTimeoutSetting(this.settings.websocketConnectTimeoutMs, "websocketConnectTimeoutMs");
 	}
 
 	getProviderRetrySettings(): { timeoutMs?: number; maxRetries?: number; maxRetryDelayMs: number } {

@@ -199,7 +199,7 @@ export default async function (pi: ExtensionAPI) {
 
   pi.registerProvider("local-openai", {
     baseUrl: "http://localhost:1234/v1",
-    apiKey: "LOCAL_OPENAI_API_KEY",
+    apiKey: "$LOCAL_OPENAI_API_KEY",
     api: "openai-completions",
     models: payload.data.map((model) => ({
       id: model.id,
@@ -1555,7 +1555,7 @@ If you need to discover models from a remote endpoint, prefer an async extension
 pi.registerProvider("my-proxy", {
   name: "My Proxy",
   baseUrl: "https://proxy.example.com",
-  apiKey: "PROXY_API_KEY",  // env var name or literal
+  apiKey: "$PROXY_API_KEY",  // env var reference
   api: "anthropic-messages",
   models: [
     {
@@ -1602,7 +1602,7 @@ pi.registerProvider("corporate-ai", {
 **Config options:**
 - `name` - Display name for the provider in UI such as `/login`.
 - `baseUrl` - API endpoint URL. Required when defining models.
-- `apiKey` - API key or environment variable name. Required when defining models (unless `oauth` provided).
+- `apiKey` - API key literal, environment interpolation (`$ENV_VAR` or `${ENV_VAR}`), or leading `!command`. Required when defining models (unless `oauth` provided). `$$` escapes `$`, and `$!` escapes a literal `!` without triggering command execution.
 - `api` - API type: `"anthropic-messages"`, `"openai-completions"`, `"openai-responses"`, etc.
 - `headers` - Custom headers to include in requests.
 - `authHeader` - If true, adds `Authorization: Bearer` header automatically.
@@ -2557,6 +2557,7 @@ All examples in [examples/extensions/](../examples/extensions/).
 | `custom-compaction.ts` | Custom compaction summary | `on("session_before_compact")` |
 | `trigger-compact.ts` | Trigger compaction manually | `compact()` |
 | `git-checkpoint.ts` | Git stash on turns | `on("turn_start")`, `on("session_before_fork")`, `exec` |
+| `git-merge-and-resolve.ts` | Fetch, merge, and resolve conflicts | `on("agent_end")`, `exec`, `sendUserMessage` |
 | `auto-commit-on-exit.ts` | Commit on shutdown | `on("session_shutdown")`, `exec` |
 | **UI Components** |||
 | `status-line.ts` | Footer status indicator | `setStatus`, session events |

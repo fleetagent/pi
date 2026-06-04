@@ -1,11 +1,12 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Agent } from "@fleetagent/pi-agent-core";
+import { Agent, type AgentEvent } from "@fleetagent/pi-agent-core";
 import { type AssistantMessage, getModel } from "@fleetagent/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
+import type { CompactOptions } from "../src/core/extensions/index.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
 import { InMemorySessionManager, type Session } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
@@ -95,6 +96,44 @@ describe("AgentSession auto-compaction queue resume", () => {
 		if (tempDir && existsSync(tempDir)) {
 			rmSync(tempDir, { recursive: true });
 		}
+	});
+
+	it("defers extension-requested compaction until agent_end listeners have been notified", async () => {
+		const sequence: string[] = [];
+		const compactSpy = vi.spyOn(session, "compact").mockResolvedValue({
+			summary: "compacted",
+			firstKeptEntryId: "entry-1",
+			tokensBefore: 100,
+			details: {},
+		});
+		session.subscribe((event) => {
+			if (event.type === "agent_end") {
+				sequence.push("agent_end");
+			}
+		});
+
+		(session.agent.state as unknown as { isStreaming: boolean }).isStreaming = true;
+		const requestCompaction = (
+			session as unknown as { _requestExtensionCompaction: (options?: CompactOptions) => void }
+		)._requestExtensionCompaction.bind(session);
+		requestCompaction({ onComplete: () => sequence.push("compact_complete") });
+
+		await vi.runAllTimersAsync();
+		expect(compactSpy).not.toHaveBeenCalled();
+
+		(session.agent.state as unknown as { isStreaming: boolean }).isStreaming = false;
+		const handleAgentEvent = (
+			session as unknown as { _handleAgentEvent: (event: AgentEvent) => Promise<void> }
+		)._handleAgentEvent.bind(session);
+		await handleAgentEvent({ type: "agent_end", messages: [] });
+
+		expect(compactSpy).not.toHaveBeenCalled();
+		expect(sequence).toEqual(["agent_end"]);
+
+		await vi.runAllTimersAsync();
+
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+		expect(sequence).toEqual(["agent_end", "compact_complete"]);
 	});
 
 	it("should resume after threshold compaction when only agent-level queued messages exist", async () => {

@@ -693,7 +693,17 @@ Content`,
 
 			expect(runCommandSpy).toHaveBeenCalledWith(
 				"mise",
-				["exec", "node@20", "--", "npm", "install", "@scope/pkg", "--prefix", join(agentDir, "npm")],
+				[
+					"exec",
+					"node@20",
+					"--",
+					"npm",
+					"install",
+					"@scope/pkg",
+					"--prefix",
+					join(agentDir, "npm"),
+					"--legacy-peer-deps",
+				],
 				undefined,
 			);
 		});
@@ -714,7 +724,7 @@ Content`,
 
 			expect(runCommandSpy).toHaveBeenCalledWith(
 				"mise",
-				["exec", "bun@1", "--", "bun", "install", "@scope/pkg", "--cwd", join(agentDir, "npm")],
+				["exec", "bun@1", "--", "bun", "install", "@scope/pkg", "--cwd", join(agentDir, "npm"), "--omit=peer"],
 				undefined,
 			);
 		});
@@ -748,7 +758,7 @@ Content`,
 				if (args[0] === "rev-parse" && args[1] === "HEAD") {
 					return "old-head";
 				}
-				if (args[0] === "rev-parse" && args[1] === "FETCH_HEAD") {
+				if (args[0] === "rev-parse" && args[1] === "FETCH_HEAD^{commit}") {
 					return "new-head";
 				}
 				throw new Error(`Unexpected runCommandCapture args: ${args.join(" ")}`);
@@ -758,7 +768,9 @@ Content`,
 			await packageManager.install(source);
 
 			expect(runCommandSpy).toHaveBeenCalledWith("git", ["fetch", "origin", "v2"], { cwd: targetDir });
-			expect(runCommandSpy).toHaveBeenCalledWith("git", ["reset", "--hard", "FETCH_HEAD"], { cwd: targetDir });
+			expect(runCommandSpy).toHaveBeenCalledWith("git", ["reset", "--hard", "FETCH_HEAD^{commit}"], {
+				cwd: targetDir,
+			});
 			expect(runCommandSpy).toHaveBeenCalledWith("git", ["clean", "-fdx"], { cwd: targetDir });
 			expect(runCommandSpy).toHaveBeenCalledWith("npm", ["install", "--omit=dev"], { cwd: targetDir });
 		});
@@ -779,7 +791,7 @@ Content`,
 				if (args[0] === "rev-parse" && args[1] === "HEAD") {
 					return "old-head";
 				}
-				if (args[0] === "rev-parse" && args[1] === "origin/HEAD") {
+				if (args[0] === "rev-parse" && args[1] === "origin/HEAD^{commit}") {
 					return "new-head";
 				}
 				throw new Error(`Unexpected runCommandCapture args: ${args.join(" ")}`);
@@ -789,7 +801,9 @@ Content`,
 			await packageManager.install(source);
 
 			expect(runCommandSpy).toHaveBeenCalledWith("git", fetchArgs, { cwd: targetDir });
-			expect(runCommandSpy).toHaveBeenCalledWith("git", ["reset", "--hard", "origin/HEAD"], { cwd: targetDir });
+			expect(runCommandSpy).toHaveBeenCalledWith("git", ["reset", "--hard", "origin/HEAD^{commit}"], {
+				cwd: targetDir,
+			});
 			expect(runCommandSpy).toHaveBeenCalledWith("git", ["clean", "-fdx"], { cwd: targetDir });
 		});
 
@@ -832,7 +846,7 @@ Content`,
 				if (args[0] === "rev-parse" && args[1] === "--abbrev-ref" && args[2] === "@{upstream}") {
 					return "origin/main";
 				}
-				if (args[0] === "rev-parse" && args[1] === "@{upstream}") {
+				if (args[0] === "rev-parse" && (args[1] === "@{upstream}" || args[1] === "@{upstream}^{commit}")) {
 					return "remote-head";
 				}
 				if (args[0] === "rev-parse" && args[1] === "HEAD") {
@@ -868,7 +882,7 @@ Content`,
 				if (args[0] === "rev-parse" && args[1] === "--abbrev-ref" && args[2] === "@{upstream}") {
 					return "origin/main";
 				}
-				if (args[0] === "rev-parse" && args[1] === "@{upstream}") {
+				if (args[0] === "rev-parse" && (args[1] === "@{upstream}" || args[1] === "@{upstream}^{commit}")) {
 					return "remote-head";
 				}
 				if (args[0] === "rev-parse" && args[1] === "HEAD") {
@@ -949,6 +963,8 @@ Content`,
 						"pnpm-pkg",
 						"--prefix",
 						join(agentDir, "npm"),
+						"--config.auto-install-peers=false",
+						"--config.strict-peer-dependencies=false",
 						"--config.strict-dep-builds=false",
 					]);
 					mkdirSync(join(packagePath, "extensions"), { recursive: true });
@@ -2001,7 +2017,7 @@ export default function(api) { api.registerTool({ name: "test", description: "te
 			);
 			expect(runCommandSpy).toHaveBeenCalledWith(
 				"npm",
-				["install", "example@latest", "--prefix", join(tempDir, ".pi", "npm")],
+				["install", "example@latest", "--prefix", join(tempDir, ".pi", "npm"), "--legacy-peer-deps"],
 				undefined,
 			);
 		});
@@ -2040,7 +2056,13 @@ export default function(api) { api.registerTool({ name: "test", description: "te
 				.mockImplementation(async (...callArgs: unknown[]) => {
 					const [command, args] = callArgs as [string, string[]];
 					expect(command).toBe("npm");
-					expect(args).toEqual(["install", "legacy-pkg@latest", "--prefix", join(agentDir, "npm")]);
+					expect(args).toEqual([
+						"install",
+						"legacy-pkg@latest",
+						"--prefix",
+						join(agentDir, "npm"),
+						"--legacy-peer-deps",
+					]);
 					mkdirSync(managedPath, { recursive: true });
 					writeFileSync(
 						join(managedPath, "package.json"),
@@ -2057,7 +2079,7 @@ export default function(api) { api.registerTool({ name: "test", description: "te
 			expect(packageManager.getInstalledPath("npm:legacy-pkg", "user")).toBe(managedPath);
 		});
 
-		it("should batch npm updates per scope and run git updates in parallel while skipping pinned and current packages", async () => {
+		it("should batch npm updates per scope and run git updates in parallel while skipping pinned npm and current packages", async () => {
 			const userOldPath = join(agentDir, "npm", "node_modules", "user-old");
 			const userCurrentPath = join(agentDir, "npm", "node_modules", "user-current");
 			const userUnknownPath = join(agentDir, "npm", "node_modules", "user-unknown");
@@ -2150,16 +2172,30 @@ export default function(api) { api.registerTool({ name: "test", description: "te
 			expect(runCommandSpy).toHaveBeenNthCalledWith(
 				1,
 				"npm",
-				["install", "user-old@latest", "user-unknown@latest", "--prefix", join(agentDir, "npm")],
+				[
+					"install",
+					"user-old@latest",
+					"user-unknown@latest",
+					"--prefix",
+					join(agentDir, "npm"),
+					"--legacy-peer-deps",
+				],
 				undefined,
 			);
 			expect(runCommandSpy).toHaveBeenNthCalledWith(
 				2,
 				"npm",
-				["install", "project-old@latest", "project-missing@latest", "--prefix", join(tempDir, ".pi", "npm")],
+				[
+					"install",
+					"project-old@latest",
+					"project-missing@latest",
+					"--prefix",
+					join(tempDir, ".pi", "npm"),
+					"--legacy-peer-deps",
+				],
 				undefined,
 			);
-			expect(updateGitSpy).toHaveBeenCalledTimes(3);
+			expect(updateGitSpy).toHaveBeenCalledTimes(4);
 			expect(maxConcurrentNpmUpdates).toBeGreaterThan(1);
 			expect(maxConcurrentGitUpdates).toBeGreaterThan(1);
 		});

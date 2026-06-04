@@ -1,6 +1,7 @@
 import {
 	findMostRecent,
 	getDefaultSessionDir as getDefaultJsonlSessionDir,
+	getDefaultSessionDirPath as getDefaultJsonlSessionDirPath,
 	JsonlSessionStore,
 	load,
 } from "./stores/jsonl-session-store.ts";
@@ -21,7 +22,11 @@ export function loadEntriesFromFile(filePath: string): FileEntry[] {
 	return load(filePath);
 }
 
+export function getDefaultSessionDirPath(cwd: string, agentDir?: string): string {
+	return getDefaultJsonlSessionDirPath(cwd, agentDir);
+}
+
 /** Exported for testing. */
-export function findMostRecentSession(sessionDir: string): string | null {
-	return findMostRecent(sessionDir);
+export function findMostRecentSession(sessionDir: string, cwd?: string): string | null {
+	return findMostRecent(sessionDir, cwd);
 }
