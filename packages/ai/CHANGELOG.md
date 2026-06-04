@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.7](https://github.com/fleetagent/pi/compare/@fleetagent/pi-ai-v0.0.6...@fleetagent/pi-ai-v0.0.7) (2026-06-04)
+
+
+### Bug Fixes
+
+* **ai:** use stable provider model ids ([6bae279](https://github.com/fleetagent/pi/commit/6bae2793a591a87660ffe267dfda2757ba4d57a9))
+
 ## [0.0.6](https://github.com/fleetagent/pi/compare/@fleetagent/pi-ai-v0.0.5...@fleetagent/pi-ai-v0.0.6) (2026-05-24)
 
 
