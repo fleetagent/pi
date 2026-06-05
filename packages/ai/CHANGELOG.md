@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.8](https://github.com/fleetagent/pi/compare/@fleetagent/pi-ai-v0.0.7...@fleetagent/pi-ai-v0.0.8) (2026-06-05)
+
+
+### Bug Fixes
+
+* **coding-agent:** run extension compaction between turns and check n… ([6883d4a](https://github.com/fleetagent/pi/commit/6883d4a7327c24cefac3fd0f89b76fecf1bf62ad))
+* **coding-agent:** run extension compaction between turns and check npm for updates ([609e3a1](https://github.com/fleetagent/pi/commit/609e3a1a48cdc946f7a218beb1f0e5ba341d2442))
+
 ## [0.0.7](https://github.com/fleetagent/pi/compare/@fleetagent/pi-ai-v0.0.6...@fleetagent/pi-ai-v0.0.7) (2026-06-04)
 
 
