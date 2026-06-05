@@ -9,7 +9,8 @@
 ### Fixed
 
 - Changed RPC client idle waits to use a five-minute inactivity timeout that resets when events arrive.
-- Deferred extension-triggered compaction until after the active agent turn ends.
+- Ran extension-triggered compaction between agent turns so queued follow-up work can continue before `agent_end`.
+- Fixed update notifications to check and describe the `@fleetagent/pi-coding-agent` package instead of the upstream Pi release.
 
 ## [0.0.5](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.0.4...@fleetagent/pi-coding-agent-v0.0.5) (2026-05-23)
 

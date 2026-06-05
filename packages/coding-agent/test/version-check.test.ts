@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { PACKAGE_NAME } from "../src/config.ts";
 import {
 	checkForNewPiVersion,
 	comparePackageVersions,
@@ -34,20 +35,20 @@ describe("version checks", () => {
 	});
 
 	it("returns only newer versions", async () => {
-		const fetchMock = vi.fn(async () => Response.json({ version: "1.2.3" }));
+		const fetchMock = vi.fn(async () => Response.json({ "dist-tags": { latest: "1.2.3" } }));
 		vi.stubGlobal("fetch", fetchMock);
 
 		await expect(checkForNewPiVersion("1.2.3")).resolves.toBeUndefined();
-		await expect(checkForNewPiVersion("1.2.2")).resolves.toEqual({ version: "1.2.3" });
+		await expect(checkForNewPiVersion("1.2.2")).resolves.toEqual({ packageName: PACKAGE_NAME, version: "1.2.3" });
 	});
 
-	it("uses the pi.dev version check api with a pi user agent", async () => {
-		const fetchMock = vi.fn(async () => Response.json({ version: "1.2.4" }));
+	it("uses the npm package metadata api with a pi user agent", async () => {
+		const fetchMock = vi.fn(async () => Response.json({ "dist-tags": { latest: "1.2.4" } }));
 		vi.stubGlobal("fetch", fetchMock);
 
 		await expect(getLatestPiVersion("1.2.3")).resolves.toBe("1.2.4");
 		expect(fetchMock).toHaveBeenCalledWith(
-			"https://pi.dev/api/latest-version",
+			`https://registry.npmjs.org/${PACKAGE_NAME.replace("/", "%2f")}`,
 			expect.objectContaining({
 				headers: expect.objectContaining({
 					"User-Agent": expect.stringMatching(/^pi\/1\.2\.3 /),
@@ -60,8 +61,8 @@ describe("version checks", () => {
 	it("returns the active package metadata from the version check api", async () => {
 		const fetchMock = vi.fn(async () =>
 			Response.json({
+				"dist-tags": { latest: "1.2.4" },
 				packageName: "@new-scope/pi",
-				version: "1.2.4",
 			}),
 		);
 		vi.stubGlobal("fetch", fetchMock);
@@ -73,10 +74,14 @@ describe("version checks", () => {
 	});
 
 	it("returns update notes from the version check api", async () => {
-		const fetchMock = vi.fn(async () => Response.json({ note: " **Read this** ", version: "1.2.4" }));
+		const fetchMock = vi.fn(async () => Response.json({ "dist-tags": { latest: "1.2.4" }, note: " **Read this** " }));
 		vi.stubGlobal("fetch", fetchMock);
 
-		await expect(getLatestPiRelease("1.2.3")).resolves.toEqual({ note: "**Read this**", version: "1.2.4" });
+		await expect(getLatestPiRelease("1.2.3")).resolves.toEqual({
+			note: "**Read this**",
+			packageName: PACKAGE_NAME,
+			version: "1.2.4",
+		});
 	});
 
 	it("skips api calls when version checks are disabled", async () => {

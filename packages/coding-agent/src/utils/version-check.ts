@@ -1,6 +1,7 @@
+import { PACKAGE_NAME } from "../config.ts";
 import { getPiUserAgent } from "./pi-user-agent.ts";
 
-const LATEST_VERSION_URL = "https://pi.dev/api/latest-version";
+const LATEST_VERSION_URL = `https://registry.npmjs.org/${PACKAGE_NAME.replace("/", "%2f")}`;
 const DEFAULT_VERSION_CHECK_TIMEOUT_MS = 10000;
 
 export interface LatestPiRelease {
@@ -69,18 +70,25 @@ export async function getLatestPiRelease(
 	if (!response.ok) return undefined;
 
 	const data = (await response.json()) as {
+		"dist-tags"?: { latest?: unknown };
+		note?: unknown;
 		packageName?: unknown;
 		version?: unknown;
-		note?: unknown;
 	};
-	if (typeof data.version !== "string" || !data.version.trim()) {
+	const version =
+		typeof data["dist-tags"]?.latest === "string" && data["dist-tags"].latest.trim()
+			? data["dist-tags"].latest.trim()
+			: typeof data.version === "string" && data.version.trim()
+				? data.version.trim()
+				: undefined;
+	if (!version) {
 		return undefined;
 	}
 	const packageName =
-		typeof data.packageName === "string" && data.packageName.trim() ? data.packageName.trim() : undefined;
+		typeof data.packageName === "string" && data.packageName.trim() ? data.packageName.trim() : PACKAGE_NAME;
 	const note = typeof data.note === "string" && data.note.trim() ? data.note.trim() : undefined;
 	return {
-		version: data.version.trim(),
+		version,
 		packageName,
 		...(note ? { note } : {}),
 	};
