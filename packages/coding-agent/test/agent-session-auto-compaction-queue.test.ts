@@ -98,14 +98,8 @@ describe("AgentSession auto-compaction queue resume", () => {
 		}
 	});
 
-	it("defers extension-requested compaction until agent_end listeners have been notified", async () => {
+	it("runs extension-requested compaction between turns before agent_end", async () => {
 		const sequence: string[] = [];
-		const compactSpy = vi.spyOn(session, "compact").mockResolvedValue({
-			summary: "compacted",
-			firstKeptEntryId: "entry-1",
-			tokensBefore: 100,
-			details: {},
-		});
 		session.subscribe((event) => {
 			if (event.type === "agent_end") {
 				sequence.push("agent_end");
@@ -116,24 +110,32 @@ describe("AgentSession auto-compaction queue resume", () => {
 		const requestCompaction = (
 			session as unknown as { _requestExtensionCompaction: (options?: CompactOptions) => void }
 		)._requestExtensionCompaction.bind(session);
-		requestCompaction({ onComplete: () => sequence.push("compact_complete") });
+		requestCompaction({
+			onComplete: () => {
+				sequence.push("compact_complete");
+				session.agent.followUp({
+					role: "user",
+					content: [{ type: "text", text: "queued after compaction" }],
+					timestamp: Date.now(),
+				});
+			},
+		});
 
 		await vi.runAllTimersAsync();
-		expect(compactSpy).not.toHaveBeenCalled();
+		expect(sequence).toEqual([]);
 
-		(session.agent.state as unknown as { isStreaming: boolean }).isStreaming = false;
+		const turnUpdate = await session.agent.prepareNextTurn?.(session.agent.signal);
+
+		expect(sequence).toEqual(["compact_complete"]);
+		expect(session.agent.hasQueuedMessages()).toBe(true);
+		expect(turnUpdate?.context?.messages.at(0)?.role).toBe("compactionSummary");
+
 		const handleAgentEvent = (
 			session as unknown as { _handleAgentEvent: (event: AgentEvent) => Promise<void> }
 		)._handleAgentEvent.bind(session);
 		await handleAgentEvent({ type: "agent_end", messages: [] });
 
-		expect(compactSpy).not.toHaveBeenCalled();
-		expect(sequence).toEqual(["agent_end"]);
-
-		await vi.runAllTimersAsync();
-
-		expect(compactSpy).toHaveBeenCalledTimes(1);
-		expect(sequence).toEqual(["agent_end", "compact_complete"]);
+		expect(sequence).toEqual(["compact_complete", "agent_end"]);
 	});
 
 	it("should resume after threshold compaction when only agent-level queued messages exist", async () => {

@@ -15,7 +15,16 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname } from "node:path";
-import type { Agent, AgentEvent, AgentMessage, AgentState, AgentTool, ThinkingLevel } from "@fleetagent/pi-agent-core";
+import type {
+	Agent,
+	AgentContext,
+	AgentEvent,
+	AgentLoopTurnUpdate,
+	AgentMessage,
+	AgentState,
+	AgentTool,
+	ThinkingLevel,
+} from "@fleetagent/pi-agent-core";
 import type {
 	AssistantMessage,
 	ImageContent,
@@ -407,6 +416,7 @@ export class AgentSession {
 		// (session persistence, extensions, auto-compaction, retry logic)
 		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);
 		this._installAgentToolHooks();
+		this._installAgentTurnPreparation();
 
 		this._buildRuntime({
 			activeToolNames: this._initialActiveToolNames,
@@ -512,6 +522,30 @@ export class AgentSession {
 				details: hookResult.details,
 				isError: hookResult.isError ?? isError,
 			};
+		};
+	}
+
+	private _installAgentTurnPreparation(): void {
+		const previousPrepareNextTurn = this.agent.prepareNextTurn;
+		this.agent.prepareNextTurn = async (signal) => {
+			const previousUpdate = await previousPrepareNextTurn?.(signal);
+			const compacted = await this._drainExtensionCompactionQueue("between-turns");
+			if (!compacted) {
+				return previousUpdate;
+			}
+
+			return {
+				...previousUpdate,
+				context: this._buildCurrentAgentContext(previousUpdate?.context),
+			} satisfies AgentLoopTurnUpdate;
+		};
+	}
+
+	private _buildCurrentAgentContext(previousContext?: AgentContext): AgentContext {
+		return {
+			systemPrompt: previousContext?.systemPrompt ?? this.agent.state.systemPrompt,
+			messages: this.agent.state.messages.slice(),
+			tools: previousContext?.tools ?? this.agent.state.tools.slice(),
 		};
 	}
 
@@ -1995,30 +2029,33 @@ export class AgentSession {
 		}, 0);
 	}
 
-	private async _drainExtensionCompactionQueue(): Promise<void> {
+	private async _drainExtensionCompactionQueue(mode: "idle" | "between-turns" = "idle"): Promise<boolean> {
 		if (this._extensionCompactionRunning) {
-			return;
+			return false;
 		}
 		this._extensionCompactionRunning = true;
+		let compacted = false;
 		try {
-			while (!this.isStreaming) {
+			while (mode === "between-turns" || !this.isStreaming) {
 				const options = this._extensionCompactionQueue.shift();
 				if (!options) {
 					break;
 				}
-				await this._runRequestedExtensionCompaction(options);
+				compacted = true;
+				await this._runRequestedExtensionCompaction(options, mode === "idle");
 			}
 		} finally {
 			this._extensionCompactionRunning = false;
 		}
-		if (!this.isStreaming) {
+		if (mode === "idle" && !this.isStreaming) {
 			this._scheduleExtensionCompactions();
 		}
+		return compacted;
 	}
 
-	private async _runRequestedExtensionCompaction(options: CompactOptions): Promise<void> {
+	private async _runRequestedExtensionCompaction(options: CompactOptions, abortActiveRun: boolean): Promise<void> {
 		try {
-			const result = await this.compact(options.customInstructions);
+			const result = await this._compactSession(options.customInstructions, { abortActiveRun });
 			options.onComplete?.(result);
 		} catch (error) {
 			const err = error instanceof Error ? error : new Error(String(error));
@@ -2032,8 +2069,19 @@ export class AgentSession {
 	 * @param customInstructions Optional instructions for the compaction summary
 	 */
 	async compact(customInstructions?: string): Promise<CompactionResult> {
-		this._disconnectFromAgent();
-		await this.abort();
+		return this._compactSession(customInstructions, { abortActiveRun: true });
+	}
+
+	private async _compactSession(
+		customInstructions: string | undefined,
+		options: { abortActiveRun: boolean },
+	): Promise<CompactionResult> {
+		let disconnected = false;
+		if (options.abortActiveRun) {
+			this._disconnectFromAgent();
+			disconnected = true;
+			await this.abort();
+		}
 		this._compactionAbortController = new AbortController();
 		this._emit({ type: "compaction_start", reason: "manual" });
 
@@ -2158,7 +2206,9 @@ export class AgentSession {
 			throw error;
 		} finally {
 			this._compactionAbortController = undefined;
-			this._reconnectToAgent();
+			if (disconnected) {
+				this._reconnectToAgent();
+			}
 		}
 	}
 
