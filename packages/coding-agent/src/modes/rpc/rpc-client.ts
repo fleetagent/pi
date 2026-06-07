@@ -19,7 +19,6 @@ import type {
 	RpcListSessionsOptions,
 	RpcListSessionsResponse,
 	RpcResponse,
-	RpcSessionInfo,
 	RpcSessionState,
 	RpcSlashCommand,
 } from "./rpc-types.ts";
@@ -646,7 +645,7 @@ export class RpcClient {
 	}
 }
 
-function reviveSessionInfo(session: RpcSessionInfo): SessionInfo {
+function reviveSessionInfo(session: SessionInfo): SessionInfo {
 	return {
 		...session,
 		created: new Date(session.created),

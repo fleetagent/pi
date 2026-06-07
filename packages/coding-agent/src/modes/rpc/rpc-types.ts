@@ -91,13 +91,8 @@ export type RpcListSessionsOptions = {
 	limit?: number;
 };
 
-export type RpcSessionInfo = Omit<SessionInfo, "created" | "modified"> & {
-	created: string;
-	modified: string;
-};
-
 export type RpcListSessionsResponse = {
-	sessions: RpcSessionInfo[];
+	sessions: SessionInfo[];
 	nextCursor?: string;
 };
 

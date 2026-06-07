@@ -12,6 +12,5 @@ export type {
 	RpcListSessionsOptions,
 	RpcListSessionsResponse,
 	RpcResponse,
-	RpcSessionInfo,
 	RpcSessionState,
 } from "./rpc/rpc-types.ts";

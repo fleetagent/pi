@@ -301,7 +301,6 @@ export {
 	type RpcListSessionsOptions,
 	type RpcListSessionsResponse,
 	type RpcResponse,
-	type RpcSessionInfo,
 	type RpcSessionState,
 	runPrintMode,
 	runRpcMode,

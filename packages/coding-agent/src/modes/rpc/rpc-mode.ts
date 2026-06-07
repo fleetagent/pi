@@ -25,7 +25,6 @@ import {
 	writeRawStdout,
 } from "../../core/output-guard.ts";
 import type { PiAgentRuntimeHost } from "../../core/pi-agent.ts";
-import type { SessionInfo } from "../../core/session/types.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import { type Theme, theme } from "../interactive/theme/theme.ts";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
@@ -35,7 +34,6 @@ import type {
 	RpcExtensionUIResponse,
 	RpcListSessionsResponse,
 	RpcResponse,
-	RpcSessionInfo,
 	RpcSessionState,
 	RpcSlashCommand,
 } from "./rpc-types.ts";
@@ -48,7 +46,6 @@ export type {
 	RpcListSessionsOptions,
 	RpcListSessionsResponse,
 	RpcResponse,
-	RpcSessionInfo,
 	RpcSessionState,
 } from "./rpc-types.ts";
 
@@ -469,7 +466,7 @@ export async function runRpcMode(runtimeHost: PiAgentRuntimeHost): Promise<never
 				}
 
 				const sessions = await runtimeHost.listSessions();
-				const page = sessions.slice(offset, offset + limit).map((item) => serializeSessionInfo(item));
+				const page = sessions.slice(offset, offset + limit);
 				const nextOffset = offset + page.length;
 				const response: RpcListSessionsResponse = {
 					sessions: page,
@@ -841,20 +838,4 @@ function parseSessionListCursor(cursor: string | undefined): number | string {
 		return "Session list cursor is invalid";
 	}
 	return Number(cursor);
-}
-
-function serializeSessionInfo(session: SessionInfo): RpcSessionInfo {
-	return {
-		reference: session.reference,
-		path: session.path,
-		id: session.id,
-		cwd: session.cwd,
-		name: session.name,
-		parentSessionPath: session.parentSessionPath,
-		created: session.created.toISOString(),
-		modified: session.modified.toISOString(),
-		messageCount: session.messageCount,
-		firstMessage: session.firstMessage,
-		allMessagesText: session.allMessagesText,
-	};
 }
