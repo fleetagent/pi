@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.0.9](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.0.8...@fleetagent/pi-coding-agent-v0.0.9) (2026-06-07)
+
+
+### Features
+
+* **coding-agent:** add paginated RPC session listing ([#12](https://github.com/fleetagent/pi/issues/12)) ([350951b](https://github.com/fleetagent/pi/commit/350951bae00295f2373a5693ff3d13c4440f0cb5))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @fleetagent/pi-agent-core bumped from ^0.0.8 to ^0.0.9
+    * @fleetagent/pi-ai bumped from ^0.0.8 to ^0.0.9
+    * @fleetagent/pi-tui bumped from ^0.0.8 to ^0.0.9
+
 ## [0.0.8](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.0.7...@fleetagent/pi-coding-agent-v0.0.8) (2026-06-05)
 
 
