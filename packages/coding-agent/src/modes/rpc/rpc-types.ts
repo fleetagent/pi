@@ -91,18 +91,9 @@ export type RpcListSessionsOptions = {
 	limit?: number;
 };
 
-export type RpcSessionInfo = {
-	reference?: string;
-	path: string;
-	id: string;
-	cwd: string;
-	name?: string;
-	parentSessionPath?: string;
+export type RpcSessionInfo = Omit<SessionInfo, "created" | "modified"> & {
 	created: string;
 	modified: string;
-	messageCount: number;
-	firstMessage: string;
-	allMessagesText: string;
 };
 
 export type RpcListSessionsResponse = {
