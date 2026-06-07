@@ -25,6 +25,7 @@ import {
 	writeRawStdout,
 } from "../../core/output-guard.ts";
 import type { PiAgentRuntimeHost } from "../../core/pi-agent.ts";
+import type { SessionInfo } from "../../core/session/types.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import { type Theme, theme } from "../interactive/theme/theme.ts";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
@@ -32,7 +33,9 @@ import type {
 	RpcCommand,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
+	RpcListSessionsResponse,
 	RpcResponse,
+	RpcSessionInfo,
 	RpcSessionState,
 	RpcSlashCommand,
 } from "./rpc-types.ts";
@@ -42,9 +45,15 @@ export type {
 	RpcCommand,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
+	RpcListSessionsOptions,
+	RpcListSessionsResponse,
 	RpcResponse,
+	RpcSessionInfo,
 	RpcSessionState,
 } from "./rpc-types.ts";
+
+const DEFAULT_RPC_SESSION_LIST_LIMIT = 100;
+const MAX_RPC_SESSION_LIST_LIMIT = 500;
 
 /**
  * Run in RPC mode.
@@ -448,6 +457,27 @@ export async function runRpcMode(runtimeHost: PiAgentRuntimeHost): Promise<never
 				return success(id, "new_session", result);
 			}
 
+			case "list_sessions": {
+				const limit = parseSessionListLimit(command.limit);
+				if (typeof limit === "string") {
+					return error(id, "list_sessions", limit);
+				}
+
+				const offset = parseSessionListCursor(command.cursor);
+				if (typeof offset === "string") {
+					return error(id, "list_sessions", offset);
+				}
+
+				const sessions = await runtimeHost.listSessions();
+				const page = sessions.slice(offset, offset + limit).map((item) => serializeSessionInfo(item));
+				const nextOffset = offset + page.length;
+				const response: RpcListSessionsResponse = {
+					sessions: page,
+					...(nextOffset < sessions.length ? { nextCursor: String(nextOffset) } : {}),
+				};
+				return success(id, "list_sessions", response);
+			}
+
 			// =================================================================
 			// State
 			// =================================================================
@@ -791,4 +821,40 @@ export async function runRpcMode(runtimeHost: PiAgentRuntimeHost): Promise<never
 
 	// Keep process alive forever
 	return new Promise(() => {});
+}
+
+function parseSessionListLimit(limit: number | undefined): number | string {
+	if (limit === undefined) {
+		return DEFAULT_RPC_SESSION_LIST_LIMIT;
+	}
+	if (!Number.isInteger(limit) || limit < 1) {
+		return "Session list limit must be a positive integer";
+	}
+	return Math.min(limit, MAX_RPC_SESSION_LIST_LIMIT);
+}
+
+function parseSessionListCursor(cursor: string | undefined): number | string {
+	if (cursor === undefined) {
+		return 0;
+	}
+	if (!/^\d+$/.test(cursor)) {
+		return "Session list cursor is invalid";
+	}
+	return Number(cursor);
+}
+
+function serializeSessionInfo(session: SessionInfo): RpcSessionInfo {
+	return {
+		reference: session.reference,
+		path: session.path,
+		id: session.id,
+		cwd: session.cwd,
+		name: session.name,
+		parentSessionPath: session.parentSessionPath,
+		created: session.created.toISOString(),
+		modified: session.modified.toISOString(),
+		messageCount: session.messageCount,
+		firstMessage: session.firstMessage,
+		allMessagesText: session.allMessagesText,
+	};
 }

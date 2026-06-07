@@ -11,6 +11,7 @@ import type { TSchema } from "typebox";
 import type { SessionStats, StructuredResponse } from "../../core/agent-session.ts";
 import type { BashResult } from "../../core/bash-executor.ts";
 import type { CompactionResult } from "../../core/compaction/index.ts";
+import type { SessionInfo } from "../../core/session/types.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
 
 // ============================================================================
@@ -33,6 +34,7 @@ export type RpcCommand =
 	| { id?: string; type: "follow_up"; message: string; images?: ImageContent[] }
 	| { id?: string; type: "abort" }
 	| { id?: string; type: "new_session"; sessionId?: string; parentSession?: string }
+	| { id?: string; type: "list_sessions"; cursor?: string; limit?: number }
 
 	// State
 	| { id?: string; type: "get_state" }
@@ -77,6 +79,41 @@ export type RpcCommand =
 
 	// Commands (available for invocation via prompt)
 	| { id?: string; type: "get_commands" };
+
+// ============================================================================
+// RPC Session List
+// ============================================================================
+
+export type RpcListSessionsOptions = {
+	/** Cursor returned by the previous list_sessions response. */
+	cursor?: string;
+	/** Number of sessions to return. Defaults to 100 and is capped by the RPC server. */
+	limit?: number;
+};
+
+export type RpcSessionInfo = {
+	reference?: string;
+	path: string;
+	id: string;
+	cwd: string;
+	name?: string;
+	parentSessionPath?: string;
+	created: string;
+	modified: string;
+	messageCount: number;
+	firstMessage: string;
+	allMessagesText: string;
+};
+
+export type RpcListSessionsResponse = {
+	sessions: RpcSessionInfo[];
+	nextCursor?: string;
+};
+
+export type RpcClientListSessionsResponse = {
+	sessions: SessionInfo[];
+	nextCursor?: string;
+};
 
 // ============================================================================
 // RPC Slash Command (for get_commands response)
@@ -132,6 +169,7 @@ export type RpcResponse =
 	| { id?: string; type: "response"; command: "follow_up"; success: true }
 	| { id?: string; type: "response"; command: "abort"; success: true }
 	| { id?: string; type: "response"; command: "new_session"; success: true; data: { cancelled: boolean } }
+	| { id?: string; type: "response"; command: "list_sessions"; success: true; data: RpcListSessionsResponse }
 
 	// State
 	| { id?: string; type: "response"; command: "get_state"; success: true; data: RpcSessionState }

@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added paginated `listSessions` support to the RPC client.
 - Added on-demand `RULES.md` resources for mandatory task and file constraints.
 
 ### Fixed

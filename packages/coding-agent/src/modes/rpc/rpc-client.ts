@@ -11,8 +11,18 @@ import type { Static, TSchema } from "typebox";
 import type { SessionStats, StructuredResponse } from "../../core/agent-session.ts";
 import type { BashResult } from "../../core/bash-executor.ts";
 import type { CompactionResult } from "../../core/compaction/index.ts";
+import type { SessionInfo } from "../../core/session/types.ts";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
-import type { RpcCommand, RpcResponse, RpcSessionState, RpcSlashCommand } from "./rpc-types.ts";
+import type {
+	RpcClientListSessionsResponse,
+	RpcCommand,
+	RpcListSessionsOptions,
+	RpcListSessionsResponse,
+	RpcResponse,
+	RpcSessionInfo,
+	RpcSessionState,
+	RpcSlashCommand,
+} from "./rpc-types.ts";
 
 // ============================================================================
 // Types
@@ -262,6 +272,18 @@ export class RpcClient {
 			parentSession: sessionOptions?.parentSession,
 		});
 		return this.getData(response);
+	}
+
+	/**
+	 * List sessions visible to this runtime. Results are paginated to avoid large RPC responses.
+	 */
+	async listSessions(options: RpcListSessionsOptions = {}): Promise<RpcClientListSessionsResponse> {
+		const response = await this.send({ type: "list_sessions", cursor: options.cursor, limit: options.limit });
+		const data = this.getData<RpcListSessionsResponse>(response);
+		return {
+			sessions: data.sessions.map((session) => reviveSessionInfo(session)),
+			nextCursor: data.nextCursor,
+		};
 	}
 
 	/**
@@ -622,4 +644,12 @@ export class RpcClient {
 		const successResponse = response as Extract<RpcResponse, { success: true; data: unknown }>;
 		return successResponse.data as T;
 	}
+}
+
+function reviveSessionInfo(session: RpcSessionInfo): SessionInfo {
+	return {
+		...session,
+		created: new Date(session.created),
+		modified: new Date(session.modified),
+	};
 }
