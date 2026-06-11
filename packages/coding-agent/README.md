@@ -576,6 +576,9 @@ cat README.md | pi -p "Summarize this text"
 | `--tools <list>`, `-t <list>` | Allowlist specific tool names across built-in, extension, and custom tools |
 | `--no-builtin-tools`, `-nbt` | Disable built-in tools by default but keep extension/custom tools enabled |
 | `--no-tools`, `-nt` | Disable all tools by default |
+| `--ssh <target>` | Run built-in tools over SSH (`user@host` or `user@host:/path`) |
+| `--ssh-deferred` | Start in SSH sandbox mode and configure the target later |
+| `--ssh-cwd <path>` | Stable remote cwd for `--ssh-deferred` |
 
 Available built-in tools: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`
 
@@ -643,6 +646,12 @@ pi --models "claude-*,gpt-4o"
 
 # Read-only mode
 pi --tools read,grep,find,ls -p "Review the code"
+
+# Run tools over SSH
+pi --ssh user@host:/workspace "Review the code"
+
+# Start in deferred SSH sandbox mode
+pi --ssh-deferred --ssh-cwd /workspace --mode rpc
 
 # High thinking level
 pi --thinking high "Solve this complex problem"
