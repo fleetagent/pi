@@ -3,6 +3,7 @@ import type { ImageContent, TextContent } from "@fleetagent/pi-ai";
 import { getCapabilities, getImageDimensions, imageFallback } from "@fleetagent/pi-tui";
 import { stripAnsi } from "../../utils/ansi.ts";
 import { sanitizeBinaryOutput } from "../../utils/shell.ts";
+import type { ToolBackendInfo } from "./operations.ts";
 
 export function shortenPath(path: unknown): string {
 	if (typeof path !== "string") return "";
@@ -61,4 +62,19 @@ export type ToolRenderResultLike<TDetails> = {
 
 export function invalidArgText(theme: { fg: (name: any, text: string) => string }): string {
 	return theme.fg("error", "[invalid arg]");
+}
+
+/**
+ * Render a small icon prefix for a tool-call header indicating whether the tool
+ * runs against the local machine or a remote (SSH) backend. Placed at the start
+ * of the header so the local/remote target is visible at a glance.
+ */
+export function formatBackendIcon(
+	backendInfo: ToolBackendInfo | undefined,
+	theme: { fg: (name: any, text: string) => string },
+): string {
+	if (!backendInfo) return "";
+	if (backendInfo.type === "local") return theme.fg("muted", "\u{1F5A5} ");
+	if (backendInfo.configured) return theme.fg("muted", "\u2601 ");
+	return theme.fg("warning", "\u2601 ");
 }

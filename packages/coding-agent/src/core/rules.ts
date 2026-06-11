@@ -6,6 +6,7 @@ import { parseFrontmatter } from "../utils/frontmatter.ts";
 import { canonicalizePath, resolvePath } from "../utils/paths.ts";
 import type { ResourceDiagnostic } from "./diagnostics.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
+import type { ToolOperations } from "./tools/operations.ts";
 
 /** Max name length per spec */
 const MAX_NAME_LENGTH = 64;
@@ -78,6 +79,7 @@ export interface Rule {
 	baseDir: string;
 	sourceInfo: SourceInfo;
 	disableModelInvocation: boolean;
+	content?: string;
 }
 
 export interface LoadRulesResult {
@@ -478,4 +480,252 @@ export function loadRules(options: LoadRulesOptions): LoadRulesResult {
 		rules: Array.from(ruleMap.values()),
 		diagnostics: [...allDiagnostics, ...collisionDiagnostics],
 	};
+}
+
+async function backendPathExists(operations: ToolOperations, path: string): Promise<boolean> {
+	try {
+		await operations.access(path, "exists");
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+async function addIgnoreRulesWithOperations(
+	operations: ToolOperations,
+	ig: IgnoreMatcher,
+	dir: string,
+	rootDir: string,
+): Promise<void> {
+	const relativeDir = relative(rootDir, dir);
+	const prefix = relativeDir ? `${toPosixPath(relativeDir)}/` : "";
+
+	for (const filename of IGNORE_FILE_NAMES) {
+		const ignorePath = join(dir, filename);
+		if (!(await backendPathExists(operations, ignorePath))) continue;
+		try {
+			const content = (await operations.readFile(ignorePath)).toString("utf-8");
+			const patterns = content
+				.split(/\r?\n/)
+				.map((line) => prefixIgnorePattern(line, prefix))
+				.filter((line): line is string => Boolean(line));
+			if (patterns.length > 0) {
+				ig.add(patterns);
+			}
+		} catch {}
+	}
+}
+
+async function loadRuleFromFileWithOperations(
+	operations: ToolOperations,
+	filePath: string,
+	source: string,
+): Promise<{ rule: Rule | null; diagnostics: ResourceDiagnostic[] }> {
+	const diagnostics: ResourceDiagnostic[] = [];
+
+	try {
+		const rawContent = (await operations.readFile(filePath)).toString("utf-8");
+		const { frontmatter } = parseFrontmatter<RuleFrontmatter>(rawContent);
+		const ruleDir = dirname(filePath);
+		const parentDirName = basename(ruleDir);
+
+		for (const error of validateDescription(frontmatter.description)) {
+			diagnostics.push({ type: "warning", message: error, path: filePath });
+		}
+
+		const name = frontmatter.name || parentDirName;
+		for (const error of validateName(name)) {
+			diagnostics.push({ type: "warning", message: error, path: filePath });
+		}
+
+		if (!frontmatter.description || frontmatter.description.trim() === "") {
+			return { rule: null, diagnostics };
+		}
+
+		return {
+			rule: {
+				name,
+				description: frontmatter.description,
+				filePath,
+				baseDir: ruleDir,
+				sourceInfo: createRuleSourceInfo(filePath, ruleDir, source),
+				disableModelInvocation: frontmatter["disable-model-invocation"] === true,
+			},
+			diagnostics,
+		};
+	} catch (error) {
+		const message = error instanceof Error ? error.message : "failed to parse rule file";
+		diagnostics.push({ type: "warning", message, path: filePath });
+		return { rule: null, diagnostics };
+	}
+}
+
+async function loadRulesFromDirInternalWithOperations(
+	operations: ToolOperations,
+	dir: string,
+	source: string,
+	includeRootFiles: boolean,
+	ignoreMatcher?: IgnoreMatcher,
+	rootDir?: string,
+): Promise<LoadRulesResult> {
+	const rules: Rule[] = [];
+	const diagnostics: ResourceDiagnostic[] = [];
+
+	if (!(await backendPathExists(operations, dir))) {
+		return { rules, diagnostics };
+	}
+
+	const root = rootDir ?? dir;
+	const ig = ignoreMatcher ?? ignore();
+	await addIgnoreRulesWithOperations(operations, ig, dir, root);
+
+	try {
+		const entries = await operations.readdir(dir);
+
+		for (const name of entries) {
+			if (name !== "RULES.md") continue;
+			const fullPath = join(dir, name);
+			let isFile = false;
+			try {
+				isFile = (await operations.stat(fullPath)).isFile();
+			} catch {
+				continue;
+			}
+			const relPath = toPosixPath(relative(root, fullPath));
+			if (!isFile || ig.ignores(relPath)) continue;
+			const result = await loadRuleFromFileWithOperations(operations, fullPath, source);
+			if (result.rule) rules.push(result.rule);
+			diagnostics.push(...result.diagnostics);
+			return { rules, diagnostics };
+		}
+
+		for (const name of entries) {
+			if (name.startsWith(".") || name === "node_modules") continue;
+			const fullPath = join(dir, name);
+			let isDirectory = false;
+			let isFile = false;
+			try {
+				const stats = await operations.stat(fullPath);
+				isDirectory = stats.isDirectory();
+				isFile = stats.isFile();
+			} catch {
+				continue;
+			}
+			const relPath = toPosixPath(relative(root, fullPath));
+			const ignorePath = isDirectory ? `${relPath}/` : relPath;
+			if (ig.ignores(ignorePath)) continue;
+			if (isDirectory) {
+				const subResult = await loadRulesFromDirInternalWithOperations(
+					operations,
+					fullPath,
+					source,
+					false,
+					ig,
+					root,
+				);
+				rules.push(...subResult.rules);
+				diagnostics.push(...subResult.diagnostics);
+				continue;
+			}
+			if (!isFile || !includeRootFiles || !name.endsWith(".md")) continue;
+			const result = await loadRuleFromFileWithOperations(operations, fullPath, source);
+			if (result.rule) rules.push(result.rule);
+			diagnostics.push(...result.diagnostics);
+		}
+	} catch {}
+
+	return { rules, diagnostics };
+}
+
+export interface LoadRulesWithOperationsOptions extends LoadRulesOptions {
+	operations: ToolOperations;
+}
+
+export async function loadRulesWithOperations(options: LoadRulesWithOperationsOptions): Promise<LoadRulesResult> {
+	const { agentDir, rulePaths, includeDefaults, operations } = options;
+	const resolvedCwd = resolvePath(options.cwd);
+	const resolvedAgentDir = resolvePath(agentDir ?? getAgentDir());
+	const ruleMap = new Map<string, Rule>();
+	const pathSet = new Set<string>();
+	const allDiagnostics: ResourceDiagnostic[] = [];
+	const collisionDiagnostics: ResourceDiagnostic[] = [];
+
+	function addRules(result: LoadRulesResult) {
+		allDiagnostics.push(...result.diagnostics);
+		for (const rule of result.rules) {
+			const canonicalPath = resolve(rule.filePath);
+			if (pathSet.has(canonicalPath)) continue;
+			const existing = ruleMap.get(rule.name);
+			if (existing) {
+				collisionDiagnostics.push({
+					type: "collision",
+					message: `name "${rule.name}" collision`,
+					path: rule.filePath,
+					collision: {
+						resourceType: "rule",
+						name: rule.name,
+						winnerPath: existing.filePath,
+						loserPath: rule.filePath,
+					},
+				});
+			} else {
+				ruleMap.set(rule.name, rule);
+				pathSet.add(canonicalPath);
+			}
+		}
+	}
+
+	if (includeDefaults) {
+		addRules(await loadRulesFromDirInternalWithOperations(operations, join(resolvedAgentDir, "rules"), "user", true));
+		addRules(
+			await loadRulesFromDirInternalWithOperations(
+				operations,
+				resolve(resolvedCwd, CONFIG_DIR_NAME, "rules"),
+				"project",
+				true,
+			),
+		);
+	}
+
+	const userRulesDir = join(resolvedAgentDir, "rules");
+	const projectRulesDir = resolve(resolvedCwd, CONFIG_DIR_NAME, "rules");
+	const isUnderPath = (target: string, root: string): boolean => {
+		const normalizedRoot = resolve(root);
+		if (target === normalizedRoot) return true;
+		const prefix = normalizedRoot.endsWith(sep) ? normalizedRoot : `${normalizedRoot}${sep}`;
+		return target.startsWith(prefix);
+	};
+	const getSource = (resolvedPath: string): "user" | "project" | "path" => {
+		if (!includeDefaults) {
+			if (isUnderPath(resolvedPath, userRulesDir)) return "user";
+			if (isUnderPath(resolvedPath, projectRulesDir)) return "project";
+		}
+		return "path";
+	};
+
+	for (const rawPath of rulePaths) {
+		const resolvedPath = resolvePath(rawPath, resolvedCwd, { trim: true });
+		if (!(await backendPathExists(operations, resolvedPath))) {
+			allDiagnostics.push({ type: "warning", message: "rule path does not exist", path: resolvedPath });
+			continue;
+		}
+		try {
+			const stats = await operations.stat(resolvedPath);
+			const source = getSource(resolvedPath);
+			if (stats.isDirectory()) {
+				addRules(await loadRulesFromDirInternalWithOperations(operations, resolvedPath, source, true));
+			} else if (stats.isFile() && resolvedPath.endsWith(".md")) {
+				const result = await loadRuleFromFileWithOperations(operations, resolvedPath, source);
+				if (result.rule) addRules({ rules: [result.rule], diagnostics: result.diagnostics });
+				else allDiagnostics.push(...result.diagnostics);
+			} else {
+				allDiagnostics.push({ type: "warning", message: "rule path is not a markdown file", path: resolvedPath });
+			}
+		} catch (error) {
+			const message = error instanceof Error ? error.message : "failed to read rule path";
+			allDiagnostics.push({ type: "warning", message, path: resolvedPath });
+		}
+	}
+
+	return { rules: Array.from(ruleMap.values()), diagnostics: [...allDiagnostics, ...collisionDiagnostics] };
 }

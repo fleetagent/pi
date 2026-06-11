@@ -18,9 +18,9 @@ import {
 	stripBom,
 } from "./edit-diff.ts";
 import { withFileMutationQueue } from "./file-mutation-queue.ts";
-import type { ToolOperations } from "./operations.ts";
+import type { ToolBackendInfo, ToolOperations } from "./operations.ts";
 import { resolveToCwd } from "./path-utils.ts";
-import { invalidArgText, shortenPath, str } from "./render-utils.ts";
+import { formatBackendIcon, invalidArgText, shortenPath, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 type EditPreview = EditDiffResult | EditDiffError;
@@ -230,10 +230,11 @@ function buildEditCallComponent(
 	component: EditCallRenderComponent,
 	args: RenderableEditArgs | undefined,
 	theme: typeof import("../../modes/interactive/theme/theme.ts").theme,
+	backendInfo: ToolBackendInfo | undefined,
 ): EditCallRenderComponent {
 	component.setBgFn(getEditHeaderBg(component.preview, component.settledError, theme));
 	component.clear();
-	component.addChild(new Text(formatEditCall(args, theme), 0, 0));
+	component.addChild(new Text(formatBackendIcon(backendInfo, theme) + formatEditCall(args, theme), 0, 0));
 
 	if (!component.preview) {
 		return component;
@@ -375,7 +376,7 @@ export function createEditToolDefinition(
 				});
 			}
 
-			return buildEditCallComponent(component, args, theme);
+			return buildEditCallComponent(component, args, theme, operations.getBackendInfo?.());
 		},
 		renderResult(result, _options, theme, context) {
 			const callComponent = context.state.callComponent;
@@ -400,7 +401,12 @@ export function createEditToolDefinition(
 					changed = true;
 				}
 				if (changed) {
-					buildEditCallComponent(callComponent, context.args as RenderableEditArgs | undefined, theme);
+					buildEditCallComponent(
+						callComponent,
+						context.args as RenderableEditArgs | undefined,
+						theme,
+						operations.getBackendInfo?.(),
+					);
 				}
 			}
 

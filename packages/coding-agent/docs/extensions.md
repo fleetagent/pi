@@ -869,6 +869,53 @@ UI methods for user interaction. See [Custom UI](#custom-ui) for full details.
 
 Current working directory.
 
+### ctx.toolOperations / ctx.getToolBackendInfo() / ctx.execToolBackend()
+
+Backend-aware file and shell operations for extensions. These APIs use the same active backend as Pi's built-in tools: local by default, or SSH/remote when an SSH sandbox is configured.
+
+Use these APIs for extension tools and extension-owned automation that reads files, writes files, lists directories, or executes shell commands. This is the only safe way for extension tools to run shell commands because it preserves Pi's active execution boundary. Direct local process APIs (`child_process`, `pi.exec`, shell libraries, etc.) bypass the configured tool backend and will run on the local machine even when Pi tools are remote.
+
+```typescript
+pi.registerTool({
+  name: "repo_status",
+  label: "Repo status",
+  description: "Show git status using the active Pi tool backend",
+  parameters: Type.Object({}),
+  async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+    const backend = ctx.getToolBackendInfo();
+    const result = await ctx.execToolBackend("git status --short", {
+      signal: ctx.signal,
+      timeout: 30,
+    });
+
+    return {
+      content: [{ type: "text", text: result.output || `(no output from ${backend.type})` }],
+    };
+  },
+});
+```
+
+`ctx.execToolBackend(command, options)` executes a shell command string through `ctx.toolOperations` and returns `BashResult`:
+
+```typescript
+{
+  output: string;        // combined stdout/stderr, sanitized and possibly truncated
+  exitCode?: number;    // undefined when cancelled
+  cancelled: boolean;
+  truncated: boolean;
+  fullOutputPath?: string;
+}
+```
+
+Options:
+
+- `cwd` - working directory; defaults to the active backend cwd
+- `signal` - abort signal
+- `timeout` - timeout in seconds
+- `onChunk` - streaming output callback
+
+Use `ctx.toolOperations` directly when you need backend-aware file operations such as `readFile`, `writeFile`, `stat`, `readdir`, `glob`, or `grep`.
+
 ### ctx.session
 
 Read-only access to active session state. See [Session Format](session-format.md) for the full `Session` API and entry types.
@@ -1408,6 +1455,35 @@ pi.registerCommand("deploy", {
 });
 ```
 
+### pi.registerSkill(skill) / pi.registerRule(rule) / pi.registerPrompt(prompt)
+
+Register local extension-hosted skills, rules, or prompt templates. These stay on the local agent host even when built-in tools use an SSH backend.
+
+Provide either `filePath` (relative to the extension file directory) or inline `content`. Inline content is available to `/skill:name`, `/rule:name`, and `/prompt-name` expansion.
+
+```typescript
+pi.registerSkill({
+  name: "agent-pod-tools",
+  description: "Use for agent pod maintenance workflows",
+  filePath: "./skills/agent-pod-tools/SKILL.md",
+});
+
+pi.registerRule({
+  name: "company-policy",
+  description: "Mandatory policy for release tasks",
+  content: "Only publish after the release checklist is complete.",
+});
+
+pi.registerPrompt({
+  name: "release-summary",
+  description: "Draft a release summary",
+  argumentHint: "<version>",
+  content: "Summarize the release changes for $ARGUMENTS.",
+});
+```
+
+Use `pi.registerPrompts([...])` to register multiple prompt templates at once.
+
 ### pi.getCommands()
 
 Get the slash commands available for invocation via `prompt` in the current session. Includes extension commands, prompt templates, skill commands, and rule commands.
@@ -1477,9 +1553,12 @@ if (pi.getFlag("plan")) {
 
 ### pi.exec(command, args, options?)
 
-Execute a shell command.
+Execute a local process with argv. This API is local-only and legacy-compatible. It does not use Pi's active tool backend and does not honor SSH/remote sandboxing.
+
+Do not use `pi.exec` from extension tools or backend-sensitive automation. Use `ctx.execToolBackend()` from handlers/tools that receive `ExtensionContext` so shell commands execute in the same local/remote environment as built-in Pi tools.
 
 ```typescript
+// Local-only process execution. Avoid for extension tools.
 const result = await pi.exec("git", ["status"], { signal, timeout: 5000 });
 // result.stdout, result.stderr, result.code, result.killed
 ```
@@ -1743,8 +1822,8 @@ pi.registerTool({
       details: { progress: 50 },
     });
 
-    // Run commands via pi.exec (captured from extension closure)
-    const result = await pi.exec("some-command", [], { signal });
+    // Run commands through the active Pi tool backend (local or SSH/remote)
+    const result = await ctx.execToolBackend("some-command", { signal });
 
     // Return result
     return {

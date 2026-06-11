@@ -339,6 +339,7 @@ export class PiAgent {
 				cwd,
 				agentDir: this.agentDir,
 				settingsManager,
+				toolOperations: this.options.resourceLoaderOptions?.toolOperations ?? this.options.toolOperations,
 			});
 		await resourceLoader.reload();
 

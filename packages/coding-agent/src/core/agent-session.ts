@@ -439,8 +439,13 @@ export class AgentSession {
 		return this._modelRegistry;
 	}
 
+	getToolOperations(): ToolOperations {
+		const shellPath = this.settingsManager.getShellPath();
+		return this._toolOperations ?? createLocalBashOperations({ cwd: this.session.getCwd(), shellPath });
+	}
+
 	getToolBackendInfo(): ToolBackendInfo {
-		return this._toolOperations?.getBackendInfo?.() ?? { type: "local", cwd: this._cwd };
+		return this.getToolOperations().getBackendInfo?.() ?? { type: "local", cwd: this._cwd };
 	}
 
 	async configureSshSandbox(options: { remote: string; cwd?: string }): Promise<ToolBackendInfo> {
@@ -1568,7 +1573,7 @@ export class AgentSession {
 		if (!skill) return text; // Unknown skill, pass through
 
 		try {
-			const content = readFileSync(skill.filePath, "utf-8");
+			const content = skill.content ?? readFileSync(skill.filePath, "utf-8");
 			const body = stripFrontmatter(content).trim();
 			const skillBlock = `<skill name="${skill.name}" location="${skill.filePath}">\nReferences are relative to ${skill.baseDir}.\n\n${body}\n</skill>`;
 			return args ? `${skillBlock}\n\n${args}` : skillBlock;
@@ -1594,7 +1599,7 @@ export class AgentSession {
 		if (!rule) return text; // Unknown rule, pass through
 
 		try {
-			const content = readFileSync(rule.filePath, "utf-8");
+			const content = rule.content ?? readFileSync(rule.filePath, "utf-8");
 			const body = stripFrontmatter(content).trim();
 			const ruleBlock = `<rule name="${rule.name}" location="${rule.filePath}">\nReferences are relative to ${rule.baseDir}.\n\n${body}\n</rule>`;
 			return args ? `${ruleBlock}\n\n${args}` : ruleBlock;
@@ -2640,6 +2645,8 @@ export class AgentSession {
 	}
 
 	private _bindExtensionCore(runner: ExtensionRunner): void {
+		const getToolOperations = (): ToolOperations => this.getToolOperations();
+
 		const getCommands = (): SlashCommandInfo[] => {
 			const extensionCommands: SlashCommandInfo[] = runner.getRegisteredCommands().map((command) => ({
 				name: command.invocationName,
@@ -2737,6 +2744,14 @@ export class AgentSession {
 					this._requestExtensionCompaction(options);
 				},
 				getSystemPrompt: () => this.systemPrompt,
+				getToolOperations,
+				getToolBackendInfo: () => this.getToolBackendInfo(),
+				execToolBackend: (command, options) => {
+					const operations = getToolOperations();
+					const prefix = this.settingsManager.getShellCommandPrefix();
+					const resolvedCommand = prefix ? `${prefix}\n${command}` : command;
+					return executeBashWithOperations(resolvedCommand, options?.cwd ?? operations.cwd, operations, options);
+				},
 			},
 			{
 				registerProvider: (name, config) => {

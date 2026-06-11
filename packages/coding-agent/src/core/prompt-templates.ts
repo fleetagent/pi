@@ -4,6 +4,7 @@ import { CONFIG_DIR_NAME } from "../config.ts";
 import { parseFrontmatter } from "../utils/frontmatter.ts";
 import { resolvePath } from "../utils/paths.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
+import type { ToolOperations } from "./tools/operations.ts";
 
 /**
  * Represents a prompt template loaded from a markdown file
@@ -282,4 +283,129 @@ export function expandPromptTemplate(text: string, templates: PromptTemplate[]):
 	}
 
 	return text;
+}
+
+async function backendPathExists(operations: ToolOperations, path: string): Promise<boolean> {
+	try {
+		await operations.access(path, "exists");
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+async function loadTemplateFromFileWithOperations(
+	operations: ToolOperations,
+	filePath: string,
+	sourceInfo: SourceInfo,
+): Promise<PromptTemplate | null> {
+	try {
+		const rawContent = (await operations.readFile(filePath)).toString("utf-8");
+		const { frontmatter, body } = parseFrontmatter<Record<string, string>>(rawContent);
+		const name = basename(filePath).replace(/\.md$/, "");
+		let description = frontmatter.description || "";
+		if (!description) {
+			const firstLine = body.split("\n").find((line) => line.trim());
+			if (firstLine) {
+				description = firstLine.slice(0, 60);
+				if (firstLine.length > 60) description += "...";
+			}
+		}
+		return {
+			name,
+			description,
+			...(frontmatter["argument-hint"] && { argumentHint: frontmatter["argument-hint"] }),
+			content: body,
+			sourceInfo,
+			filePath,
+		};
+	} catch {
+		return null;
+	}
+}
+
+async function loadTemplatesFromDirWithOperations(
+	operations: ToolOperations,
+	dir: string,
+	getSourceInfo: (filePath: string) => SourceInfo,
+): Promise<PromptTemplate[]> {
+	const templates: PromptTemplate[] = [];
+	if (!(await backendPathExists(operations, dir))) return templates;
+	try {
+		const entries = await operations.readdir(dir);
+		for (const name of entries) {
+			const fullPath = join(dir, name);
+			let isFile = false;
+			try {
+				isFile = (await operations.stat(fullPath)).isFile();
+			} catch {
+				continue;
+			}
+			if (isFile && name.endsWith(".md")) {
+				const template = await loadTemplateFromFileWithOperations(operations, fullPath, getSourceInfo(fullPath));
+				if (template) templates.push(template);
+			}
+		}
+	} catch {
+		return templates;
+	}
+	return templates;
+}
+
+export interface LoadPromptTemplatesWithOperationsOptions extends LoadPromptTemplatesOptions {
+	operations: ToolOperations;
+}
+
+export async function loadPromptTemplatesWithOperations(
+	options: LoadPromptTemplatesWithOperationsOptions,
+): Promise<PromptTemplate[]> {
+	const resolvedCwd = resolvePath(options.cwd);
+	const resolvedAgentDir = resolvePath(options.agentDir);
+	const promptPaths = options.promptPaths;
+	const includeDefaults = options.includeDefaults;
+	const operations = options.operations;
+	const templates: PromptTemplate[] = [];
+	const globalPromptsDir = join(resolvedAgentDir, "prompts");
+	const projectPromptsDir = resolve(resolvedCwd, CONFIG_DIR_NAME, "prompts");
+	const isUnderPath = (target: string, root: string): boolean => {
+		const normalizedRoot = resolve(root);
+		if (target === normalizedRoot) return true;
+		const prefix = normalizedRoot.endsWith(sep) ? normalizedRoot : `${normalizedRoot}${sep}`;
+		return target.startsWith(prefix);
+	};
+	const getSourceInfo = (resolvedPath: string): SourceInfo => {
+		if (isUnderPath(resolvedPath, globalPromptsDir)) {
+			return createSyntheticSourceInfo(resolvedPath, { source: "local", scope: "user", baseDir: globalPromptsDir });
+		}
+		if (isUnderPath(resolvedPath, projectPromptsDir)) {
+			return createSyntheticSourceInfo(resolvedPath, {
+				source: "ssh",
+				scope: "project",
+				baseDir: projectPromptsDir,
+			});
+		}
+		return createSyntheticSourceInfo(resolvedPath, { source: "ssh", baseDir: dirname(resolvedPath) });
+	};
+	if (includeDefaults) {
+		templates.push(...(await loadTemplatesFromDirWithOperations(operations, globalPromptsDir, getSourceInfo)));
+		templates.push(...(await loadTemplatesFromDirWithOperations(operations, projectPromptsDir, getSourceInfo)));
+	}
+	for (const rawPath of promptPaths) {
+		const resolvedPath = resolvePath(rawPath, resolvedCwd, { trim: true });
+		if (!(await backendPathExists(operations, resolvedPath))) continue;
+		try {
+			const stats = await operations.stat(resolvedPath);
+			if (stats.isDirectory()) {
+				templates.push(...(await loadTemplatesFromDirWithOperations(operations, resolvedPath, getSourceInfo)));
+			} else if (stats.isFile() && resolvedPath.endsWith(".md")) {
+				const template = await loadTemplateFromFileWithOperations(
+					operations,
+					resolvedPath,
+					getSourceInfo(resolvedPath),
+				);
+				if (template) templates.push(template);
+			}
+		} catch {}
+	}
+	return templates;
 }

@@ -8,7 +8,14 @@ import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/type
 import { withFileMutationQueue } from "./file-mutation-queue.ts";
 import type { ToolOperations } from "./operations.ts";
 import { resolveToCwd } from "./path-utils.ts";
-import { invalidArgText, normalizeDisplayText, replaceTabs, shortenPath, str } from "./render-utils.ts";
+import {
+	formatBackendIcon,
+	invalidArgText,
+	normalizeDisplayText,
+	replaceTabs,
+	shortenPath,
+	str,
+} from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 const writeSchema = Type.Object({
@@ -227,12 +234,13 @@ export function createWriteToolDefinition(
 				component.cache = undefined;
 			}
 			component.setText(
-				formatWriteCall(
-					renderArgs,
-					{ expanded: context.expanded, isPartial: context.isPartial },
-					theme,
-					component.cache,
-				),
+				formatBackendIcon(ops.getBackendInfo?.(), theme) +
+					formatWriteCall(
+						renderArgs,
+						{ expanded: context.expanded, isPartial: context.isPartial },
+						theme,
+						component.cache,
+					),
 			);
 			return component;
 		},

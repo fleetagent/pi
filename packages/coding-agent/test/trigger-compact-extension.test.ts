@@ -1,12 +1,16 @@
 import { describe, expect, test, vi } from "vitest";
 import triggerCompactExtension from "../examples/extensions/trigger-compact.ts";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "../src/core/extensions/index.ts";
+import { LocalToolOperations } from "../src/core/tools/index.ts";
 
 function createContext(tokens: number | null, compact = vi.fn()): ExtensionContext {
 	return {
 		hasUI: false,
 		ui: {} as ExtensionContext["ui"],
 		cwd: process.cwd(),
+		toolOperations: new LocalToolOperations(process.cwd()),
+		getToolBackendInfo: () => ({ type: "local", cwd: process.cwd() }),
+		execToolBackend: async () => ({ output: "", exitCode: 0, cancelled: false, truncated: false }),
 		session: {} as ExtensionContext["session"],
 		modelRegistry: {} as ExtensionContext["modelRegistry"],
 		model: undefined,

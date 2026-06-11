@@ -80,6 +80,9 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 			tools: new Map(),
 			messageRenderers: new Map(),
 			commands: new Map(),
+			skills: new Map(),
+			rules: new Map(),
+			prompts: new Map(),
 			flags: new Map(),
 			shortcuts: new Map(),
 		};
@@ -254,6 +257,9 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 			tools: new Map(),
 			messageRenderers: new Map(),
 			commands: new Map(),
+			skills: new Map(),
+			rules: new Map(),
+			prompts: new Map(),
 			flags: new Map(),
 			shortcuts: new Map(),
 		};
@@ -303,6 +309,9 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 			tools: new Map(),
 			messageRenderers: new Map(),
 			commands: new Map(),
+			skills: new Map(),
+			rules: new Map(),
+			prompts: new Map(),
 			flags: new Map(),
 			shortcuts: new Map(),
 		};
@@ -334,6 +343,9 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 			tools: new Map(),
 			messageRenderers: new Map(),
 			commands: new Map(),
+			skills: new Map(),
+			rules: new Map(),
+			prompts: new Map(),
 			flags: new Map(),
 			shortcuts: new Map(),
 		};

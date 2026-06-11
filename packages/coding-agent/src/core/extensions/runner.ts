@@ -6,6 +6,7 @@ import type { AgentMessage } from "@fleetagent/pi-agent-core";
 import type { ImageContent, Model } from "@fleetagent/pi-ai";
 import type { KeyId } from "@fleetagent/pi-tui";
 import { type Theme, theme } from "../../modes/interactive/theme/theme.ts";
+import { executeBashWithOperations } from "../bash-executor.ts";
 import type { ResourceDiagnostic } from "../diagnostics.ts";
 import type { KeybindingsConfig } from "../keybindings.ts";
 import type { ModelRegistry } from "../model-registry.ts";
@@ -239,6 +240,9 @@ export class ExtensionRunner {
 	private getContextUsageFn: () => ContextUsage | undefined = () => undefined;
 	private compactFn: (options?: CompactOptions) => void = () => {};
 	private getSystemPromptFn: () => string = () => "";
+	private getToolOperationsFn: ExtensionContextActions["getToolOperations"];
+	private getToolBackendInfoFn: ExtensionContextActions["getToolBackendInfo"];
+	private execToolBackendFn: ExtensionContextActions["execToolBackend"];
 	private newSessionHandler: NewSessionHandler = async () => ({ cancelled: false });
 	private forkHandler: ForkHandler = async () => ({ cancelled: false });
 	private navigateTreeHandler: NavigateTreeHandler = async () => ({ cancelled: false });
@@ -262,6 +266,15 @@ export class ExtensionRunner {
 		this.cwd = cwd;
 		this.session = session;
 		this.modelRegistry = modelRegistry;
+		this.getToolOperationsFn = () => {
+			throw new Error("Extension tool backend is not bound yet");
+		};
+		this.getToolBackendInfoFn = () =>
+			this.getToolOperationsFn().getBackendInfo?.() ?? { type: "local", cwd: this.cwd };
+		this.execToolBackendFn = async (command, options) => {
+			const operations = this.getToolOperationsFn();
+			return executeBashWithOperations(command, options?.cwd ?? operations.cwd, operations, options);
+		};
 	}
 
 	bindCore(
@@ -298,6 +311,9 @@ export class ExtensionRunner {
 		this.getContextUsageFn = contextActions.getContextUsage;
 		this.compactFn = contextActions.compact;
 		this.getSystemPromptFn = contextActions.getSystemPrompt;
+		this.getToolOperationsFn = contextActions.getToolOperations;
+		this.getToolBackendInfoFn = contextActions.getToolBackendInfo;
+		this.execToolBackendFn = contextActions.execToolBackend;
 
 		// Flush provider registrations queued during extension loading
 		for (const { name, config, extensionPath } of this.runtime.pendingProviderRegistrations) {
@@ -586,6 +602,18 @@ export class ExtensionRunner {
 			get cwd() {
 				runner.assertActive();
 				return runner.cwd;
+			},
+			get toolOperations() {
+				runner.assertActive();
+				return runner.getToolOperationsFn();
+			},
+			getToolBackendInfo: () => {
+				runner.assertActive();
+				return runner.getToolBackendInfoFn();
+			},
+			execToolBackend: (command, options) => {
+				runner.assertActive();
+				return runner.execToolBackendFn(command, options);
 			},
 			get session() {
 				runner.assertActive();

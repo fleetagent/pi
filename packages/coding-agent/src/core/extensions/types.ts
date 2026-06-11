@@ -41,7 +41,7 @@ import type {
 } from "@fleetagent/pi-tui";
 import type { Static, TSchema } from "typebox";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
-import type { BashResult } from "../bash-executor.ts";
+import type { BashExecutorOptions, BashResult } from "../bash-executor.ts";
 import type { CompactionPreparation, CompactionResult } from "../compaction/index.ts";
 import type { EventBus } from "../event-bus.ts";
 import type { ExecOptions, ExecResult } from "../exec.ts";
@@ -49,6 +49,8 @@ import type { ReadonlyFooterDataProvider } from "../footer-data-provider.ts";
 import type { KeybindingsManager } from "../keybindings.ts";
 import type { CustomMessage } from "../messages.ts";
 import type { ModelRegistry } from "../model-registry.ts";
+import type { PromptTemplate } from "../prompt-templates.ts";
+import type { Rule } from "../rules.ts";
 import type {
 	BranchSummaryEntry,
 	CompactionEntry,
@@ -56,6 +58,7 @@ import type {
 	Session,
 	SessionEntry,
 } from "../session-manager.ts";
+import type { Skill } from "../skills.ts";
 import type { SlashCommandInfo } from "../slash-commands.ts";
 import type { SourceInfo } from "../source-info.ts";
 import type { BuildSystemPromptOptions } from "../system-prompt.ts";
@@ -74,8 +77,9 @@ import type {
 	ReadToolInput,
 	WriteToolInput,
 } from "../tools/index.ts";
-import type { ToolOperations } from "../tools/operations.ts";
+import type { ToolBackendInfo, ToolOperations } from "../tools/operations.ts";
 
+export type { BashResult } from "../bash-executor.ts";
 export type { ExecOptions, ExecResult } from "../exec.ts";
 export type { BuildSystemPromptOptions } from "../system-prompt.ts";
 export type { AgentToolResult, AgentToolUpdateCallback, ToolExecutionMode };
@@ -295,6 +299,13 @@ export interface CompactOptions {
 /**
  * Context passed to extension event handlers.
  */
+export interface ExtensionToolBackendExecOptions extends BashExecutorOptions {
+	/** Working directory. Defaults to the active tool backend cwd. */
+	cwd?: string;
+	/** Timeout in seconds. */
+	timeout?: number;
+}
+
 export interface ExtensionContext {
 	/** UI methods for user interaction */
 	ui: ExtensionUIContext;
@@ -302,6 +313,12 @@ export interface ExtensionContext {
 	hasUI: boolean;
 	/** Current working directory */
 	cwd: string;
+	/** Active file/tool backend used by built-in tools (local or SSH). */
+	toolOperations: ToolOperations;
+	/** Get active file/tool backend metadata. */
+	getToolBackendInfo(): ToolBackendInfo;
+	/** Execute a shell command through the active file/tool backend. */
+	execToolBackend(command: string, options?: ExtensionToolBackendExecOptions): Promise<BashResult>;
 	/** Current session (read-only) */
 	session: ReadonlySession;
 	/** Model registry for API key resolution */
@@ -1081,6 +1098,31 @@ export interface ResolvedCommand extends RegisteredCommand {
 	invocationName: string;
 }
 
+export interface ExtensionInstructionRegistration {
+	name: string;
+	description: string;
+	/** Path to the local instruction file. Relative paths resolve against the extension file directory. */
+	filePath?: string;
+	/** Inline instruction content. Used by /skill:name and /rule:name command expansion. */
+	content?: string;
+	/** Base directory for resolving relative paths referenced by the instruction. Defaults to filePath dirname or extension dir. */
+	baseDir?: string;
+	/** Hide from model invocation prompt; explicit /skill:name or /rule:name still works. */
+	disableModelInvocation?: boolean;
+}
+
+export interface ExtensionPromptRegistration {
+	name: string;
+	/** Human-readable description. If omitted for filePath prompts, frontmatter or first non-empty body line is used. */
+	description?: string;
+	/** Argument hint shown in command help/completions. */
+	argumentHint?: string;
+	/** Path to the local prompt file. Relative paths resolve against the extension file directory. */
+	filePath?: string;
+	/** Inline prompt content. */
+	content?: string;
+}
+
 // ============================================================================
 // Extension API
 // ============================================================================
@@ -1151,6 +1193,18 @@ export interface ExtensionAPI {
 
 	/** Register a custom command. */
 	registerCommand(name: string, options: Omit<RegisteredCommand, "name" | "sourceInfo">): void;
+
+	/** Register a local skill from an extension. Extension skills stay local even when tools use SSH. */
+	registerSkill(skill: ExtensionInstructionRegistration): void;
+
+	/** Register a local rule from an extension. Extension rules stay local even when tools use SSH. */
+	registerRule(rule: ExtensionInstructionRegistration): void;
+
+	/** Register a local prompt template from an extension. Extension prompts stay local even when tools use SSH. */
+	registerPrompt(prompt: ExtensionPromptRegistration): void;
+
+	/** Register multiple local prompt templates from an extension. */
+	registerPrompts(prompts: ExtensionPromptRegistration[]): void;
 
 	/** Register a keyboard shortcut. */
 	registerShortcut(
@@ -1511,6 +1565,9 @@ export interface ExtensionContextActions {
 	getContextUsage: () => ContextUsage | undefined;
 	compact: (options?: CompactOptions) => void;
 	getSystemPrompt: () => string;
+	getToolOperations: () => ToolOperations;
+	getToolBackendInfo: () => ToolBackendInfo;
+	execToolBackend: (command: string, options?: ExtensionToolBackendExecOptions) => Promise<BashResult>;
 }
 
 /**
@@ -1555,6 +1612,9 @@ export interface Extension {
 	tools: Map<string, RegisteredTool>;
 	messageRenderers: Map<string, MessageRenderer>;
 	commands: Map<string, RegisteredCommand>;
+	skills: Map<string, Skill>;
+	rules: Map<string, Rule>;
+	prompts: Map<string, PromptTemplate>;
 	flags: Map<string, ExtensionFlag>;
 	shortcuts: Map<KeyId, ExtensionShortcut>;
 }
