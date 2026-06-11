@@ -12,6 +12,7 @@ import type { SessionStats, StructuredResponse } from "../../core/agent-session.
 import type { BashResult } from "../../core/bash-executor.ts";
 import type { CompactionResult } from "../../core/compaction/index.ts";
 import type { SessionInfo } from "../../core/session/types.ts";
+import type { ToolBackendInfo } from "../../core/tools/index.ts";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
 import type {
 	RpcClientListSessionsResponse,
@@ -392,6 +393,22 @@ export class RpcClient {
 	 */
 	async abortBash(): Promise<void> {
 		await this.send({ type: "abort_bash" });
+	}
+
+	/**
+	 * Configure or reconfigure the deferred SSH sandbox.
+	 */
+	async setSshSandbox(remote: string, cwd?: string): Promise<ToolBackendInfo> {
+		const response = await this.send({ type: "set_ssh_sandbox", remote, cwd });
+		return this.getData(response);
+	}
+
+	/**
+	 * Clear the deferred SSH sandbox configuration.
+	 */
+	async clearSshSandbox(): Promise<ToolBackendInfo> {
+		const response = await this.send({ type: "clear_ssh_sandbox" });
+		return this.getData(response);
 	}
 
 	/**

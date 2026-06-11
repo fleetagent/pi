@@ -82,6 +82,7 @@
 
 - Consolidated built-in tool execution backends behind a shared `ToolOperations` interface.
 - Added `--ssh` CLI support for running built-in tools through `SshToolOperations`.
+- Added deferred SSH sandbox mode with RPC and `/ssh-sandbox` reconfiguration.
 - Removed the SSH extension example now that SSH tool execution is built in.
 
 ### Fixed

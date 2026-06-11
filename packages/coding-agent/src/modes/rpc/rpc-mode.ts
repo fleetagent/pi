@@ -493,6 +493,7 @@ export async function runRpcMode(runtimeHost: PiAgentRuntimeHost): Promise<never
 					autoCompactionEnabled: session.autoCompactionEnabled,
 					messageCount: session.messages.length,
 					pendingMessageCount: session.pendingMessageCount,
+					toolBackend: session.getToolBackendInfo(),
 				};
 				return success(id, "get_state", state);
 			}
@@ -595,6 +596,16 @@ export async function runRpcMode(runtimeHost: PiAgentRuntimeHost): Promise<never
 			case "abort_bash": {
 				session.abortBash();
 				return success(id, "abort_bash");
+			}
+
+			case "set_ssh_sandbox": {
+				const info = await session.configureSshSandbox({ remote: command.remote, cwd: command.cwd });
+				return success(id, "set_ssh_sandbox", info);
+			}
+
+			case "clear_ssh_sandbox": {
+				session.clearSshSandbox();
+				return success(id, "clear_ssh_sandbox", session.getToolBackendInfo());
 			}
 
 			// =================================================================

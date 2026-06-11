@@ -6,7 +6,7 @@ import { truncateToVisualLines } from "../../modes/interactive/components/visual
 import { theme } from "../../modes/interactive/theme/theme.ts";
 import { getShellEnv } from "../../utils/shell.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
-import { LocalToolOperations, type ToolOperations } from "./operations.ts";
+import { LocalToolOperations, type ToolBackendInfo, type ToolOperations } from "./operations.ts";
 import { OutputAccumulator } from "./output-accumulator.ts";
 import { getTextOutput, invalidArgText, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
@@ -81,12 +81,22 @@ function formatDuration(ms: number): string {
 	return `${(ms / 1000).toFixed(1)}s`;
 }
 
-function formatBashCall(args: { command?: string; timeout?: number } | undefined): string {
+function formatBackendSuffix(backendInfo: ToolBackendInfo | undefined): string {
+	if (!backendInfo) return "";
+	if (backendInfo.type === "local") return theme.fg("muted", ` [local ${backendInfo.cwd}]`);
+	if (backendInfo.configured) return theme.fg("muted", ` [ssh ${backendInfo.remote}:${backendInfo.cwd}]`);
+	return theme.fg("warning", ` [ssh not configured ${backendInfo.cwd}]`);
+}
+
+function formatBashCall(
+	args: { command?: string; timeout?: number } | undefined,
+	backendInfo?: ToolBackendInfo,
+): string {
 	const command = str(args?.command);
 	const timeout = args?.timeout as number | undefined;
 	const timeoutSuffix = timeout ? theme.fg("muted", ` (timeout ${timeout}s)`) : "";
 	const commandDisplay = command === null ? invalidArgText(theme) : command ? command : theme.fg("toolOutput", "...");
-	return theme.fg("toolTitle", theme.bold(`$ ${commandDisplay}`)) + timeoutSuffix;
+	return theme.fg("toolTitle", theme.bold(`$ ${commandDisplay}`)) + timeoutSuffix + formatBackendSuffix(backendInfo);
 }
 
 function rebuildBashResultRenderComponent(
@@ -315,7 +325,7 @@ export function createBashToolDefinition(
 				state.endedAt = undefined;
 			}
 			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-			text.setText(formatBashCall(args));
+			text.setText(formatBashCall(args, ops.getBackendInfo?.()));
 			return text;
 		},
 		renderResult(result, options, _theme, context) {

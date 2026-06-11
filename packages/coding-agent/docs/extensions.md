@@ -1904,7 +1904,7 @@ const bashTool = createBashTool(cwd, {
 });
 ```
 
-SSH execution is built in; use `pi --ssh user@host:/path` to run built-in tools on a remote host.
+SSH execution is built in; use `pi --ssh user@host:/path` to run built-in tools on a remote host, or `pi --ssh-deferred --ssh-cwd /path` and configure the target later via RPC or `/ssh-sandbox`.
 
 ### Output Truncation
 

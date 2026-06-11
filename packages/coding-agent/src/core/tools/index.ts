@@ -39,12 +39,15 @@ export {
 } from "./ls.ts";
 export {
 	createSshToolOperations,
+	DeferredSshToolOperations,
+	type DeferredSshToolOperationsConfigureOptions,
 	LocalToolOperations,
 	type LocalToolOperationsOptions,
 	type ParsedSshTarget,
 	SshToolOperations,
 	type SshToolOperationsOptions,
 	type ToolAccessMode,
+	type ToolBackendInfo,
 	type ToolExecOptions,
 	type ToolFileStat,
 	type ToolGlobOptions,

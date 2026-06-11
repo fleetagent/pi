@@ -59,6 +59,11 @@ export interface ToolGrepResult {
 	matches: ToolGrepMatch[];
 }
 
+export type ToolBackendInfo =
+	| { type: "local"; cwd: string }
+	| { type: "ssh"; cwd: string; remote: string; configured: true }
+	| { type: "ssh"; cwd: string; configured: false };
+
 export interface ToolOperations {
 	cwd: string;
 	exec(command: string, options: ToolExecOptions): Promise<{ exitCode: number | null }>;
@@ -71,6 +76,7 @@ export interface ToolOperations {
 	glob?(pattern: string, cwd: string, options: ToolGlobOptions): Promise<string[]>;
 	grep?(options: ToolGrepOptions): Promise<ToolGrepResult>;
 	detectImageMimeType?(path: string): Promise<string | null | undefined>;
+	getBackendInfo?(): ToolBackendInfo;
 	dispose?(): Promise<void>;
 }
 
@@ -81,6 +87,11 @@ export interface LocalToolOperationsOptions {
 export interface SshToolOperationsOptions {
 	remote: string;
 	cwd: string;
+}
+
+export interface DeferredSshToolOperationsConfigureOptions {
+	remote: string;
+	cwd?: string;
 }
 
 export interface ParsedSshTarget {
@@ -300,6 +311,10 @@ export class LocalToolOperations implements ToolOperations {
 	async detectImageMimeType(path: string): Promise<string | null | undefined> {
 		return detectSupportedImageMimeTypeFromFile(path);
 	}
+
+	getBackendInfo(): ToolBackendInfo {
+		return { type: "local", cwd: this.cwd };
+	}
 }
 
 export class SshToolOperations implements ToolOperations {
@@ -450,6 +465,87 @@ export class SshToolOperations implements ToolOperations {
 		} catch {
 			return null;
 		}
+	}
+
+	getBackendInfo(): ToolBackendInfo {
+		return { type: "ssh", remote: this.remote, cwd: this.cwd, configured: true };
+	}
+}
+
+export class DeferredSshToolOperations implements ToolOperations {
+	cwd: string;
+	private operations: SshToolOperations | undefined;
+
+	constructor(cwd: string) {
+		this.cwd = cwd;
+	}
+
+	async configure(options: DeferredSshToolOperationsConfigureOptions): Promise<ToolBackendInfo> {
+		const next = new SshToolOperations({ remote: options.remote, cwd: options.cwd ?? this.cwd });
+		const stat = await next.stat(next.cwd);
+		if (!stat.isDirectory()) {
+			throw new Error(`SSH sandbox cwd is not a directory: ${next.cwd}`);
+		}
+		this.cwd = next.cwd;
+		this.operations = next;
+		return this.getBackendInfo();
+	}
+
+	clear(): void {
+		this.operations = undefined;
+	}
+
+	private requireOperations(): SshToolOperations {
+		if (!this.operations) {
+			throw new Error(
+				"SSH sandbox is not configured. Configure it over RPC or with /ssh-sandbox before using tools.",
+			);
+		}
+		return this.operations;
+	}
+
+	async exec(command: string, options: ToolExecOptions): Promise<{ exitCode: number | null }> {
+		return this.requireOperations().exec(command, options);
+	}
+
+	async access(path: string, mode?: ToolAccessMode): Promise<void> {
+		await this.requireOperations().access(path, mode);
+	}
+
+	async readFile(path: string): Promise<Buffer> {
+		return this.requireOperations().readFile(path);
+	}
+
+	async writeFile(path: string, content: string | Buffer): Promise<void> {
+		await this.requireOperations().writeFile(path, content);
+	}
+
+	async mkdir(path: string, options?: { recursive?: boolean }): Promise<void> {
+		await this.requireOperations().mkdir(path, options);
+	}
+
+	async stat(path: string): Promise<ToolFileStat> {
+		return this.requireOperations().stat(path);
+	}
+
+	async readdir(path: string): Promise<string[]> {
+		return this.requireOperations().readdir(path);
+	}
+
+	async glob(pattern: string, cwd: string, options: ToolGlobOptions): Promise<string[]> {
+		return this.requireOperations().glob(pattern, cwd, options);
+	}
+
+	async grep(options: ToolGrepOptions): Promise<ToolGrepResult> {
+		return this.requireOperations().grep(options);
+	}
+
+	async detectImageMimeType(path: string): Promise<string | null | undefined> {
+		return this.requireOperations().detectImageMimeType(path);
+	}
+
+	getBackendInfo(): ToolBackendInfo {
+		return this.operations?.getBackendInfo() ?? { type: "ssh", cwd: this.cwd, configured: false };
 	}
 }
 

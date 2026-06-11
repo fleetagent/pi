@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { executeBashWithOperations } from "../src/core/bash-executor.ts";
 import { createBashTool, createLocalBashOperations } from "../src/core/tools/bash.ts";
 import { computeEditsDiff } from "../src/core/tools/edit-diff.ts";
-import { LocalToolOperations } from "../src/core/tools/index.ts";
+import { DeferredSshToolOperations, LocalToolOperations } from "../src/core/tools/index.ts";
 import {
 	createEditTool,
 	createFindTool,
@@ -441,6 +441,20 @@ describe("Coding Agent Tools", () => {
 			);
 
 			expect(result).toEqual({ error: `Could not edit file: ${unreadableFile}. Error code: EACCES.` });
+		});
+	});
+
+	describe("deferred SSH operations", () => {
+		it("fails every operation before SSH sandbox configuration", async () => {
+			const operations = new DeferredSshToolOperations("/workspace");
+
+			expect(operations.getBackendInfo()).toEqual({ type: "ssh", cwd: "/workspace", configured: false });
+			await expect(
+				operations.exec("pwd", {
+					onData: () => {},
+				}),
+			).rejects.toThrow("SSH sandbox is not configured");
+			await expect(operations.readFile("/workspace/file.txt")).rejects.toThrow("SSH sandbox is not configured");
 		});
 	});
 

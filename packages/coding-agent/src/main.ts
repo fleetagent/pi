@@ -47,7 +47,7 @@ import {
 } from "./core/session-manager.ts";
 import { SettingsManager } from "./core/settings-manager.ts";
 import { resetTimings, time } from "./core/timings.ts";
-import { createSshToolOperations, type ToolOperations } from "./core/tools/index.ts";
+import { createSshToolOperations, DeferredSshToolOperations, type ToolOperations } from "./core/tools/index.ts";
 import { runMigrations, showDeprecationWarnings } from "./migrations.ts";
 import { ExtensionSelectorComponent } from "./modes/interactive/components/extension-selector.ts";
 import { initTheme, stopThemeWatcher } from "./modes/interactive/theme/theme.ts";
@@ -591,6 +591,10 @@ export async function main(args: string[], options?: MainOptions) {
 		? new InMemorySessionManager(initialSession.getCwd())
 		: createLifecycleSessionManager({ cwd: initialSession.getCwd(), sessionDir, remote: remoteSessionOptions });
 	let toolOperations: ToolOperations | undefined;
+	if (parsed.ssh && parsed.sshDeferred && !parsed.help) {
+		console.error(chalk.red("Error: --ssh and --ssh-deferred cannot be used together"));
+		process.exit(1);
+	}
 	if (parsed.ssh && !parsed.help) {
 		try {
 			toolOperations = await createSshToolOperations(parsed.ssh);
@@ -599,6 +603,12 @@ export async function main(args: string[], options?: MainOptions) {
 			console.error(chalk.red(`Error: failed to initialize SSH tool operations: ${message}`));
 			process.exit(1);
 		}
+	} else if (parsed.sshDeferred && !parsed.help) {
+		if (!parsed.sshCwd) {
+			console.error(chalk.red("Error: --ssh-deferred requires --ssh-cwd <path>"));
+			process.exit(1);
+		}
+		toolOperations = new DeferredSshToolOperations(parsed.sshCwd);
 	}
 	const piAgent = await PiAgent.create({
 		mode: appMode,
@@ -650,9 +660,13 @@ export async function main(args: string[], options?: MainOptions) {
 			}
 
 			if (toolOperations) {
+				const backend = toolOperations.getBackendInfo?.();
 				diagnostics.push({
 					type: "info",
-					message: `SSH tool operations enabled: ${parsed.ssh} (cwd: ${toolOperations.cwd})`,
+					message:
+						backend?.type === "ssh" && backend.configured
+							? `SSH tool operations enabled: ${backend.remote}:${backend.cwd}`
+							: `Deferred SSH sandbox mode enabled (cwd: ${toolOperations.cwd})`,
 				});
 			}
 
