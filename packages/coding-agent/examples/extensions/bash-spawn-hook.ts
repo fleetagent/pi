@@ -8,12 +8,12 @@
  */
 
 import type { ExtensionAPI } from "@fleetagent/pi-coding-agent";
-import { createBashTool } from "@fleetagent/pi-coding-agent";
+import { createBashTool, LocalToolOperations } from "@fleetagent/pi-coding-agent";
 
 export default function (pi: ExtensionAPI) {
 	const cwd = process.cwd();
 
-	const bashTool = createBashTool(cwd, {
+	const bashTool = createBashTool(new LocalToolOperations(cwd), {
 		spawnHook: ({ command, cwd, env }) => ({
 			command: `source ~/.profile\n${command}`,
 			cwd,

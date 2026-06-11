@@ -78,6 +78,10 @@
 - Added paginated `listSessions` support to the RPC client.
 - Added on-demand `RULES.md` resources for mandatory task and file constraints.
 
+### Changed
+
+- Consolidated built-in tool execution backends behind a shared `ToolOperations` interface.
+
 ### Fixed
 
 - Changed RPC client idle waits to use a five-minute inactivity timeout that resets when events arrive.

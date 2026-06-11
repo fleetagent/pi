@@ -59,7 +59,6 @@ import type {
 import type { SlashCommandInfo } from "../slash-commands.ts";
 import type { SourceInfo } from "../source-info.ts";
 import type { BuildSystemPromptOptions } from "../system-prompt.ts";
-import type { BashOperations } from "../tools/bash.ts";
 import type { EditToolDetails } from "../tools/edit.ts";
 import type {
 	BashToolDetails,
@@ -75,6 +74,7 @@ import type {
 	ReadToolInput,
 	WriteToolInput,
 } from "../tools/index.ts";
+import type { ToolOperations } from "../tools/operations.ts";
 
 export type { ExecOptions, ExecResult } from "../exec.ts";
 export type { BuildSystemPromptOptions } from "../system-prompt.ts";
@@ -1001,7 +1001,7 @@ export interface ToolCallEventResult {
 /** Result from user_bash event handler */
 export interface UserBashEventResult {
 	/** Custom operations to use for execution */
-	operations?: BashOperations;
+	operations?: ToolOperations;
 	/** Full replacement: extension handled execution, use this result */
 	result?: BashResult;
 }

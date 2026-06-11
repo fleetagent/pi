@@ -5,6 +5,7 @@ import { Container, type Terminal, Text, TUI } from "@fleetagent/pi-tui";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { createEditToolDefinition } from "../src/core/tools/edit.ts";
 import { computeEditsDiff, type Edit } from "../src/core/tools/edit-diff.ts";
+import { LocalToolOperations } from "../src/core/tools/index.ts";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 
@@ -88,7 +89,7 @@ describe("edit tool TUI rendering", () => {
 		);
 		const lines = (await readFile(filePath, "utf8")).trimEnd().split("\n");
 		const edits = createLargeEdits(lines);
-		const diff = await computeEditsDiff(filePath, edits, process.cwd());
+		const diff = await computeEditsDiff(filePath, edits, new LocalToolOperations(process.cwd()));
 		if ("error" in diff) {
 			throw new Error(diff.error);
 		}
@@ -105,7 +106,7 @@ describe("edit tool TUI rendering", () => {
 			"tool-call-1",
 			{ path: filePath, edits },
 			{},
-			createEditToolDefinition(process.cwd()),
+			createEditToolDefinition(new LocalToolOperations(process.cwd())),
 			tui,
 			process.cwd(),
 		);
@@ -161,7 +162,7 @@ describe("edit tool TUI rendering", () => {
 		);
 		const lines = (await readFile(filePath, "utf8")).trimEnd().split("\n");
 		const edits = createLargeEdits(lines).slice(0, 2);
-		const diff = await computeEditsDiff(filePath, edits, process.cwd());
+		const diff = await computeEditsDiff(filePath, edits, new LocalToolOperations(process.cwd()));
 		if ("error" in diff) {
 			throw new Error(diff.error);
 		}
@@ -174,7 +175,7 @@ describe("edit tool TUI rendering", () => {
 			"tool-call-replay",
 			{ path: filePath, edits },
 			{},
-			createEditToolDefinition(process.cwd()),
+			createEditToolDefinition(new LocalToolOperations(process.cwd())),
 			tui,
 			process.cwd(),
 		);
@@ -211,7 +212,7 @@ describe("edit tool TUI rendering", () => {
 			"tool-call-2",
 			{ path: filePath, edits: [{ oldText: "does not exist", newText: "replacement" }] },
 			{},
-			createEditToolDefinition(process.cwd()),
+			createEditToolDefinition(new LocalToolOperations(process.cwd())),
 			tui,
 			process.cwd(),
 		);

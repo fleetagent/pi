@@ -4,8 +4,7 @@
  */
 
 import * as Diff from "diff";
-import { constants } from "fs";
-import { access, readFile } from "fs/promises";
+import type { ToolOperations } from "./operations.ts";
 import { resolveToCwd } from "./path-utils.ts";
 
 export function detectLineEnding(content: string): "\r\n" | "\n" {
@@ -412,21 +411,21 @@ export interface EditDiffError {
 export async function computeEditsDiff(
 	path: string,
 	edits: Edit[],
-	cwd: string,
+	operations: ToolOperations,
 ): Promise<EditDiffResult | EditDiffError> {
-	const absolutePath = resolveToCwd(path, cwd);
+	const absolutePath = resolveToCwd(path, operations.cwd);
 
 	try {
 		// Check if file exists and is readable
 		try {
-			await access(absolutePath, constants.R_OK);
+			await operations.access(absolutePath, "read");
 		} catch (error: unknown) {
 			const errorMessage = error instanceof Error && "code" in error ? `Error code: ${error.code}` : String(error);
 			return { error: `Could not edit file: ${path}. ${errorMessage}.` };
 		}
 
 		// Read the file
-		const rawContent = await readFile(absolutePath, "utf-8");
+		const rawContent = (await operations.readFile(absolutePath)).toString("utf-8");
 
 		// Strip BOM before matching (LLM won't include invisible BOM in oldText)
 		const { text: content } = stripBom(rawContent);
@@ -448,7 +447,7 @@ export async function computeEditDiff(
 	path: string,
 	oldText: string,
 	newText: string,
-	cwd: string,
+	operations: ToolOperations,
 ): Promise<EditDiffResult | EditDiffError> {
-	return computeEditsDiff(path, [{ oldText, newText }], cwd);
+	return computeEditsDiff(path, [{ oldText, newText }], operations);
 }

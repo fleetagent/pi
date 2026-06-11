@@ -1,12 +1,12 @@
 import type { AgentTool } from "@fleetagent/pi-agent-core";
 import { Container, Text } from "@fleetagent/pi-tui";
-import { mkdir as fsMkdir, writeFile as fsWriteFile } from "fs/promises";
 import { dirname } from "path";
 import { type Static, Type } from "typebox";
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
 import { getLanguageFromPath, highlightCode } from "../../modes/interactive/theme/theme.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
 import { withFileMutationQueue } from "./file-mutation-queue.ts";
+import type { ToolOperations } from "./operations.ts";
 import { resolveToCwd } from "./path-utils.ts";
 import { invalidArgText, normalizeDisplayText, replaceTabs, shortenPath, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
@@ -18,26 +18,7 @@ const writeSchema = Type.Object({
 
 export type WriteToolInput = Static<typeof writeSchema>;
 
-/**
- * Pluggable operations for the write tool.
- * Override these to delegate file writing to remote systems (for example SSH).
- */
-export interface WriteOperations {
-	/** Write content to a file */
-	writeFile: (absolutePath: string, content: string) => Promise<void>;
-	/** Create directory recursively */
-	mkdir: (dir: string) => Promise<void>;
-}
-
-const defaultWriteOperations: WriteOperations = {
-	writeFile: (path, content) => fsWriteFile(path, content, "utf-8"),
-	mkdir: (dir) => fsMkdir(dir, { recursive: true }).then(() => {}),
-};
-
-export interface WriteToolOptions {
-	/** Custom operations for file writing. Default: local filesystem */
-	operations?: WriteOperations;
-}
+export interface WriteToolOptions {}
 
 type WriteHighlightCache = {
 	rawPath: string | null;
@@ -179,10 +160,11 @@ function formatWriteResult(
 }
 
 export function createWriteToolDefinition(
-	cwd: string,
-	options?: WriteToolOptions,
+	operations: ToolOperations,
+	_options?: WriteToolOptions,
 ): ToolDefinition<typeof writeSchema, undefined> {
-	const ops = options?.operations ?? defaultWriteOperations;
+	const ops = operations;
+	const cwd = operations.cwd;
 	return {
 		name: "write",
 		label: "write",
@@ -215,7 +197,7 @@ export function createWriteToolDefinition(
 				try {
 					throwIfAborted();
 					// Create parent directories if needed.
-					await ops.mkdir(dir);
+					await ops.mkdir(dir, { recursive: true });
 					throwIfAborted();
 
 					// Write the file contents.
@@ -268,6 +250,6 @@ export function createWriteToolDefinition(
 	};
 }
 
-export function createWriteTool(cwd: string, options?: WriteToolOptions): AgentTool<typeof writeSchema> {
-	return wrapToolDefinition(createWriteToolDefinition(cwd, options));
+export function createWriteTool(operations: ToolOperations, options?: WriteToolOptions): AgentTool<typeof writeSchema> {
+	return wrapToolDefinition(createWriteToolDefinition(operations, options));
 }

@@ -3,7 +3,7 @@ import type { AgentTool } from "@fleetagent/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@fleetagent/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
-import type { BashOperations } from "../../src/core/tools/bash.ts";
+import { LocalToolOperations } from "../../src/core/tools/index.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
 function getEntryTypes(harness: Harness): string[] {
@@ -108,18 +108,17 @@ describe("AgentSession bash and persistence characterization", () => {
 	it("cancels running bash commands with abortBash", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
-		const operations: BashOperations = {
-			exec: async (_command, _cwd, options) => {
-				return await new Promise<{ exitCode: number | null }>((_resolve, reject) => {
-					options.signal?.addEventListener(
-						"abort",
-						() => {
-							reject(new Error("aborted"));
-						},
-						{ once: true },
-					);
-				});
-			},
+		const operations = new LocalToolOperations(process.cwd());
+		operations.exec = async (_command, options) => {
+			return await new Promise<{ exitCode: number | null }>((_resolve, reject) => {
+				options.signal?.addEventListener(
+					"abort",
+					() => {
+						reject(new Error("aborted"));
+					},
+					{ once: true },
+				);
+			});
 		};
 
 		const bashPromise = harness.session.executeBash("sleep", undefined, { operations });
@@ -227,11 +226,10 @@ describe("AgentSession bash and persistence characterization", () => {
 	it("records bash output through custom operations", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
-		const operations: BashOperations = {
-			exec: async (_command, _cwd, options) => {
-				options.onData(Buffer.from("hello from custom ops"));
-				return { exitCode: 0 };
-			},
+		const operations = new LocalToolOperations(process.cwd());
+		operations.exec = async (_command, options) => {
+			options.onData(Buffer.from("hello from custom ops"));
+			return { exitCode: 0 };
 		};
 
 		const result = await harness.session.executeBash("custom", undefined, { operations });

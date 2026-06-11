@@ -9,6 +9,7 @@ vi.mock("../src/utils/image-resize.ts", () => ({
 }));
 
 import { processFileArguments } from "../src/cli/file-processor.ts";
+import { LocalToolOperations } from "../src/core/tools/index.ts";
 import { createReadTool } from "../src/core/tools/read.ts";
 import { resizeImage } from "../src/utils/image-resize.ts";
 
@@ -33,7 +34,7 @@ describe("image resize callers", () => {
 		const imagePath = join(testDir, "test.png");
 		writeFileSync(imagePath, Buffer.from(TINY_PNG_BASE64, "base64"));
 
-		const tool = createReadTool(testDir);
+		const tool = createReadTool(new LocalToolOperations(testDir));
 		const result = await tool.execute("test-read-image", { path: imagePath });
 
 		expect(result.content).toHaveLength(1);
