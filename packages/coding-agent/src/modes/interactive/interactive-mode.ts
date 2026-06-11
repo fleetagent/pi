@@ -1368,7 +1368,8 @@ export class InteractiveMode {
 			const contextFiles = this.session.resourceLoader.getAgentsFiles().agentsFiles;
 			if (contextFiles.length > 0) {
 				this.chatContainer.addChild(new Spacer(1));
-				const contextBackendIcon = this.session.getToolBackendInfo().type === "ssh" ? "☁" : "🖥";
+				const contextBackendInfo = this.session.getToolBackendInfo?.();
+				const contextBackendIcon = contextBackendInfo?.type === "ssh" ? "☁" : "🖥";
 				const contextList = contextFiles
 					.map((f) =>
 						theme.fg(
