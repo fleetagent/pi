@@ -56,6 +56,9 @@ export interface Args {
 	listModels?: string | true;
 	offline?: boolean;
 	verbose?: boolean;
+	ssh?: string;
+	sshDeferred?: boolean;
+	sshCwd?: string;
 	messages: string[];
 	fileArgs: string[];
 	/** Unknown flags (potentially extension flags) - map of flag name to value */
@@ -186,6 +189,12 @@ export function parseArgs(args: string[]): Args {
 			result.verbose = true;
 		} else if (arg === "--offline") {
 			result.offline = true;
+		} else if (arg === "--ssh" && i + 1 < args.length) {
+			result.ssh = args[++i];
+		} else if (arg === "--ssh-deferred") {
+			result.sshDeferred = true;
+		} else if (arg === "--ssh-cwd" && i + 1 < args.length) {
+			result.sshCwd = args[++i];
 		} else if (arg.startsWith("@")) {
 			result.fileArgs.push(arg.slice(1)); // Remove @ prefix
 		} else if (arg.startsWith("--")) {
@@ -276,6 +285,9 @@ ${chalk.bold("Options:")}
   --list-models [search]         List available models (with optional fuzzy search)
   --verbose                      Force verbose startup (overrides quietStartup setting)
   --offline                      Disable startup network operations (same as PI_OFFLINE=1)
+  --ssh <target>                 Run built-in tools over SSH (user@host or user@host:/path)
+  --ssh-deferred                 Start in SSH sandbox mode and configure target later
+  --ssh-cwd <path>               Stable remote cwd for --ssh-deferred
   --help, -h                     Show this help
   --version, -v                  Show version number
 
@@ -323,6 +335,12 @@ ${chalk.bold("Examples:")}
 
   # Read-only mode (no file modifications possible)
   ${APP_NAME} --tools read,grep,find,ls -p "Review the code in src/"
+
+  # Run built-in tools on a remote machine over SSH
+  ${APP_NAME} --ssh user@host:/home/user/project "Inspect this repo"
+
+  # Start in SSH sandbox mode and configure host later via RPC or /ssh-sandbox
+  ${APP_NAME} --ssh-deferred --ssh-cwd /workspace
 
   # Export a session file to HTML
   ${APP_NAME} --export ~/${CONFIG_DIR_NAME}/agent/sessions/--path--/session.jsonl

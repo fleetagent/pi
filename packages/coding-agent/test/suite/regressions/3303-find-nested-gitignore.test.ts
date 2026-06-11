@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createFindToolDefinition } from "../../../src/core/tools/find.ts";
+import { LocalToolOperations } from "../../../src/core/tools/index.ts";
 
 /**
  * Regression test for https://github.com/earendil-works/pi-mono/issues/3303
@@ -18,7 +19,7 @@ describe("issue #3303 nested .gitignore rules leak into sibling directories", ()
 	let tempRoot: string;
 
 	async function runFind(pattern: string): Promise<string[]> {
-		const def = createFindToolDefinition(tempRoot);
+		const def = createFindToolDefinition(new LocalToolOperations(tempRoot));
 		const ctx = {} as Parameters<typeof def.execute>[4];
 		const result = (await def.execute("call-1", { pattern }, undefined, undefined, ctx)) as {
 			content: Array<{ type: string; text?: string }>;

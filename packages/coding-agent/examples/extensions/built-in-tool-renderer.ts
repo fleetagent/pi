@@ -26,14 +26,21 @@
  */
 
 import type { BashToolDetails, EditToolDetails, ExtensionAPI, ReadToolDetails } from "@fleetagent/pi-coding-agent";
-import { createBashTool, createEditTool, createReadTool, createWriteTool } from "@fleetagent/pi-coding-agent";
+import {
+	createBashTool,
+	createEditTool,
+	createReadTool,
+	createWriteTool,
+	LocalToolOperations,
+} from "@fleetagent/pi-coding-agent";
 import { Text } from "@fleetagent/pi-tui";
 
 export default function (pi: ExtensionAPI) {
 	const cwd = process.cwd();
+	const operations = new LocalToolOperations(cwd);
 
 	// --- Read tool: show path and line count ---
-	const originalRead = createReadTool(cwd);
+	const originalRead = createReadTool(operations);
 	pi.registerTool({
 		name: "read",
 		label: "read",
@@ -92,7 +99,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// --- Bash tool: show command and exit code ---
-	const originalBash = createBashTool(cwd);
+	const originalBash = createBashTool(operations);
 	pi.registerTool({
 		name: "bash",
 		label: "bash",
@@ -151,7 +158,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// --- Edit tool: show path and diff stats ---
-	const originalEdit = createEditTool(cwd);
+	const originalEdit = createEditTool(operations);
 	pi.registerTool({
 		name: "edit",
 		label: "edit",
@@ -216,7 +223,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// --- Write tool: show path and size ---
-	const originalWrite = createWriteTool(cwd);
+	const originalWrite = createWriteTool(operations);
 	pi.registerTool({
 		name: "write",
 		label: "write",

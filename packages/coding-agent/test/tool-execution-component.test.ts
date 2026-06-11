@@ -4,7 +4,8 @@ import { Type } from "typebox";
 import { beforeAll, describe, expect, test } from "vitest";
 import { getReadmePath } from "../src/config.ts";
 import type { ToolDefinition } from "../src/core/extensions/types.ts";
-import { type BashOperations, createBashToolDefinition } from "../src/core/tools/bash.ts";
+import { createBashToolDefinition } from "../src/core/tools/bash.ts";
+import { LocalToolOperations } from "../src/core/tools/index.ts";
 import { createReadTool, createReadToolDefinition } from "../src/core/tools/read.ts";
 import { createWriteToolDefinition } from "../src/core/tools/write.ts";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
@@ -105,13 +106,12 @@ describe("ToolExecutionComponent parity", () => {
 
 	test("bash execute emits an initial empty partial update before output arrives", async () => {
 		const updates: Array<{ content: Array<{ type: string; text?: string }>; details?: unknown }> = [];
-		const operations: BashOperations = {
-			exec: async () => {
-				await new Promise((resolve) => setTimeout(resolve, 10));
-				return { exitCode: 0 };
-			},
+		const operations = new LocalToolOperations(process.cwd());
+		operations.exec = async () => {
+			await new Promise((resolve) => setTimeout(resolve, 10));
+			return { exitCode: 0 };
 		};
-		const tool = createBashToolDefinition(process.cwd(), { operations });
+		const tool = createBashToolDefinition(operations);
 		const promise = tool.execute(
 			"tool-bash-1",
 			{ command: "sleep 10" },
@@ -124,15 +124,14 @@ describe("ToolExecutionComponent parity", () => {
 	});
 
 	test("bash renderer does not duplicate final full output truncation details", async () => {
-		const operations: BashOperations = {
-			exec: async (_command, _cwd, { onData }) => {
-				for (let i = 1; i <= 4000; i++) {
-					onData(Buffer.from(`line-${String(i).padStart(4, "0")}\n`));
-				}
-				return { exitCode: 0 };
-			},
+		const operations = new LocalToolOperations(process.cwd());
+		operations.exec = async (_command, { onData }) => {
+			for (let i = 1; i <= 4000; i++) {
+				onData(Buffer.from(`line-${String(i).padStart(4, "0")}\n`));
+			}
+			return { exitCode: 0 };
 		};
-		const tool = createBashToolDefinition(process.cwd(), { operations });
+		const tool = createBashToolDefinition(operations);
 		const result = await tool.execute(
 			"tool-bash-1b",
 			{ command: "generate output" },
@@ -166,7 +165,7 @@ describe("ToolExecutionComponent parity", () => {
 			"tool-4",
 			{ path: "README.md" },
 			{},
-			createReadToolDefinition(process.cwd()),
+			createReadToolDefinition(new LocalToolOperations(process.cwd())),
 			createFakeTui(),
 			process.cwd(),
 		);
@@ -219,7 +218,7 @@ describe("ToolExecutionComponent parity", () => {
 	});
 
 	test("uses custom renderers for built-in overrides that reuse built-in definition parameters", () => {
-		const builtInDefinition = createReadToolDefinition(process.cwd());
+		const builtInDefinition = createReadToolDefinition(new LocalToolOperations(process.cwd()));
 		const component = new ToolExecutionComponent(
 			"read",
 			"tool-4d",
@@ -241,7 +240,7 @@ describe("ToolExecutionComponent parity", () => {
 	});
 
 	test("uses custom renderers for built-in overrides that reuse wrapped built-in tool parameters", () => {
-		const builtInTool = createReadTool(process.cwd());
+		const builtInTool = createReadTool(new LocalToolOperations(process.cwd()));
 		const component = new ToolExecutionComponent(
 			"read",
 			"tool-4e",
@@ -338,7 +337,7 @@ describe("ToolExecutionComponent parity", () => {
 			"tool-7",
 			{ path: "README.md", content: "one\ntwo\n" },
 			{},
-			createWriteToolDefinition(process.cwd()),
+			createWriteToolDefinition(new LocalToolOperations(process.cwd())),
 			createFakeTui(),
 			process.cwd(),
 		);
@@ -354,7 +353,7 @@ describe("ToolExecutionComponent parity", () => {
 			"tool-8",
 			{ path: "notes.txt" },
 			{},
-			createReadToolDefinition(process.cwd()),
+			createReadToolDefinition(new LocalToolOperations(process.cwd())),
 			createFakeTui(),
 			process.cwd(),
 		);
@@ -408,7 +407,7 @@ describe("ToolExecutionComponent parity", () => {
 				`tool-compact-${scenario.title}`,
 				{ path: scenario.path },
 				{},
-				createReadToolDefinition(process.cwd()),
+				createReadToolDefinition(new LocalToolOperations(process.cwd())),
 				createFakeTui(),
 				process.cwd(),
 			);
@@ -440,7 +439,7 @@ describe("ToolExecutionComponent parity", () => {
 				`tool-compact-range-${scenario.title}`,
 				{ path: scenario.path, offset: 120, limit: 210 },
 				{},
-				createReadToolDefinition(process.cwd()),
+				createReadToolDefinition(new LocalToolOperations(process.cwd())),
 				createFakeTui(),
 				process.cwd(),
 			);

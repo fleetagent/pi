@@ -25,6 +25,7 @@ import {
 	createLsTool,
 	createReadTool,
 	createWriteTool,
+	LocalToolOperations,
 } from "@fleetagent/pi-coding-agent";
 import { Text } from "@fleetagent/pi-tui";
 import { homedir } from "os";
@@ -44,14 +45,15 @@ function shortenPath(path: string): string {
 const toolCache = new Map<string, ReturnType<typeof createBuiltInTools>>();
 
 function createBuiltInTools(cwd: string) {
+	const operations = new LocalToolOperations(cwd);
 	return {
-		read: createReadTool(cwd),
-		bash: createBashTool(cwd),
-		edit: createEditTool(cwd),
-		write: createWriteTool(cwd),
-		find: createFindTool(cwd),
-		grep: createGrepTool(cwd),
-		ls: createLsTool(cwd),
+		read: createReadTool(operations),
+		bash: createBashTool(operations),
+		edit: createEditTool(operations),
+		write: createWriteTool(operations),
+		find: createFindTool(operations),
+		grep: createGrepTool(operations),
+		ls: createLsTool(operations),
 	};
 }
 

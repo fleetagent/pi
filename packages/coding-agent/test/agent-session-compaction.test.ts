@@ -18,7 +18,7 @@ import { AuthStorage } from "../src/core/auth-storage.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
 import { InMemorySessionManager, LocalSessionManager, type Session } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
-import { createCodingTools } from "../src/index.ts";
+import { createCodingTools, LocalToolOperations } from "../src/index.ts";
 import { API_KEY, createTestResourceLoader } from "./utilities.ts";
 
 describe.skipIf(!API_KEY)("AgentSession compaction e2e", () => {
@@ -52,7 +52,7 @@ describe.skipIf(!API_KEY)("AgentSession compaction e2e", () => {
 			initialState: {
 				model,
 				systemPrompt: "You are a helpful assistant. Be concise.",
-				tools: createCodingTools(process.cwd()),
+				tools: createCodingTools(new LocalToolOperations(process.cwd())),
 			},
 		});
 

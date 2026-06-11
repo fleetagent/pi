@@ -83,6 +83,7 @@ import { LocalSessionManager, type SessionContext } from "../../core/session-man
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
 import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
+import type { ToolBackendInfo } from "../../core/tools/index.ts";
 import type { TruncationResult } from "../../core/tools/truncate.ts";
 import { getChangelogPath, getNewEntries, parseChangelog } from "../../utils/changelog.ts";
 import { copyToClipboard } from "../../utils/clipboard.ts";
@@ -1593,6 +1594,7 @@ export class InteractiveMode {
 
 		setRegisteredThemes(this.session.resourceLoader.getThemes().themes);
 		this.setupAutocompleteProvider();
+		this.updateToolBackendStatus();
 
 		const extensionRunner = this.session.extensionRunner;
 		this.setupExtensionShortcuts(extensionRunner);
@@ -1714,6 +1716,20 @@ export class InteractiveMode {
 	private setExtensionStatus(key: string, text: string | undefined): void {
 		this.footerDataProvider.setExtensionStatus(key, text);
 		this.ui.requestRender();
+	}
+
+	private formatToolBackendStatus(info: ToolBackendInfo): string {
+		if (info.type === "local") {
+			return theme.fg("dim", `tools: local ${info.cwd}`);
+		}
+		if (info.configured) {
+			return theme.fg("accent", `tools: ssh ${info.remote}:${info.cwd}`);
+		}
+		return theme.fg("warning", `tools: ssh not configured ${info.cwd}`);
+	}
+
+	private updateToolBackendStatus(): void {
+		this.setExtensionStatus("toolBackend", this.formatToolBackendStatus(this.session.getToolBackendInfo()));
 	}
 
 	private getWorkingLoaderMessage(): string {
@@ -2544,6 +2560,11 @@ export class InteractiveMode {
 			if (text === "/session") {
 				this.handleSessionCommand();
 				this.editor.setText("");
+				return;
+			}
+			if (text === "/ssh-sandbox" || text.startsWith("/ssh-sandbox ")) {
+				this.editor.setText("");
+				await this.handleSshSandboxCommand(text);
 				return;
 			}
 			if (text === "/changelog") {
@@ -5228,6 +5249,40 @@ export class InteractiveMode {
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new Text(theme.fg("dim", `Session name set: ${name}`), 1, 0));
 		this.ui.requestRender();
+	}
+
+	private async handleSshSandboxCommand(text: string): Promise<void> {
+		const args = text.replace(/^\/ssh-sandbox\s*/, "").trim();
+		if (!args || args === "status") {
+			this.showStatus(this.formatToolBackendStatus(this.session.getToolBackendInfo()));
+			return;
+		}
+		if (args === "clear") {
+			try {
+				this.session.clearSshSandbox();
+				this.updateToolBackendStatus();
+				this.showStatus("SSH sandbox cleared");
+			} catch (error) {
+				this.showError(error instanceof Error ? error.message : String(error));
+			}
+			return;
+		}
+
+		const [targetArg, cwdArg] = args.split(/\s+/, 2);
+		if (!targetArg) {
+			this.showWarning("Usage: /ssh-sandbox <user@host[:/path]> [path]");
+			return;
+		}
+		const separatorIndex = targetArg.indexOf(":");
+		const remote = separatorIndex === -1 ? targetArg : targetArg.slice(0, separatorIndex);
+		const cwd = cwdArg ?? (separatorIndex === -1 ? undefined : targetArg.slice(separatorIndex + 1));
+		try {
+			const info = await this.session.configureSshSandbox({ remote, cwd });
+			this.updateToolBackendStatus();
+			this.showStatus(this.formatToolBackendStatus(info));
+		} catch (error) {
+			this.showError(`Failed to configure SSH sandbox: ${error instanceof Error ? error.message : String(error)}`);
+		}
 	}
 
 	private handleSessionCommand(): void {

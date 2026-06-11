@@ -2,16 +2,15 @@ import { basename, dirname, isAbsolute, relative, resolve as resolvePath, sep } 
 import type { AgentTool } from "@fleetagent/pi-agent-core";
 import type { Api, ImageContent, Model, TextContent } from "@fleetagent/pi-ai";
 import { Text } from "@fleetagent/pi-tui";
-import { constants } from "fs";
-import { access as fsAccess, readFile as fsReadFile } from "fs/promises";
+
 import { type Static, Type } from "typebox";
 import { getReadmePath } from "../../config.ts";
 import { keyHint, keyText } from "../../modes/interactive/components/keybinding-hints.ts";
 import { getLanguageFromPath, highlightCode, type Theme } from "../../modes/interactive/theme/theme.ts";
 import { formatDimensionNote, resizeImage } from "../../utils/image-resize.ts";
-import { detectSupportedImageMimeTypeFromFile } from "../../utils/mime.ts";
 import { formatPathRelativeToCwdOrAbsolute } from "../../utils/paths.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
+import type { ToolOperations } from "./operations.ts";
 import { resolveReadPathAsync, resolveToCwd } from "./path-utils.ts";
 import { getTextOutput, invalidArgText, replaceTabs, shortenPath, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
@@ -36,30 +35,9 @@ interface CompactReadClassification {
 
 const COMPACT_RESOURCE_FILE_NAMES = new Set(["AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"]);
 
-/**
- * Pluggable operations for the read tool.
- * Override these to delegate file reading to remote systems (for example SSH).
- */
-export interface ReadOperations {
-	/** Read file contents as a Buffer */
-	readFile: (absolutePath: string) => Promise<Buffer>;
-	/** Check if file is readable (throw if not) */
-	access: (absolutePath: string) => Promise<void>;
-	/** Detect image MIME type, return null or undefined for non-images */
-	detectImageMimeType?: (absolutePath: string) => Promise<string | null | undefined>;
-}
-
-const defaultReadOperations: ReadOperations = {
-	readFile: (path) => fsReadFile(path),
-	access: (path) => fsAccess(path, constants.R_OK),
-	detectImageMimeType: detectSupportedImageMimeTypeFromFile,
-};
-
 export interface ReadToolOptions {
 	/** Whether to auto-resize images to 2000x2000 max. Default: true */
 	autoResizeImages?: boolean;
-	/** Custom operations for file reading. Default: local filesystem */
-	operations?: ReadOperations;
 }
 
 type ReadRenderArgs = { path?: string; file_path?: string; offset?: number; limit?: number };
@@ -208,11 +186,12 @@ function formatReadResult(
 }
 
 export function createReadToolDefinition(
-	cwd: string,
+	operations: ToolOperations,
 	options?: ReadToolOptions,
 ): ToolDefinition<typeof readSchema, ReadToolDetails | undefined> {
 	const autoResizeImages = options?.autoResizeImages ?? true;
-	const ops = options?.operations ?? defaultReadOperations;
+	const ops = operations;
+	const cwd = operations.cwd;
 	return {
 		name: "read",
 		label: "read",
@@ -245,7 +224,7 @@ export function createReadToolDefinition(
 							const absolutePath = await resolveReadPathAsync(path, cwd);
 							if (aborted) return;
 							// Check if file exists and is readable.
-							await ops.access(absolutePath);
+							await ops.access(absolutePath, "read");
 							if (aborted) return;
 							const mimeType = ops.detectImageMimeType ? await ops.detectImageMimeType(absolutePath) : undefined;
 							let content: (TextContent | ImageContent)[];
@@ -362,6 +341,6 @@ export function createReadToolDefinition(
 	};
 }
 
-export function createReadTool(cwd: string, options?: ReadToolOptions): AgentTool<typeof readSchema> {
-	return wrapToolDefinition(createReadToolDefinition(cwd, options));
+export function createReadTool(operations: ToolOperations, options?: ReadToolOptions): AgentTool<typeof readSchema> {
+	return wrapToolDefinition(createReadToolDefinition(operations, options));
 }

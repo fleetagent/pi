@@ -1,5 +1,3 @@
-import { constants } from "node:fs";
-import { access as fsAccess } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import type { AgentTool } from "@fleetagent/pi-agent-core";
 import { Text } from "@fleetagent/pi-tui";
@@ -9,6 +7,7 @@ import { type Static, Type } from "typebox";
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
 import { ensureTool } from "../../utils/tools-manager.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
+import type { ToolOperations } from "./operations.ts";
 import { resolveToCwd } from "./path-utils.ts";
 import { getTextOutput, invalidArgText, shortenPath, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
@@ -35,34 +34,7 @@ export interface FindToolDetails {
 	resultLimitReached?: number;
 }
 
-/**
- * Pluggable operations for the find tool.
- * Override these to delegate file search to remote systems (for example SSH).
- */
-export interface FindOperations {
-	/** Check if path exists */
-	exists: (absolutePath: string) => Promise<boolean> | boolean;
-	/** Find files matching glob pattern. Returns relative or absolute paths. */
-	glob: (pattern: string, cwd: string, options: { ignore: string[]; limit: number }) => Promise<string[]> | string[];
-}
-
-const defaultFindOperations: FindOperations = {
-	exists: async (absolutePath) => {
-		try {
-			await fsAccess(absolutePath, constants.F_OK);
-			return true;
-		} catch {
-			return false;
-		}
-	},
-	// This is a placeholder. Actual fd execution happens in execute() when no custom glob is provided.
-	glob: () => [],
-};
-
-export interface FindToolOptions {
-	/** Custom operations for find. Default: local filesystem plus fd */
-	operations?: FindOperations;
-}
+export interface FindToolOptions {}
 
 function formatFindCall(
 	args: { pattern: string; path?: string; limit?: number } | undefined,
@@ -118,10 +90,11 @@ function formatFindResult(
 }
 
 export function createFindToolDefinition(
-	cwd: string,
-	options?: FindToolOptions,
+	operations: ToolOperations,
+	_options?: FindToolOptions,
 ): ToolDefinition<typeof findSchema, FindToolDetails | undefined> {
-	const customOps = options?.operations;
+	const ops = operations;
+	const cwd = operations.cwd;
 	return {
 		name: "find",
 		label: "find",
@@ -160,11 +133,11 @@ export function createFindToolDefinition(
 					try {
 						const searchPath = resolveToCwd(searchDir || ".", cwd);
 						const effectiveLimit = limit ?? DEFAULT_LIMIT;
-						const ops = customOps ?? defaultFindOperations;
-
-						// If custom operations provide glob(), use that instead of fd.
-						if (customOps?.glob) {
-							if (!(await ops.exists(searchPath))) {
+						// If operations provide glob(), use that instead of fd.
+						if (ops.glob) {
+							try {
+								await ops.access(searchPath, "exists");
+							} catch {
 								settle(() => reject(new Error(`Path not found: ${searchPath}`)));
 								return;
 							}
@@ -373,6 +346,6 @@ export function createFindToolDefinition(
 	};
 }
 
-export function createFindTool(cwd: string, options?: FindToolOptions): AgentTool<typeof findSchema> {
-	return wrapToolDefinition(createFindToolDefinition(cwd, options));
+export function createFindTool(operations: ToolOperations, options?: FindToolOptions): AgentTool<typeof findSchema> {
+	return wrapToolDefinition(createFindToolDefinition(operations, options));
 }

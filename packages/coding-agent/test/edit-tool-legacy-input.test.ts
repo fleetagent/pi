@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ExtensionContext } from "../src/core/extensions/types.ts";
 import { createEditToolDefinition } from "../src/core/tools/edit.ts";
+import { LocalToolOperations } from "../src/core/tools/index.ts";
 
 const tempDirs: string[] = [];
 
@@ -19,13 +20,13 @@ afterEach(async () => {
 
 describe("edit tool prepareArguments", () => {
 	it("keeps legacy fields out of the public schema", () => {
-		const definition = createEditToolDefinition(process.cwd());
+		const definition = createEditToolDefinition(new LocalToolOperations(process.cwd()));
 		expect(definition.parameters.properties).not.toHaveProperty("oldText");
 		expect(definition.parameters.properties).not.toHaveProperty("newText");
 	});
 
 	it("folds top-level oldText/newText into edits", () => {
-		const definition = createEditToolDefinition(process.cwd());
+		const definition = createEditToolDefinition(new LocalToolOperations(process.cwd()));
 		const prepared = definition.prepareArguments!({
 			path: "file.txt",
 			oldText: "before",
@@ -38,7 +39,7 @@ describe("edit tool prepareArguments", () => {
 	});
 
 	it("appends legacy replacement to existing edits", () => {
-		const definition = createEditToolDefinition(process.cwd());
+		const definition = createEditToolDefinition(new LocalToolOperations(process.cwd()));
 		const prepared = definition.prepareArguments!({
 			path: "file.txt",
 			edits: [{ oldText: "a", newText: "b" }],
@@ -55,7 +56,7 @@ describe("edit tool prepareArguments", () => {
 	});
 
 	it("passes through valid input unchanged", () => {
-		const definition = createEditToolDefinition(process.cwd());
+		const definition = createEditToolDefinition(new LocalToolOperations(process.cwd()));
 		const input = {
 			path: "file.txt",
 			edits: [{ oldText: "a", newText: "b" }],
@@ -65,7 +66,7 @@ describe("edit tool prepareArguments", () => {
 	});
 
 	it("passes through non-object input unchanged", () => {
-		const definition = createEditToolDefinition(process.cwd());
+		const definition = createEditToolDefinition(new LocalToolOperations(process.cwd()));
 		expect(definition.prepareArguments!(null)).toBe(null);
 		expect(definition.prepareArguments!(undefined)).toBe(undefined);
 		expect(definition.prepareArguments!("garbage")).toBe("garbage");
@@ -76,7 +77,7 @@ describe("edit tool prepareArguments", () => {
 		const filePath = join(dir, "legacy.txt");
 		await writeFile(filePath, "before\n", "utf8");
 
-		const definition = createEditToolDefinition(dir);
+		const definition = createEditToolDefinition(new LocalToolOperations(dir));
 		const prepared = definition.prepareArguments!({
 			path: "legacy.txt",
 			oldText: "before",
@@ -91,7 +92,7 @@ describe("edit tool prepareArguments", () => {
 
 describe("edit tool stringified edits", () => {
 	it("parses edits from a JSON string", () => {
-		const definition = createEditToolDefinition(process.cwd());
+		const definition = createEditToolDefinition(new LocalToolOperations(process.cwd()));
 		const prepared = definition.prepareArguments!({
 			path: "file.txt",
 			edits: JSON.stringify([{ oldText: "a", newText: "b" }]),
@@ -103,7 +104,7 @@ describe("edit tool stringified edits", () => {
 	});
 
 	it("leaves edits alone when the string is not valid JSON", () => {
-		const definition = createEditToolDefinition(process.cwd());
+		const definition = createEditToolDefinition(new LocalToolOperations(process.cwd()));
 		const prepared = definition.prepareArguments!({
 			path: "file.txt",
 			edits: "not json",

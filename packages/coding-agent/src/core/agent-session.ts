@@ -101,8 +101,14 @@ import type { SettingsManager } from "./settings-manager.ts";
 import type { SlashCommandInfo } from "./slash-commands.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.ts";
-import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
-import { createAllToolDefinitions } from "./tools/index.ts";
+import { createLocalBashOperations } from "./tools/bash.ts";
+import {
+	createAllToolDefinitions,
+	DeferredSshToolOperations,
+	LocalToolOperations,
+	type ToolBackendInfo,
+	type ToolOperations,
+} from "./tools/index.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
 
 // ============================================================================
@@ -177,6 +183,8 @@ export interface AgentSessionConfig {
 	resourceLoader: ResourceLoader;
 	/** SDK custom tools registered outside extensions */
 	customTools?: ToolDefinition[];
+	/** Tool operation backend used by built-in tools. */
+	toolOperations?: ToolOperations;
 	/** Model registry for API key resolution and model discovery */
 	modelRegistry: ModelRegistry;
 	/** Initial active built-in tool names. Default: [read, bash, edit, write] */
@@ -376,6 +384,7 @@ export class AgentSession {
 	private _initialActiveToolNames?: string[];
 	private _allowedToolNames?: Set<string>;
 	private _baseToolsOverride?: Record<string, AgentTool>;
+	private _toolOperations?: ToolOperations;
 	private _sessionStartEvent: SessionStartEvent;
 	private _extensionUIContext?: ExtensionUIContext;
 	private _extensionCommandContextActions?: ExtensionCommandContextActions;
@@ -410,6 +419,7 @@ export class AgentSession {
 		this._initialActiveToolNames = config.initialActiveToolNames;
 		this._allowedToolNames = config.allowedToolNames ? new Set(config.allowedToolNames) : undefined;
 		this._baseToolsOverride = config.baseToolsOverride;
+		this._toolOperations = config.toolOperations;
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
 
 		// Always subscribe to agent events for internal handling
@@ -427,6 +437,24 @@ export class AgentSession {
 	/** Model registry for API key resolution and model discovery */
 	get modelRegistry(): ModelRegistry {
 		return this._modelRegistry;
+	}
+
+	getToolBackendInfo(): ToolBackendInfo {
+		return this._toolOperations?.getBackendInfo?.() ?? { type: "local", cwd: this._cwd };
+	}
+
+	async configureSshSandbox(options: { remote: string; cwd?: string }): Promise<ToolBackendInfo> {
+		if (!(this._toolOperations instanceof DeferredSshToolOperations)) {
+			throw new Error("SSH sandbox can only be configured when Pi is started with --ssh-deferred");
+		}
+		return this._toolOperations.configure(options);
+	}
+
+	clearSshSandbox(): void {
+		if (!(this._toolOperations instanceof DeferredSshToolOperations)) {
+			throw new Error("SSH sandbox can only be cleared when Pi is started with --ssh-deferred");
+		}
+		this._toolOperations.clear();
 	}
 
 	private async _getRequiredRequestAuth(model: Model<any>): Promise<{
@@ -1030,7 +1058,7 @@ export class AgentSession {
 		const loadedContextFiles = this._resourceLoader.getAgentsFiles().agentsFiles;
 
 		this._baseSystemPromptOptions = {
-			cwd: this._cwd,
+			cwd: this._toolOperations?.cwd ?? this._cwd,
 			skills: loadedSkills,
 			rules: loadedRules,
 			contextFiles: loadedContextFiles,
@@ -2822,6 +2850,7 @@ export class AgentSession {
 		const autoResizeImages = this.settingsManager.getImageAutoResize();
 		const shellCommandPrefix = this.settingsManager.getShellCommandPrefix();
 		const shellPath = this.settingsManager.getShellPath();
+		const operations = this._toolOperations ?? new LocalToolOperations(this._cwd, { shellPath });
 		const baseToolDefinitions = this._baseToolsOverride
 			? Object.fromEntries(
 					Object.entries(this._baseToolsOverride).map(([name, tool]) => [
@@ -2829,9 +2858,9 @@ export class AgentSession {
 						createToolDefinitionFromAgentTool(tool),
 					]),
 				)
-			: createAllToolDefinitions(this._cwd, {
+			: createAllToolDefinitions(operations, {
 					read: { autoResizeImages },
-					bash: { commandPrefix: shellCommandPrefix, shellPath },
+					bash: { commandPrefix: shellCommandPrefix },
 				});
 
 		this._baseToolDefinitions = new Map(
@@ -3010,12 +3039,12 @@ export class AgentSession {
 	 * @param command The bash command to execute
 	 * @param onChunk Optional streaming callback for output
 	 * @param options.excludeFromContext If true, command output won't be sent to LLM (!! prefix)
-	 * @param options.operations Custom BashOperations for remote execution
+	 * @param options.operations Custom ToolOperations for remote execution
 	 */
 	async executeBash(
 		command: string,
 		onChunk?: (chunk: string) => void,
-		options?: { excludeFromContext?: boolean; operations?: BashOperations },
+		options?: { excludeFromContext?: boolean; operations?: ToolOperations },
 	): Promise<BashResult> {
 		this._bashAbortController = new AbortController();
 
@@ -3025,15 +3054,14 @@ export class AgentSession {
 		const resolvedCommand = prefix ? `${prefix}\n${command}` : command;
 
 		try {
-			const result = await executeBashWithOperations(
-				resolvedCommand,
-				this.session.getCwd(),
-				options?.operations ?? createLocalBashOperations({ shellPath }),
-				{
-					onChunk,
-					signal: this._bashAbortController.signal,
-				},
-			);
+			const operations =
+				options?.operations ??
+				this._toolOperations ??
+				createLocalBashOperations({ cwd: this.session.getCwd(), shellPath });
+			const result = await executeBashWithOperations(resolvedCommand, operations.cwd, operations, {
+				onChunk,
+				signal: this._bashAbortController.signal,
+			});
 
 			this.recordBashResult(command, result, options);
 			return result;

@@ -78,6 +78,13 @@
 - Added paginated `listSessions` support to the RPC client.
 - Added on-demand `RULES.md` resources for mandatory task and file constraints.
 
+### Changed
+
+- Consolidated built-in tool execution backends behind a shared `ToolOperations` interface.
+- Added `--ssh` CLI support for running built-in tools through `SshToolOperations`.
+- Added deferred SSH sandbox mode with RPC and `/ssh-sandbox` reconfiguration.
+- Removed the SSH extension example now that SSH tool execution is built in.
+
 ### Fixed
 
 - Changed RPC client idle waits to use a five-minute inactivity timeout that resets when events arrive.

@@ -1,11 +1,10 @@
-import { constants } from "node:fs";
-import { access as fsAccess, readdir as fsReaddir, stat as fsStat } from "node:fs/promises";
 import type { AgentTool } from "@fleetagent/pi-agent-core";
 import { Text } from "@fleetagent/pi-tui";
 import nodePath from "path";
 import { type Static, Type } from "typebox";
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
+import type { ToolOperations } from "./operations.ts";
 import { resolveToCwd } from "./path-utils.ts";
 import { getTextOutput, invalidArgText, shortenPath, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
@@ -25,36 +24,7 @@ export interface LsToolDetails {
 	entryLimitReached?: number;
 }
 
-/**
- * Pluggable operations for the ls tool.
- * Override these to delegate directory listing to remote systems (for example SSH).
- */
-export interface LsOperations {
-	/** Check if path exists */
-	exists: (absolutePath: string) => Promise<boolean> | boolean;
-	/** Get file or directory stats. Throws if not found. */
-	stat: (absolutePath: string) => Promise<{ isDirectory: () => boolean }> | { isDirectory: () => boolean };
-	/** Read directory entries */
-	readdir: (absolutePath: string) => Promise<string[]> | string[];
-}
-
-const defaultLsOperations: LsOperations = {
-	exists: async (absolutePath) => {
-		try {
-			await fsAccess(absolutePath, constants.F_OK);
-			return true;
-		} catch {
-			return false;
-		}
-	},
-	stat: fsStat,
-	readdir: fsReaddir,
-};
-
-export interface LsToolOptions {
-	/** Custom operations for directory listing. Default: local filesystem */
-	operations?: LsOperations;
-}
+export interface LsToolOptions {}
 
 function formatLsCall(
 	args: { path?: string; limit?: number } | undefined,
@@ -105,10 +75,11 @@ function formatLsResult(
 }
 
 export function createLsToolDefinition(
-	cwd: string,
-	options?: LsToolOptions,
+	operations: ToolOperations,
+	_options?: LsToolOptions,
 ): ToolDefinition<typeof lsSchema, LsToolDetails | undefined> {
-	const ops = options?.operations ?? defaultLsOperations;
+	const ops = operations;
+	const cwd = operations.cwd;
 	return {
 		name: "ls",
 		label: "ls",
@@ -137,7 +108,9 @@ export function createLsToolDefinition(
 						const effectiveLimit = limit ?? DEFAULT_LIMIT;
 
 						// Check if path exists.
-						if (!(await ops.exists(dirPath))) {
+						try {
+							await ops.access(dirPath, "exists");
+						} catch {
 							reject(new Error(`Path not found: ${dirPath}`));
 							return;
 						}
@@ -232,6 +205,6 @@ export function createLsToolDefinition(
 	};
 }
 
-export function createLsTool(cwd: string, options?: LsToolOptions): AgentTool<typeof lsSchema> {
-	return wrapToolDefinition(createLsToolDefinition(cwd, options));
+export function createLsTool(operations: ToolOperations, options?: LsToolOptions): AgentTool<typeof lsSchema> {
+	return wrapToolDefinition(createLsToolDefinition(operations, options));
 }

@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createFindToolDefinition } from "../../../src/core/tools/find.ts";
+import { LocalToolOperations } from "../../../src/core/tools/index.ts";
 
 /**
  * Regression test for https://github.com/earendil-works/pi-mono/issues/3302
@@ -33,7 +34,7 @@ describe("issue #3302 find returns no results for path-based glob patterns", () 
 	});
 
 	async function runFind(pattern: string): Promise<string[]> {
-		const def = createFindToolDefinition(tempRoot);
+		const def = createFindToolDefinition(new LocalToolOperations(tempRoot));
 		// The find tool implementation does not touch ctx; pass a minimal stub.
 		const ctx = {} as Parameters<typeof def.execute>[4];
 		const result = (await def.execute("call-1", { pattern }, undefined, undefined, ctx)) as {

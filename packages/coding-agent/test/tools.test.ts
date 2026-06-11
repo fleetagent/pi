@@ -4,8 +4,9 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { executeBashWithOperations } from "../src/core/bash-executor.ts";
-import { type BashOperations, createBashTool, createLocalBashOperations } from "../src/core/tools/bash.ts";
+import { createBashTool, createLocalBashOperations } from "../src/core/tools/bash.ts";
 import { computeEditsDiff } from "../src/core/tools/edit-diff.ts";
+import { DeferredSshToolOperations, LocalToolOperations } from "../src/core/tools/index.ts";
 import {
 	createEditTool,
 	createFindTool,
@@ -16,13 +17,14 @@ import {
 } from "../src/index.ts";
 import * as shellModule from "../src/utils/shell.ts";
 
-const readTool = createReadTool(process.cwd());
-const writeTool = createWriteTool(process.cwd());
-const editTool = createEditTool(process.cwd());
-const bashTool = createBashTool(process.cwd());
-const grepTool = createGrepTool(process.cwd());
-const findTool = createFindTool(process.cwd());
-const lsTool = createLsTool(process.cwd());
+const operations = new LocalToolOperations(process.cwd());
+const readTool = createReadTool(operations);
+const writeTool = createWriteTool(operations);
+const editTool = createEditTool(operations);
+const bashTool = createBashTool(operations);
+const grepTool = createGrepTool(operations);
+const findTool = createFindTool(operations);
+const lsTool = createLsTool(operations);
 
 // Helper to extract text from content blocks
 function getTextOutput(result: any): string {
@@ -400,15 +402,13 @@ describe("Coding Agent Tools", () => {
 		});
 
 		it("should include the original error message for unknown edit access errors", async () => {
-			const genericFailureTool = createEditTool(testDir, {
-				operations: {
-					access: async () => {
-						throw new Error("disk offline");
-					},
-					readFile: async () => Buffer.from("hello\n", "utf-8"),
-					writeFile: async () => {},
-				},
-			});
+			const failingOperations = new LocalToolOperations(testDir);
+			failingOperations.access = async () => {
+				throw new Error("disk offline");
+			};
+			failingOperations.readFile = async () => Buffer.from("hello\n", "utf-8");
+			failingOperations.writeFile = async () => {};
+			const genericFailureTool = createEditTool(failingOperations);
 
 			await expect(
 				genericFailureTool.execute("test-call-16", {
@@ -420,7 +420,11 @@ describe("Coding Agent Tools", () => {
 
 		it("should include ENOENT in diff preview for missing files", async () => {
 			const missingFile = join(testDir, "missing-preview.txt");
-			const result = await computeEditsDiff(missingFile, [{ oldText: "hello", newText: "world" }], testDir);
+			const result = await computeEditsDiff(
+				missingFile,
+				[{ oldText: "hello", newText: "world" }],
+				new LocalToolOperations(testDir),
+			);
 
 			expect(result).toEqual({ error: `Could not edit file: ${missingFile}. Error code: ENOENT.` });
 		});
@@ -430,9 +434,27 @@ describe("Coding Agent Tools", () => {
 			writeFileSync(unreadableFile, "hello\n");
 			chmodSync(unreadableFile, 0o222);
 
-			const result = await computeEditsDiff(unreadableFile, [{ oldText: "hello", newText: "world" }], testDir);
+			const result = await computeEditsDiff(
+				unreadableFile,
+				[{ oldText: "hello", newText: "world" }],
+				new LocalToolOperations(testDir),
+			);
 
 			expect(result).toEqual({ error: `Could not edit file: ${unreadableFile}. Error code: EACCES.` });
+		});
+	});
+
+	describe("deferred SSH operations", () => {
+		it("fails every operation before SSH sandbox configuration", async () => {
+			const operations = new DeferredSshToolOperations("/workspace");
+
+			expect(operations.getBackendInfo()).toEqual({ type: "ssh", cwd: "/workspace", configured: false });
+			await expect(
+				operations.exec("pwd", {
+					onData: () => {},
+				}),
+			).rejects.toThrow("SSH sandbox is not configured");
+			await expect(operations.readFile("/workspace/file.txt")).rejects.toThrow("SSH sandbox is not configured");
 		});
 	});
 
@@ -461,15 +483,14 @@ describe("Coding Agent Tools", () => {
 				{ error: "timeout:5", expected: "Command timed out after 5 seconds" },
 				{ error: "aborted", expected: "Command aborted" },
 			]) {
-				const operations: BashOperations = {
-					exec: async (_command, _cwd, { onData }) => {
-						for (let i = 1; i <= 3000; i++) {
-							onData(Buffer.from(`${i}\n`, "utf-8"));
-						}
-						throw new Error(testCase.error);
-					},
+				const operations = new LocalToolOperations(testDir);
+				operations.exec = async (_command, { onData }) => {
+					for (let i = 1; i <= 3000; i++) {
+						onData(Buffer.from(`${i}\n`, "utf-8"));
+					}
+					throw new Error(testCase.error);
 				};
-				const bash = createBashTool(testDir, { operations });
+				const bash = createBashTool(operations);
 
 				let error: unknown;
 				try {
@@ -495,7 +516,7 @@ describe("Coding Agent Tools", () => {
 		it("should throw error when cwd does not exist", async () => {
 			const nonexistentCwd = "/this/directory/definitely/does/not/exist/12345";
 
-			const bashToolWithBadCwd = createBashTool(nonexistentCwd);
+			const bashToolWithBadCwd = createBashTool(new LocalToolOperations(nonexistentCwd));
 
 			await expect(bashToolWithBadCwd.execute("test-call-11", { command: "echo test" })).rejects.toThrow(
 				/Working directory does not exist/,
@@ -508,27 +529,17 @@ describe("Coding Agent Tools", () => {
 				args: ["-c"],
 			});
 
-			const bashWithBadShell = createBashTool(testDir);
+			const bashWithBadShell = createBashTool(new LocalToolOperations(testDir));
 
 			await expect(bashWithBadShell.execute("test-call-12", { command: "echo test" })).rejects.toThrow(/ENOENT/);
 		});
 
 		it("should pass shellPath through to shell resolution", async () => {
 			const getShellConfigSpy = vi.spyOn(shellModule, "getShellConfig");
-			const bashWithCustomShell = createBashTool(testDir, {
-				shellPath: "/custom/bash",
-				operations: {
-					exec: async () => ({ exitCode: 0 }),
-				},
-			});
-
-			await bashWithCustomShell.execute("test-call-12b", { command: "echo test" });
-
-			expect(getShellConfigSpy).not.toHaveBeenCalled();
-
-			const ops = createLocalBashOperations({ shellPath: "/custom/bash" });
+			const ops = createLocalBashOperations({ cwd: testDir, shellPath: "/custom/bash" });
 			await expect(
-				ops.exec("echo test", testDir, {
+				ops.exec("echo test", {
+					cwd: testDir,
 					onData: () => {},
 				}),
 			).rejects.toThrow("Custom shell path not found: /custom/bash");
@@ -536,7 +547,7 @@ describe("Coding Agent Tools", () => {
 		});
 
 		it("should prepend command prefix when configured", async () => {
-			const bashWithPrefix = createBashTool(testDir, {
+			const bashWithPrefix = createBashTool(new LocalToolOperations(testDir), {
 				commandPrefix: "export TEST_VAR=hello",
 			});
 
@@ -545,7 +556,7 @@ describe("Coding Agent Tools", () => {
 		});
 
 		it("should include output from both prefix and command", async () => {
-			const bashWithPrefix = createBashTool(testDir, {
+			const bashWithPrefix = createBashTool(new LocalToolOperations(testDir), {
 				commandPrefix: "echo prefix-output",
 			});
 
@@ -554,23 +565,22 @@ describe("Coding Agent Tools", () => {
 		});
 
 		it("should work without command prefix", async () => {
-			const bashWithoutPrefix = createBashTool(testDir, {});
+			const bashWithoutPrefix = createBashTool(new LocalToolOperations(testDir), {});
 
 			const result = await bashWithoutPrefix.execute("test-prefix-3", { command: "echo no-prefix" });
 			expect(getTextOutput(result).trim()).toBe("no-prefix");
 		});
 
 		it("should coalesce streaming updates for chatty output", async () => {
-			const operations: BashOperations = {
-				exec: async (_command, _cwd, { onData }) => {
-					for (let i = 0; i < 5000; i++) {
-						onData(Buffer.from(`line ${i}\n`, "utf-8"));
-					}
-					return { exitCode: 0 };
-				},
+			const operations = new LocalToolOperations(testDir);
+			operations.exec = async (_command, { onData }) => {
+				for (let i = 0; i < 5000; i++) {
+					onData(Buffer.from(`line ${i}\n`, "utf-8"));
+				}
+				return { exitCode: 0 };
 			};
 			const updates: Array<{ content: Array<{ type: string; text?: string }>; details?: unknown }> = [];
-			const bash = createBashTool(testDir, { operations });
+			const bash = createBashTool(operations);
 
 			const result = await bash.execute("test-call-chatty-updates", { command: "chatty" }, undefined, (update) =>
 				updates.push(update),
@@ -581,15 +591,14 @@ describe("Coding Agent Tools", () => {
 		});
 
 		it("should not count a trailing newline as an extra truncated bash output line", async () => {
-			const operations: BashOperations = {
-				exec: async (_command, _cwd, { onData }) => {
-					for (let i = 1; i <= 4000; i++) {
-						onData(Buffer.from(`line-${String(i).padStart(4, "0")}\n`, "utf-8"));
-					}
-					return { exitCode: 0 };
-				},
+			const operations = new LocalToolOperations(testDir);
+			operations.exec = async (_command, { onData }) => {
+				for (let i = 1; i <= 4000; i++) {
+					onData(Buffer.from(`line-${String(i).padStart(4, "0")}\n`, "utf-8"));
+				}
+				return { exitCode: 0 };
 			};
-			const bash = createBashTool(testDir, { operations });
+			const bash = createBashTool(operations);
 
 			const result = await bash.execute("test-call-trailing-newline-line-count", { command: "many-lines" });
 			const output = getTextOutput(result);
@@ -604,14 +613,13 @@ describe("Coding Agent Tools", () => {
 
 		it("should decode UTF-8 characters split across output chunks", async () => {
 			const euro = Buffer.from("€\n", "utf-8");
-			const operations: BashOperations = {
-				exec: async (_command, _cwd, { onData }) => {
-					onData(euro.subarray(0, 1));
-					onData(euro.subarray(1));
-					return { exitCode: 0 };
-				},
+			const operations = new LocalToolOperations(testDir);
+			operations.exec = async (_command, { onData }) => {
+				onData(euro.subarray(0, 1));
+				onData(euro.subarray(1));
+				return { exitCode: 0 };
 			};
-			const bash = createBashTool(testDir, { operations });
+			const bash = createBashTool(operations);
 
 			const result = await bash.execute("test-call-split-utf8", { command: "split-utf8" });
 
@@ -619,10 +627,11 @@ describe("Coding Agent Tools", () => {
 		});
 
 		it("should expose local bash operations for extension reuse", async () => {
-			const ops = createLocalBashOperations();
+			const ops = createLocalBashOperations({ cwd: testDir });
 			const chunks: Buffer[] = [];
 
-			const result = await ops.exec("echo $TEST_LOCAL_BASH_OPS", testDir, {
+			const result = await ops.exec("echo $TEST_LOCAL_BASH_OPS", {
+				cwd: testDir,
 				onData: (data) => chunks.push(data),
 				env: { ...process.env, TEST_LOCAL_BASH_OPS: "from-local-ops" },
 			});
@@ -635,7 +644,7 @@ describe("Coding Agent Tools", () => {
 			const result = await executeBashWithOperations(
 				"printf '\\033[31mred\\033[0m\\r\\n'",
 				process.cwd(),
-				createLocalBashOperations(),
+				createLocalBashOperations({ cwd: process.cwd() }),
 			);
 
 			expect(result.exitCode).toBe(0);
@@ -643,7 +652,7 @@ describe("Coding Agent Tools", () => {
 		});
 
 		it("should persist full output when truncation happens by line count only", async () => {
-			const bash = createBashTool(testDir);
+			const bash = createBashTool(new LocalToolOperations(testDir));
 			const result = await bash.execute("test-call-line-truncation", { command: "seq 3000" });
 			const output = getTextOutput(result);
 			const fullOutputPath = result.details?.fullOutputPath;
@@ -666,7 +675,11 @@ describe("Coding Agent Tools", () => {
 		});
 
 		it("executeBash should persist full output when truncation happens by line count only", async () => {
-			const result = await executeBashWithOperations("seq 3000", process.cwd(), createLocalBashOperations());
+			const result = await executeBashWithOperations(
+				"seq 3000",
+				process.cwd(),
+				createLocalBashOperations({ cwd: process.cwd() }),
+			);
 			const fullOutputPath = result.fullOutputPath;
 
 			expect(result.truncated).toBe(true);

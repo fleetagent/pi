@@ -13,6 +13,7 @@ import type { BashResult } from "../../core/bash-executor.ts";
 import type { CompactionResult } from "../../core/compaction/index.ts";
 import type { SessionInfo } from "../../core/session/types.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
+import type { ToolBackendInfo } from "../../core/tools/index.ts";
 
 // ============================================================================
 // RPC Commands (stdin)
@@ -63,6 +64,10 @@ export type RpcCommand =
 	// Bash
 	| { id?: string; type: "bash"; command: string }
 	| { id?: string; type: "abort_bash" }
+
+	// SSH sandbox
+	| { id?: string; type: "set_ssh_sandbox"; remote: string; cwd?: string }
+	| { id?: string; type: "clear_ssh_sandbox" }
 
 	// Session
 	| { id?: string; type: "get_session_stats" }
@@ -134,6 +139,7 @@ export interface RpcSessionState {
 	autoCompactionEnabled: boolean;
 	messageCount: number;
 	pendingMessageCount: number;
+	toolBackend: ToolBackendInfo;
 }
 
 // ============================================================================
@@ -208,6 +214,10 @@ export type RpcResponse =
 	// Bash
 	| { id?: string; type: "response"; command: "bash"; success: true; data: BashResult }
 	| { id?: string; type: "response"; command: "abort_bash"; success: true }
+
+	// SSH sandbox
+	| { id?: string; type: "response"; command: "set_ssh_sandbox"; success: true; data: ToolBackendInfo }
+	| { id?: string; type: "response"; command: "clear_ssh_sandbox"; success: true; data: ToolBackendInfo }
 
 	// Session
 	| { id?: string; type: "response"; command: "get_session_stats"; success: true; data: SessionStats }

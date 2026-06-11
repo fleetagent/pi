@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { executeBashWithOperations } from "../src/core/bash-executor.ts";
 import { createBashTool, createLocalBashOperations } from "../src/core/tools/bash.ts";
+import { LocalToolOperations } from "../src/core/tools/index.ts";
 
 function toBashSingleQuotedArg(value: string): string {
 	return `'${value.replace(/\\/g, "/").replace(/'/g, `'"'"'`)}'`;
@@ -88,7 +89,7 @@ describe.skipIf(process.platform !== "win32")("Windows child-process close handl
 
 		try {
 			const result = await withTimeout(
-				executeBashWithOperations(command, process.cwd(), createLocalBashOperations(), {
+				executeBashWithOperations(command, process.cwd(), createLocalBashOperations({ cwd: process.cwd() }), {
 					signal: controller.signal,
 				}),
 				3000,
@@ -110,7 +111,7 @@ describe.skipIf(process.platform !== "win32")("Windows child-process close handl
 		const pidFile = join(testDir, "tool-grandchild.pid");
 		const command = createInheritedStdioCommand(pidFile);
 		const controller = new AbortController();
-		const bashTool = createBashTool(testDir);
+		const bashTool = createBashTool(new LocalToolOperations(testDir));
 
 		try {
 			const result = await withTimeout(bashTool.execute("test-call", { command }, controller.signal), 3000, () => {

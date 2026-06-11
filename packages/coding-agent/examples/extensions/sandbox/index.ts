@@ -46,7 +46,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { SandboxManager, type SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 import type { ExtensionAPI } from "@fleetagent/pi-coding-agent";
-import { type BashOperations, createBashTool, getAgentDir } from "@fleetagent/pi-coding-agent";
+import { createBashTool, getAgentDir, LocalToolOperations } from "@fleetagent/pi-coding-agent";
 
 interface SandboxConfig extends SandboxRuntimeConfig {
 	enabled?: boolean;
@@ -129,47 +129,29 @@ function deepMerge(base: SandboxConfig, overrides: Partial<SandboxConfig>): Sand
 	return result;
 }
 
-function createSandboxedBashOps(): BashOperations {
-	return {
-		async exec(command, cwd, { onData, signal, timeout }) {
-			if (!existsSync(cwd)) {
-				throw new Error(`Working directory does not exist: ${cwd}`);
-			}
+function createSandboxedBashOps(cwd: string): LocalToolOperations {
+	const operations = new LocalToolOperations(cwd);
+	operations.exec = async (command, options) => {
+		const workingDirectory = options.cwd ?? cwd;
+		if (!existsSync(workingDirectory)) {
+			throw new Error(`Working directory does not exist: ${workingDirectory}`);
+		}
 
-			const wrappedCommand = await SandboxManager.wrapWithSandbox(command);
+		const wrappedCommand = await SandboxManager.wrapWithSandbox(command);
 
-			return new Promise((resolve, reject) => {
-				const child = spawn("bash", ["-c", wrappedCommand], {
-					cwd,
-					detached: true,
-					stdio: ["ignore", "pipe", "pipe"],
-				});
+		return new Promise((resolve, reject) => {
+			const child = spawn("bash", ["-c", wrappedCommand], {
+				cwd: workingDirectory,
+				detached: true,
+				stdio: ["ignore", "pipe", "pipe"],
+			});
 
-				let timedOut = false;
-				let timeoutHandle: NodeJS.Timeout | undefined;
+			let timedOut = false;
+			let timeoutHandle: NodeJS.Timeout | undefined;
 
-				if (timeout !== undefined && timeout > 0) {
-					timeoutHandle = setTimeout(() => {
-						timedOut = true;
-						if (child.pid) {
-							try {
-								process.kill(-child.pid, "SIGKILL");
-							} catch {
-								child.kill("SIGKILL");
-							}
-						}
-					}, timeout * 1000);
-				}
-
-				child.stdout?.on("data", onData);
-				child.stderr?.on("data", onData);
-
-				child.on("error", (err) => {
-					if (timeoutHandle) clearTimeout(timeoutHandle);
-					reject(err);
-				});
-
-				const onAbort = () => {
+			if (options.timeout !== undefined && options.timeout > 0) {
+				timeoutHandle = setTimeout(() => {
+					timedOut = true;
 					if (child.pid) {
 						try {
 							process.kill(-child.pid, "SIGKILL");
@@ -177,25 +159,44 @@ function createSandboxedBashOps(): BashOperations {
 							child.kill("SIGKILL");
 						}
 					}
-				};
+				}, options.timeout * 1000);
+			}
 
-				signal?.addEventListener("abort", onAbort, { once: true });
+			child.stdout?.on("data", options.onData);
+			child.stderr?.on("data", options.onData);
 
-				child.on("close", (code) => {
-					if (timeoutHandle) clearTimeout(timeoutHandle);
-					signal?.removeEventListener("abort", onAbort);
-
-					if (signal?.aborted) {
-						reject(new Error("aborted"));
-					} else if (timedOut) {
-						reject(new Error(`timeout:${timeout}`));
-					} else {
-						resolve({ exitCode: code });
-					}
-				});
+			child.on("error", (err) => {
+				if (timeoutHandle) clearTimeout(timeoutHandle);
+				reject(err);
 			});
-		},
+
+			const onAbort = () => {
+				if (child.pid) {
+					try {
+						process.kill(-child.pid, "SIGKILL");
+					} catch {
+						child.kill("SIGKILL");
+					}
+				}
+			};
+
+			options.signal?.addEventListener("abort", onAbort, { once: true });
+
+			child.on("close", (code) => {
+				if (timeoutHandle) clearTimeout(timeoutHandle);
+				options.signal?.removeEventListener("abort", onAbort);
+
+				if (options.signal?.aborted) {
+					reject(new Error("aborted"));
+				} else if (timedOut) {
+					reject(new Error(`timeout:${options.timeout}`));
+				} else {
+					resolve({ exitCode: code });
+				}
+			});
+		});
 	};
+	return operations;
 }
 
 export default function (pi: ExtensionAPI) {
@@ -206,7 +207,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	const localCwd = process.cwd();
-	const localBash = createBashTool(localCwd);
+	const localBash = createBashTool(new LocalToolOperations(localCwd));
 
 	let sandboxEnabled = false;
 	let sandboxInitialized = false;
@@ -219,16 +220,14 @@ export default function (pi: ExtensionAPI) {
 				return localBash.execute(id, params, signal, onUpdate);
 			}
 
-			const sandboxedBash = createBashTool(localCwd, {
-				operations: createSandboxedBashOps(),
-			});
+			const sandboxedBash = createBashTool(createSandboxedBashOps(localCwd));
 			return sandboxedBash.execute(id, params, signal, onUpdate);
 		},
 	});
 
 	pi.on("user_bash", () => {
 		if (!sandboxEnabled || !sandboxInitialized) return;
-		return { operations: createSandboxedBashOps() };
+		return { operations: createSandboxedBashOps(localCwd) };
 	});
 
 	pi.on("session_start", async (_event, ctx) => {

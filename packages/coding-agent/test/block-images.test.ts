@@ -4,6 +4,7 @@ import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { processFileArguments } from "../src/cli/file-processor.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
+import { LocalToolOperations } from "../src/core/tools/index.ts";
 import { createReadTool } from "../src/core/tools/read.ts";
 
 // 1x1 red PNG image as base64 (smallest valid PNG)
@@ -59,7 +60,7 @@ describe("blockImages setting", () => {
 			const imagePath = join(testDir, "test.png");
 			writeFileSync(imagePath, Buffer.from(TINY_PNG_BASE64, "base64"));
 
-			const tool = createReadTool(testDir);
+			const tool = createReadTool(new LocalToolOperations(testDir));
 			const result = await tool.execute("test-1", { path: imagePath });
 
 			// Should have text note + image content
@@ -73,7 +74,7 @@ describe("blockImages setting", () => {
 			const textPath = join(testDir, "test.txt");
 			writeFileSync(textPath, "Hello, world!");
 
-			const tool = createReadTool(testDir);
+			const tool = createReadTool(new LocalToolOperations(testDir));
 			const result = await tool.execute("test-2", { path: textPath });
 
 			expect(result.content).toHaveLength(1);

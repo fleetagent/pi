@@ -1,7 +1,6 @@
 import type { AgentTool } from "@fleetagent/pi-agent-core";
 import { Box, Container, Spacer, Text } from "@fleetagent/pi-tui";
-import { constants } from "fs";
-import { access as fsAccess, readFile as fsReadFile, writeFile as fsWriteFile } from "fs/promises";
+
 import { type Static, Type } from "typebox";
 import { renderDiff } from "../../modes/interactive/components/diff.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
@@ -19,6 +18,7 @@ import {
 	stripBom,
 } from "./edit-diff.ts";
 import { withFileMutationQueue } from "./file-mutation-queue.ts";
+import type { ToolOperations } from "./operations.ts";
 import { resolveToCwd } from "./path-utils.ts";
 import { invalidArgText, shortenPath, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
@@ -66,29 +66,7 @@ export interface EditToolDetails {
 	firstChangedLine?: number;
 }
 
-/**
- * Pluggable operations for the edit tool.
- * Override these to delegate file editing to remote systems (for example SSH).
- */
-export interface EditOperations {
-	/** Read file contents as a Buffer */
-	readFile: (absolutePath: string) => Promise<Buffer>;
-	/** Write content to a file */
-	writeFile: (absolutePath: string, content: string) => Promise<void>;
-	/** Check if file is readable and writable (throw if not) */
-	access: (absolutePath: string) => Promise<void>;
-}
-
-const defaultEditOperations: EditOperations = {
-	readFile: (path) => fsReadFile(path),
-	writeFile: (path, content) => fsWriteFile(path, content, "utf-8"),
-	access: (path) => fsAccess(path, constants.R_OK | constants.W_OK),
-};
-
-export interface EditToolOptions {
-	/** Custom operations for file editing. Default: local filesystem */
-	operations?: EditOperations;
-}
+export interface EditToolOptions {}
 
 function prepareEditArguments(input: unknown): EditToolInput {
 	if (!input || typeof input !== "object") {
@@ -289,10 +267,11 @@ function setEditPreview(
 }
 
 export function createEditToolDefinition(
-	cwd: string,
-	options?: EditToolOptions,
+	operations: ToolOperations,
+	_options?: EditToolOptions,
 ): ToolDefinition<typeof editSchema, EditToolDetails | undefined, EditRenderState> {
-	const ops = options?.operations ?? defaultEditOperations;
+	const ops = operations;
+	const cwd = operations.cwd;
 	return {
 		name: "edit",
 		label: "edit",
@@ -330,7 +309,7 @@ export function createEditToolDefinition(
 
 					// Check if file exists.
 					try {
-						await ops.access(absolutePath);
+						await ops.access(absolutePath, "readwrite");
 					} catch (error: unknown) {
 						throwIfAborted();
 						const errorMessage =
@@ -388,7 +367,7 @@ export function createEditToolDefinition(
 			if (context.argsComplete && previewInput && !component.preview && !component.previewPending) {
 				component.previewPending = true;
 				const requestKey = argsKey;
-				void computeEditsDiff(previewInput.path, previewInput.edits, context.cwd).then((preview) => {
+				void computeEditsDiff(previewInput.path, previewInput.edits, operations).then((preview) => {
 					if (component.previewArgsKey === requestKey) {
 						setEditPreview(component, preview, requestKey);
 						context.invalidate();
@@ -438,6 +417,6 @@ export function createEditToolDefinition(
 	};
 }
 
-export function createEditTool(cwd: string, options?: EditToolOptions): AgentTool<typeof editSchema> {
-	return wrapToolDefinition(createEditToolDefinition(cwd, options));
+export function createEditTool(operations: ToolOperations, options?: EditToolOptions): AgentTool<typeof editSchema> {
+	return wrapToolDefinition(createEditToolDefinition(operations, options));
 }

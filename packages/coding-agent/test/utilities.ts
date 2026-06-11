@@ -17,7 +17,7 @@ import { ModelRegistry } from "../src/core/model-registry.ts";
 import type { ResourceLoader } from "../src/core/resource-loader.ts";
 import { InMemorySessionManager, LocalSessionManager, type Session } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
-import { createCodingTools } from "../src/index.ts";
+import { createCodingTools, LocalToolOperations } from "../src/index.ts";
 
 /**
  * API key for authenticated tests. Tests using this should be wrapped in
@@ -242,7 +242,7 @@ export function createTestSession(options: TestSessionOptions = {}): TestSession
 		initialState: {
 			model,
 			systemPrompt: options.systemPrompt ?? "You are a helpful assistant. Be extremely concise.",
-			tools: createCodingTools(process.cwd()),
+			tools: createCodingTools(new LocalToolOperations(process.cwd())),
 		},
 	});
 

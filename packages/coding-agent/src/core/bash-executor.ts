@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stripAnsi } from "../utils/ansi.ts";
 import { sanitizeBinaryOutput } from "../utils/shell.ts";
-import type { BashOperations } from "./tools/bash.ts";
+import type { ToolOperations } from "./tools/operations.ts";
 import { DEFAULT_MAX_BYTES, truncateTail } from "./tools/truncate.ts";
 
 // ============================================================================
@@ -44,13 +44,13 @@ export interface BashResult {
 // ============================================================================
 
 /**
- * Execute a bash command using custom BashOperations.
+ * Execute a bash command using custom ToolOperations.
  * Used for remote execution (SSH, containers, etc.).
  */
 export async function executeBashWithOperations(
 	command: string,
 	cwd: string,
-	operations: BashOperations,
+	operations: ToolOperations,
 	options?: BashExecutorOptions,
 ): Promise<BashResult> {
 	const outputChunks: string[] = [];
@@ -105,7 +105,8 @@ export async function executeBashWithOperations(
 	};
 
 	try {
-		const result = await operations.exec(command, cwd, {
+		const result = await operations.exec(command, {
+			cwd,
 			onData,
 			signal: options?.signal,
 		});

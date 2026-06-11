@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createEditTool } from "../src/core/tools/edit.ts";
 import { withFileMutationQueue } from "../src/core/tools/file-mutation-queue.ts";
+import { LocalToolOperations } from "../src/core/tools/index.ts";
 import { createWriteTool } from "../src/core/tools/write.ts";
 
 function delay(ms: number): Promise<void> {
@@ -104,20 +105,18 @@ describe("built-in edit and write tools", () => {
 		const filePath = join(dir, "parallel-edit.txt");
 		await writeFile(filePath, "alpha\nbeta\ngamma\n", "utf8");
 
-		const editTool = createEditTool(dir, {
-			operations: {
-				access,
-				readFile: async (path) => {
-					const buffer = await readFile(path);
-					await delay(30);
-					return buffer;
-				},
-				writeFile: async (path, content) => {
-					await delay(30);
-					await writeFile(path, content, "utf8");
-				},
-			},
-		});
+		const operations = new LocalToolOperations(dir);
+		operations.access = async (path) => access(path);
+		operations.readFile = async (path) => {
+			const buffer = await readFile(path);
+			await delay(30);
+			return buffer;
+		};
+		operations.writeFile = async (path, content) => {
+			await delay(30);
+			await writeFile(path, content, "utf8");
+		};
+		const editTool = createEditTool(operations);
 
 		await Promise.all([
 			editTool.execute("call-1", { path: filePath, edits: [{ oldText: "alpha", newText: "ALPHA" }] }),
@@ -133,29 +132,25 @@ describe("built-in edit and write tools", () => {
 		const filePath = join(dir, "mixed.txt");
 		await writeFile(filePath, "original\n", "utf8");
 
-		const editTool = createEditTool(dir, {
-			operations: {
-				access,
-				readFile: async (path) => {
-					const buffer = await readFile(path);
-					await delay(30);
-					return buffer;
-				},
-				writeFile: async (path, content) => {
-					await delay(30);
-					await writeFile(path, content, "utf8");
-				},
-			},
-		});
-		const writeTool = createWriteTool(dir, {
-			operations: {
-				mkdir: async () => {},
-				writeFile: async (path, content) => {
-					await delay(10);
-					await writeFile(path, content, "utf8");
-				},
-			},
-		});
+		const editOperations = new LocalToolOperations(dir);
+		editOperations.access = async (path) => access(path);
+		editOperations.readFile = async (path) => {
+			const buffer = await readFile(path);
+			await delay(30);
+			return buffer;
+		};
+		editOperations.writeFile = async (path, content) => {
+			await delay(30);
+			await writeFile(path, content, "utf8");
+		};
+		const editTool = createEditTool(editOperations);
+		const writeOperations = new LocalToolOperations(dir);
+		writeOperations.mkdir = async () => {};
+		writeOperations.writeFile = async (path, content) => {
+			await delay(10);
+			await writeFile(path, content, "utf8");
+		};
+		const writeTool = createWriteTool(writeOperations);
 
 		const editPromise = editTool.execute("call-1", {
 			path: filePath,
@@ -181,26 +176,24 @@ describe("built-in edit and write tools", () => {
 		const secondWriteStarted = createDeferred();
 		let firstWriteSettled = false;
 
-		const writeTool = createWriteTool(dir, {
-			operations: {
-				mkdir: async () => {},
-				writeFile: async (path, content) => {
-					if (content === "first\n") {
-						firstWriteStarted.resolve();
-						await finishFirstWrite.promise;
-						await writeFile(path, content, "utf8");
-						firstWriteSettled = true;
-						return;
-					}
+		const writeOperations = new LocalToolOperations(dir);
+		writeOperations.mkdir = async () => {};
+		writeOperations.writeFile = async (path, content) => {
+			if (content === "first\n") {
+				firstWriteStarted.resolve();
+				await finishFirstWrite.promise;
+				await writeFile(path, content, "utf8");
+				firstWriteSettled = true;
+				return;
+			}
 
-					if (content === "second\n") {
-						expect(firstWriteSettled).toBe(true);
-						secondWriteStarted.resolve();
-					}
-					await writeFile(path, content, "utf8");
-				},
-			},
-		});
+			if (content === "second\n") {
+				expect(firstWriteSettled).toBe(true);
+				secondWriteStarted.resolve();
+			}
+			await writeFile(path, content, "utf8");
+		};
+		const writeTool = createWriteTool(writeOperations);
 
 		const controller = new AbortController();
 		const firstWrite = writeTool.execute("call-1", { path: filePath, content: "first\n" }, controller.signal);
@@ -227,27 +220,25 @@ describe("built-in edit and write tools", () => {
 		const secondWriteStarted = createDeferred();
 		let firstWriteSettled = false;
 
-		const editTool = createEditTool(dir, {
-			operations: {
-				access,
-				readFile,
-				writeFile: async (path, content) => {
-					if (content === "ALPHA\nbeta\n") {
-						firstWriteStarted.resolve();
-						await finishFirstWrite.promise;
-						await writeFile(path, content, "utf8");
-						firstWriteSettled = true;
-						return;
-					}
+		const editOperations = new LocalToolOperations(dir);
+		editOperations.access = async (path) => access(path);
+		editOperations.readFile = async (path) => readFile(path);
+		editOperations.writeFile = async (path, content) => {
+			if (content === "ALPHA\nbeta\n") {
+				firstWriteStarted.resolve();
+				await finishFirstWrite.promise;
+				await writeFile(path, content, "utf8");
+				firstWriteSettled = true;
+				return;
+			}
 
-					if (content === "ALPHA\nBETA\n" || content === "alpha\nBETA\n") {
-						expect(firstWriteSettled).toBe(true);
-						secondWriteStarted.resolve();
-					}
-					await writeFile(path, content, "utf8");
-				},
-			},
-		});
+			if (content === "ALPHA\nBETA\n" || content === "alpha\nBETA\n") {
+				expect(firstWriteSettled).toBe(true);
+				secondWriteStarted.resolve();
+			}
+			await writeFile(path, content, "utf8");
+		};
+		const editTool = createEditTool(editOperations);
 
 		const controller = new AbortController();
 		const firstEdit = editTool.execute(
