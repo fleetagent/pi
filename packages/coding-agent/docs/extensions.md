@@ -1904,7 +1904,7 @@ const bashTool = createBashTool(cwd, {
 });
 ```
 
-See [examples/extensions/ssh.ts](../examples/extensions/ssh.ts) for a complete SSH example with `--ssh` flag.
+SSH execution is built in; use `pi --ssh user@host:/path` to run built-in tools on a remote host.
 
 ### Output Truncation
 
@@ -2578,7 +2578,6 @@ All examples in [examples/extensions/](../examples/extensions/).
 | `preset.ts` | Saveable presets (model, tools, thinking) | `registerCommand`, `registerShortcut`, `registerFlag`, `setModel`, `setActiveTools`, `setThinkingLevel`, `appendEntry` |
 | `tools.ts` | Toggle tools on/off UI | `registerCommand`, `setActiveTools`, `SettingsList`, session events |
 | **Remote & Sandbox** |||
-| `ssh.ts` | SSH remote execution | `registerFlag`, `on("user_bash")`, `on("before_agent_start")`, tool operations |
 | `interactive-shell.ts` | Persistent shell session | `on("user_bash")` |
 | `sandbox/` | Sandboxed tool execution | Tool operations |
 | `subagent/` | Spawn sub-agents | `registerTool`, `exec` |

@@ -81,6 +81,8 @@
 ### Changed
 
 - Consolidated built-in tool execution backends behind a shared `ToolOperations` interface.
+- Added `--ssh` CLI support for running built-in tools through `SshToolOperations`.
+- Removed the SSH extension example now that SSH tool execution is built in.
 
 ### Fixed
 

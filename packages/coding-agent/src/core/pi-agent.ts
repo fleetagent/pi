@@ -35,7 +35,7 @@ import {
 import { SettingsManager } from "./settings-manager.ts";
 import { isInstallTelemetryEnabled } from "./telemetry.ts";
 import { printTimings, time } from "./timings.ts";
-import type { ToolName } from "./tools/index.ts";
+import type { ToolName, ToolOperations } from "./tools/index.ts";
 
 export interface PiAgentDiagnostic {
 	type: "info" | "warning" | "error";
@@ -59,6 +59,7 @@ export interface PiAgentSessionOptions {
 	tools?: string[];
 	noTools?: "all" | "builtin";
 	customTools?: ToolDefinition[];
+	toolOperations?: ToolOperations;
 }
 
 export interface ResolvePiAgentSessionOptionsContext {
@@ -395,6 +396,7 @@ export class PiAgent {
 			tools: resolvedOptions.tools ?? this.options.tools,
 			noTools: resolvedOptions.noTools ?? this.options.noTools,
 			customTools: resolvedOptions.customTools ?? this.options.customTools,
+			toolOperations: resolvedOptions.toolOperations ?? this.options.toolOperations,
 		};
 
 		const existingSession = activeSession.buildSessionContext();
@@ -576,6 +578,7 @@ export class PiAgent {
 				scopedModels: sessionOptions.scopedModels,
 				resourceLoader: services.resourceLoader,
 				customTools: sessionOptions.customTools,
+				toolOperations: sessionOptions.toolOperations,
 				modelRegistry: services.modelRegistry,
 				initialActiveToolNames,
 				allowedToolNames,

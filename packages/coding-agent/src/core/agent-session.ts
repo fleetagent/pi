@@ -177,6 +177,8 @@ export interface AgentSessionConfig {
 	resourceLoader: ResourceLoader;
 	/** SDK custom tools registered outside extensions */
 	customTools?: ToolDefinition[];
+	/** Tool operation backend used by built-in tools. */
+	toolOperations?: ToolOperations;
 	/** Model registry for API key resolution and model discovery */
 	modelRegistry: ModelRegistry;
 	/** Initial active built-in tool names. Default: [read, bash, edit, write] */
@@ -376,6 +378,7 @@ export class AgentSession {
 	private _initialActiveToolNames?: string[];
 	private _allowedToolNames?: Set<string>;
 	private _baseToolsOverride?: Record<string, AgentTool>;
+	private _toolOperations?: ToolOperations;
 	private _sessionStartEvent: SessionStartEvent;
 	private _extensionUIContext?: ExtensionUIContext;
 	private _extensionCommandContextActions?: ExtensionCommandContextActions;
@@ -410,6 +413,7 @@ export class AgentSession {
 		this._initialActiveToolNames = config.initialActiveToolNames;
 		this._allowedToolNames = config.allowedToolNames ? new Set(config.allowedToolNames) : undefined;
 		this._baseToolsOverride = config.baseToolsOverride;
+		this._toolOperations = config.toolOperations;
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
 
 		// Always subscribe to agent events for internal handling
@@ -1030,7 +1034,7 @@ export class AgentSession {
 		const loadedContextFiles = this._resourceLoader.getAgentsFiles().agentsFiles;
 
 		this._baseSystemPromptOptions = {
-			cwd: this._cwd,
+			cwd: this._toolOperations?.cwd ?? this._cwd,
 			skills: loadedSkills,
 			rules: loadedRules,
 			contextFiles: loadedContextFiles,
@@ -2822,7 +2826,7 @@ export class AgentSession {
 		const autoResizeImages = this.settingsManager.getImageAutoResize();
 		const shellCommandPrefix = this.settingsManager.getShellCommandPrefix();
 		const shellPath = this.settingsManager.getShellPath();
-		const operations = new LocalToolOperations(this._cwd, { shellPath });
+		const operations = this._toolOperations ?? new LocalToolOperations(this._cwd, { shellPath });
 		const baseToolDefinitions = this._baseToolsOverride
 			? Object.fromEntries(
 					Object.entries(this._baseToolsOverride).map(([name, tool]) => [
@@ -3029,7 +3033,9 @@ export class AgentSession {
 			const result = await executeBashWithOperations(
 				resolvedCommand,
 				this.session.getCwd(),
-				options?.operations ?? createLocalBashOperations({ cwd: this.session.getCwd(), shellPath }),
+				options?.operations ??
+					this._toolOperations ??
+					createLocalBashOperations({ cwd: this.session.getCwd(), shellPath }),
 				{
 					onChunk,
 					signal: this._bashAbortController.signal,

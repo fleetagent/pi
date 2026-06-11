@@ -38,12 +38,19 @@ export {
 	type LsToolOptions,
 } from "./ls.ts";
 export {
+	createSshToolOperations,
 	LocalToolOperations,
 	type LocalToolOperationsOptions,
+	type ParsedSshTarget,
+	SshToolOperations,
+	type SshToolOperationsOptions,
 	type ToolAccessMode,
 	type ToolExecOptions,
 	type ToolFileStat,
 	type ToolGlobOptions,
+	type ToolGrepMatch,
+	type ToolGrepOptions,
+	type ToolGrepResult,
 	type ToolOperations,
 } from "./operations.ts";
 export {
