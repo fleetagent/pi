@@ -13,6 +13,7 @@ import type { ExtensionActions, ExtensionContextActions, ProviderConfig } from "
 import { KeybindingsManager, type KeyId } from "../src/core/keybindings.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
 import { InMemorySessionManager, type Session } from "../src/core/session-manager.ts";
+import { LocalToolOperations } from "../src/core/tools/index.ts";
 
 describe("ExtensionRunner", () => {
 	let tempDir: string;
@@ -78,6 +79,9 @@ describe("ExtensionRunner", () => {
 		getContextUsage: () => undefined,
 		compact: () => {},
 		getSystemPrompt: () => "",
+		getToolOperations: () => new LocalToolOperations(tempDir),
+		getToolBackendInfo: () => ({ type: "local", cwd: tempDir }),
+		execToolBackend: async () => ({ output: "", exitCode: 0, cancelled: false, truncated: false }),
 	};
 
 	describe("shortcut conflicts", () => {

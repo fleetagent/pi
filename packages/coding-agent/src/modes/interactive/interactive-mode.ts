@@ -60,6 +60,7 @@ import {
 	VERSION,
 } from "../../config.ts";
 import { type AgentSession, type AgentSessionEvent, parseSkillBlock } from "../../core/agent-session.ts";
+import { executeBashWithOperations } from "../../core/bash-executor.ts";
 import type {
 	AutocompleteProviderFactory,
 	EditorFactory,
@@ -81,7 +82,7 @@ import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
 import { LocalSessionManager, type SessionContext } from "../../core/session-manager.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
-import type { SourceInfo } from "../../core/source-info.ts";
+import { getSourceBackendIcon, type SourceInfo } from "../../core/source-info.ts";
 import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
 import type { ToolBackendInfo } from "../../core/tools/index.ts";
 import type { TruncationResult } from "../../core/tools/truncate.ts";
@@ -428,7 +429,8 @@ export class InteractiveMode {
 		if (!sourceTag) {
 			return description;
 		}
-		return description ? `[${sourceTag}] ${description}` : `[${sourceTag}]`;
+		const backendIcon = getSourceBackendIcon(sourceInfo);
+		return description ? `[${backendIcon} ${sourceTag}] ${description}` : `[${backendIcon} ${sourceTag}]`;
 	}
 
 	private getBuiltInCommandConflictDiagnostics(extensionRunner: ExtensionRunner): ResourceDiagnostic[] {
@@ -1229,7 +1231,8 @@ export class InteractiveMode {
 		if (sourceInfo) {
 			const shortPath = this.getShortPath(p, sourceInfo);
 			const { label, scopeLabel } = this.getDisplaySourceInfo(sourceInfo);
-			const labelText = scopeLabel ? `${label} (${scopeLabel})` : label;
+			const backendIcon = getSourceBackendIcon(sourceInfo);
+			const labelText = scopeLabel ? `${backendIcon} ${label} (${scopeLabel})` : `${backendIcon} ${label}`;
 			return `${labelText} ${shortPath}`;
 		}
 		return this.formatDisplayPath(p);
@@ -1365,8 +1368,14 @@ export class InteractiveMode {
 			const contextFiles = this.session.resourceLoader.getAgentsFiles().agentsFiles;
 			if (contextFiles.length > 0) {
 				this.chatContainer.addChild(new Spacer(1));
+				const contextBackendIcon = this.session.getToolBackendInfo().type === "ssh" ? "☁" : "🖥";
 				const contextList = contextFiles
-					.map((f) => theme.fg("dim", `  ${this.formatDisplayPath(f.path)}`))
+					.map((f) =>
+						theme.fg(
+							"dim",
+							`  ${f.path.startsWith(getAgentDir()) ? "🖥" : contextBackendIcon} ${this.formatDisplayPath(f.path)}`,
+						),
+					)
 					.join("\n");
 				const contextCompactList = formatCompactList(
 					contextFiles.map((contextFile) => this.formatContextPath(contextFile.path)),
@@ -1381,8 +1390,9 @@ export class InteractiveMode {
 					skills.map((skill) => ({ path: skill.filePath, sourceInfo: skill.sourceInfo })),
 				);
 				const skillList = this.formatScopeGroups(groups, {
-					formatPath: (item) => this.formatDisplayPath(item.path),
-					formatPackagePath: (item) => this.getShortPath(item.path, item.sourceInfo),
+					formatPath: (item) => `${getSourceBackendIcon(item.sourceInfo)} ${this.formatDisplayPath(item.path)}`,
+					formatPackagePath: (item) =>
+						`${getSourceBackendIcon(item.sourceInfo)} ${this.getShortPath(item.path, item.sourceInfo)}`,
 				});
 				const skillCompactList = formatCompactList(skills.map((skill) => skill.name));
 				addLoadedSection("Skills", skillCompactList, skillList);
@@ -1394,8 +1404,9 @@ export class InteractiveMode {
 					rules.map((rule) => ({ path: rule.filePath, sourceInfo: rule.sourceInfo })),
 				);
 				const ruleList = this.formatScopeGroups(groups, {
-					formatPath: (item) => this.formatDisplayPath(item.path),
-					formatPackagePath: (item) => this.getShortPath(item.path, item.sourceInfo),
+					formatPath: (item) => `${getSourceBackendIcon(item.sourceInfo)} ${this.formatDisplayPath(item.path)}`,
+					formatPackagePath: (item) =>
+						`${getSourceBackendIcon(item.sourceInfo)} ${this.getShortPath(item.path, item.sourceInfo)}`,
 				});
 				const ruleCompactList = formatCompactList(rules.map((rule) => rule.name));
 				addLoadedSection("Rules", ruleCompactList, ruleList);
@@ -1410,11 +1421,11 @@ export class InteractiveMode {
 				const templateList = this.formatScopeGroups(groups, {
 					formatPath: (item) => {
 						const template = templateByPath.get(item.path);
-						return template ? `/${template.name}` : this.formatDisplayPath(item.path);
+						return `${getSourceBackendIcon(item.sourceInfo)} ${template ? `/${template.name}` : this.formatDisplayPath(item.path)}`;
 					},
 					formatPackagePath: (item) => {
 						const template = templateByPath.get(item.path);
-						return template ? `/${template.name}` : this.formatDisplayPath(item.path);
+						return `${getSourceBackendIcon(item.sourceInfo)} ${template ? `/${template.name}` : this.formatDisplayPath(item.path)}`;
 					},
 				});
 				const promptCompactList = formatCompactList(templates.map((template) => `/${template.name}`));
@@ -1667,6 +1678,12 @@ export class InteractiveMode {
 			ui: this.createExtensionUIContext(),
 			hasUI: true,
 			cwd: this.activeSession.getCwd(),
+			toolOperations: this.session.getToolOperations(),
+			getToolBackendInfo: () => this.session.getToolBackendInfo(),
+			execToolBackend: (command, options) => {
+				const operations = this.session.getToolOperations();
+				return executeBashWithOperations(command, options?.cwd ?? operations.cwd, operations, options);
+			},
 			session: this.activeSession,
 			modelRegistry: this.session.modelRegistry,
 			model: this.session.model,

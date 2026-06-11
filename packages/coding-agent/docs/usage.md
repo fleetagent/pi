@@ -211,6 +211,8 @@ Combine `--no-*` with explicit flags to load exactly what you need, ignoring set
 pi --no-extensions -e ./my-extension.ts
 ```
 
+With `--ssh`, project instruction resources are loaded from the tool backend cwd: `.pi/skills`, `.pi/rules`, `.pi/prompts`, ancestor `.agents/skills` and `.agents/rules`, and `AGENTS.md`/`CLAUDE.md`. Extension loading, themes, user resources, and package resources remain local.
+
 ### Other Options
 
 | Option | Description |

@@ -24,6 +24,8 @@ export interface BashExecutorOptions {
 	onChunk?: (chunk: string) => void;
 	/** AbortSignal for cancellation */
 	signal?: AbortSignal;
+	/** Timeout in seconds */
+	timeout?: number;
 }
 
 export interface BashResult {
@@ -109,6 +111,7 @@ export async function executeBashWithOperations(
 			cwd,
 			onData,
 			signal: options?.signal,
+			timeout: options?.timeout,
 		});
 
 		const fullOutput = outputChunks.join("");

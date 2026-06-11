@@ -581,11 +581,6 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 	time("resolveInitialSession");
 
-	const resolvedExtensionPaths = resolveCliPaths(cwd, parsed.extensions);
-	const resolvedSkillPaths = resolveCliPaths(cwd, parsed.skills);
-	const resolvedRulePaths = resolveCliPaths(cwd, parsed.rules);
-	const resolvedPromptTemplatePaths = resolveCliPaths(cwd, parsed.promptTemplates);
-	const resolvedThemePaths = resolveCliPaths(cwd, parsed.themes);
 	const authStorage = AuthStorage.create();
 	const runtimeSessionManager = parsed.noSession
 		? new InMemorySessionManager(initialSession.getCwd())
@@ -610,6 +605,12 @@ export async function main(args: string[], options?: MainOptions) {
 		}
 		toolOperations = new DeferredSshToolOperations(parsed.sshCwd);
 	}
+	const instructionPathCwd = toolOperations?.getBackendInfo?.()?.type === "ssh" ? toolOperations.cwd : cwd;
+	const resolvedExtensionPaths = resolveCliPaths(cwd, parsed.extensions);
+	const resolvedSkillPaths = resolveCliPaths(instructionPathCwd, parsed.skills);
+	const resolvedRulePaths = resolveCliPaths(instructionPathCwd, parsed.rules);
+	const resolvedPromptTemplatePaths = resolveCliPaths(instructionPathCwd, parsed.promptTemplates);
+	const resolvedThemePaths = resolveCliPaths(cwd, parsed.themes);
 	const piAgent = await PiAgent.create({
 		mode: appMode,
 		cwd: initialSession.getCwd(),
@@ -618,6 +619,7 @@ export async function main(args: string[], options?: MainOptions) {
 		authStorage,
 		extensionFlagValues: parsed.unknownFlags,
 		resourceLoaderOptions: {
+			toolOperations,
 			additionalExtensionPaths: resolvedExtensionPaths,
 			additionalSkillPaths: resolvedSkillPaths,
 			additionalRulePaths: resolvedRulePaths,

@@ -31,6 +31,7 @@ export type {
 	AppKeybinding,
 	AutocompleteProviderFactory,
 	// Events - Tool (ToolCallEvent types)
+	BashResult,
 	BashToolCallEvent,
 	BashToolResultEvent,
 	BeforeAgentStartEvent,
@@ -69,6 +70,7 @@ export type {
 	// Runtime
 	ExtensionRuntime,
 	ExtensionShortcut,
+	ExtensionToolBackendExecOptions,
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
 	ExtensionWidgetOptions,

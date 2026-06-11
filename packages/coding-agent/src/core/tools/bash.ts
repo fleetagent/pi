@@ -8,7 +8,7 @@ import { getShellEnv } from "../../utils/shell.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
 import { LocalToolOperations, type ToolBackendInfo, type ToolOperations } from "./operations.ts";
 import { OutputAccumulator } from "./output-accumulator.ts";
-import { getTextOutput, invalidArgText, str } from "./render-utils.ts";
+import { formatBackendIcon, getTextOutput, invalidArgText, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult } from "./truncate.ts";
 
@@ -96,7 +96,9 @@ function formatBashCall(
 	const timeout = args?.timeout as number | undefined;
 	const timeoutSuffix = timeout ? theme.fg("muted", ` (timeout ${timeout}s)`) : "";
 	const commandDisplay = command === null ? invalidArgText(theme) : command ? command : theme.fg("toolOutput", "...");
-	return theme.fg("toolTitle", theme.bold(`$ ${commandDisplay}`)) + timeoutSuffix + formatBackendSuffix(backendInfo);
+	return (
+		formatBackendIcon(backendInfo, theme) + theme.fg("toolTitle", theme.bold(`$ ${commandDisplay}`)) + timeoutSuffix
+	);
 }
 
 function rebuildBashResultRenderComponent(
@@ -109,6 +111,7 @@ function rebuildBashResultRenderComponent(
 	showImages: boolean,
 	startedAt: number | undefined,
 	endedAt: number | undefined,
+	backendInfo: ToolBackendInfo | undefined,
 ): void {
 	const state = component.state;
 	component.clear();
@@ -177,7 +180,13 @@ function rebuildBashResultRenderComponent(
 	if (startedAt !== undefined) {
 		const label = options.isPartial ? "Elapsed" : "Took";
 		const endTime = endedAt ?? Date.now();
-		component.addChild(new Text(`\n${theme.fg("muted", `${label} ${formatDuration(endTime - startedAt)}`)}`, 0, 0));
+		component.addChild(
+			new Text(
+				`\n${theme.fg("muted", `${label} ${formatDuration(endTime - startedAt)}`)}${formatBackendSuffix(backendInfo)}`,
+				0,
+				0,
+			),
+		);
 	}
 }
 
@@ -349,6 +358,7 @@ export function createBashToolDefinition(
 				context.showImages,
 				state.startedAt,
 				state.endedAt,
+				ops.getBackendInfo?.(),
 			);
 			component.invalidate();
 			return component;

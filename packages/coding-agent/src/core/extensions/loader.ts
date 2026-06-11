@@ -23,6 +23,7 @@ import { CONFIG_DIR_NAME, getAgentDir, isBunBinary } from "../../config.ts";
 // NOTE: This import works because loader.ts exports are NOT re-exported from index.ts,
 // avoiding a circular dependency. Extensions can import from @fleetagent/pi-coding-agent.
 import * as _bundledPiCodingAgent from "../../index.ts";
+import { parseFrontmatter } from "../../utils/frontmatter.ts";
 import { resolvePath } from "../../utils/paths.ts";
 import { createEventBus, type EventBus } from "../event-bus.ts";
 import type { ExecOptions } from "../exec.ts";
@@ -32,6 +33,8 @@ import type {
 	Extension,
 	ExtensionAPI,
 	ExtensionFactory,
+	ExtensionInstructionRegistration,
+	ExtensionPromptRegistration,
 	ExtensionRuntime,
 	LoadExtensionsResult,
 	MessageRenderer,
@@ -183,6 +186,46 @@ function createExtensionAPI(
 	cwd: string,
 	eventBus: EventBus,
 ): ExtensionAPI {
+	const extensionDir = path.dirname(extension.resolvedPath);
+	const resolveLocalPath = (filePath: string): string =>
+		path.isAbsolute(filePath) ? filePath : path.resolve(extensionDir, filePath);
+	const resolveInstructionPath = (instruction: ExtensionInstructionRegistration, kind: "skill" | "rule"): string => {
+		if (instruction.filePath) {
+			return resolveLocalPath(instruction.filePath);
+		}
+		return `<extension:${extension.path}:${kind}:${instruction.name}>`;
+	};
+	const getPromptBodyDescription = (body: string): string => {
+		const firstLine = body.split("\n").find((line) => line.trim());
+		if (!firstLine) return "";
+		return firstLine.length > 60 ? `${firstLine.slice(0, 60)}...` : firstLine;
+	};
+	const resolvePromptRegistration = (prompt: ExtensionPromptRegistration) => {
+		if (!prompt.filePath && prompt.content === undefined) {
+			throw new Error(`registerPrompt("${prompt.name}") requires filePath or content`);
+		}
+		const filePath = prompt.filePath
+			? resolveLocalPath(prompt.filePath)
+			: `<extension:${extension.path}:prompt:${prompt.name}>`;
+		let content = prompt.content;
+		let description = prompt.description;
+		let argumentHint = prompt.argumentHint;
+		if (content === undefined) {
+			const rawContent = fs.readFileSync(filePath, "utf-8");
+			const parsed = parseFrontmatter<Record<string, string>>(rawContent);
+			content = parsed.body;
+			description = description ?? parsed.frontmatter.description ?? getPromptBodyDescription(parsed.body);
+			argumentHint = argumentHint ?? parsed.frontmatter["argument-hint"];
+		}
+		return {
+			name: prompt.name,
+			description: description ?? "",
+			...(argumentHint && { argumentHint }),
+			content,
+			sourceInfo: extension.sourceInfo,
+			filePath,
+		};
+	};
 	const api = {
 		// Registration methods - write to extension
 		on(event: string, handler: HandlerFn): void {
@@ -208,6 +251,52 @@ function createExtensionAPI(
 				sourceInfo: extension.sourceInfo,
 				...options,
 			});
+		},
+
+		registerSkill(skill: ExtensionInstructionRegistration): void {
+			runtime.assertActive();
+			if (!skill.filePath && !skill.content) {
+				throw new Error(`registerSkill("${skill.name}") requires filePath or content`);
+			}
+			const filePath = resolveInstructionPath(skill, "skill");
+			extension.skills.set(skill.name, {
+				name: skill.name,
+				description: skill.description,
+				filePath,
+				baseDir: skill.baseDir ?? (skill.filePath ? path.dirname(filePath) : extensionDir),
+				sourceInfo: extension.sourceInfo,
+				disableModelInvocation: skill.disableModelInvocation ?? false,
+				...(skill.content !== undefined && { content: skill.content }),
+			});
+		},
+
+		registerRule(rule: ExtensionInstructionRegistration): void {
+			runtime.assertActive();
+			if (!rule.filePath && !rule.content) {
+				throw new Error(`registerRule("${rule.name}") requires filePath or content`);
+			}
+			const filePath = resolveInstructionPath(rule, "rule");
+			extension.rules.set(rule.name, {
+				name: rule.name,
+				description: rule.description,
+				filePath,
+				baseDir: rule.baseDir ?? (rule.filePath ? path.dirname(filePath) : extensionDir),
+				sourceInfo: extension.sourceInfo,
+				disableModelInvocation: rule.disableModelInvocation ?? false,
+				...(rule.content !== undefined && { content: rule.content }),
+			});
+		},
+
+		registerPrompt(prompt: ExtensionPromptRegistration): void {
+			runtime.assertActive();
+			extension.prompts.set(prompt.name, resolvePromptRegistration(prompt));
+		},
+
+		registerPrompts(prompts: ExtensionPromptRegistration[]): void {
+			runtime.assertActive();
+			for (const prompt of prompts) {
+				extension.prompts.set(prompt.name, resolvePromptRegistration(prompt));
+			}
 		},
 
 		registerShortcut(
@@ -363,6 +452,9 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 		tools: new Map(),
 		messageRenderers: new Map(),
 		commands: new Map(),
+		skills: new Map(),
+		rules: new Map(),
+		prompts: new Map(),
 		flags: new Map(),
 		shortcuts: new Map(),
 	};

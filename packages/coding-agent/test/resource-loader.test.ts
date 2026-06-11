@@ -1,4 +1,13 @@
-import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	statSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -11,6 +20,45 @@ import { InMemorySessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import type { Skill } from "../src/core/skills.ts";
 import { createSyntheticSourceInfo } from "../src/core/source-info.ts";
+import type { ToolAccessMode, ToolBackendInfo, ToolExecOptions, ToolOperations } from "../src/core/tools/operations.ts";
+
+class FakeSshToolOperations implements ToolOperations {
+	cwd: string;
+
+	constructor(cwd: string) {
+		this.cwd = cwd;
+	}
+
+	async exec(_command: string, _options: ToolExecOptions): Promise<{ exitCode: number | null }> {
+		return { exitCode: 0 };
+	}
+
+	async access(path: string, _mode?: ToolAccessMode): Promise<void> {
+		if (!existsSync(path)) {
+			throw new Error(`missing path: ${path}`);
+		}
+	}
+
+	async readFile(path: string): Promise<Buffer> {
+		return readFileSync(path);
+	}
+
+	async writeFile(): Promise<void> {}
+
+	async mkdir(): Promise<void> {}
+
+	async stat(path: string) {
+		return statSync(path);
+	}
+
+	async readdir(path: string): Promise<string[]> {
+		return readdirSync(path);
+	}
+
+	getBackendInfo(): ToolBackendInfo {
+		return { type: "ssh", cwd: this.cwd, remote: "test@example", configured: true };
+	}
+}
 
 describe("DefaultResourceLoader", () => {
 	let tempDir: string;
@@ -95,6 +143,92 @@ Prompt content.`,
 
 			const { prompts } = loader.getPrompts();
 			expect(prompts.some((p) => p.name === "test-prompt")).toBe(true);
+		});
+
+		it("should include extension-registered skills, rules, and prompts", async () => {
+			const loader = new DefaultResourceLoader({
+				cwd,
+				agentDir,
+				extensionFactories: [
+					(pi) => {
+						pi.registerSkill({
+							name: "extension-skill",
+							description: "Extension skill",
+							content: "Extension skill body.",
+						});
+						pi.registerRule({
+							name: "extension-rule",
+							description: "Extension rule",
+							content: "Extension rule body.",
+						});
+						pi.registerPrompt({
+							name: "extension-prompt",
+							description: "Extension prompt",
+							content: "Extension prompt body.",
+						});
+					},
+				],
+			});
+			await loader.reload();
+
+			const skill = loader.getSkills().skills.find((entry) => entry.name === "extension-skill");
+			const rule = loader.getRules().rules.find((entry) => entry.name === "extension-rule");
+			const prompt = loader.getPrompts().prompts.find((entry) => entry.name === "extension-prompt");
+			expect(skill?.content).toBe("Extension skill body.");
+			expect(skill?.sourceInfo.source).toBe("extension");
+			expect(rule?.content).toBe("Extension rule body.");
+			expect(rule?.sourceInfo.source).toBe("extension");
+			expect(prompt?.content).toBe("Extension prompt body.");
+			expect(prompt?.sourceInfo.source).toBe("extension");
+		});
+
+		it("should load project instruction resources from the tool backend when SSH is configured", async () => {
+			const remoteCwd = join(tempDir, "remote-project");
+			mkdirSync(join(cwd, ".pi", "skills", "local-only"), { recursive: true });
+			writeFileSync(
+				join(cwd, ".pi", "skills", "local-only", "SKILL.md"),
+				`---
+name: local-only
+description: Local project skill
+---
+Local skill.`,
+			);
+			mkdirSync(join(remoteCwd, ".pi", "skills", "remote-only"), { recursive: true });
+			writeFileSync(
+				join(remoteCwd, ".pi", "skills", "remote-only", "SKILL.md"),
+				`---
+name: remote-only
+description: Remote project skill
+---
+Remote skill.`,
+			);
+			mkdirSync(join(remoteCwd, ".pi", "rules", "remote-rule"), { recursive: true });
+			writeFileSync(
+				join(remoteCwd, ".pi", "rules", "remote-rule", "RULES.md"),
+				`---
+name: remote-rule
+description: Remote project rule
+---
+Remote rule.`,
+			);
+			mkdirSync(join(remoteCwd, ".pi", "prompts"), { recursive: true });
+			writeFileSync(join(remoteCwd, ".pi", "prompts", "remote-prompt.md"), "Remote prompt.");
+			writeFileSync(join(remoteCwd, "AGENTS.md"), "Remote project instructions.");
+
+			const loader = new DefaultResourceLoader({
+				cwd,
+				agentDir,
+				toolOperations: new FakeSshToolOperations(remoteCwd),
+			});
+			await loader.reload();
+
+			expect(loader.getSkills().skills.map((skill) => skill.name)).toContain("remote-only");
+			expect(loader.getSkills().skills.map((skill) => skill.name)).not.toContain("local-only");
+			expect(loader.getRules().rules.map((rule) => rule.name)).toContain("remote-rule");
+			expect(loader.getPrompts().prompts.map((prompt) => prompt.name)).toContain("remote-prompt");
+			expect(loader.getAgentsFiles().agentsFiles.map((file) => file.content)).toContain(
+				"Remote project instructions.",
+			);
 		});
 
 		it("should prefer project resources over user on name collisions", async () => {
