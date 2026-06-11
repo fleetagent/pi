@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.0.11](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.0.10...@fleetagent/pi-coding-agent-v0.0.11) (2026-06-11)
+
+
+### Features
+
+* **coding-agent:** support backend-aware instructions ([a0c2158](https://github.com/fleetagent/pi/commit/a0c21584bdd62b78c27fae719c3f67a0d0b2753a))
+
+
+### Bug Fixes
+
+* **coding-agent:** tolerate missing backend info in status tests ([fcb4361](https://github.com/fleetagent/pi/commit/fcb4361e53f3c7dd64c8e12d4a9a9714a73321fa))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @fleetagent/pi-agent-core bumped from ^0.0.10 to ^0.0.11
+    * @fleetagent/pi-ai bumped from ^0.0.10 to ^0.0.11
+    * @fleetagent/pi-tui bumped from ^0.0.10 to ^0.0.11
+
 ## [0.0.10](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.0.9...@fleetagent/pi-coding-agent-v0.0.10) (2026-06-11)
 
 
