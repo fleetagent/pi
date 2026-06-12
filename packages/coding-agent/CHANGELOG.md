@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.0.12](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.0.11...@fleetagent/pi-coding-agent-v0.0.12) (2026-06-12)
+
+
+### Features
+
+* **coding-agent:** add remote commander daemon ([37f0aec](https://github.com/fleetagent/pi/commit/37f0aec87ac329742c6c7f3ed48bb1715e456756))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @fleetagent/pi-agent-core bumped from ^0.0.11 to ^0.0.12
+    * @fleetagent/pi-ai bumped from ^0.0.11 to ^0.0.12
+    * @fleetagent/pi-tui bumped from ^0.0.11 to ^0.0.12
+
 ## [0.0.11](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.0.10...@fleetagent/pi-coding-agent-v0.0.11) (2026-06-11)
 
 
