@@ -9,9 +9,9 @@
 			"version": "0.0.12",
 			"license": "MIT",
 			"dependencies": {
-				"@fleetagent/pi-agent-core": "^0.0.11",
-				"@fleetagent/pi-ai": "^0.0.11",
-				"@fleetagent/pi-tui": "^0.0.11",
+				"@fleetagent/pi-agent-core": "^0.0.12",
+				"@fleetagent/pi-ai": "^0.0.12",
+				"@fleetagent/pi-tui": "^0.0.12",
 				"@silvia-odwyer/photon-node": "0.3.4",
 				"chalk": "5.6.2",
 				"cross-spawn": "7.0.6",
@@ -473,11 +473,11 @@
 			}
 		},
 		"node_modules/@fleetagent/pi-agent-core": {
-			"version": "0.0.11",
-			"resolved": "https://registry.npmjs.org/@fleetagent/pi-agent-core/-/pi-agent-core-0.0.11.tgz",
+			"version": "0.0.12",
+			"resolved": "https://registry.npmjs.org/@fleetagent/pi-agent-core/-/pi-agent-core-0.0.12.tgz",
 			"license": "MIT",
 			"dependencies": {
-				"@fleetagent/pi-ai": "^0.0.11",
+				"@fleetagent/pi-ai": "^0.0.12",
 				"ignore": "7.0.5",
 				"typebox": "1.1.38",
 				"yaml": "2.9.0"
@@ -487,8 +487,8 @@
 			}
 		},
 		"node_modules/@fleetagent/pi-ai": {
-			"version": "0.0.11",
-			"resolved": "https://registry.npmjs.org/@fleetagent/pi-ai/-/pi-ai-0.0.11.tgz",
+			"version": "0.0.12",
+			"resolved": "https://registry.npmjs.org/@fleetagent/pi-ai/-/pi-ai-0.0.12.tgz",
 			"license": "MIT",
 			"dependencies": {
 				"@anthropic-ai/sdk": "0.91.1",
@@ -510,8 +510,8 @@
 			}
 		},
 		"node_modules/@fleetagent/pi-tui": {
-			"version": "0.0.11",
-			"resolved": "https://registry.npmjs.org/@fleetagent/pi-tui/-/pi-tui-0.0.11.tgz",
+			"version": "0.0.12",
+			"resolved": "https://registry.npmjs.org/@fleetagent/pi-tui/-/pi-tui-0.0.12.tgz",
 			"license": "MIT",
 			"dependencies": {
 				"get-east-asian-width": "1.6.0",
@@ -1322,8 +1322,7 @@
 			"license": "MIT",
 			"bin": {
 				"jiti": "lib/jiti-cli.mjs"
-			},
-			"peer": true
+			}
 		},
 		"node_modules/json-bigint": {
 			"version": "1.0.0",
@@ -1776,8 +1775,7 @@
 			"license": "MIT",
 			"funding": {
 				"url": "https://github.com/sponsors/colinhacks"
-			},
-			"peer": true
+			}
 		},
 		"node_modules/zod-to-json-schema": {
 			"version": "3.25.2",
