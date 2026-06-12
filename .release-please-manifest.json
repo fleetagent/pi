@@ -2,5 +2,6 @@
 	"packages/agent": "0.0.12",
 	"packages/ai": "0.0.12",
 	"packages/coding-agent": "0.0.12",
+	"packages/pi-daemon": "0.0.12",
 	"packages/tui": "0.0.12"
 }
