@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.12](https://github.com/fleetagent/pi/compare/@fleetagent/pi-tui-v0.0.11...@fleetagent/pi-tui-v0.0.12) (2026-06-12)
+
+
+### Miscellaneous Chores
+
+* **@fleetagent/pi-tui:** Synchronize pi versions
+
 ## [0.0.11](https://github.com/fleetagent/pi/compare/@fleetagent/pi-tui-v0.0.10...@fleetagent/pi-tui-v0.0.11) (2026-06-11)
 
 

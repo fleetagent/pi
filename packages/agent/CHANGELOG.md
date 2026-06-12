@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.0.12](https://github.com/fleetagent/pi/compare/@fleetagent/pi-agent-core-v0.0.11...@fleetagent/pi-agent-core-v0.0.12) (2026-06-12)
+
+
+### Miscellaneous Chores
+
+* **@fleetagent/pi-agent-core:** Synchronize pi versions
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @fleetagent/pi-ai bumped from ^0.0.11 to ^0.0.12
+
 ## [0.0.11](https://github.com/fleetagent/pi/compare/@fleetagent/pi-agent-core-v0.0.10...@fleetagent/pi-agent-core-v0.0.11) (2026-06-11)
 
 
