@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.1](https://github.com/fleetagent/pi/compare/@fleetagent/pi-daemon-v0.1.0...@fleetagent/pi-daemon-v0.1.1) (2026-06-12)
+
+
+### Features
+
+* **coding-agent:** add streamed sandbox file transfer ([4199641](https://github.com/fleetagent/pi/commit/41996414740a0a752c8eafac16f48d38ded76c78))
+
 ## [0.1.0](https://github.com/fleetagent/pi/compare/@fleetagent/pi-daemon-v0.0.12...@fleetagent/pi-daemon-v0.1.0) (2026-06-12)
 
 

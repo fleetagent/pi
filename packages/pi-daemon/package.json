@@ -1,6 +1,6 @@
 {
 	"name": "@fleetagent/pi-daemon",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"description": "Remote commander daemon for Pi",
 	"type": "module",
 	"bin": {
