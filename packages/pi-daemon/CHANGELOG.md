@@ -11,4 +11,5 @@
 
 ### Added
 
+- Added streamed file upload and download methods to the daemon WebSocket protocol.
 - Added the initial Pi remote commander daemon package.

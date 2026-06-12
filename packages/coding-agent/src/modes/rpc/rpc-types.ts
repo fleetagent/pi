@@ -69,6 +69,8 @@ export type RpcCommand =
 	| { id?: string; type: "set_remote_sandbox"; backend: "ssh"; remote: string; cwd?: string }
 	| { id?: string; type: "set_remote_sandbox"; backend: "daemon"; url: string }
 	| { id?: string; type: "clear_remote_sandbox" }
+	| { id?: string; type: "upload_file"; sourcePath: string; destinationPath: string }
+	| { id?: string; type: "download_file"; sourcePath: string; destinationPath: string }
 
 	// Session
 	| { id?: string; type: "get_session_stats" }
@@ -219,6 +221,8 @@ export type RpcResponse =
 	// Remote sandbox
 	| { id?: string; type: "response"; command: "set_remote_sandbox"; success: true; data: ToolBackendInfo }
 	| { id?: string; type: "response"; command: "clear_remote_sandbox"; success: true; data: ToolBackendInfo }
+	| { id?: string; type: "response"; command: "upload_file"; success: true; data: { bytes: number } }
+	| { id?: string; type: "response"; command: "download_file"; success: true; data: { bytes: number } }
 
 	// Session
 	| { id?: string; type: "response"; command: "get_session_stats"; success: true; data: SessionStats }

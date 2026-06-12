@@ -12,6 +12,7 @@
  */
 
 import * as crypto from "node:crypto";
+import { stat } from "node:fs/promises";
 import type {
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
@@ -612,6 +613,25 @@ export async function runRpcMode(runtimeHost: PiAgentRuntimeHost): Promise<never
 				session.clearRemoteSandbox();
 				await session.reload();
 				return success(id, "clear_remote_sandbox", session.getToolBackendInfo());
+			}
+
+			case "upload_file": {
+				const operations = session.getToolOperations();
+				if (!operations.uploadFile)
+					return error(id, "upload_file", "Active sandbox backend does not support file upload");
+				await operations.uploadFile(command.sourcePath, command.destinationPath);
+				const result = await stat(command.sourcePath);
+				return success(id, "upload_file", { bytes: result.size });
+			}
+
+			case "download_file": {
+				const operations = session.getToolOperations();
+				if (!operations.downloadFile) {
+					return error(id, "download_file", "Active sandbox backend does not support file download");
+				}
+				await operations.downloadFile(command.sourcePath, command.destinationPath);
+				const result = await stat(command.destinationPath);
+				return success(id, "download_file", { bytes: result.size });
 			}
 
 			// =================================================================

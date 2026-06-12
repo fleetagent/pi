@@ -1,6 +1,5 @@
 import { spawn } from "node:child_process";
-import type { Stats } from "node:fs";
-import { constants } from "node:fs";
+import { constants, createReadStream, createWriteStream, type Stats, type WriteStream } from "node:fs";
 import {
 	access as fsAccess,
 	mkdir as fsMkdir,
@@ -9,6 +8,7 @@ import {
 	stat as fsStat,
 	writeFile as fsWriteFile,
 } from "node:fs/promises";
+import { pipeline } from "node:stream/promises";
 import { waitForChildProcess } from "../../utils/child-process.ts";
 import { detectSupportedImageMimeTypeFromFile } from "../../utils/mime.ts";
 import {
@@ -71,6 +71,8 @@ export interface ToolOperations {
 	access(path: string, mode?: ToolAccessMode): Promise<void>;
 	readFile(path: string): Promise<Buffer>;
 	writeFile(path: string, content: string | Buffer): Promise<void>;
+	uploadFile?(sourcePath: string, destinationPath: string): Promise<void>;
+	downloadFile?(sourcePath: string, destinationPath: string): Promise<void>;
 	mkdir(path: string, options?: { recursive?: boolean }): Promise<void>;
 	stat(path: string): Promise<ToolFileStat>;
 	readdir(path: string): Promise<string[]>;
@@ -166,6 +168,66 @@ function buildRgArgs(options: ToolGrepOptions): string[] {
 
 function commandWithArgs(command: string, args: string[]): string {
 	return [command, ...args.map(shellQuote)].join(" ");
+}
+
+async function copyFileStream(sourcePath: string, destinationPath: string): Promise<void> {
+	await pipeline(createReadStream(sourcePath), createWriteStream(destinationPath));
+}
+
+function writeStreamChunk(stream: WriteStream, chunk: Buffer): Promise<void> {
+	return new Promise((resolve, reject) => {
+		const onError = (error: Error) => {
+			stream.off("error", onError);
+			reject(error);
+		};
+		stream.once("error", onError);
+		stream.write(chunk, (error) => {
+			stream.off("error", onError);
+			if (error) {
+				reject(error);
+				return;
+			}
+			resolve();
+		});
+	});
+}
+
+function endWriteStream(stream: WriteStream): Promise<void> {
+	return new Promise((resolve, reject) => {
+		const onError = (error: Error) => {
+			stream.off("error", onError);
+			reject(error);
+		};
+		stream.once("error", onError);
+		stream.end(() => {
+			stream.off("error", onError);
+			resolve();
+		});
+	});
+}
+
+function waitForSshFileTransfer(
+	remote: string,
+	command: string,
+	wireStreams: (child: ReturnType<typeof spawn>) => Promise<void>,
+): Promise<void> {
+	return new Promise((resolve, reject) => {
+		const child = spawn("ssh", sshArgs(remote, command), { stdio: ["pipe", "pipe", "pipe"] });
+		const stderr: Buffer[] = [];
+		child.stderr.on("data", (data: Buffer) => stderr.push(data));
+		child.on("error", reject);
+		wireStreams(child).catch((error: unknown) => {
+			child.kill();
+			reject(error instanceof Error ? error : new Error(String(error)));
+		});
+		child.on("close", (code) => {
+			if (code !== 0) {
+				reject(new Error(Buffer.concat(stderr).toString("utf-8").trim() || `ssh exited with code ${code}`));
+				return;
+			}
+			resolve();
+		});
+	});
 }
 
 async function runSshBuffer(
@@ -297,6 +359,14 @@ export class LocalToolOperations implements ToolOperations {
 		await fsWriteFile(path, content, typeof content === "string" ? "utf-8" : undefined);
 	}
 
+	async uploadFile(sourcePath: string, destinationPath: string): Promise<void> {
+		await copyFileStream(sourcePath, destinationPath);
+	}
+
+	async downloadFile(sourcePath: string, destinationPath: string): Promise<void> {
+		await copyFileStream(sourcePath, destinationPath);
+	}
+
 	async mkdir(path: string, options: { recursive?: boolean } = {}): Promise<void> {
 		await fsMkdir(path, { recursive: options.recursive ?? false });
 	}
@@ -388,6 +458,20 @@ export class SshToolOperations implements ToolOperations {
 	async writeFile(path: string, content: string | Buffer): Promise<void> {
 		await runSshBuffer(this.remote, `base64 -d > ${shellQuote(path)}`, {
 			input: Buffer.from(content).toString("base64"),
+		});
+	}
+
+	async uploadFile(sourcePath: string, destinationPath: string): Promise<void> {
+		await waitForSshFileTransfer(this.remote, `cat > ${shellQuote(destinationPath)}`, async (child) => {
+			if (!child.stdin) throw new Error("ssh stdin is unavailable");
+			await pipeline(createReadStream(sourcePath), child.stdin);
+		});
+	}
+
+	async downloadFile(sourcePath: string, destinationPath: string): Promise<void> {
+		await waitForSshFileTransfer(this.remote, `cat ${shellQuote(sourcePath)}`, async (child) => {
+			if (!child.stdout) throw new Error("ssh stdout is unavailable");
+			await pipeline(child.stdout, createWriteStream(destinationPath));
 		});
 	}
 
@@ -535,6 +619,18 @@ export class DeferredRemoteToolOperations implements ToolOperations {
 		await this.requireOperations().writeFile(path, content);
 	}
 
+	async uploadFile(sourcePath: string, destinationPath: string): Promise<void> {
+		const operations = this.requireOperations();
+		if (!operations.uploadFile) throw new Error("Remote backend does not support file upload");
+		await operations.uploadFile(sourcePath, destinationPath);
+	}
+
+	async downloadFile(sourcePath: string, destinationPath: string): Promise<void> {
+		const operations = this.requireOperations();
+		if (!operations.downloadFile) throw new Error("Remote backend does not support file download");
+		await operations.downloadFile(sourcePath, destinationPath);
+	}
+
 	async mkdir(path: string, options?: { recursive?: boolean }): Promise<void> {
 		await this.requireOperations().mkdir(path, options);
 	}
@@ -570,6 +666,11 @@ type RemoteExecEvent =
 	| { id: string; event: "data"; dataBase64?: unknown; data?: unknown; stream?: unknown }
 	| { id: string; event: "exit"; exitCode?: unknown; cancelled?: unknown }
 	| { id: string; event: "error"; error?: { message?: unknown } | string };
+
+type RemoteFileEvent =
+	| { id: string; event: "fileData"; dataBase64?: unknown }
+	| { id: string; event: "fileEnd" }
+	| { id: string; event: "fileError"; error?: { message?: unknown } | string };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null;
@@ -620,6 +721,15 @@ export class RemoteToolOperations implements ToolOperations {
 		{
 			onData: (data: Buffer) => void;
 			resolve: (value: { exitCode: number | null }) => void;
+			reject: (error: Error) => void;
+		}
+	>();
+	private fileDownloadPending = new Map<
+		string,
+		{
+			stream: WriteStream;
+			writePromise: Promise<void>;
+			resolve: () => void;
 			reject: (error: Error) => void;
 		}
 	>();
@@ -700,6 +810,11 @@ export class RemoteToolOperations implements ToolOperations {
 		this.pending.clear();
 		for (const pending of this.execPending.values()) pending.reject(error);
 		this.execPending.clear();
+		for (const pending of this.fileDownloadPending.values()) {
+			pending.stream.destroy(error);
+			pending.reject(error);
+		}
+		this.fileDownloadPending.clear();
 	}
 
 	private send(message: Record<string, unknown>): void {
@@ -737,7 +852,11 @@ export class RemoteToolOperations implements ToolOperations {
 		}
 		if (typeof parsed.id !== "string") return;
 		if (typeof parsed.event === "string") {
-			this.handleExecEvent(parsed as RemoteExecEvent);
+			if (parsed.event === "fileData" || parsed.event === "fileEnd" || parsed.event === "fileError") {
+				this.handleFileEvent(parsed as RemoteFileEvent);
+			} else {
+				this.handleExecEvent(parsed as RemoteExecEvent);
+			}
 			return;
 		}
 		const pending = this.pending.get(parsed.id);
@@ -768,6 +887,27 @@ export class RemoteToolOperations implements ToolOperations {
 		}
 		const exitCode = optionalNumber(event.exitCode) ?? null;
 		pending.resolve({ exitCode });
+	}
+
+	private handleFileEvent(event: RemoteFileEvent): void {
+		const pending = this.fileDownloadPending.get(event.id);
+		if (!pending) return;
+		if (event.event === "fileData") {
+			const encoded = optionalString(event.dataBase64);
+			if (encoded === undefined) return;
+			pending.writePromise = pending.writePromise.then(() =>
+				writeStreamChunk(pending.stream, Buffer.from(encoded, "base64")),
+			);
+			return;
+		}
+		this.fileDownloadPending.delete(event.id);
+		if (event.event === "fileError") {
+			const error = new Error(remoteErrorMessage(event.error));
+			pending.reject(error);
+			pending.stream.destroy(error);
+			return;
+		}
+		pending.writePromise.then(() => endWriteStream(pending.stream)).then(pending.resolve, pending.reject);
 	}
 
 	async exec(command: string, options: ToolExecOptions): Promise<{ exitCode: number | null }> {
@@ -840,6 +980,63 @@ export class RemoteToolOperations implements ToolOperations {
 
 	async writeFile(path: string, content: string | Buffer): Promise<void> {
 		await this.request("writeFile", { path, contentBase64: Buffer.from(content).toString("base64") });
+	}
+
+	async uploadFile(sourcePath: string, destinationPath: string): Promise<void> {
+		const uploadId = `remote-${this.nextId++}`;
+		await new Promise<void>((resolve, reject) => {
+			this.pending.set(uploadId, { resolve: () => resolve(), reject });
+			try {
+				this.send({ id: uploadId, method: "uploadFileStart", params: { path: destinationPath } });
+			} catch (error) {
+				this.pending.delete(uploadId);
+				reject(error instanceof Error ? error : new Error(String(error)));
+			}
+		});
+		try {
+			for await (const chunk of createReadStream(sourcePath, { highWaterMark: 64 * 1024 })) {
+				const buffer = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+				await this.request("uploadFileChunk", { uploadId, dataBase64: buffer.toString("base64") });
+			}
+			await this.request("uploadFileEnd", { uploadId });
+		} catch (error) {
+			await this.request("uploadFileCancel", { uploadId }).catch(() => undefined);
+			throw error;
+		}
+	}
+
+	async downloadFile(sourcePath: string, destinationPath: string): Promise<void> {
+		const id = `remote-${this.nextId++}`;
+		const stream = createWriteStream(destinationPath);
+		await new Promise<void>((resolve, reject) => {
+			const cleanup = () => stream.off("error", onStreamError);
+			const onStreamError = (error: Error) => {
+				cleanup();
+				this.fileDownloadPending.delete(id);
+				reject(error);
+			};
+			stream.once("error", onStreamError);
+			this.fileDownloadPending.set(id, {
+				stream,
+				writePromise: Promise.resolve(),
+				resolve: () => {
+					cleanup();
+					resolve();
+				},
+				reject: (error) => {
+					cleanup();
+					reject(error);
+				},
+			});
+			try {
+				this.send({ id, method: "downloadFile", params: { path: sourcePath } });
+			} catch (error) {
+				cleanup();
+				this.fileDownloadPending.delete(id);
+				stream.destroy();
+				reject(error instanceof Error ? error : new Error(String(error)));
+			}
+		});
 	}
 
 	async mkdir(path: string, options: { recursive?: boolean } = {}): Promise<void> {
