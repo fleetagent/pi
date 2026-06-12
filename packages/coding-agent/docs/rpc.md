@@ -429,6 +429,12 @@ Execute a shell command and add output to conversation context.
 {"type": "bash", "command": "ls -la"}
 ```
 
+Set `record` to `false` to return the command result without adding a `BashExecutionMessage` to agent state or session history:
+
+```json
+{"type": "bash", "command": "ls -la", "record": false}
+```
+
 Response:
 ```json
 {
@@ -462,7 +468,7 @@ If output was truncated, includes `fullOutputPath`:
 
 **How bash results reach the LLM:**
 
-The `bash` command executes immediately and returns a `BashResult`. Internally, a `BashExecutionMessage` is created and stored in the agent's message state. This message does NOT emit an event.
+The `bash` command executes immediately and returns a `BashResult`. By default, a `BashExecutionMessage` is created and stored in the agent's message state. This message does NOT emit an event. If `record` is `false`, no `BashExecutionMessage` is created.
 
 When the next `prompt` command is sent, all messages (including `BashExecutionMessage`) are transformed before being sent to the LLM. The `BashExecutionMessage` is converted to a `UserMessage` with this format:
 
@@ -476,8 +482,9 @@ drwxr-xr-x ...
 
 This means:
 1. Bash output is included in the LLM context on the **next prompt**, not immediately
-2. Multiple bash commands can be executed before a prompt; all outputs will be included
+2. Multiple recorded bash commands can be executed before a prompt; all outputs will be included
 3. No event is emitted for the `BashExecutionMessage` itself
+4. Commands with `record: false` are omitted from session history and future LLM context
 
 #### abort_bash
 

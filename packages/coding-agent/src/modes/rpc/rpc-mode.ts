@@ -590,7 +590,7 @@ export async function runRpcMode(runtimeHost: PiAgentRuntimeHost): Promise<never
 			// =================================================================
 
 			case "bash": {
-				const result = await session.executeBash(command.command);
+				const result = await session.executeBash(command.command, undefined, { record: command.record });
 				return success(id, "bash", result);
 			}
 
