@@ -40,7 +40,7 @@ export function createSyntheticSourceInfo(
 }
 
 export function getSourceBackend(sourceInfo: SourceInfo | undefined): "local" | "remote" {
-	return sourceInfo?.source === "ssh" ? "remote" : "local";
+	return sourceInfo?.source === "ssh" || sourceInfo?.source === "remote" ? "remote" : "local";
 }
 
 export function getSourceBackendIcon(sourceInfo: SourceInfo | undefined): string {

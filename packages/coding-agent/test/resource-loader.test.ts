@@ -106,6 +106,39 @@ Skill content here.`,
 			expect(skills.some((s) => s.name === "test-skill")).toBe(true);
 		});
 
+		it("should require skill and rule frontmatter names", async () => {
+			const skillsDir = join(agentDir, "skills");
+			const rulesDir = join(agentDir, "rules");
+			mkdirSync(skillsDir, { recursive: true });
+			mkdirSync(rulesDir, { recursive: true });
+			writeFileSync(
+				join(skillsDir, "container.md"),
+				`---
+description: Container skill
+---
+Skill content here.`,
+			);
+			writeFileSync(
+				join(rulesDir, "container-rule.md"),
+				`---
+description: Container rule
+---
+Rule content here.`,
+			);
+
+			const loader = new DefaultResourceLoader({ cwd, agentDir });
+			await loader.reload();
+
+			expect(loader.getSkills().skills.map((skill) => skill.name)).not.toContain("container");
+			expect(loader.getSkills().diagnostics).toContainEqual(
+				expect.objectContaining({ path: join(skillsDir, "container.md"), message: "name is required" }),
+			);
+			expect(loader.getRules().rules.map((rule) => rule.name)).not.toContain("container-rule");
+			expect(loader.getRules().diagnostics).toContainEqual(
+				expect.objectContaining({ path: join(rulesDir, "container-rule.md"), message: "name is required" }),
+			);
+		});
+
 		it("should ignore extra markdown files in auto-discovered skill dirs", async () => {
 			const skillDir = join(agentDir, "skills", "pi-skills", "browser-tools");
 			mkdirSync(skillDir, { recursive: true });
@@ -226,6 +259,15 @@ Remote rule.`,
 			expect(loader.getSkills().skills.map((skill) => skill.name)).not.toContain("local-only");
 			expect(loader.getRules().rules.map((rule) => rule.name)).toContain("remote-rule");
 			expect(loader.getPrompts().prompts.map((prompt) => prompt.name)).toContain("remote-prompt");
+			expect(loader.getSkills().diagnostics.map((diagnostic) => diagnostic.message)).not.toContain(
+				"skill path does not exist",
+			);
+			expect(loader.getRules().diagnostics.map((diagnostic) => diagnostic.message)).not.toContain(
+				"rule path does not exist",
+			);
+			expect(loader.getPrompts().diagnostics.map((diagnostic) => diagnostic.message)).not.toContain(
+				"prompt template path does not exist",
+			);
 			expect(loader.getAgentsFiles().agentsFiles.map((file) => file.content)).toContain(
 				"Remote project instructions.",
 			);

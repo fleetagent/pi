@@ -84,8 +84,12 @@ function formatDuration(ms: number): string {
 function formatBackendSuffix(backendInfo: ToolBackendInfo | undefined): string {
 	if (!backendInfo) return "";
 	if (backendInfo.type === "local") return theme.fg("muted", ` [local ${backendInfo.cwd}]`);
-	if (backendInfo.configured) return theme.fg("muted", ` [ssh ${backendInfo.remote}:${backendInfo.cwd}]`);
-	return theme.fg("warning", ` [ssh not configured ${backendInfo.cwd}]`);
+	if (backendInfo.type === "remote") {
+		return backendInfo.configured
+			? theme.fg("muted", ` [remote ${backendInfo.url}:${backendInfo.cwd}]`)
+			: theme.fg("warning", ` [remote not configured ${backendInfo.cwd}]`);
+	}
+	return theme.fg("muted", ` [ssh ${backendInfo.remote}:${backendInfo.cwd}]`);
 }
 
 function formatBashCall(

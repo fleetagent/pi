@@ -1,0 +1,44 @@
+{
+	"name": "@fleetagent/pi-daemon",
+	"version": "0.0.11",
+	"description": "Remote commander daemon for Pi",
+	"type": "module",
+	"bin": {
+		"pi-daemon": "dist/index.js"
+	},
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
+		}
+	},
+	"files": [
+		"dist",
+		"README.md",
+		"CHANGELOG.md"
+	],
+	"scripts": {
+		"clean": "shx rm -rf dist",
+		"build": "tsgo -p tsconfig.build.json && shx chmod +x dist/index.js",
+		"test": "vitest --run --passWithNoTests",
+		"prepublishOnly": "npm run clean && npm run build"
+	},
+	"keywords": [
+		"pi",
+		"daemon",
+		"remote",
+		"coding-agent"
+	],
+	"author": "Mario Zechner",
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/fleetagent/pi",
+		"directory": "packages/pi-daemon"
+	},
+	"engines": {
+		"node": ">=22.19.0"
+	}
+}

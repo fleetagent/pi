@@ -1369,7 +1369,8 @@ export class InteractiveMode {
 			if (contextFiles.length > 0) {
 				this.chatContainer.addChild(new Spacer(1));
 				const contextBackendInfo = this.session.getToolBackendInfo?.();
-				const contextBackendIcon = contextBackendInfo?.type === "ssh" ? "☁" : "🖥";
+				const contextBackendIcon =
+					contextBackendInfo?.type === "ssh" || contextBackendInfo?.type === "remote" ? "☁" : "🖥";
 				const contextList = contextFiles
 					.map((f) =>
 						theme.fg(
@@ -1395,7 +1396,9 @@ export class InteractiveMode {
 					formatPackagePath: (item) =>
 						`${getSourceBackendIcon(item.sourceInfo)} ${this.getShortPath(item.path, item.sourceInfo)}`,
 				});
-				const skillCompactList = formatCompactList(skills.map((skill) => skill.name));
+				const skillCompactList = formatCompactList(
+					skills.map((skill) => `${getSourceBackendIcon(skill.sourceInfo)} ${skill.name}`),
+				);
 				addLoadedSection("Skills", skillCompactList, skillList);
 			}
 
@@ -1409,7 +1412,9 @@ export class InteractiveMode {
 					formatPackagePath: (item) =>
 						`${getSourceBackendIcon(item.sourceInfo)} ${this.getShortPath(item.path, item.sourceInfo)}`,
 				});
-				const ruleCompactList = formatCompactList(rules.map((rule) => rule.name));
+				const ruleCompactList = formatCompactList(
+					rules.map((rule) => `${getSourceBackendIcon(rule.sourceInfo)} ${rule.name}`),
+				);
 				addLoadedSection("Rules", ruleCompactList, ruleList);
 			}
 
@@ -1429,7 +1434,9 @@ export class InteractiveMode {
 						return `${getSourceBackendIcon(item.sourceInfo)} ${template ? `/${template.name}` : this.formatDisplayPath(item.path)}`;
 					},
 				});
-				const promptCompactList = formatCompactList(templates.map((template) => `/${template.name}`));
+				const promptCompactList = formatCompactList(
+					templates.map((template) => `${getSourceBackendIcon(template.sourceInfo)} /${template.name}`),
+				);
 				addLoadedSection("Prompts", promptCompactList, templateList);
 			}
 
@@ -1740,10 +1747,12 @@ export class InteractiveMode {
 		if (info.type === "local") {
 			return theme.fg("dim", `tools: local ${info.cwd}`);
 		}
-		if (info.configured) {
-			return theme.fg("accent", `tools: ssh ${info.remote}:${info.cwd}`);
+		if (info.type === "remote") {
+			return info.configured
+				? theme.fg("accent", `tools: remote ${info.url} ${info.cwd}`)
+				: theme.fg("warning", `tools: remote not configured ${info.cwd}`);
 		}
-		return theme.fg("warning", `tools: ssh not configured ${info.cwd}`);
+		return theme.fg("accent", `tools: ssh ${info.remote}:${info.cwd}`);
 	}
 
 	private updateToolBackendStatus(): void {
@@ -2580,11 +2589,12 @@ export class InteractiveMode {
 				this.editor.setText("");
 				return;
 			}
-			if (text === "/ssh-sandbox" || text.startsWith("/ssh-sandbox ")) {
+			if (text === "/remote" || text.startsWith("/remote ")) {
 				this.editor.setText("");
-				await this.handleSshSandboxCommand(text);
+				await this.handleRemoteCommand(text);
 				return;
 			}
+
 			if (text === "/changelog") {
 				this.handleChangelogCommand();
 				this.editor.setText("");
@@ -5269,38 +5279,65 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
-	private async handleSshSandboxCommand(text: string): Promise<void> {
-		const args = text.replace(/^\/ssh-sandbox\s*/, "").trim();
+	private async reloadResourcesAfterBackendChange(): Promise<void> {
+		await this.session.reload();
+		this.setupAutocompleteProvider();
+		this.showLoadedResources({ force: true, showDiagnosticsWhenQuiet: true });
+	}
+
+	private async handleRemoteCommand(text: string): Promise<void> {
+		const args = text.replace(/^\/remote\s*/, "").trim();
 		if (!args || args === "status") {
 			this.showStatus(this.formatToolBackendStatus(this.session.getToolBackendInfo()));
 			return;
 		}
 		if (args === "clear") {
 			try {
-				this.session.clearSshSandbox();
+				this.session.clearRemoteSandbox();
+				await this.reloadResourcesAfterBackendChange();
 				this.updateToolBackendStatus();
-				this.showStatus("SSH sandbox cleared");
+				this.showStatus("Remote backend cleared");
 			} catch (error) {
 				this.showError(error instanceof Error ? error.message : String(error));
 			}
 			return;
 		}
 
-		const [targetArg, cwdArg] = args.split(/\s+/, 2);
-		if (!targetArg) {
-			this.showWarning("Usage: /ssh-sandbox <user@host[:/path]> [path]");
+		const [kind, targetArg, cwdArg] = args.split(/\s+/, 3);
+		if (kind !== "ssh" && kind !== "daemon") {
+			this.showWarning("Usage: /remote <ssh|daemon> <url> [path]");
 			return;
 		}
-		const separatorIndex = targetArg.indexOf(":");
-		const remote = separatorIndex === -1 ? targetArg : targetArg.slice(0, separatorIndex);
-		const cwd = cwdArg ?? (separatorIndex === -1 ? undefined : targetArg.slice(separatorIndex + 1));
+		if (!targetArg) {
+			this.showWarning(
+				kind === "ssh" ? "Usage: /remote ssh <user@host[:/path]> [path]" : "Usage: /remote daemon <ws://url>",
+			);
+			return;
+		}
+
 		try {
-			const info = await this.session.configureSshSandbox({ remote, cwd });
+			const info =
+				kind === "ssh"
+					? await this.session.configureRemoteSandbox({
+							type: "ssh",
+							...this.parseSshRemoteTarget(targetArg, cwdArg),
+						})
+					: await this.session.configureRemoteSandbox({ type: "daemon", url: targetArg });
+			await this.reloadResourcesAfterBackendChange();
 			this.updateToolBackendStatus();
 			this.showStatus(this.formatToolBackendStatus(info));
 		} catch (error) {
-			this.showError(`Failed to configure SSH sandbox: ${error instanceof Error ? error.message : String(error)}`);
+			this.showError(
+				`Failed to configure remote backend: ${error instanceof Error ? error.message : String(error)}`,
+			);
 		}
+	}
+
+	private parseSshRemoteTarget(targetArg: string, cwdArg?: string): { remote: string; cwd?: string } {
+		const separatorIndex = targetArg.indexOf(":");
+		const remote = separatorIndex === -1 ? targetArg : targetArg.slice(0, separatorIndex);
+		const cwd = cwdArg ?? (separatorIndex === -1 ? undefined : targetArg.slice(separatorIndex + 1));
+		return { remote, cwd };
 	}
 
 	private handleSessionCommand(): void {

@@ -239,6 +239,29 @@ describe("parseArgs", () => {
 		});
 	});
 
+	describe("--remote flag", () => {
+		test("parses --remote flag", () => {
+			const result = parseArgs(["--remote", "ws://localhost:8787"]);
+			expect(result.remote).toBe("ws://localhost:8787");
+		});
+
+		test("parses deferred remote flags", () => {
+			const result = parseArgs(["--remote-deferred", "--remote-cwd", "/workspace"]);
+			expect(result.remoteDeferred).toBe(true);
+			expect(result.remoteCwd).toBe("/workspace");
+		});
+
+		test("rejects removed ssh deferred flags", () => {
+			const result = parseArgs(["--ssh-deferred", "--ssh-cwd", "/workspace"]);
+			expect(result.remoteDeferred).toBeUndefined();
+			expect(result.remoteCwd).toBeUndefined();
+			expect(result.diagnostics).toEqual([
+				{ type: "error", message: "--ssh-deferred was removed; use --remote-deferred --remote-cwd <path>" },
+				{ type: "error", message: "--ssh-cwd was removed; use --remote-deferred --remote-cwd <path>" },
+			]);
+		});
+	});
+
 	describe("--no-skills flag", () => {
 		test("parses --no-skills flag", () => {
 			const result = parseArgs(["--no-skills"]);

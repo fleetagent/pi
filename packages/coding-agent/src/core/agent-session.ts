@@ -14,7 +14,7 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { basename, dirname } from "node:path";
+import { basename, dirname, sep } from "node:path";
 import type {
 	Agent,
 	AgentContext,
@@ -99,12 +99,12 @@ import type { BranchSummaryEntry, CompactionEntry, Session } from "./session-man
 import { CURRENT_SESSION_VERSION, getLatestCompactionEntry, type SessionHeader } from "./session-manager.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import type { SlashCommandInfo } from "./slash-commands.ts";
-import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
+import { createSyntheticSourceInfo, getSourceBackend, type SourceInfo } from "./source-info.ts";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.ts";
 import { createLocalBashOperations } from "./tools/bash.ts";
 import {
 	createAllToolDefinitions,
-	DeferredSshToolOperations,
+	DeferredRemoteToolOperations,
 	LocalToolOperations,
 	type ToolBackendInfo,
 	type ToolOperations,
@@ -385,6 +385,7 @@ export class AgentSession {
 	private _allowedToolNames?: Set<string>;
 	private _baseToolsOverride?: Record<string, AgentTool>;
 	private _toolOperations?: ToolOperations;
+	private _localResourceToolOperations?: ToolOperations;
 	private _sessionStartEvent: SessionStartEvent;
 	private _extensionUIContext?: ExtensionUIContext;
 	private _extensionCommandContextActions?: ExtensionCommandContextActions;
@@ -448,16 +449,60 @@ export class AgentSession {
 		return this.getToolOperations().getBackendInfo?.() ?? { type: "local", cwd: this._cwd };
 	}
 
-	async configureSshSandbox(options: { remote: string; cwd?: string }): Promise<ToolBackendInfo> {
-		if (!(this._toolOperations instanceof DeferredSshToolOperations)) {
-			throw new Error("SSH sandbox can only be configured when Pi is started with --ssh-deferred");
-		}
-		return this._toolOperations.configure(options);
+	private _getLocalResourceToolOperations(shellPath?: string): ToolOperations {
+		this._localResourceToolOperations ??= new LocalToolOperations(this._cwd, { shellPath });
+		return this._localResourceToolOperations;
 	}
 
-	clearSshSandbox(): void {
-		if (!(this._toolOperations instanceof DeferredSshToolOperations)) {
-			throw new Error("SSH sandbox can only be cleared when Pi is started with --ssh-deferred");
+	private _getReadOperationsForPath(absolutePath: string, shellPath?: string): ToolOperations | undefined {
+		const isSameOrChild = (target: string, root: string): boolean => {
+			const normalizedRoot = resolvePath(root);
+			if (target === normalizedRoot) return true;
+			const prefix = normalizedRoot.endsWith(sep) ? normalizedRoot : `${normalizedRoot}${sep}`;
+			return target.startsWith(prefix);
+		};
+		const resources = [
+			...this._resourceLoader.getSkills().skills.map((skill) => ({
+				path: skill.filePath,
+				baseDir: skill.baseDir,
+				sourceInfo: skill.sourceInfo,
+			})),
+			...this._resourceLoader.getRules().rules.map((rule) => ({
+				path: rule.filePath,
+				baseDir: rule.baseDir,
+				sourceInfo: rule.sourceInfo,
+			})),
+			...this._resourceLoader.getPrompts().prompts.map((prompt) => ({
+				path: prompt.filePath,
+				baseDir: dirname(prompt.filePath),
+				sourceInfo: prompt.sourceInfo,
+			})),
+		];
+		for (const resource of resources) {
+			if (getSourceBackend(resource.sourceInfo) !== "local") continue;
+			const resourcePath = resolvePath(resource.path);
+			const baseDir = resolvePath(resource.baseDir);
+			if (absolutePath === resourcePath || isSameOrChild(absolutePath, baseDir)) {
+				return this._getLocalResourceToolOperations(shellPath);
+			}
+		}
+		return undefined;
+	}
+
+	async configureRemoteSandbox(
+		options: { type: "ssh"; remote: string; cwd?: string } | { type: "daemon"; url: string },
+	): Promise<ToolBackendInfo> {
+		if (!(this._toolOperations instanceof DeferredRemoteToolOperations)) {
+			throw new Error("Remote backend can only be configured when Pi is started with --remote-deferred");
+		}
+		return options.type === "ssh"
+			? this._toolOperations.configure({ remote: options.remote, cwd: options.cwd })
+			: this._toolOperations.configureRemote(options.url);
+	}
+
+	clearRemoteSandbox(): void {
+		if (!(this._toolOperations instanceof DeferredRemoteToolOperations)) {
+			throw new Error("Remote backend can only be cleared when Pi is started with --remote-deferred");
 		}
 		this._toolOperations.clear();
 	}
@@ -856,6 +901,8 @@ export class AgentSession {
 			this.abortBranchSummary();
 			this.abortBash();
 			this.agent.abort();
+			void this._localResourceToolOperations?.dispose?.();
+			this._localResourceToolOperations = undefined;
 		} catch {
 			// Dispose must succeed even if an abort hook throws.
 		}
@@ -2874,7 +2921,10 @@ export class AgentSession {
 					]),
 				)
 			: createAllToolDefinitions(operations, {
-					read: { autoResizeImages },
+					read: {
+						autoResizeImages,
+						operationsForPath: (path) => this._getReadOperationsForPath(path, shellPath),
+					},
 					bash: { commandPrefix: shellCommandPrefix },
 				});
 

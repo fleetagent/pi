@@ -57,8 +57,9 @@ export interface Args {
 	offline?: boolean;
 	verbose?: boolean;
 	ssh?: string;
-	sshDeferred?: boolean;
-	sshCwd?: string;
+	remote?: string;
+	remoteDeferred?: boolean;
+	remoteCwd?: string;
 	messages: string[];
 	fileArgs: string[];
 	/** Unknown flags (potentially extension flags) - map of flag name to value */
@@ -191,10 +192,18 @@ export function parseArgs(args: string[]): Args {
 			result.offline = true;
 		} else if (arg === "--ssh" && i + 1 < args.length) {
 			result.ssh = args[++i];
-		} else if (arg === "--ssh-deferred") {
-			result.sshDeferred = true;
-		} else if (arg === "--ssh-cwd" && i + 1 < args.length) {
-			result.sshCwd = args[++i];
+		} else if (arg === "--remote" && i + 1 < args.length) {
+			result.remote = args[++i];
+		} else if (arg === "--remote-deferred") {
+			result.remoteDeferred = true;
+		} else if (arg === "--remote-cwd" && i + 1 < args.length) {
+			result.remoteCwd = args[++i];
+		} else if (arg === "--ssh-deferred" || arg === "--ssh-cwd") {
+			result.diagnostics.push({
+				type: "error",
+				message: `${arg} was removed; use --remote-deferred --remote-cwd <path>`,
+			});
+			if (arg === "--ssh-cwd" && i + 1 < args.length) i++;
 		} else if (arg.startsWith("@")) {
 			result.fileArgs.push(arg.slice(1)); // Remove @ prefix
 		} else if (arg.startsWith("--")) {
@@ -286,8 +295,9 @@ ${chalk.bold("Options:")}
   --verbose                      Force verbose startup (overrides quietStartup setting)
   --offline                      Disable startup network operations (same as PI_OFFLINE=1)
   --ssh <target>                 Run built-in tools over SSH (user@host or user@host:/path)
-  --ssh-deferred                 Start in SSH sandbox mode and configure target later
-  --ssh-cwd <path>               Stable remote cwd for --ssh-deferred
+  --remote <url>                 Run built-in tools through a remote commander (ws:// or wss://)
+  --remote-deferred              Start without a connected tool backend; configure later with /remote
+  --remote-cwd <path>            Stable backend cwd for --remote-deferred
   --help, -h                     Show this help
   --version, -v                  Show version number
 
@@ -339,8 +349,8 @@ ${chalk.bold("Examples:")}
   # Run built-in tools on a remote machine over SSH
   ${APP_NAME} --ssh user@host:/home/user/project "Inspect this repo"
 
-  # Start in SSH sandbox mode and configure host later via RPC or /ssh-sandbox
-  ${APP_NAME} --ssh-deferred --ssh-cwd /workspace
+  # Start without a connected tool backend and configure SSH or daemon later with /remote
+  ${APP_NAME} --remote-deferred --remote-cwd /workspace
 
   # Export a session file to HTML
   ${APP_NAME} --export ~/${CONFIG_DIR_NAME}/agent/sessions/--path--/session.jsonl

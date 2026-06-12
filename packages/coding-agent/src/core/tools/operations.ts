@@ -62,7 +62,8 @@ export interface ToolGrepResult {
 export type ToolBackendInfo =
 	| { type: "local"; cwd: string }
 	| { type: "ssh"; cwd: string; remote: string; configured: true }
-	| { type: "ssh"; cwd: string; configured: false };
+	| { type: "remote"; cwd: string; configured: false }
+	| { type: "remote"; cwd: string; url: string; protocol: "ws"; configured: true };
 
 export interface ToolOperations {
 	cwd: string;
@@ -89,7 +90,7 @@ export interface SshToolOperationsOptions {
 	cwd: string;
 }
 
-export interface DeferredSshToolOperationsConfigureOptions {
+export interface DeferredRemoteToolOperationsConfigureSshOptions {
 	remote: string;
 	cwd?: string;
 }
@@ -470,36 +471,50 @@ export class SshToolOperations implements ToolOperations {
 	getBackendInfo(): ToolBackendInfo {
 		return { type: "ssh", remote: this.remote, cwd: this.cwd, configured: true };
 	}
+
+	async dispose(): Promise<void> {}
 }
 
-export class DeferredSshToolOperations implements ToolOperations {
+export class DeferredRemoteToolOperations implements ToolOperations {
 	cwd: string;
-	private operations: SshToolOperations | undefined;
+	private operations: SshToolOperations | RemoteToolOperations | undefined;
 
 	constructor(cwd: string) {
 		this.cwd = cwd;
 	}
 
-	async configure(options: DeferredSshToolOperationsConfigureOptions): Promise<ToolBackendInfo> {
+	async configure(options: DeferredRemoteToolOperationsConfigureSshOptions): Promise<ToolBackendInfo> {
 		const next = new SshToolOperations({ remote: options.remote, cwd: options.cwd ?? this.cwd });
 		const stat = await next.stat(next.cwd);
 		if (!stat.isDirectory()) {
-			throw new Error(`SSH sandbox cwd is not a directory: ${next.cwd}`);
+			throw new Error(`SSH backend cwd is not a directory: ${next.cwd}`);
 		}
+		await this.operations?.dispose?.();
+		this.cwd = next.cwd;
+		this.operations = next;
+		return this.getBackendInfo();
+	}
+
+	async configureRemote(url: string): Promise<ToolBackendInfo> {
+		const next = await createRemoteToolOperations(url);
+		const stat = await next.stat(next.cwd);
+		if (!stat.isDirectory()) {
+			throw new Error(`Remote daemon cwd is not a directory: ${next.cwd}`);
+		}
+		await this.operations?.dispose?.();
 		this.cwd = next.cwd;
 		this.operations = next;
 		return this.getBackendInfo();
 	}
 
 	clear(): void {
+		void this.operations?.dispose?.();
 		this.operations = undefined;
 	}
 
-	private requireOperations(): SshToolOperations {
+	private requireOperations(): SshToolOperations | RemoteToolOperations {
 		if (!this.operations) {
-			throw new Error(
-				"SSH sandbox is not configured. Configure it over RPC or with /ssh-sandbox before using tools.",
-			);
+			throw new Error("Remote backend is not configured. Configure it over RPC or with /remote before using tools.");
 		}
 		return this.operations;
 	}
@@ -545,8 +560,350 @@ export class DeferredSshToolOperations implements ToolOperations {
 	}
 
 	getBackendInfo(): ToolBackendInfo {
-		return this.operations?.getBackendInfo() ?? { type: "ssh", cwd: this.cwd, configured: false };
+		return this.operations?.getBackendInfo() ?? { type: "remote", cwd: this.cwd, configured: false };
 	}
+}
+
+type RemoteResponse = { id: string; result: unknown } | { id: string; error: { message?: unknown } | string };
+
+type RemoteExecEvent =
+	| { id: string; event: "data"; dataBase64?: unknown; data?: unknown; stream?: unknown }
+	| { id: string; event: "exit"; exitCode?: unknown; cancelled?: unknown }
+	| { id: string; event: "error"; error?: { message?: unknown } | string };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null;
+}
+
+function remoteErrorMessage(error: unknown): string {
+	if (typeof error === "string") return error;
+	if (isRecord(error) && typeof error.message === "string") return error.message;
+	return "remote operation failed";
+}
+
+function requireString(value: unknown, name: string): string {
+	if (typeof value !== "string") throw new Error(`Remote response missing string ${name}`);
+	return value;
+}
+
+function optionalString(value: unknown): string | undefined {
+	return typeof value === "string" ? value : undefined;
+}
+
+function optionalNumber(value: unknown): number | undefined {
+	return typeof value === "number" ? value : undefined;
+}
+
+function normalizeRemoteUrl(url: string): { url: string; protocol: "ws" } {
+	const parsed = new URL(url);
+	if (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") {
+		throw new Error(`--remote currently supports ws:// and wss:// URLs, got ${parsed.protocol}`);
+	}
+	return { url, protocol: "ws" };
+}
+
+export class RemoteToolOperations implements ToolOperations {
+	readonly url: string;
+	readonly protocol: "ws";
+	cwd: string;
+	private socket: WebSocket;
+	private nextId = 1;
+	private pending = new Map<
+		string,
+		{
+			resolve: (value: unknown) => void;
+			reject: (error: Error) => void;
+		}
+	>();
+	private execPending = new Map<
+		string,
+		{
+			onData: (data: Buffer) => void;
+			resolve: (value: { exitCode: number | null }) => void;
+			reject: (error: Error) => void;
+		}
+	>();
+	private keepAliveInterval: NodeJS.Timeout | undefined;
+	private lastPongAt = Date.now();
+
+	private constructor(url: string, protocol: "ws", socket: WebSocket, cwd: string) {
+		this.url = url;
+		this.protocol = protocol;
+		this.socket = socket;
+		this.cwd = cwd;
+		this.socket.addEventListener("message", (event) => this.handleMessage(event.data));
+		this.socket.addEventListener("close", () => {
+			this.stopKeepAlive();
+			this.rejectAll(new Error("remote connection closed"));
+		});
+		this.socket.addEventListener("error", () => {
+			this.stopKeepAlive();
+			this.rejectAll(new Error("remote connection error"));
+		});
+		this.startKeepAlive();
+	}
+
+	static async connect(url: string): Promise<RemoteToolOperations> {
+		const normalized = normalizeRemoteUrl(url);
+		const socket = await new Promise<WebSocket>((resolveSocket, rejectSocket) => {
+			const ws = new WebSocket(normalized.url);
+			const cleanup = () => {
+				ws.removeEventListener("open", onOpen);
+				ws.removeEventListener("error", onError);
+			};
+			const onOpen = () => {
+				cleanup();
+				resolveSocket(ws);
+			};
+			const onError = () => {
+				cleanup();
+				rejectSocket(new Error(`failed to connect remote commander: ${normalized.url}`));
+			};
+			ws.addEventListener("open", onOpen, { once: true });
+			ws.addEventListener("error", onError, { once: true });
+		});
+		const operations = new RemoteToolOperations(normalized.url, normalized.protocol, socket, "/");
+		const capabilities = await operations.request("capabilities", {});
+		if (isRecord(capabilities) && typeof capabilities.cwd === "string") {
+			operations.cwd = capabilities.cwd;
+		}
+		return operations;
+	}
+
+	private startKeepAlive(): void {
+		this.keepAliveInterval = setInterval(() => {
+			if (Date.now() - this.lastPongAt > 90_000) {
+				this.stopKeepAlive();
+				this.rejectAll(new Error("remote connection heartbeat timed out"));
+				this.socket.close();
+				return;
+			}
+			try {
+				this.send({ type: "ping", timestamp: Date.now() });
+			} catch (error) {
+				this.stopKeepAlive();
+				this.rejectAll(error instanceof Error ? error : new Error(String(error)));
+			}
+		}, 30_000);
+		this.keepAliveInterval.unref?.();
+	}
+
+	private stopKeepAlive(): void {
+		if (this.keepAliveInterval) {
+			clearInterval(this.keepAliveInterval);
+			this.keepAliveInterval = undefined;
+		}
+	}
+
+	private rejectAll(error: Error): void {
+		for (const pending of this.pending.values()) pending.reject(error);
+		this.pending.clear();
+		for (const pending of this.execPending.values()) pending.reject(error);
+		this.execPending.clear();
+	}
+
+	private send(message: Record<string, unknown>): void {
+		if (this.socket.readyState !== WebSocket.OPEN) {
+			throw new Error("remote connection is not open");
+		}
+		this.socket.send(JSON.stringify(message));
+	}
+
+	private request(method: string, params: Record<string, unknown>): Promise<unknown> {
+		const id = `remote-${this.nextId++}`;
+		return new Promise((resolve, reject) => {
+			this.pending.set(id, { resolve, reject });
+			try {
+				this.send({ id, method, params });
+			} catch (error) {
+				this.pending.delete(id);
+				reject(error instanceof Error ? error : new Error(String(error)));
+			}
+		});
+	}
+
+	private handleMessage(data: unknown): void {
+		if (typeof data !== "string") return;
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(data);
+		} catch {
+			return;
+		}
+		if (!isRecord(parsed)) return;
+		if (parsed.type === "pong") {
+			this.lastPongAt = Date.now();
+			return;
+		}
+		if (typeof parsed.id !== "string") return;
+		if (typeof parsed.event === "string") {
+			this.handleExecEvent(parsed as RemoteExecEvent);
+			return;
+		}
+		const pending = this.pending.get(parsed.id);
+		if (!pending) return;
+		this.pending.delete(parsed.id);
+		const response = parsed as RemoteResponse;
+		if ("error" in response) {
+			pending.reject(new Error(remoteErrorMessage(response.error)));
+			return;
+		}
+		pending.resolve(response.result);
+	}
+
+	private handleExecEvent(event: RemoteExecEvent): void {
+		const pending = this.execPending.get(event.id);
+		if (!pending) return;
+		if (event.event === "data") {
+			const encoded = optionalString(event.dataBase64);
+			const text = optionalString(event.data);
+			if (encoded !== undefined) pending.onData(Buffer.from(encoded, "base64"));
+			else if (text !== undefined) pending.onData(Buffer.from(text));
+			return;
+		}
+		this.execPending.delete(event.id);
+		if (event.event === "error") {
+			pending.reject(new Error(remoteErrorMessage(event.error)));
+			return;
+		}
+		const exitCode = optionalNumber(event.exitCode) ?? null;
+		pending.resolve({ exitCode });
+	}
+
+	async exec(command: string, options: ToolExecOptions): Promise<{ exitCode: number | null }> {
+		const id = `remote-${this.nextId++}`;
+		let timeoutHandle: NodeJS.Timeout | undefined;
+		return new Promise((resolve, reject) => {
+			const cleanup = () => {
+				if (timeoutHandle) clearTimeout(timeoutHandle);
+				options.signal?.removeEventListener("abort", onAbort);
+			};
+			const onAbort = () => {
+				try {
+					this.send({ id, method: "cancel" });
+				} catch {}
+				const pending = this.execPending.get(id);
+				if (pending) {
+					this.execPending.delete(id);
+					cleanup();
+					pending.reject(new Error("aborted"));
+				}
+			};
+			this.execPending.set(id, {
+				onData: options.onData,
+				resolve: (value) => {
+					cleanup();
+					resolve(value);
+				},
+				reject: (error) => {
+					cleanup();
+					reject(error);
+				},
+			});
+			options.signal?.addEventListener("abort", onAbort, { once: true });
+			if (options.timeout !== undefined && options.timeout > 0) {
+				timeoutHandle = setTimeout(() => {
+					try {
+						this.send({ id, method: "cancel" });
+					} catch {}
+					const pending = this.execPending.get(id);
+					if (pending) {
+						this.execPending.delete(id);
+						cleanup();
+						pending.reject(new Error(`timeout:${options.timeout}`));
+					}
+				}, options.timeout * 1000);
+			}
+			try {
+				this.send({
+					id,
+					method: "exec",
+					params: { command, cwd: options.cwd ?? this.cwd, env: options.env, timeout: options.timeout },
+				});
+			} catch (error) {
+				this.execPending.delete(id);
+				cleanup();
+				reject(error instanceof Error ? error : new Error(String(error)));
+			}
+		});
+	}
+
+	async access(path: string, mode?: ToolAccessMode): Promise<void> {
+		await this.request("access", { path, mode });
+	}
+
+	async readFile(path: string): Promise<Buffer> {
+		const result = await this.request("readFile", { path });
+		if (!isRecord(result)) throw new Error("Invalid remote readFile response");
+		return Buffer.from(requireString(result.contentBase64, "contentBase64"), "base64");
+	}
+
+	async writeFile(path: string, content: string | Buffer): Promise<void> {
+		await this.request("writeFile", { path, contentBase64: Buffer.from(content).toString("base64") });
+	}
+
+	async mkdir(path: string, options: { recursive?: boolean } = {}): Promise<void> {
+		await this.request("mkdir", { path, recursive: options.recursive ?? false });
+	}
+
+	async stat(path: string): Promise<ToolFileStat> {
+		const result = await this.request("stat", { path });
+		if (!isRecord(result)) throw new Error("Invalid remote stat response");
+		const kind = optionalString(result.kind) ?? optionalString(result.type);
+		const isDirectory = result.isDirectory === true || kind === "directory" || kind === "dir";
+		const isFile = result.isFile === true || kind === "file";
+		return { isDirectory: () => isDirectory, isFile: () => isFile };
+	}
+
+	async readdir(path: string): Promise<string[]> {
+		const result = await this.request("readdir", { path });
+		if (Array.isArray(result)) return result.filter((entry): entry is string => typeof entry === "string");
+		if (!isRecord(result) || !Array.isArray(result.entries)) throw new Error("Invalid remote readdir response");
+		return result.entries.filter((entry): entry is string => typeof entry === "string");
+	}
+
+	async glob(pattern: string, cwd: string, options: ToolGlobOptions): Promise<string[]> {
+		const result = await this.request("glob", { pattern, cwd, ignore: options.ignore, limit: options.limit });
+		if (Array.isArray(result)) return result.filter((entry): entry is string => typeof entry === "string");
+		if (!isRecord(result) || !Array.isArray(result.matches)) throw new Error("Invalid remote glob response");
+		return result.matches.filter((entry): entry is string => typeof entry === "string");
+	}
+
+	async grep(options: ToolGrepOptions): Promise<ToolGrepResult> {
+		const result = await this.request("grep", options as unknown as Record<string, unknown>);
+		if (!isRecord(result)) throw new Error("Invalid remote grep response");
+		const matches = Array.isArray(result.matches) ? result.matches : [];
+		return {
+			isDirectory: result.isDirectory === true,
+			matches: matches.flatMap((entry): ToolGrepMatch[] => {
+				if (!isRecord(entry)) return [];
+				const filePath = optionalString(entry.filePath);
+				const lineNumber = optionalNumber(entry.lineNumber);
+				if (!filePath || lineNumber === undefined) return [];
+				return [{ filePath, lineNumber, lineText: optionalString(entry.lineText) }];
+			}),
+		};
+	}
+
+	async detectImageMimeType(path: string): Promise<string | null | undefined> {
+		const result = await this.request("detectImageMimeType", { path });
+		if (!isRecord(result)) return undefined;
+		const mimeType = optionalString(result.mimeType);
+		return mimeType && ["image/jpeg", "image/png", "image/gif", "image/webp"].includes(mimeType) ? mimeType : null;
+	}
+
+	getBackendInfo(): ToolBackendInfo {
+		return { type: "remote", cwd: this.cwd, url: this.url, protocol: this.protocol, configured: true };
+	}
+
+	async dispose(): Promise<void> {
+		this.stopKeepAlive();
+		this.socket.close();
+	}
+}
+
+export function createRemoteToolOperations(url: string): Promise<RemoteToolOperations> {
+	return RemoteToolOperations.connect(url);
 }
 
 export function createSshToolOperations(target: string): Promise<SshToolOperations> {

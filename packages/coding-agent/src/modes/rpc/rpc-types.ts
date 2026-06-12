@@ -65,9 +65,10 @@ export type RpcCommand =
 	| { id?: string; type: "bash"; command: string }
 	| { id?: string; type: "abort_bash" }
 
-	// SSH sandbox
-	| { id?: string; type: "set_ssh_sandbox"; remote: string; cwd?: string }
-	| { id?: string; type: "clear_ssh_sandbox" }
+	// Remote sandbox
+	| { id?: string; type: "set_remote_sandbox"; backend: "ssh"; remote: string; cwd?: string }
+	| { id?: string; type: "set_remote_sandbox"; backend: "daemon"; url: string }
+	| { id?: string; type: "clear_remote_sandbox" }
 
 	// Session
 	| { id?: string; type: "get_session_stats" }
@@ -215,9 +216,9 @@ export type RpcResponse =
 	| { id?: string; type: "response"; command: "bash"; success: true; data: BashResult }
 	| { id?: string; type: "response"; command: "abort_bash"; success: true }
 
-	// SSH sandbox
-	| { id?: string; type: "response"; command: "set_ssh_sandbox"; success: true; data: ToolBackendInfo }
-	| { id?: string; type: "response"; command: "clear_ssh_sandbox"; success: true; data: ToolBackendInfo }
+	// Remote sandbox
+	| { id?: string; type: "response"; command: "set_remote_sandbox"; success: true; data: ToolBackendInfo }
+	| { id?: string; type: "response"; command: "clear_remote_sandbox"; success: true; data: ToolBackendInfo }
 
 	// Session
 	| { id?: string; type: "response"; command: "get_session_stats"; success: true; data: SessionStats }

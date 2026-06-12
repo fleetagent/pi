@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { executeBashWithOperations } from "../src/core/bash-executor.ts";
 import { createBashTool, createLocalBashOperations } from "../src/core/tools/bash.ts";
 import { computeEditsDiff } from "../src/core/tools/edit-diff.ts";
-import { DeferredSshToolOperations, LocalToolOperations } from "../src/core/tools/index.ts";
+import { DeferredRemoteToolOperations, LocalToolOperations } from "../src/core/tools/index.ts";
 import {
 	createEditTool,
 	createFindTool,
@@ -444,17 +444,17 @@ describe("Coding Agent Tools", () => {
 		});
 	});
 
-	describe("deferred SSH operations", () => {
-		it("fails every operation before SSH sandbox configuration", async () => {
-			const operations = new DeferredSshToolOperations("/workspace");
+	describe("deferred remote operations", () => {
+		it("fails every operation before remote backend configuration", async () => {
+			const operations = new DeferredRemoteToolOperations("/workspace");
 
-			expect(operations.getBackendInfo()).toEqual({ type: "ssh", cwd: "/workspace", configured: false });
+			expect(operations.getBackendInfo()).toEqual({ type: "remote", cwd: "/workspace", configured: false });
 			await expect(
 				operations.exec("pwd", {
 					onData: () => {},
 				}),
-			).rejects.toThrow("SSH sandbox is not configured");
-			await expect(operations.readFile("/workspace/file.txt")).rejects.toThrow("SSH sandbox is not configured");
+			).rejects.toThrow("Remote backend is not configured");
+			await expect(operations.readFile("/workspace/file.txt")).rejects.toThrow("Remote backend is not configured");
 		});
 	});
 

@@ -396,18 +396,20 @@ export class RpcClient {
 	}
 
 	/**
-	 * Configure or reconfigure the deferred SSH sandbox.
+	 * Configure or reconfigure the deferred remote sandbox.
 	 */
-	async setSshSandbox(remote: string, cwd?: string): Promise<ToolBackendInfo> {
-		const response = await this.send({ type: "set_ssh_sandbox", remote, cwd });
+	async setRemoteSandbox(
+		options: { backend: "ssh"; remote: string; cwd?: string } | { backend: "daemon"; url: string },
+	): Promise<ToolBackendInfo> {
+		const response = await this.send({ type: "set_remote_sandbox", ...options });
 		return this.getData(response);
 	}
 
 	/**
-	 * Clear the deferred SSH sandbox configuration.
+	 * Clear the deferred remote sandbox configuration.
 	 */
-	async clearSshSandbox(): Promise<ToolBackendInfo> {
-		const response = await this.send({ type: "clear_ssh_sandbox" });
+	async clearRemoteSandbox(): Promise<ToolBackendInfo> {
+		const response = await this.send({ type: "clear_remote_sandbox" });
 		return this.getData(response);
 	}
 
