@@ -3100,16 +3100,17 @@ export class AgentSession {
 
 	/**
 	 * Execute a bash command.
-	 * Adds result to agent context and session.
+	 * Adds result to agent context and session unless options.record is false.
 	 * @param command The bash command to execute
 	 * @param onChunk Optional streaming callback for output
 	 * @param options.excludeFromContext If true, command output won't be sent to LLM (!! prefix)
 	 * @param options.operations Custom ToolOperations for remote execution
+	 * @param options.record If false, result won't be stored in agent state or session history
 	 */
 	async executeBash(
 		command: string,
 		onChunk?: (chunk: string) => void,
-		options?: { excludeFromContext?: boolean; operations?: ToolOperations },
+		options?: { excludeFromContext?: boolean; operations?: ToolOperations; record?: boolean },
 	): Promise<BashResult> {
 		this._bashAbortController = new AbortController();
 
@@ -3128,7 +3129,9 @@ export class AgentSession {
 				signal: this._bashAbortController.signal,
 			});
 
-			this.recordBashResult(command, result, options);
+			if (options?.record !== false) {
+				this.recordBashResult(command, result, options);
+			}
 			return result;
 		} finally {
 			this._bashAbortController = undefined;
