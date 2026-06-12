@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.1.0](https://github.com/fleetagent/pi/compare/@fleetagent/pi-agent-core-v0.0.12...@fleetagent/pi-agent-core-v0.1.0) (2026-06-12)
+
+
+### Features
+
+* add model thinking level metadata ([80f06d3](https://github.com/fleetagent/pi/commit/80f06d3636312a87ad7a9b5d74a726ad62c24d34)), closes [#3208](https://github.com/fleetagent/pi/issues/3208)
+* **agent:** add harness factory helpers ([d29e47c](https://github.com/fleetagent/pi/commit/d29e47c77108bb6bdce7ae816cf7c9670db0b654))
+* **agent:** add harness stream configuration ([c0f416a](https://github.com/fleetagent/pi/commit/c0f416aabc6c3f991fde19e68bb37dec6c8b9a7e))
+* **agent:** add initial harness foundation ([a5b2736](https://github.com/fleetagent/pi/commit/a5b27367d35d2cbcc33baa43b8ff17cf43d8e7ab))
+* **agent:** add post-turn stop callback ([73b7b2c](https://github.com/fleetagent/pi/commit/73b7b2c56456441f356e1fba016d14fc28e3c0d2))
+* **agent:** return diagnostics from resource loaders ([ddb1864](https://github.com/fleetagent/pi/commit/ddb18640e3edce20c97f0d6c9227be63666196f5))
+* **agent:** split harness compaction and session modules ([83599e7](https://github.com/fleetagent/pi/commit/83599e789da8cd28253401b295110944a3f63f13))
+* image content ([c3c1073](https://github.com/fleetagent/pi/commit/c3c10737d86f76ec61fc46ccc957eda883010d6d))
+
+
+### Bug Fixes
+
+* **agent:** correct uuidv7 sequence handling ([c00f1cf](https://github.com/fleetagent/pi/commit/c00f1cf1302142c90a414e26ecd09f7988d97b6f))
+* **agent:** preserve oversized tail output with trailing newline ([b1893b3](https://github.com/fleetagent/pi/commit/b1893b3d7720273c1c2289dde88cf22e6c1a83aa)), closes [#4715](https://github.com/fleetagent/pi/issues/4715)
+* **agent:** stop tool preflight after extension abort ([b944827](https://github.com/fleetagent/pi/commit/b94482762321ed0b9f8f245be57c84d786a7105d)), closes [#4276](https://github.com/fleetagent/pi/issues/4276)
+* **ai:** honor codex transport option ([b8bb241](https://github.com/fleetagent/pi/commit/b8bb2411ff5a2be5767fa02a43859b0e40a6d673)), closes [#4083](https://github.com/fleetagent/pi/issues/4083)
+* **coding-agent:** remove global fetch override closes [#4619](https://github.com/fleetagent/pi/issues/4619) ([c9e7049](https://github.com/fleetagent/pi/commit/c9e70492125806053e0ea31ad00eef6822d4a268))
+* **compaction:** clamp summary output tokens ([3d9e14d](https://github.com/fleetagent/pi/commit/3d9e14d7482f4a99d5224926099bec0d17ff86fd))
+* **windows:** hide bash helper consoles ([29b3417](https://github.com/fleetagent/pi/commit/29b3417a7a6d87a0db48841ce5f316f9e9711352)), closes [#4699](https://github.com/fleetagent/pi/issues/4699)
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @fleetagent/pi-ai bumped from ^0.0.12 to ^0.1.0
+
 ## [0.0.12](https://github.com/fleetagent/pi/compare/@fleetagent/pi-agent-core-v0.0.11...@fleetagent/pi-agent-core-v0.0.12) (2026-06-12)
 
 
