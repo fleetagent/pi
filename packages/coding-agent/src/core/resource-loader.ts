@@ -372,17 +372,22 @@ export class DefaultResourceLoader implements ResourceLoader {
 
 	private getInstructionOperations(): ToolOperations | undefined {
 		const backend = this.toolOperations?.getBackendInfo?.();
-		return backend?.type === "ssh" && backend.configured ? this.toolOperations : undefined;
+		return (backend?.type === "ssh" || backend?.type === "remote") && backend.configured
+			? this.toolOperations
+			: undefined;
 	}
 
-	private getRemoteProjectInstructionResourcePaths(cwd: string): {
+	private getRemoteProjectInstructionResourcePaths(
+		cwd: string,
+		source: "ssh" | "remote",
+	): {
 		skills: Array<{ path: string; metadata: PathMetadata }>;
 		rules: Array<{ path: string; metadata: PathMetadata }>;
 		prompts: Array<{ path: string; metadata: PathMetadata }>;
 	} {
 		const projectBaseDir = join(cwd, CONFIG_DIR_NAME);
 		const projectMetadata: PathMetadata = {
-			source: "ssh",
+			source,
 			scope: "project",
 			origin: "top-level",
 			baseDir: projectBaseDir,
@@ -402,7 +407,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 		while (true) {
 			const agentsBaseDir = join(currentDir, ".agents");
 			const agentsMetadata: PathMetadata = {
-				source: "ssh",
+				source,
 				scope: "project",
 				origin: "top-level",
 				baseDir: agentsBaseDir,
@@ -540,9 +545,33 @@ export class DefaultResourceLoader implements ResourceLoader {
 			return resource.path;
 		};
 
-		const remoteInstructionResourcePaths = instructionOperations
-			? this.getRemoteProjectInstructionResourcePaths(instructionOperations.cwd)
+		const instructionBackendType = instructionOperations?.getBackendInfo?.()?.type;
+		const discoveredRemoteInstructionResourcePaths = instructionOperations
+			? this.getRemoteProjectInstructionResourcePaths(
+					instructionOperations.cwd,
+					instructionBackendType === "remote" ? "remote" : "ssh",
+				)
 			: { skills: [], rules: [], prompts: [] };
+		const filterExistingRemoteInstructionPaths = async (
+			entries: Array<{ path: string; metadata: PathMetadata }>,
+		): Promise<Array<{ path: string; metadata: PathMetadata }>> => {
+			if (!instructionOperations) return [];
+			const existing: Array<{ path: string; metadata: PathMetadata }> = [];
+			for (const entry of entries) {
+				try {
+					await instructionOperations.access(entry.path, "exists");
+					existing.push(entry);
+				} catch {}
+			}
+			return existing;
+		};
+		const remoteInstructionResourcePaths = instructionOperations
+			? {
+					skills: await filterExistingRemoteInstructionPaths(discoveredRemoteInstructionResourcePaths.skills),
+					rules: await filterExistingRemoteInstructionPaths(discoveredRemoteInstructionResourcePaths.rules),
+					prompts: await filterExistingRemoteInstructionPaths(discoveredRemoteInstructionResourcePaths.prompts),
+				}
+			: discoveredRemoteInstructionResourcePaths;
 		for (const entry of [
 			...remoteInstructionResourcePaths.skills,
 			...remoteInstructionResourcePaths.rules,
@@ -797,7 +826,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 		const operations = this.getInstructionOperations();
 		if (!operations) return false;
 		const sourceInfo = this.findSourceInfoForPath(path, undefined, metadataByPath);
-		if (sourceInfo?.source === "ssh") return true;
+		if (sourceInfo?.source === "ssh" || sourceInfo?.source === "remote") return true;
 		const cwd = operations.cwd.endsWith(sep) ? operations.cwd : `${operations.cwd}${sep}`;
 		return path === operations.cwd || path.startsWith(cwd);
 	}

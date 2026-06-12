@@ -186,8 +186,11 @@ cat README.md | pi -p "Summarize this text"
 | `--tools <list>`, `-t <list>` | Allowlist specific built-in, extension, and custom tools |
 | `--no-builtin-tools`, `-nbt` | Disable built-in tools but keep extension/custom tools enabled |
 | `--no-tools`, `-nt` | Disable all tools |
+| `--remote <url>` | Run built-in tools through a remote commander (`ws://` or `wss://`) |
 
 Built-in tools: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`.
+
+Use `--remote-deferred --remote-cwd <path>` to start without a connected tool backend, then connect from interactive mode with `/remote ssh <user@host[:/path]> [path]` or `/remote daemon <ws://url>`. Connecting reloads project instruction resources from the selected backend.
 
 ### Resource Options
 
@@ -211,7 +214,7 @@ Combine `--no-*` with explicit flags to load exactly what you need, ignoring set
 pi --no-extensions -e ./my-extension.ts
 ```
 
-With `--ssh`, project instruction resources are loaded from the tool backend cwd: `.pi/skills`, `.pi/rules`, `.pi/prompts`, ancestor `.agents/skills` and `.agents/rules`, and `AGENTS.md`/`CLAUDE.md`. Extension loading, themes, user resources, and package resources remain local.
+With `--ssh` or `--remote`, project instruction resources are loaded from the tool backend cwd: `.pi/skills`, `.pi/rules`, `.pi/prompts`, ancestor `.agents/skills` and `.agents/rules`, and `AGENTS.md`/`CLAUDE.md`. Extension loading, themes, user resources, and package resources remain local.
 
 ### Other Options
 

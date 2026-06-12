@@ -492,6 +492,37 @@ Response:
 {"type": "response", "command": "abort_bash", "success": true}
 ```
 
+### Remote sandbox
+
+Configure a deferred tool backend started with `--remote-deferred --remote-cwd <path>`.
+
+SSH backend:
+```json
+{"type": "set_remote_sandbox", "backend": "ssh", "remote": "user@host", "cwd": "/workspace"}
+```
+
+Daemon backend:
+```json
+{"type": "set_remote_sandbox", "backend": "daemon", "url": "ws://127.0.0.1:8787"}
+```
+
+Response:
+```json
+{"type": "response", "command": "set_remote_sandbox", "success": true, "data": { "type": "remote", "cwd": "/workspace", "url": "ws://127.0.0.1:8787", "protocol": "ws", "configured": true }}
+```
+
+Clear the deferred backend:
+```json
+{"type": "clear_remote_sandbox"}
+```
+
+Response:
+```json
+{"type": "response", "command": "clear_remote_sandbox", "success": true, "data": { "type": "remote", "cwd": "/workspace", "configured": false }}
+```
+
+Changing or clearing the backend reloads project instruction resources from the selected backend.
+
 ### Session
 
 #### get_session_stats

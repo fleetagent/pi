@@ -47,7 +47,12 @@ import {
 } from "./core/session-manager.ts";
 import { SettingsManager } from "./core/settings-manager.ts";
 import { resetTimings, time } from "./core/timings.ts";
-import { createSshToolOperations, DeferredSshToolOperations, type ToolOperations } from "./core/tools/index.ts";
+import {
+	createRemoteToolOperations,
+	createSshToolOperations,
+	DeferredRemoteToolOperations,
+	type ToolOperations,
+} from "./core/tools/index.ts";
 import { runMigrations, showDeprecationWarnings } from "./migrations.ts";
 import { ExtensionSelectorComponent } from "./modes/interactive/components/extension-selector.ts";
 import { initTheme, stopThemeWatcher } from "./modes/interactive/theme/theme.ts";
@@ -586,11 +591,21 @@ export async function main(args: string[], options?: MainOptions) {
 		? new InMemorySessionManager(initialSession.getCwd())
 		: createLifecycleSessionManager({ cwd: initialSession.getCwd(), sessionDir, remote: remoteSessionOptions });
 	let toolOperations: ToolOperations | undefined;
-	if (parsed.ssh && parsed.sshDeferred && !parsed.help) {
-		console.error(chalk.red("Error: --ssh and --ssh-deferred cannot be used together"));
+	const remoteDeferred = parsed.remoteDeferred;
+	const remoteDeferredCwd = parsed.remoteCwd;
+	if ([parsed.ssh, remoteDeferred, parsed.remote].filter(Boolean).length > 1 && !parsed.help) {
+		console.error(chalk.red("Error: --ssh, --remote-deferred, and --remote cannot be used together"));
 		process.exit(1);
 	}
-	if (parsed.ssh && !parsed.help) {
+	if (parsed.remote && !parsed.help) {
+		try {
+			toolOperations = await createRemoteToolOperations(parsed.remote);
+		} catch (error: unknown) {
+			const message = error instanceof Error ? error.message : String(error);
+			console.error(chalk.red(`Error: failed to initialize remote tool operations: ${message}`));
+			process.exit(1);
+		}
+	} else if (parsed.ssh && !parsed.help) {
 		try {
 			toolOperations = await createSshToolOperations(parsed.ssh);
 		} catch (error: unknown) {
@@ -598,14 +613,16 @@ export async function main(args: string[], options?: MainOptions) {
 			console.error(chalk.red(`Error: failed to initialize SSH tool operations: ${message}`));
 			process.exit(1);
 		}
-	} else if (parsed.sshDeferred && !parsed.help) {
-		if (!parsed.sshCwd) {
-			console.error(chalk.red("Error: --ssh-deferred requires --ssh-cwd <path>"));
+	} else if (remoteDeferred && !parsed.help) {
+		if (!remoteDeferredCwd) {
+			console.error(chalk.red("Error: --remote-deferred requires --remote-cwd <path>"));
 			process.exit(1);
 		}
-		toolOperations = new DeferredSshToolOperations(parsed.sshCwd);
+		toolOperations = new DeferredRemoteToolOperations(remoteDeferredCwd);
 	}
-	const instructionPathCwd = toolOperations?.getBackendInfo?.()?.type === "ssh" ? toolOperations.cwd : cwd;
+	const backendType = toolOperations?.getBackendInfo?.()?.type;
+	const instructionPathCwd =
+		toolOperations && (backendType === "ssh" || backendType === "remote") ? toolOperations.cwd : cwd;
 	const resolvedExtensionPaths = resolveCliPaths(cwd, parsed.extensions);
 	const resolvedSkillPaths = resolveCliPaths(instructionPathCwd, parsed.skills);
 	const resolvedRulePaths = resolveCliPaths(instructionPathCwd, parsed.rules);
@@ -663,13 +680,13 @@ export async function main(args: string[], options?: MainOptions) {
 
 			if (toolOperations) {
 				const backend = toolOperations.getBackendInfo?.();
-				diagnostics.push({
-					type: "info",
-					message:
-						backend?.type === "ssh" && backend.configured
-							? `SSH tool operations enabled: ${backend.remote}:${backend.cwd}`
-							: `Deferred SSH sandbox mode enabled (cwd: ${toolOperations.cwd})`,
-				});
+				let message = `Deferred remote backend mode enabled (cwd: ${toolOperations.cwd})`;
+				if (backend?.type === "ssh" && backend.configured) {
+					message = `SSH tool operations enabled: ${backend.remote}:${backend.cwd}`;
+				} else if (backend?.type === "remote" && backend.configured) {
+					message = `Remote tool operations enabled: ${backend.url} (cwd: ${backend.cwd})`;
+				}
+				diagnostics.push({ type: "info", message });
 			}
 
 			return {

@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "fs";
 import ignore from "ignore";
-import { basename, dirname, join, relative, resolve, sep } from "path";
+import { dirname, join, relative, resolve, sep } from "path";
 import { CONFIG_DIR_NAME, getAgentDir } from "../config.ts";
 import { parseFrontmatter } from "../utils/frontmatter.ts";
 import { canonicalizePath, resolvePath } from "../utils/paths.ts";
@@ -286,7 +286,6 @@ function loadSkillFromFile(
 		const rawContent = readFileSync(filePath, "utf-8");
 		const { frontmatter } = parseFrontmatter<SkillFrontmatter>(rawContent);
 		const skillDir = dirname(filePath);
-		const parentDirName = basename(skillDir);
 
 		// Validate description
 		const descErrors = validateDescription(frontmatter.description);
@@ -294,17 +293,19 @@ function loadSkillFromFile(
 			diagnostics.push({ type: "warning", message: error, path: filePath });
 		}
 
-		// Use name from frontmatter, or fall back to parent directory name
-		const name = frontmatter.name || parentDirName;
-
-		// Validate name
-		const nameErrors = validateName(name);
-		for (const error of nameErrors) {
-			diagnostics.push({ type: "warning", message: error, path: filePath });
+		if (!frontmatter.name || frontmatter.name.trim() === "") {
+			diagnostics.push({ type: "warning", message: "name is required", path: filePath });
 		}
 
-		// Still load the skill even with warnings (unless description is completely missing)
-		if (!frontmatter.description || frontmatter.description.trim() === "") {
+		const name = frontmatter.name;
+		if (name) {
+			for (const error of validateName(name)) {
+				diagnostics.push({ type: "warning", message: error, path: filePath });
+			}
+		}
+
+		// Still load the skill even with warnings (unless required fields are missing)
+		if (!name || !frontmatter.description || frontmatter.description.trim() === "") {
 			return { skill: null, diagnostics };
 		}
 
@@ -533,18 +534,23 @@ async function loadSkillFromFileWithOperations(
 		const rawContent = (await operations.readFile(filePath)).toString("utf-8");
 		const { frontmatter } = parseFrontmatter<SkillFrontmatter>(rawContent);
 		const skillDir = dirname(filePath);
-		const parentDirName = basename(skillDir);
 
 		for (const error of validateDescription(frontmatter.description)) {
 			diagnostics.push({ type: "warning", message: error, path: filePath });
 		}
 
-		const name = frontmatter.name || parentDirName;
-		for (const error of validateName(name)) {
-			diagnostics.push({ type: "warning", message: error, path: filePath });
+		if (!frontmatter.name || frontmatter.name.trim() === "") {
+			diagnostics.push({ type: "warning", message: "name is required", path: filePath });
 		}
 
-		if (!frontmatter.description || frontmatter.description.trim() === "") {
+		const name = frontmatter.name;
+		if (name) {
+			for (const error of validateName(name)) {
+				diagnostics.push({ type: "warning", message: error, path: filePath });
+			}
+		}
+
+		if (!name || !frontmatter.description || frontmatter.description.trim() === "") {
 			return { skill: null, diagnostics };
 		}
 

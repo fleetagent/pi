@@ -38,12 +38,14 @@ export {
 	type LsToolOptions,
 } from "./ls.ts";
 export {
+	createRemoteToolOperations,
 	createSshToolOperations,
-	DeferredSshToolOperations,
-	type DeferredSshToolOperationsConfigureOptions,
+	DeferredRemoteToolOperations,
+	type DeferredRemoteToolOperationsConfigureSshOptions,
 	LocalToolOperations,
 	type LocalToolOperationsOptions,
 	type ParsedSshTarget,
+	RemoteToolOperations,
 	SshToolOperations,
 	type SshToolOperationsOptions,
 	type ToolAccessMode,

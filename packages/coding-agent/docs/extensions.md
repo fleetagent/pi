@@ -871,7 +871,7 @@ Current working directory.
 
 ### ctx.toolOperations / ctx.getToolBackendInfo() / ctx.execToolBackend()
 
-Backend-aware file and shell operations for extensions. These APIs use the same active backend as Pi's built-in tools: local by default, or SSH/remote when an SSH sandbox is configured.
+Backend-aware file and shell operations for extensions. These APIs use the same active backend as Pi's built-in tools: local by default, or SSH/remote when a remote backend is configured.
 
 Use these APIs for extension tools and extension-owned automation that reads files, writes files, lists directories, or executes shell commands. This is the only safe way for extension tools to run shell commands because it preserves Pi's active execution boundary. Direct local process APIs (`child_process`, `pi.exec`, shell libraries, etc.) bypass the configured tool backend and will run on the local machine even when Pi tools are remote.
 
@@ -1983,7 +1983,7 @@ const bashTool = createBashTool(cwd, {
 });
 ```
 
-SSH execution is built in; use `pi --ssh user@host:/path` to run built-in tools on a remote host, or `pi --ssh-deferred --ssh-cwd /path` and configure the target later via RPC or `/ssh-sandbox`.
+Remote execution is built in. Use `pi --remote ws://host:port` for a streaming remote commander backend, `pi --ssh user@host:/path` to run built-in tools over SSH, or `pi --remote-deferred --remote-cwd /path` and configure the target later via RPC, `/remote ssh <user@host[:/path]> [path]`, or `/remote daemon <ws://url>`. Connecting a deferred backend reloads project instruction resources from that backend.
 
 ### Output Truncation
 

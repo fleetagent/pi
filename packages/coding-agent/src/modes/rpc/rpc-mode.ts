@@ -598,14 +598,20 @@ export async function runRpcMode(runtimeHost: PiAgentRuntimeHost): Promise<never
 				return success(id, "abort_bash");
 			}
 
-			case "set_ssh_sandbox": {
-				const info = await session.configureSshSandbox({ remote: command.remote, cwd: command.cwd });
-				return success(id, "set_ssh_sandbox", info);
+			case "set_remote_sandbox": {
+				const info = await session.configureRemoteSandbox(
+					command.backend === "ssh"
+						? { type: "ssh", remote: command.remote, cwd: command.cwd }
+						: { type: "daemon", url: command.url },
+				);
+				await session.reload();
+				return success(id, "set_remote_sandbox", info);
 			}
 
-			case "clear_ssh_sandbox": {
-				session.clearSshSandbox();
-				return success(id, "clear_ssh_sandbox", session.getToolBackendInfo());
+			case "clear_remote_sandbox": {
+				session.clearRemoteSandbox();
+				await session.reload();
+				return success(id, "clear_remote_sandbox", session.getToolBackendInfo());
 			}
 
 			// =================================================================

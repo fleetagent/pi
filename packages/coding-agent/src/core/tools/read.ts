@@ -38,6 +38,8 @@ const COMPACT_RESOURCE_FILE_NAMES = new Set(["AGENTS.md", "AGENTS.MD", "CLAUDE.m
 export interface ReadToolOptions {
 	/** Whether to auto-resize images to 2000x2000 max. Default: true */
 	autoResizeImages?: boolean;
+	/** Select a backend for a resolved absolute path. Defaults to the tool backend. */
+	operationsForPath?: (absolutePath: string) => ToolOperations | undefined;
 }
 
 type ReadRenderArgs = { path?: string; file_path?: string; offset?: number; limit?: number };
@@ -192,6 +194,7 @@ export function createReadToolDefinition(
 	const autoResizeImages = options?.autoResizeImages ?? true;
 	const ops = operations;
 	const cwd = operations.cwd;
+	const operationsForPath = options?.operationsForPath;
 	return {
 		name: "read",
 		label: "read",
@@ -222,17 +225,20 @@ export function createReadToolDefinition(
 					(async () => {
 						try {
 							const absolutePath = await resolveReadPathAsync(path, cwd);
+							const readOps = operationsForPath?.(absolutePath) ?? ops;
 							if (aborted) return;
 							// Check if file exists and is readable.
-							await ops.access(absolutePath, "read");
+							await readOps.access(absolutePath, "read");
 							if (aborted) return;
-							const mimeType = ops.detectImageMimeType ? await ops.detectImageMimeType(absolutePath) : undefined;
+							const mimeType = readOps.detectImageMimeType
+								? await readOps.detectImageMimeType(absolutePath)
+								: undefined;
 							let content: (TextContent | ImageContent)[];
 							let details: ReadToolDetails | undefined;
 							const nonVisionImageNote = getNonVisionImageNote(ctx?.model);
 							if (mimeType) {
 								// Read image as binary.
-								const buffer = await ops.readFile(absolutePath);
+								const buffer = await readOps.readFile(absolutePath);
 								if (autoResizeImages) {
 									// Resize image if needed before sending it back to the model.
 									const resized = await resizeImage(buffer, mimeType);
@@ -260,7 +266,7 @@ export function createReadToolDefinition(
 								}
 							} else {
 								// Read text content.
-								const buffer = await ops.readFile(absolutePath);
+								const buffer = await readOps.readFile(absolutePath);
 								const textContent = buffer.toString("utf-8");
 								const allLines = textContent.split("\n");
 								const totalFileLines = allLines.length;
@@ -326,8 +332,11 @@ export function createReadToolDefinition(
 		renderCall(args, theme, context) {
 			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
 			const classification = !context.expanded ? getCompactReadClassification(args, context.cwd) : undefined;
+			const renderArgs = args as ReadRenderArgs | undefined;
+			const rawPath = str(renderArgs?.file_path ?? renderArgs?.path);
+			const displayOps = rawPath ? (operationsForPath?.(resolveToCwd(rawPath, cwd)) ?? ops) : ops;
 			text.setText(
-				formatBackendIcon(ops.getBackendInfo?.(), theme) +
+				formatBackendIcon(displayOps.getBackendInfo?.(), theme) +
 					(classification ? formatCompactReadCall(classification, args, theme) : formatReadCall(args, theme)),
 			);
 			return text;

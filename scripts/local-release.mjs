@@ -10,6 +10,7 @@ const packages = [
 	{ directory: "packages/tui", name: "@fleetagent/pi-tui" },
 	{ directory: "packages/agent", name: "@fleetagent/pi-agent-core" },
 	{ directory: "packages/coding-agent", name: "@fleetagent/pi-coding-agent" },
+	{ directory: "packages/pi-daemon", name: "@fleetagent/pi-daemon" },
 ];
 
 function printUsage() {
@@ -153,19 +154,27 @@ function buildBunBinaryRelease(targetDirectory, archiveDirectory) {
 	return platform;
 }
 
-function createPiShim(installDirectory) {
+function createBinShim(installDirectory, binName) {
 	const binDirectory = join(installDirectory, "node_modules", ".bin");
 	if (process.platform === "win32") {
-		if (existsSync(join(binDirectory, "pi.cmd"))) {
-			writeFileSync(join(installDirectory, "pi.cmd"), '@ECHO off\r\n"%~dp0node_modules\\.bin\\pi.cmd" %*\r\n');
-			writeFileSync(join(installDirectory, "pi.ps1"), '& "$PSScriptRoot/node_modules/.bin/pi.ps1" @args\n');
+		if (existsSync(join(binDirectory, `${binName}.cmd`))) {
+			writeFileSync(join(installDirectory, `${binName}.cmd`), `@ECHO off\r\n"%~dp0node_modules\\.bin\\${binName}.cmd" %*\r\n`);
+			writeFileSync(join(installDirectory, `${binName}.ps1`), `& "$PSScriptRoot/node_modules/.bin/${binName}.ps1" @args\n`);
 			return;
 		}
-		writeFileSync(join(installDirectory, "pi.cmd"), '@ECHO off\r\n"%~dp0node_modules\\.bin\\pi.exe" %*\r\n');
-		writeFileSync(join(installDirectory, "pi.ps1"), '& "$PSScriptRoot/node_modules/.bin/pi.exe" @args\n');
+		writeFileSync(join(installDirectory, `${binName}.cmd`), `@ECHO off\r\n"%~dp0node_modules\\.bin\\${binName}.exe" %*\r\n`);
+		writeFileSync(join(installDirectory, `${binName}.ps1`), `& "$PSScriptRoot/node_modules/.bin/${binName}.exe" @args\n`);
 		return;
 	}
-	symlinkSync(join("node_modules", ".bin", "pi"), join(installDirectory, "pi"));
+	symlinkSync(join("node_modules", ".bin", binName), join(installDirectory, binName));
+}
+
+function createPiShim(installDirectory) {
+	createBinShim(installDirectory, "pi");
+}
+
+function createPiDaemonShim(installDirectory) {
+	createBinShim(installDirectory, "pi-daemon");
 }
 
 function packPackage(pkg, tarballDirectory) {
@@ -225,6 +234,7 @@ if (!options.skipInstall) {
 
 	run("npm", ["install", "--omit=dev", "--ignore-scripts"], { cwd: nodeInstallDirectory });
 	createPiShim(nodeInstallDirectory);
+	createPiDaemonShim(nodeInstallDirectory);
 
 	if (!options.skipBunInstall) {
 		if (!commandExists("bun")) {
@@ -237,6 +247,7 @@ if (!options.skipInstall) {
 		writeFileSync(join(bunInstallDirectory, "package.json"), `${JSON.stringify({ private: true, dependencies: bunDependencies, overrides: bunDependencies }, undefined, "\t")}\n`);
 		run("bun", ["install", "--production", "--ignore-scripts"], { cwd: bunInstallDirectory });
 		createPiShim(bunInstallDirectory);
+		createPiDaemonShim(bunInstallDirectory);
 	}
 }
 
@@ -258,11 +269,13 @@ if (!options.skipInstall) {
 	console.log(`  ${nodeInstallDirectory}`);
 	console.log("\nRun the locally packed npm CLI from outside the repository:");
 	console.log(`  ${join(nodeInstallDirectory, process.platform === "win32" ? "pi.cmd" : "pi")} --help`);
+	console.log(`  PI_DAEMON_PORT=18787 ${join(nodeInstallDirectory, process.platform === "win32" ? "pi-daemon.cmd" : "pi-daemon")}`);
 
 	if (!options.skipBunInstall) {
 		console.log("\nIsolated Bun package install:");
 		console.log(`  ${bunInstallDirectory}`);
 		console.log("\nRun the locally packed Bun package CLI from outside the repository:");
 		console.log(`  ${join(bunInstallDirectory, process.platform === "win32" ? "pi.cmd" : "pi")} --help`);
+		console.log(`  PI_DAEMON_PORT=18787 ${join(bunInstallDirectory, process.platform === "win32" ? "pi-daemon.cmd" : "pi-daemon")}`);
 	}
 }

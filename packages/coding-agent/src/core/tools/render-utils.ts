@@ -75,6 +75,7 @@ export function formatBackendIcon(
 ): string {
 	if (!backendInfo) return "";
 	if (backendInfo.type === "local") return theme.fg("muted", "\u{1F5A5} ");
+	if (backendInfo.type === "remote") return theme.fg("muted", "\u2601 ");
 	if (backendInfo.configured) return theme.fg("muted", "\u2601 ");
 	return theme.fg("warning", "\u2601 ");
 }
