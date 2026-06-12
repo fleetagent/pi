@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Added RPC `upload_file` and `download_file` commands for streaming files to and from the active sandbox backend.
+
 ## [0.1.0](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.0.12...@fleetagent/pi-coding-agent-v0.1.0) (2026-06-12)
 
 

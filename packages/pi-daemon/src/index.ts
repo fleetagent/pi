@@ -2,7 +2,8 @@
 
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { constants } from "node:fs";
+import { once } from "node:events";
+import { constants, createReadStream, createWriteStream, type WriteStream } from "node:fs";
 import { access, mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage } from "node:http";
 import type { Socket } from "node:net";
@@ -18,14 +19,16 @@ interface ClientConnection {
 	socket: Socket;
 	buffer: Buffer;
 	execs: Map<string, ChildProcessWithoutNullStreams>;
+	uploads: Map<string, WriteStream>;
 }
 
 const port = Number(process.env.PORT ?? process.env.PI_DAEMON_PORT ?? "8787");
 const host = process.env.HOST ?? process.env.PI_DAEMON_HOST ?? "127.0.0.1";
 const cwd = resolve(process.env.PI_DAEMON_CWD ?? process.cwd());
 const token = process.env.PI_DAEMON_TOKEN;
+const fileTransferChunkSize = 64 * 1024;
 
-function sendFrame(socket: Socket, payload: unknown): void {
+function createFrame(payload: unknown): Buffer {
 	const data = Buffer.from(JSON.stringify(payload));
 	let header: Buffer;
 	if (data.length < 126) {
@@ -41,7 +44,17 @@ function sendFrame(socket: Socket, payload: unknown): void {
 		header[1] = 127;
 		header.writeBigUInt64BE(BigInt(data.length), 2);
 	}
-	socket.write(Buffer.concat([header, data]));
+	return Buffer.concat([header, data]);
+}
+
+function sendFrame(socket: Socket, payload: unknown): void {
+	socket.write(createFrame(payload));
+}
+
+async function sendFrameAsync(socket: Socket, payload: unknown): Promise<void> {
+	if (!socket.write(createFrame(payload))) {
+		await once(socket, "drain");
+	}
 }
 
 function sendResult(connection: ClientConnection, id: string, result: unknown): void {
@@ -192,6 +205,54 @@ function cancelExec(connection: ClientConnection, id: string): void {
 	sendFrame(connection.socket, { id, event: "exit", exitCode: null, cancelled: true });
 }
 
+async function handleDownloadFile(connection: ClientConnection, id: string, path: string): Promise<void> {
+	try {
+		for await (const chunk of createReadStream(path, { highWaterMark: fileTransferChunkSize })) {
+			const buffer = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+			await sendFrameAsync(connection.socket, { id, event: "fileData", dataBase64: buffer.toString("base64") });
+		}
+		await sendFrameAsync(connection.socket, { id, event: "fileEnd" });
+	} catch (error) {
+		sendFrame(connection.socket, {
+			id,
+			event: "fileError",
+			error: { message: error instanceof Error ? error.message : String(error) },
+		});
+	}
+}
+
+function writeUploadChunk(stream: WriteStream, chunk: Buffer): Promise<void> {
+	return new Promise((resolve, reject) => {
+		const onError = (error: Error) => {
+			stream.off("error", onError);
+			reject(error);
+		};
+		stream.once("error", onError);
+		stream.write(chunk, (error) => {
+			stream.off("error", onError);
+			if (error) {
+				reject(error);
+				return;
+			}
+			resolve();
+		});
+	});
+}
+
+function closeUploadStream(stream: WriteStream): Promise<void> {
+	return new Promise((resolve, reject) => {
+		const onError = (error: Error) => {
+			stream.off("error", onError);
+			reject(error);
+		};
+		stream.once("error", onError);
+		stream.end(() => {
+			stream.off("error", onError);
+			resolve();
+		});
+	});
+}
+
 async function handleRequest(connection: ClientConnection, message: JsonRpcMessage): Promise<void> {
 	const id = requireString(message.id, "id");
 	const method = requireString(message.method, "method");
@@ -208,7 +269,14 @@ async function handleRequest(connection: ClientConnection, message: JsonRpcMessa
 		if (method === "capabilities") {
 			sendResult(connection, id, {
 				cwd,
-				features: { exec: true, files: true, glob: true, grep: true, instructions: false },
+				features: {
+					exec: true,
+					files: true,
+					fileTransfer: true,
+					glob: true,
+					grep: true,
+					instructions: false,
+				},
 			});
 			return;
 		}
@@ -227,6 +295,45 @@ async function handleRequest(connection: ClientConnection, message: JsonRpcMessa
 				requireString(params.path, "path"),
 				Buffer.from(requireString(params.contentBase64, "contentBase64"), "base64"),
 			);
+			sendResult(connection, id, {});
+			return;
+		}
+		if (method === "downloadFile") {
+			await handleDownloadFile(connection, id, requireString(params.path, "path"));
+			return;
+		}
+		if (method === "uploadFileStart") {
+			const path = requireString(params.path, "path");
+			const stream = createWriteStream(path);
+			stream.on("error", () => undefined);
+			connection.uploads.set(id, stream);
+			sendResult(connection, id, {});
+			return;
+		}
+		if (method === "uploadFileChunk") {
+			const uploadId = requireString(params.uploadId, "uploadId");
+			const stream = connection.uploads.get(uploadId);
+			if (!stream) throw new Error(`Unknown upload: ${uploadId}`);
+			await writeUploadChunk(stream, Buffer.from(requireString(params.dataBase64, "dataBase64"), "base64"));
+			sendResult(connection, id, {});
+			return;
+		}
+		if (method === "uploadFileEnd") {
+			const uploadId = requireString(params.uploadId, "uploadId");
+			const stream = connection.uploads.get(uploadId);
+			if (!stream) throw new Error(`Unknown upload: ${uploadId}`);
+			connection.uploads.delete(uploadId);
+			await closeUploadStream(stream);
+			sendResult(connection, id, {});
+			return;
+		}
+		if (method === "uploadFileCancel") {
+			const uploadId = requireString(params.uploadId, "uploadId");
+			const stream = connection.uploads.get(uploadId);
+			if (stream) {
+				connection.uploads.delete(uploadId);
+				stream.destroy();
+			}
 			sendResult(connection, id, {});
 			return;
 		}
@@ -382,7 +489,12 @@ server.on("upgrade", (request, socket) => {
 			"",
 		].join("\r\n"),
 	);
-	const connection: ClientConnection = { socket: netSocket, buffer: Buffer.alloc(0), execs: new Map() };
+	const connection: ClientConnection = {
+		socket: netSocket,
+		buffer: Buffer.alloc(0),
+		execs: new Map(),
+		uploads: new Map(),
+	};
 	netSocket.on("data", (chunk: Buffer) => {
 		connection.buffer = Buffer.concat([connection.buffer, chunk]);
 		parseFrames(connection);
@@ -392,6 +504,10 @@ server.on("upgrade", (request, socket) => {
 			child.kill();
 		}
 		connection.execs.clear();
+		for (const stream of connection.uploads.values()) {
+			stream.destroy();
+		}
+		connection.uploads.clear();
 	});
 });
 

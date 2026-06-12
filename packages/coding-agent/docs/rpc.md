@@ -523,6 +523,28 @@ Response:
 
 Changing or clearing the backend reloads project instruction resources from the selected backend.
 
+Upload a file from the RPC process filesystem into the active sandbox backend:
+```json
+{"type": "upload_file", "sourcePath": "/tmp/local.bin", "destinationPath": "/workspace/remote.bin"}
+```
+
+Response:
+```json
+{"type": "response", "command": "upload_file", "success": true, "data": { "bytes": 1048576 }}
+```
+
+Download a file from the active sandbox backend into the RPC process filesystem:
+```json
+{"type": "download_file", "sourcePath": "/workspace/remote.bin", "destinationPath": "/tmp/local.bin"}
+```
+
+Response:
+```json
+{"type": "response", "command": "download_file", "success": true, "data": { "bytes": 1048576 }}
+```
+
+The daemon backend streams file transfers in base64 chunks over its WebSocket protocol so binary and text files do not need to be loaded fully into memory.
+
 ### Session
 
 #### get_session_stats

@@ -414,6 +414,22 @@ export class RpcClient {
 	}
 
 	/**
+	 * Upload a file from the RPC process filesystem to the active sandbox backend.
+	 */
+	async uploadFile(sourcePath: string, destinationPath: string): Promise<{ bytes: number }> {
+		const response = await this.send({ type: "upload_file", sourcePath, destinationPath });
+		return this.getData(response);
+	}
+
+	/**
+	 * Download a file from the active sandbox backend to the RPC process filesystem.
+	 */
+	async downloadFile(sourcePath: string, destinationPath: string): Promise<{ bytes: number }> {
+		const response = await this.send({ type: "download_file", sourcePath, destinationPath });
+		return this.getData(response);
+	}
+
+	/**
 	 * Get session statistics.
 	 */
 	async getSessionStats(): Promise<SessionStats> {

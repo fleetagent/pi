@@ -43,3 +43,12 @@ Then inside Pi:
 ```text
 /remote daemon ws://127.0.0.1:8787?token=secret
 ```
+
+## File transfers
+
+The daemon protocol supports streamed file upload and download for binary and text files:
+
+- `downloadFile` streams `{ event: "fileData", dataBase64 }` chunks followed by `fileEnd`.
+- `uploadFileStart`, `uploadFileChunk`, and `uploadFileEnd` write chunked base64 data to a sandbox file.
+
+Pi RPC exposes these as `upload_file` and `download_file` commands when the daemon is configured as the remote sandbox backend.
