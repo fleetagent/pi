@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.1.2](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.1.1...@fleetagent/pi-coding-agent-v0.1.2) (2026-06-13)
+
+
+### Features
+
+* **coding-agent:** add unrecorded RPC bash option ([56666da](https://github.com/fleetagent/pi/commit/56666dae36cbd16402e92a997a06520692a8125a))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @fleetagent/pi-agent-core bumped from ^0.1.1 to ^0.1.2
+    * @fleetagent/pi-ai bumped from ^0.1.1 to ^0.1.2
+    * @fleetagent/pi-tui bumped from ^0.1.1 to ^0.1.2
+
 ## [0.1.1](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.1.0...@fleetagent/pi-coding-agent-v0.1.1) (2026-06-12)
 
 
