@@ -3106,11 +3106,12 @@ export class AgentSession {
 	 * @param options.excludeFromContext If true, command output won't be sent to LLM (!! prefix)
 	 * @param options.operations Custom ToolOperations for remote execution
 	 * @param options.record If false, result won't be stored in agent state or session history
+	 * @param options.truncate If false, returned output won't be truncated
 	 */
 	async executeBash(
 		command: string,
 		onChunk?: (chunk: string) => void,
-		options?: { excludeFromContext?: boolean; operations?: ToolOperations; record?: boolean },
+		options?: { excludeFromContext?: boolean; operations?: ToolOperations; record?: boolean; truncate?: boolean },
 	): Promise<BashResult> {
 		this._bashAbortController = new AbortController();
 
@@ -3127,6 +3128,7 @@ export class AgentSession {
 			const result = await executeBashWithOperations(resolvedCommand, operations.cwd, operations, {
 				onChunk,
 				signal: this._bashAbortController.signal,
+				truncate: options?.truncate,
 			});
 
 			if (options?.record !== false) {

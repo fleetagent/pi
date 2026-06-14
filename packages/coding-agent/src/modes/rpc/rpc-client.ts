@@ -383,9 +383,10 @@ export class RpcClient {
 	/**
 	 * Execute a bash command.
 	 * Set options.record to false to avoid adding the result to session history.
+	 * Set options.truncate to false to return complete output.
 	 */
-	async bash(command: string, options: { record?: boolean } = {}): Promise<BashResult> {
-		const response = await this.send({ type: "bash", command, record: options.record });
+	async bash(command: string, options: { record?: boolean; truncate?: boolean } = {}): Promise<BashResult> {
+		const response = await this.send({ type: "bash", command, record: options.record, truncate: options.truncate });
 		return this.getData(response);
 	}
 

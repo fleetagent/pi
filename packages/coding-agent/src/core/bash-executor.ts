@@ -26,6 +26,8 @@ export interface BashExecutorOptions {
 	signal?: AbortSignal;
 	/** Timeout in seconds */
 	timeout?: number;
+	/** Whether to truncate returned output. Defaults to true. */
+	truncate?: boolean;
 }
 
 export interface BashResult {
@@ -58,6 +60,7 @@ export async function executeBashWithOperations(
 	const outputChunks: string[] = [];
 	let outputBytes = 0;
 	const maxOutputBytes = DEFAULT_MAX_BYTES * 2;
+	const truncateOutput = options?.truncate !== false;
 
 	let tempFilePath: string | undefined;
 	let tempFileStream: WriteStream | undefined;
@@ -92,10 +95,10 @@ export async function executeBashWithOperations(
 			tempFileStream.write(text);
 		}
 
-		// Keep rolling buffer
+		// Keep rolling buffer unless the caller explicitly needs complete output.
 		outputChunks.push(text);
 		outputBytes += text.length;
-		while (outputBytes > maxOutputBytes && outputChunks.length > 1) {
+		while (truncateOutput && outputBytes > maxOutputBytes && outputChunks.length > 1) {
 			const removed = outputChunks.shift()!;
 			outputBytes -= removed.length;
 		}
@@ -115,7 +118,7 @@ export async function executeBashWithOperations(
 		});
 
 		const fullOutput = outputChunks.join("");
-		const truncationResult = truncateTail(fullOutput);
+		const truncationResult = truncateOutput ? truncateTail(fullOutput) : { content: fullOutput, truncated: false };
 		if (truncationResult.truncated) {
 			ensureTempFile();
 		}
@@ -125,7 +128,7 @@ export async function executeBashWithOperations(
 		const cancelled = options?.signal?.aborted ?? false;
 
 		return {
-			output: truncationResult.truncated ? truncationResult.content : fullOutput,
+			output: truncationResult.content,
 			exitCode: cancelled ? undefined : (result.exitCode ?? undefined),
 			cancelled,
 			truncated: truncationResult.truncated,
@@ -135,7 +138,7 @@ export async function executeBashWithOperations(
 		// Check if it was an abort
 		if (options?.signal?.aborted) {
 			const fullOutput = outputChunks.join("");
-			const truncationResult = truncateTail(fullOutput);
+			const truncationResult = truncateOutput ? truncateTail(fullOutput) : { content: fullOutput, truncated: false };
 			if (truncationResult.truncated) {
 				ensureTempFile();
 			}
@@ -143,7 +146,7 @@ export async function executeBashWithOperations(
 				tempFileStream.end();
 			}
 			return {
-				output: truncationResult.truncated ? truncationResult.content : fullOutput,
+				output: truncationResult.content,
 				exitCode: undefined,
 				cancelled: true,
 				truncated: truncationResult.truncated,
