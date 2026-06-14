@@ -435,6 +435,12 @@ Set `record` to `false` to return the command result without adding a `BashExecu
 {"type": "bash", "command": "ls -la", "record": false}
 ```
 
+Set `truncate` to `false` to return complete output instead of the default truncated display output:
+
+```json
+{"type": "bash", "command": "printf '%s\\n' many-lines", "record": false, "truncate": false}
+```
+
 Response:
 ```json
 {
@@ -485,6 +491,7 @@ This means:
 2. Multiple recorded bash commands can be executed before a prompt; all outputs will be included
 3. No event is emitted for the `BashExecutionMessage` itself
 4. Commands with `record: false` are omitted from session history and future LLM context
+5. Commands with `truncate: false` return complete output in the RPC response
 
 #### abort_bash
 

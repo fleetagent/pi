@@ -62,7 +62,7 @@ export type RpcCommand =
 	| { id?: string; type: "abort_retry" }
 
 	// Bash
-	| { id?: string; type: "bash"; command: string; record?: boolean }
+	| { id?: string; type: "bash"; command: string; record?: boolean; truncate?: boolean }
 	| { id?: string; type: "abort_bash" }
 
 	// Remote sandbox
