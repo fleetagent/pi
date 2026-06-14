@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.1.3](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.1.2...@fleetagent/pi-coding-agent-v0.1.3) (2026-06-14)
+
+
+### Features
+
+* **coding-agent:** add untruncated bash execution option ([3427e3f](https://github.com/fleetagent/pi/commit/3427e3f343c6f3865a28d48186b93e59a7a1fbf4))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @fleetagent/pi-agent-core bumped from ^0.1.2 to ^0.1.3
+    * @fleetagent/pi-ai bumped from ^0.1.2 to ^0.1.3
+    * @fleetagent/pi-tui bumped from ^0.1.2 to ^0.1.3
+
 ## [0.1.2](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.1.1...@fleetagent/pi-coding-agent-v0.1.2) (2026-06-13)
 
 
