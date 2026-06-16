@@ -3190,6 +3190,10 @@ export class AgentSession {
 		const allowedToolNames = this._allowedToolNames;
 		const isAllowedTool = (name: string): boolean => !allowedToolNames || allowedToolNames.has(name);
 
+		const lifecycleToolNames = new Set(["load_tool", "unload_tool"]);
+		const hasAvailableSessionTools = this.getAvailableSessionTools().length > 0;
+		const isVisibleBaseTool = (name: string): boolean =>
+			isAllowedTool(name) && (hasAvailableSessionTools || !lifecycleToolNames.has(name));
 		const registeredTools = this._extensionRunner
 			.getAllRegisteredTools()
 			.filter((tool) => tool.lazy !== true || tool.loaded === true);
@@ -3204,7 +3208,7 @@ export class AgentSession {
 		].filter((tool) => isAllowedTool(tool.definition.name));
 		const definitionRegistry = new Map<string, ToolDefinitionEntry>(
 			Array.from(this._baseToolDefinitions.entries())
-				.filter(([name]) => isAllowedTool(name))
+				.filter(([name]) => isVisibleBaseTool(name))
 				.map(([name, definition]) => [
 					name,
 					{
@@ -3240,7 +3244,7 @@ export class AgentSession {
 		const wrappedExtensionTools = wrapRegisteredTools(allCustomTools, runner);
 		const wrappedBuiltInTools = wrapRegisteredTools(
 			Array.from(this._baseToolDefinitions.values())
-				.filter((definition) => isAllowedTool(definition.name))
+				.filter((definition) => isVisibleBaseTool(definition.name))
 				.map((definition) => ({
 					definition,
 					sourceInfo: createSyntheticSourceInfo(`<builtin:${definition.name}>`, { source: "builtin" }),
@@ -3276,7 +3280,7 @@ export class AgentSession {
 			}
 		}
 
-		if (this.getAvailableSessionTools().length > 0) {
+		if (hasAvailableSessionTools) {
 			nextActiveToolNames.push("load_tool", "unload_tool");
 		}
 
