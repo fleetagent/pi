@@ -46,6 +46,7 @@ export type {
 	RpcCommand,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
+	RpcInstructionDefinition,
 	RpcListSessionsOptions,
 	RpcListSessionsResponse,
 	RpcResponse,
@@ -739,7 +740,7 @@ export async function runRpcMode(runtimeHost: PiAgentRuntimeHost): Promise<never
 					});
 				}
 
-				for (const skill of session.resourceLoader.getSkills().skills) {
+				for (const skill of session.getRegisteredSkills()) {
 					commands.push({
 						name: `skill:${skill.name}`,
 						description: skill.description,
@@ -748,7 +749,7 @@ export async function runRpcMode(runtimeHost: PiAgentRuntimeHost): Promise<never
 					});
 				}
 
-				for (const rule of session.resourceLoader.getRules().rules) {
+				for (const rule of session.getRegisteredRules()) {
 					commands.push({
 						name: `rule:${rule.name}`,
 						description: rule.description,
@@ -758,6 +759,52 @@ export async function runRpcMode(runtimeHost: PiAgentRuntimeHost): Promise<never
 				}
 
 				return success(id, "get_commands", { commands });
+			}
+
+			case "register_skill": {
+				if (!command.skill.filePath && command.skill.content === undefined) {
+					return error(
+						id,
+						"register_skill",
+						`registerSkill("${command.skill.name}") requires filePath or content`,
+					);
+				}
+				const filePath = command.skill.filePath ?? `<rpc-skill:${command.skill.name}>`;
+				session.registerSessionSkill({
+					name: command.skill.name,
+					description: command.skill.description,
+					filePath,
+					baseDir: command.skill.baseDir,
+					disableModelInvocation: command.skill.disableModelInvocation ?? false,
+					tools: command.skill.tools ?? [],
+					...(command.skill.content !== undefined ? { content: command.skill.content } : {}),
+				});
+				return success(id, "register_skill");
+			}
+
+			case "unregister_skill": {
+				return success(id, "unregister_skill", { unregistered: session.unregisterSessionSkill(command.name) });
+			}
+
+			case "register_rule": {
+				if (!command.rule.filePath && command.rule.content === undefined) {
+					return error(id, "register_rule", `registerRule("${command.rule.name}") requires filePath or content`);
+				}
+				const filePath = command.rule.filePath ?? `<rpc-rule:${command.rule.name}>`;
+				session.registerSessionRule({
+					name: command.rule.name,
+					description: command.rule.description,
+					filePath,
+					baseDir: command.rule.baseDir,
+					disableModelInvocation: command.rule.disableModelInvocation ?? false,
+					tools: command.rule.tools ?? [],
+					...(command.rule.content !== undefined ? { content: command.rule.content } : {}),
+				});
+				return success(id, "register_rule");
+			}
+
+			case "unregister_rule": {
+				return success(id, "unregister_rule", { unregistered: session.unregisterSessionRule(command.name) });
 			}
 
 			case "register_tool": {

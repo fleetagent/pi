@@ -15,6 +15,7 @@ export { runRpcMode } from "./rpc/rpc-mode.ts";
 export type {
 	RpcClientListSessionsResponse,
 	RpcCommand,
+	RpcInstructionDefinition,
 	RpcListSessionsOptions,
 	RpcListSessionsResponse,
 	RpcResponse,
