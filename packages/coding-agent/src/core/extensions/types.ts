@@ -1109,6 +1109,8 @@ export interface ExtensionInstructionRegistration {
 	baseDir?: string;
 	/** Hide from model invocation prompt; explicit /skill:name or /rule:name still works. */
 	disableModelInvocation?: boolean;
+	/** Lazy tools to load automatically when this instruction is loaded. */
+	tools?: string[];
 }
 
 export interface ExtensionPromptRegistration {
@@ -1182,10 +1184,23 @@ export interface ExtensionAPI {
 	// Tool Registration
 	// =========================================================================
 
-	/** Register a tool that the LLM can call. */
+	/** Register a tool that the LLM can call. Lazy tools are advertised in <available-tools> until loaded. */
 	registerTool<TParams extends TSchema = TSchema, TDetails = unknown, TState = any>(
 		tool: ToolDefinition<TParams, TDetails, TState>,
+		options?: RegisterToolOptions,
 	): void;
+
+	/** Unregister a tool from this extension in the current session. */
+	unregisterTool(name: string): boolean;
+
+	/** Load a lazy session-scoped tool into active context. */
+	loadTool(name: string): boolean;
+
+	/** Unload a lazy session-scoped tool from active context. */
+	unloadTool(name: string): boolean;
+
+	/** Get available session-scoped lazy tools. */
+	getAvailableTools(): ToolInfo[];
 
 	// =========================================================================
 	// Command, Shortcut, Flag Registration
@@ -1447,9 +1462,15 @@ export type ExtensionFactory = (pi: ExtensionAPI) => void | Promise<void>;
 // Loaded Extension Types
 // ============================================================================
 
+export interface RegisterToolOptions {
+	lazy?: boolean;
+}
+
 export interface RegisteredTool {
 	definition: ToolDefinition;
 	sourceInfo: SourceInfo;
+	lazy?: boolean;
+	loaded?: boolean;
 }
 
 export interface ExtensionFlag {
@@ -1494,9 +1515,15 @@ export type ToolInfo = Pick<ToolDefinition, "name" | "description" | "parameters
 
 export type GetAllToolsHandler = () => ToolInfo[];
 
+export type GetAvailableToolsHandler = () => ToolInfo[];
+
 export type GetCommandsHandler = () => SlashCommandInfo[];
 
 export type SetActiveToolsHandler = (toolNames: string[]) => void;
+
+export type UnregisterToolHandler = (name: string) => boolean;
+
+export type LoadToolHandler = (name: string) => boolean;
 
 export type RefreshToolsHandler = () => void;
 
@@ -1543,7 +1570,11 @@ export interface ExtensionActions {
 	setLabel: SetLabelHandler;
 	getActiveTools: GetActiveToolsHandler;
 	getAllTools: GetAllToolsHandler;
+	getAvailableTools: GetAvailableToolsHandler;
 	setActiveTools: SetActiveToolsHandler;
+	unregisterTool: UnregisterToolHandler;
+	loadTool: LoadToolHandler;
+	unloadTool: LoadToolHandler;
 	refreshTools: RefreshToolsHandler;
 	getCommands: GetCommandsHandler;
 	setModel: SetModelHandler;

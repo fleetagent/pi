@@ -44,10 +44,11 @@ import {
 	streamSimple,
 	validateToolArguments,
 } from "@fleetagent/pi-ai";
-import type { Static, TSchema } from "typebox";
+import { Text } from "@fleetagent/pi-tui";
+import { type Static, type TSchema, Type } from "typebox";
 import { theme } from "../modes/interactive/theme/theme.ts";
 import { stripFrontmatter } from "../utils/frontmatter.ts";
-import { resolvePath } from "../utils/paths.ts";
+import { canonicalizePath, resolvePath } from "../utils/paths.ts";
 import { sleep } from "../utils/sleep.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
@@ -279,6 +280,11 @@ interface ToolDefinitionEntry {
 	sourceInfo: SourceInfo;
 }
 
+interface SessionToolEntry extends ToolDefinitionEntry {
+	lazy: boolean;
+	loaded: boolean;
+}
+
 interface StructuredInternalDetails {
 	stage: "request" | "assistant" | "tool_result" | "result";
 	schemaName: string;
@@ -305,6 +311,56 @@ function getAssistantText(message: AssistantMessage): string {
 		.filter((block) => block.type === "text")
 		.map((block) => block.text)
 		.join("\n");
+}
+
+function escapeXmlAttribute(value: string): string {
+	return value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function normalizeSessionToolNames(value: unknown): string[] {
+	const raw = Array.isArray(value) ? value : [value];
+	const names: string[] = [];
+	for (const entry of raw) {
+		if (typeof entry !== "string") continue;
+		const trimmed = entry.trim();
+		if (trimmed.length > 0 && !names.includes(trimmed)) {
+			names.push(trimmed);
+		}
+	}
+	return names;
+}
+
+function getToolNameArgs(args: { name?: string | string[] } | undefined): string[] {
+	const names = normalizeSessionToolNames(args?.name);
+	return names.length > 0 ? names : ["..."];
+}
+
+function formatSessionToolLifecycleCall(label: string, toolNames: string[]): string {
+	return (
+		theme.fg("customMessageLabel", `\x1b[1m[tool]\x1b[22m `) +
+		theme.fg("toolTitle", label) +
+		" " +
+		theme.fg("customMessageText", toolNames.join(", "))
+	);
+}
+
+function formatSessionToolLifecycleResult(
+	action: "loaded" | "unloaded",
+	succeeded: string[],
+	notFound: string[],
+): string {
+	const prefix = theme.fg("customMessageLabel", `\x1b[1m[tool]\x1b[22m `);
+	const parts: string[] = [];
+	if (succeeded.length > 0) {
+		parts.push(`${theme.fg("success", action)} ${theme.fg("customMessageText", succeeded.join(", "))}`);
+	}
+	if (notFound.length > 0) {
+		parts.push(`${theme.fg("error", "not found")} ${theme.fg("customMessageText", notFound.join(", "))}`);
+	}
+	if (parts.length === 0) {
+		parts.push(theme.fg("error", "not found"));
+	}
+	return prefix + parts.join("  ");
 }
 
 function extractJsonCandidates(text: string): unknown[] {
@@ -400,6 +456,7 @@ export class AgentSession {
 	// Tool registry for extension getTools/setTools
 	private _toolRegistry: Map<string, AgentTool> = new Map();
 	private _toolDefinitions: Map<string, ToolDefinitionEntry> = new Map();
+	private _sessionTools: Map<string, SessionToolEntry> = new Map();
 	private _toolPromptSnippets: Map<string, string> = new Map();
 	private _toolPromptGuidelines: Map<string, string[]> = new Map();
 
@@ -576,6 +633,8 @@ export class AgentSession {
 		};
 
 		this.agent.afterToolCall = async ({ toolCall, args, result, isError }) => {
+			this._loadAssociatedToolsForReadToolCall(toolCall.name, args, isError);
+
 			const runner = this._extensionRunner;
 			if (!runner.hasHandlers("tool_result")) {
 				return undefined;
@@ -603,15 +662,44 @@ export class AgentSession {
 		};
 	}
 
+	private _loadAssociatedInstructionTools(resource: { tools?: string[] }): void {
+		for (const toolName of resource.tools ?? []) {
+			this.loadSessionTool(toolName);
+		}
+	}
+
+	private _loadAssociatedToolsForReadToolCall(toolName: string, args: unknown, isError: boolean): void {
+		if (toolName !== "read" || isError || typeof args !== "object" || args === null) {
+			return;
+		}
+		const readArgs = args as { path?: unknown; file_path?: unknown };
+		const rawPath = typeof readArgs.path === "string" ? readArgs.path : readArgs.file_path;
+		if (typeof rawPath !== "string" || rawPath.trim().length === 0) {
+			return;
+		}
+
+		const readPath = canonicalizePath(resolvePath(rawPath, this._cwd));
+		for (const skill of this.resourceLoader.getSkills().skills) {
+			if (canonicalizePath(resolvePath(skill.filePath, this._cwd)) === readPath) {
+				this._loadAssociatedInstructionTools(skill);
+			}
+		}
+		for (const rule of this.resourceLoader.getRules().rules) {
+			if (canonicalizePath(resolvePath(rule.filePath, this._cwd)) === readPath) {
+				this._loadAssociatedInstructionTools(rule);
+			}
+		}
+	}
+
 	private _installAgentTurnPreparation(): void {
 		const previousPrepareNextTurn = this.agent.prepareNextTurn;
 		this.agent.prepareNextTurn = async (signal) => {
 			const previousUpdate = await previousPrepareNextTurn?.(signal);
-			const compacted = await this._drainExtensionCompactionQueue("between-turns");
-			if (!compacted) {
-				return previousUpdate;
-			}
+			await this._drainExtensionCompactionQueue("between-turns");
 
+			// Always rebuild the loop context so session-driven changes to the active
+			// tool set and system prompt (e.g. load_tool / unload_tool) take effect on
+			// the next turn within the same run instead of waiting for a new prompt.
 			return {
 				...previousUpdate,
 				context: this._buildCurrentAgentContext(previousUpdate?.context),
@@ -621,9 +709,9 @@ export class AgentSession {
 
 	private _buildCurrentAgentContext(previousContext?: AgentContext): AgentContext {
 		return {
-			systemPrompt: previousContext?.systemPrompt ?? this.agent.state.systemPrompt,
-			messages: this.agent.state.messages.slice(),
-			tools: previousContext?.tools ?? this.agent.state.tools.slice(),
+			systemPrompt: this.agent.state.systemPrompt,
+			messages: previousContext?.messages ?? this.agent.state.messages.slice(),
+			tools: this.agent.state.tools.slice(),
 		};
 	}
 
@@ -976,7 +1064,75 @@ export class AgentSession {
 	}
 
 	getToolDefinition(name: string): ToolDefinition | undefined {
-		return this._toolDefinitions.get(name)?.definition;
+		return this._toolDefinitions.get(name)?.definition ?? this._sessionTools.get(name)?.definition;
+	}
+
+	registerSessionTool(definition: ToolDefinition, options: { lazy?: boolean; sourceInfo?: SourceInfo } = {}): void {
+		this._sessionTools.set(definition.name, {
+			definition,
+			sourceInfo:
+				options.sourceInfo ?? createSyntheticSourceInfo(`<session:${definition.name}>`, { source: "session" }),
+			lazy: options.lazy === true,
+			loaded: options.lazy !== true,
+		});
+		this._refreshToolRegistry();
+		if (options.lazy === true) {
+			const activeTools = new Set(this.getActiveToolNames());
+			activeTools.add("load_tool");
+			activeTools.add("unload_tool");
+			this.setActiveToolsByName(Array.from(activeTools));
+		}
+	}
+
+	unregisterSessionTool(name: string): boolean {
+		const deleted = this._sessionTools.delete(name);
+		if (deleted) {
+			this._refreshToolRegistry();
+		}
+		return deleted;
+	}
+
+	loadSessionTool(name: string): boolean {
+		const tool = this._sessionTools.get(name);
+		if (tool) {
+			if (!tool.loaded) {
+				tool.loaded = true;
+				this._refreshToolRegistry();
+			}
+			return true;
+		}
+		const loaded = this._extensionRunner.loadRegisteredTool(name);
+		if (loaded) {
+			this._refreshToolRegistry();
+		}
+		return loaded;
+	}
+
+	unloadSessionTool(name: string): boolean {
+		const tool = this._sessionTools.get(name);
+		if (tool) {
+			if (tool.loaded) {
+				tool.loaded = false;
+				this._refreshToolRegistry();
+			}
+			return true;
+		}
+		const unloaded = this._extensionRunner.unloadRegisteredTool(name);
+		if (unloaded) {
+			this._refreshToolRegistry();
+		}
+		return unloaded;
+	}
+
+	getAvailableSessionTools(): ToolInfo[] {
+		return [...Array.from(this._sessionTools.values()), ...this._extensionRunner.getAvailableRegisteredTools()].map(
+			({ definition, sourceInfo }) => ({
+				name: definition.name,
+				description: definition.description,
+				parameters: definition.parameters,
+				sourceInfo,
+			}),
+		);
 	}
 
 	/**
@@ -1103,8 +1259,12 @@ export class AgentSession {
 
 		const loaderSystemPrompt = this._resourceLoader.getSystemPrompt();
 		const loaderAppendSystemPrompt = this._resourceLoader.getAppendSystemPrompt();
-		const appendSystemPrompt =
-			loaderAppendSystemPrompt.length > 0 ? loaderAppendSystemPrompt.join("\n\n") : undefined;
+		const appendSystemPromptParts = [...loaderAppendSystemPrompt];
+		const availableToolsPrompt = this._buildAvailableToolsPrompt();
+		if (availableToolsPrompt) {
+			appendSystemPromptParts.push(availableToolsPrompt);
+		}
+		const appendSystemPrompt = appendSystemPromptParts.length > 0 ? appendSystemPromptParts.join("\n\n") : undefined;
 		const loadedSkills = this._resourceLoader.getSkills().skills;
 		const loadedRules = this._resourceLoader.getRules().rules;
 		const loadedContextFiles = this._resourceLoader.getAgentsFiles().agentsFiles;
@@ -1121,6 +1281,31 @@ export class AgentSession {
 			promptGuidelines,
 		};
 		return buildSystemPrompt(this._baseSystemPromptOptions);
+	}
+
+	private _buildAvailableToolsPrompt(): string | undefined {
+		const tools = [
+			...Array.from(this._sessionTools.values()).filter((tool) => tool.lazy),
+			...this._extensionRunner.getAvailableRegisteredTools(),
+		];
+		if (tools.length === 0) {
+			return undefined;
+		}
+
+		const lines = [
+			"<available-tools>",
+			"These tools are session-scoped and can be loaded into the active tool context with load_tool when needed, then unloaded with unload_tool when no longer needed.",
+		];
+		for (const tool of tools) {
+			const loaded = tool.loaded ? ' loaded="true"' : "";
+			lines.push(
+				`  <tool name="${escapeXmlAttribute(tool.definition.name)}"${loaded} description="${escapeXmlAttribute(
+					tool.definition.description,
+				)}" />`,
+			);
+		}
+		lines.push("</available-tools>");
+		return lines.join("\n");
 	}
 
 	// =========================================================================
@@ -1620,6 +1805,7 @@ export class AgentSession {
 		if (!skill) return text; // Unknown skill, pass through
 
 		try {
+			this._loadAssociatedInstructionTools(skill);
 			const content = skill.content ?? readFileSync(skill.filePath, "utf-8");
 			const body = stripFrontmatter(content).trim();
 			const skillBlock = `<skill name="${skill.name}" location="${skill.filePath}">\nReferences are relative to ${skill.baseDir}.\n\n${body}\n</skill>`;
@@ -1646,6 +1832,7 @@ export class AgentSession {
 		if (!rule) return text; // Unknown rule, pass through
 
 		try {
+			this._loadAssociatedInstructionTools(rule);
 			const content = rule.content ?? readFileSync(rule.filePath, "utf-8");
 			const body = stripFrontmatter(content).trim();
 			const ruleBlock = `<rule name="${rule.name}" location="${rule.filePath}">\nReferences are relative to ${rule.baseDir}.\n\n${body}\n</rule>`;
@@ -2760,7 +2947,11 @@ export class AgentSession {
 				},
 				getActiveTools: () => this.getActiveToolNames(),
 				getAllTools: () => this.getAllTools(),
+				getAvailableTools: () => this.getAvailableSessionTools(),
 				setActiveTools: (toolNames) => this.setActiveToolsByName(toolNames),
+				unregisterTool: (name) => this.unregisterSessionTool(name),
+				loadTool: (name) => this.loadSessionTool(name),
+				unloadTool: (name) => this.unloadSessionTool(name),
 				refreshTools: () => this._refreshToolRegistry(),
 				getCommands,
 				setModel: async (model) => {
@@ -2813,19 +3004,139 @@ export class AgentSession {
 		);
 	}
 
+	private _createLoadToolDefinition(): ToolDefinition {
+		const parameters = Type.Object({
+			name: Type.Union([Type.String(), Type.Array(Type.String())], {
+				description:
+					"Name of the available session-scoped tool to load, or an array of names to load several at once",
+			}),
+		});
+		return {
+			name: "load_tool",
+			label: "Load tool",
+			description:
+				"Load one or more session-scoped available tools into the active tool context for subsequent turns. Pass a single name or an array of names to load several in one call.",
+			promptSnippet:
+				"Use load_tool to load session-scoped available tools listed in <available-tools> before calling them; pass an array of names to load several at once.",
+			parameters,
+			renderCall: (args: unknown) => {
+				return new Text(
+					formatSessionToolLifecycleCall(
+						"load",
+						getToolNameArgs(args as { name?: string | string[] } | undefined),
+					),
+					0,
+					0,
+				);
+			},
+			renderResult: (result, _options, _theme, context) => {
+				const details = result.details as { loaded?: string[]; notFound?: string[] } | undefined;
+				const loaded = details?.loaded ?? getToolNameArgs(context.args as { name?: string | string[] } | undefined);
+				return new Text(formatSessionToolLifecycleResult("loaded", loaded, details?.notFound ?? []), 0, 0);
+			},
+			executionMode: "sequential",
+			execute: async (_toolCallId, params: { name: string | string[] }) => {
+				const names = normalizeSessionToolNames(params.name);
+				const loaded: string[] = [];
+				const notFound: string[] = [];
+				for (const name of names) {
+					if (this.loadSessionTool(name)) loaded.push(name);
+					else notFound.push(name);
+				}
+				const parts: string[] = [];
+				if (loaded.length > 0) {
+					parts.push(
+						`Loaded tool${loaded.length > 1 ? "s" : ""}: ${loaded.join(", ")}. ${loaded.length > 1 ? "They are" : "It is"} now active and can be called.`,
+					);
+				}
+				if (notFound.length > 0) {
+					parts.push(`Tool${notFound.length > 1 ? "s" : ""} not found in this session: ${notFound.join(", ")}.`);
+				}
+				if (parts.length === 0) {
+					parts.push("No tool names provided.");
+				}
+				return {
+					content: [{ type: "text", text: parts.join(" ") }],
+					details: { names, loaded, notFound },
+				};
+			},
+		};
+	}
+
+	private _createUnloadToolDefinition(): ToolDefinition {
+		const parameters = Type.Object({
+			name: Type.Union([Type.String(), Type.Array(Type.String())], {
+				description: "Name of the session-scoped tool to unload, or an array of names to unload several at once",
+			}),
+		});
+		return {
+			name: "unload_tool",
+			label: "Unload tool",
+			description:
+				"Unload one or more session-scoped tools from the active tool context while keeping them available in this session. Pass a single name or an array of names.",
+			promptSnippet:
+				"Use unload_tool to remove session-scoped loaded tools from active context when no longer needed; pass an array of names to unload several at once.",
+			parameters,
+			renderCall: (args: unknown) => {
+				return new Text(
+					formatSessionToolLifecycleCall(
+						"unload",
+						getToolNameArgs(args as { name?: string | string[] } | undefined),
+					),
+					0,
+					0,
+				);
+			},
+			renderResult: (result, _options, _theme, context) => {
+				const details = result.details as { unloaded?: string[]; notFound?: string[] } | undefined;
+				const unloaded =
+					details?.unloaded ?? getToolNameArgs(context.args as { name?: string | string[] } | undefined);
+				return new Text(formatSessionToolLifecycleResult("unloaded", unloaded, details?.notFound ?? []), 0, 0);
+			},
+			executionMode: "sequential",
+			execute: async (_toolCallId, params: { name: string | string[] }) => {
+				const names = normalizeSessionToolNames(params.name);
+				const unloaded: string[] = [];
+				const notFound: string[] = [];
+				for (const name of names) {
+					if (this.unloadSessionTool(name)) unloaded.push(name);
+					else notFound.push(name);
+				}
+				const parts: string[] = [];
+				if (unloaded.length > 0) {
+					parts.push(`Unloaded tool${unloaded.length > 1 ? "s" : ""}: ${unloaded.join(", ")}.`);
+				}
+				if (notFound.length > 0) {
+					parts.push(`Tool${notFound.length > 1 ? "s" : ""} not found in this session: ${notFound.join(", ")}.`);
+				}
+				if (parts.length === 0) {
+					parts.push("No tool names provided.");
+				}
+				return {
+					content: [{ type: "text", text: parts.join(" ") }],
+					details: { names, unloaded, notFound },
+				};
+			},
+		};
+	}
+
 	private _refreshToolRegistry(options?: { activeToolNames?: string[]; includeAllExtensionTools?: boolean }): void {
 		const previousRegistryNames = new Set(this._toolRegistry.keys());
 		const previousActiveToolNames = this.getActiveToolNames();
 		const allowedToolNames = this._allowedToolNames;
 		const isAllowedTool = (name: string): boolean => !allowedToolNames || allowedToolNames.has(name);
 
-		const registeredTools = this._extensionRunner.getAllRegisteredTools();
+		const registeredTools = this._extensionRunner
+			.getAllRegisteredTools()
+			.filter((tool) => tool.lazy !== true || tool.loaded === true);
+		const activeSessionTools = Array.from(this._sessionTools.values()).filter((tool) => !tool.lazy || tool.loaded);
 		const allCustomTools = [
 			...registeredTools,
 			...this._customTools.map((definition) => ({
 				definition,
 				sourceInfo: createSyntheticSourceInfo(`<sdk:${definition.name}>`, { source: "sdk" }),
 			})),
+			...activeSessionTools,
 		].filter((tool) => isAllowedTool(tool.definition.name));
 		const definitionRegistry = new Map<string, ToolDefinitionEntry>(
 			Array.from(this._baseToolDefinitions.entries())
@@ -2901,6 +3212,10 @@ export class AgentSession {
 			}
 		}
 
+		if (this.getAvailableSessionTools().length > 0) {
+			nextActiveToolNames.push("load_tool", "unload_tool");
+		}
+
 		this.setActiveToolsByName([...new Set(nextActiveToolNames)]);
 	}
 
@@ -2931,6 +3246,8 @@ export class AgentSession {
 		this._baseToolDefinitions = new Map(
 			Object.entries(baseToolDefinitions).map(([name, tool]) => [name, tool as ToolDefinition]),
 		);
+		this._baseToolDefinitions.set("load_tool", this._createLoadToolDefinition());
+		this._baseToolDefinitions.set("unload_tool", this._createUnloadToolDefinition());
 
 		const extensionsResult = this._resourceLoader.getExtensions();
 		if (options.flagValues) {

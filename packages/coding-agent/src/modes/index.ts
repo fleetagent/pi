@@ -4,7 +4,13 @@
 
 export { InteractiveMode, type InteractiveModeOptions } from "./interactive/interactive-mode.ts";
 export { type PrintModeOptions, runPrintMode } from "./print-mode.ts";
-export { type ModelInfo, RpcClient, type RpcClientOptions, type RpcEventListener } from "./rpc/rpc-client.ts";
+export {
+	type ModelInfo,
+	RpcClient,
+	type RpcClientOptions,
+	type RpcEventListener,
+	type RpcToolHandler,
+} from "./rpc/rpc-client.ts";
 export { runRpcMode } from "./rpc/rpc-mode.ts";
 export type {
 	RpcClientListSessionsResponse,
@@ -13,4 +19,6 @@ export type {
 	RpcListSessionsResponse,
 	RpcResponse,
 	RpcSessionState,
+	RpcToolCallRequest,
+	RpcToolDefinition,
 } from "./rpc/rpc-types.ts";

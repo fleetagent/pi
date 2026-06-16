@@ -50,8 +50,15 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed lazy `load_tool`/`unload_tool` activation so loaded tools become callable on the next turn within the same run instead of only after a new prompt.
+
 ### Added
 
+- Added `tools` frontmatter support for skills and rules so associated lazy tools load automatically when the instruction is loaded.
+- Added batched lazy tool loading and unloading by allowing `load_tool` and `unload_tool` to accept an array of tool names.
+- Added session-scoped RPC-hosted tool registration with lazy `load_tool`/`unload_tool` activation.
 - Added RPC and extension backend bash `truncate: false` support for commands that need complete returned output.
 - Added an RPC `bash` `record: false` option for running shell commands without adding results to session history.
 - Added RPC `upload_file` and `download_file` commands for streaming files to and from the active sandbox backend.
