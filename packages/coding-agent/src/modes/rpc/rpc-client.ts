@@ -18,6 +18,7 @@ import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
 import type {
 	RpcClientListSessionsResponse,
 	RpcCommand,
+	RpcInstructionDefinition,
 	RpcListSessionsOptions,
 	RpcListSessionsResponse,
 	RpcResponse,
@@ -524,6 +525,28 @@ export class RpcClient {
 	async getCommands(): Promise<RpcSlashCommand[]> {
 		const response = await this.send({ type: "get_commands" });
 		return this.getData<{ commands: RpcSlashCommand[] }>(response).commands;
+	}
+
+	/** Register a session-scoped skill in the active RPC agent session. */
+	async registerSkill(skill: RpcInstructionDefinition): Promise<void> {
+		await this.send({ type: "register_skill", skill });
+	}
+
+	/** Remove a session-scoped skill from the active RPC agent session. */
+	async unregisterSkill(name: string): Promise<{ unregistered: boolean }> {
+		const response = await this.send({ type: "unregister_skill", name });
+		return this.getData(response);
+	}
+
+	/** Register a session-scoped rule in the active RPC agent session. */
+	async registerRule(rule: RpcInstructionDefinition): Promise<void> {
+		await this.send({ type: "register_rule", rule });
+	}
+
+	/** Remove a session-scoped rule from the active RPC agent session. */
+	async unregisterRule(name: string): Promise<{ unregistered: boolean }> {
+		const response = await this.send({ type: "unregister_rule", name });
+		return this.getData(response);
 	}
 
 	/**

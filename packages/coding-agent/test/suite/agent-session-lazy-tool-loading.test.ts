@@ -126,6 +126,62 @@ describe("AgentSession lazy session tool loading", () => {
 		expect(loadResult).toContain("not found in this session: missing");
 	});
 
+	it("loads tools for a session-registered skill when expanding a skill command", async () => {
+		const runs: string[] = [];
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.session.registerSessionTool(makeLazyTool("rpc_skill_tool", runs), { lazy: true });
+		harness.session.registerSessionSkill({
+			name: "rpc-skill",
+			description: "RPC skill",
+			filePath: "<rpc-skill:rpc-skill>",
+			baseDir: harness.tempDir,
+			disableModelInvocation: false,
+			tools: ["rpc_skill_tool"],
+			content: "# RPC Skill\n",
+		});
+
+		expect(harness.session.getRegisteredSkills().map((skill) => skill.name)).toContain("rpc-skill");
+		expect(harness.session.getActiveToolNames()).not.toContain("rpc_skill_tool");
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("rpc_skill_tool", {}), { stopReason: "toolUse" }),
+			fauxAssistantMessage("done"),
+		]);
+
+		await harness.session.prompt("/skill:rpc-skill use it");
+
+		expect(runs).toEqual(["rpc_skill_tool"]);
+		expect(harness.session.getActiveToolNames()).toContain("rpc_skill_tool");
+	});
+
+	it("loads tools for a session-registered rule when expanding a rule command", async () => {
+		const runs: string[] = [];
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.session.registerSessionTool(makeLazyTool("rpc_rule_tool", runs), { lazy: true });
+		harness.session.registerSessionRule({
+			name: "rpc-rule",
+			description: "RPC rule",
+			filePath: "<rpc-rule:rpc-rule>",
+			baseDir: harness.tempDir,
+			disableModelInvocation: false,
+			tools: ["rpc_rule_tool"],
+			content: "# RPC Rule\n",
+		});
+
+		expect(harness.session.getRegisteredRules().map((rule) => rule.name)).toContain("rpc-rule");
+		expect(harness.session.getActiveToolNames()).not.toContain("rpc_rule_tool");
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("rpc_rule_tool", {}), { stopReason: "toolUse" }),
+			fauxAssistantMessage("done"),
+		]);
+
+		await harness.session.prompt("/rule:rpc-rule use it");
+
+		expect(runs).toEqual(["rpc_rule_tool"]);
+		expect(harness.session.getActiveToolNames()).toContain("rpc_rule_tool");
+	});
+
 	it("loads skill frontmatter tools when expanding a skill command", async () => {
 		const runs: string[] = [];
 		const { resourceLoader, skills } = createMutableResourceLoader();

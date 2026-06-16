@@ -12,6 +12,7 @@ import type { SessionStats, StructuredResponse } from "../../core/agent-session.
 import type { BashResult } from "../../core/bash-executor.ts";
 import type { CompactionResult } from "../../core/compaction/index.ts";
 import type { ToolDefinition, ToolInfo } from "../../core/extensions/index.ts";
+import type { ExtensionInstructionRegistration } from "../../core/extensions/types.ts";
 import type { SessionInfo } from "../../core/session/types.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
 import type { ToolBackendInfo } from "../../core/tools/index.ts";
@@ -27,6 +28,12 @@ export interface RpcToolDefinition
 	> {
 	lazy?: boolean;
 }
+
+export interface RpcInstructionDefinition
+	extends Pick<
+		ExtensionInstructionRegistration,
+		"name" | "description" | "filePath" | "content" | "baseDir" | "disableModelInvocation" | "tools"
+	> {}
 
 export type RpcCommand =
 	// Prompting
@@ -96,6 +103,12 @@ export type RpcCommand =
 
 	// Commands (available for invocation via prompt)
 	| { id?: string; type: "get_commands" }
+
+	// Session-scoped RPC instructions
+	| { id?: string; type: "register_skill"; skill: RpcInstructionDefinition }
+	| { id?: string; type: "unregister_skill"; name: string }
+	| { id?: string; type: "register_rule"; rule: RpcInstructionDefinition }
+	| { id?: string; type: "unregister_rule"; name: string }
 
 	// Session-scoped RPC tools
 	| { id?: string; type: "register_tool"; tool: RpcToolDefinition }
@@ -273,6 +286,12 @@ export type RpcResponse =
 			success: true;
 			data: { commands: RpcSlashCommand[] };
 	  }
+
+	// Session-scoped RPC instructions
+	| { id?: string; type: "response"; command: "register_skill"; success: true }
+	| { id?: string; type: "response"; command: "unregister_skill"; success: true; data: { unregistered: boolean } }
+	| { id?: string; type: "response"; command: "register_rule"; success: true }
+	| { id?: string; type: "response"; command: "unregister_rule"; success: true; data: { unregistered: boolean } }
 
 	// Session-scoped RPC tools
 	| { id?: string; type: "response"; command: "register_tool"; success: true }

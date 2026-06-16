@@ -312,6 +312,7 @@ export {
 	type RpcClientOptions,
 	type RpcCommand,
 	type RpcEventListener,
+	type RpcInstructionDefinition,
 	type RpcListSessionsOptions,
 	type RpcListSessionsResponse,
 	type RpcResponse,

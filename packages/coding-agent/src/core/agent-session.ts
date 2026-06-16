@@ -96,9 +96,11 @@ import { type BashExecutionMessage, type CustomMessage, STRUCTURED_RESPONSE_INTE
 import type { ModelRegistry } from "./model-registry.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
+import type { Rule } from "./rules.ts";
 import type { BranchSummaryEntry, CompactionEntry, Session } from "./session-manager.ts";
 import { CURRENT_SESSION_VERSION, getLatestCompactionEntry, type SessionHeader } from "./session-manager.ts";
 import type { SettingsManager } from "./settings-manager.ts";
+import type { Skill } from "./skills.ts";
 import type { SlashCommandInfo } from "./slash-commands.ts";
 import { createSyntheticSourceInfo, getSourceBackend, type SourceInfo } from "./source-info.ts";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.ts";
@@ -457,6 +459,8 @@ export class AgentSession {
 	private _toolRegistry: Map<string, AgentTool> = new Map();
 	private _toolDefinitions: Map<string, ToolDefinitionEntry> = new Map();
 	private _sessionTools: Map<string, SessionToolEntry> = new Map();
+	private _sessionSkills: Map<string, Skill> = new Map();
+	private _sessionRules: Map<string, Rule> = new Map();
 	private _toolPromptSnippets: Map<string, string> = new Map();
 	private _toolPromptGuidelines: Map<string, string[]> = new Map();
 
@@ -519,12 +523,12 @@ export class AgentSession {
 			return target.startsWith(prefix);
 		};
 		const resources = [
-			...this._resourceLoader.getSkills().skills.map((skill) => ({
+			...this.getRegisteredSkills().map((skill) => ({
 				path: skill.filePath,
 				baseDir: skill.baseDir,
 				sourceInfo: skill.sourceInfo,
 			})),
-			...this._resourceLoader.getRules().rules.map((rule) => ({
+			...this.getRegisteredRules().map((rule) => ({
 				path: rule.filePath,
 				baseDir: rule.baseDir,
 				sourceInfo: rule.sourceInfo,
@@ -679,12 +683,12 @@ export class AgentSession {
 		}
 
 		const readPath = canonicalizePath(resolvePath(rawPath, this._cwd));
-		for (const skill of this.resourceLoader.getSkills().skills) {
+		for (const skill of this.getRegisteredSkills()) {
 			if (canonicalizePath(resolvePath(skill.filePath, this._cwd)) === readPath) {
 				this._loadAssociatedInstructionTools(skill);
 			}
 		}
-		for (const rule of this.resourceLoader.getRules().rules) {
+		for (const rule of this.getRegisteredRules()) {
 			if (canonicalizePath(resolvePath(rule.filePath, this._cwd)) === readPath) {
 				this._loadAssociatedInstructionTools(rule);
 			}
@@ -1067,6 +1071,66 @@ export class AgentSession {
 		return this._toolDefinitions.get(name)?.definition ?? this._sessionTools.get(name)?.definition;
 	}
 
+	getRegisteredSkills(): Skill[] {
+		const sessionSkillNames = new Set(this._sessionSkills.keys());
+		return [
+			...Array.from(this._sessionSkills.values()),
+			...this._resourceLoader.getSkills().skills.filter((skill) => !sessionSkillNames.has(skill.name)),
+		];
+	}
+
+	getRegisteredRules(): Rule[] {
+		const sessionRuleNames = new Set(this._sessionRules.keys());
+		return [
+			...Array.from(this._sessionRules.values()),
+			...this._resourceLoader.getRules().rules.filter((rule) => !sessionRuleNames.has(rule.name)),
+		];
+	}
+
+	registerSessionSkill(
+		skill: Omit<Skill, "sourceInfo" | "baseDir"> & { baseDir?: string; sourceInfo?: SourceInfo },
+	): void {
+		const filePath = skill.filePath || `<session-skill:${skill.name}>`;
+		const baseDir = skill.baseDir || (skill.filePath ? dirname(skill.filePath) : this._cwd);
+		this._sessionSkills.set(skill.name, {
+			...skill,
+			filePath,
+			baseDir,
+			sourceInfo: skill.sourceInfo ?? createSyntheticSourceInfo(filePath, { source: "session", baseDir }),
+		});
+		this.setActiveToolsByName(this.getActiveToolNames());
+	}
+
+	unregisterSessionSkill(name: string): boolean {
+		const deleted = this._sessionSkills.delete(name);
+		if (deleted) {
+			this.setActiveToolsByName(this.getActiveToolNames());
+		}
+		return deleted;
+	}
+
+	registerSessionRule(
+		rule: Omit<Rule, "sourceInfo" | "baseDir"> & { baseDir?: string; sourceInfo?: SourceInfo },
+	): void {
+		const filePath = rule.filePath || `<session-rule:${rule.name}>`;
+		const baseDir = rule.baseDir || (rule.filePath ? dirname(rule.filePath) : this._cwd);
+		this._sessionRules.set(rule.name, {
+			...rule,
+			filePath,
+			baseDir,
+			sourceInfo: rule.sourceInfo ?? createSyntheticSourceInfo(filePath, { source: "session", baseDir }),
+		});
+		this.setActiveToolsByName(this.getActiveToolNames());
+	}
+
+	unregisterSessionRule(name: string): boolean {
+		const deleted = this._sessionRules.delete(name);
+		if (deleted) {
+			this.setActiveToolsByName(this.getActiveToolNames());
+		}
+		return deleted;
+	}
+
 	registerSessionTool(definition: ToolDefinition, options: { lazy?: boolean; sourceInfo?: SourceInfo } = {}): void {
 		this._sessionTools.set(definition.name, {
 			definition,
@@ -1265,8 +1329,8 @@ export class AgentSession {
 			appendSystemPromptParts.push(availableToolsPrompt);
 		}
 		const appendSystemPrompt = appendSystemPromptParts.length > 0 ? appendSystemPromptParts.join("\n\n") : undefined;
-		const loadedSkills = this._resourceLoader.getSkills().skills;
-		const loadedRules = this._resourceLoader.getRules().rules;
+		const loadedSkills = this.getRegisteredSkills();
+		const loadedRules = this.getRegisteredRules();
 		const loadedContextFiles = this._resourceLoader.getAgentsFiles().agentsFiles;
 
 		this._baseSystemPromptOptions = {
@@ -1801,7 +1865,7 @@ export class AgentSession {
 		const skillName = spaceIndex === -1 ? text.slice(7) : text.slice(7, spaceIndex);
 		const args = spaceIndex === -1 ? "" : text.slice(spaceIndex + 1).trim();
 
-		const skill = this.resourceLoader.getSkills().skills.find((s) => s.name === skillName);
+		const skill = this.getRegisteredSkills().find((s) => s.name === skillName);
 		if (!skill) return text; // Unknown skill, pass through
 
 		try {
@@ -1828,7 +1892,7 @@ export class AgentSession {
 		const ruleName = spaceIndex === -1 ? text.slice(6) : text.slice(6, spaceIndex);
 		const args = spaceIndex === -1 ? "" : text.slice(spaceIndex + 1).trim();
 
-		const rule = this.resourceLoader.getRules().rules.find((r) => r.name === ruleName);
+		const rule = this.getRegisteredRules().find((r) => r.name === ruleName);
 		if (!rule) return text; // Unknown rule, pass through
 
 		try {
@@ -2896,14 +2960,14 @@ export class AgentSession {
 				sourceInfo: template.sourceInfo,
 			}));
 
-			const skills: SlashCommandInfo[] = this._resourceLoader.getSkills().skills.map((skill) => ({
+			const skills: SlashCommandInfo[] = this.getRegisteredSkills().map((skill) => ({
 				name: `skill:${skill.name}`,
 				description: skill.description,
 				source: "skill",
 				sourceInfo: skill.sourceInfo,
 			}));
 
-			const rules: SlashCommandInfo[] = this._resourceLoader.getRules().rules.map((rule) => ({
+			const rules: SlashCommandInfo[] = this.getRegisteredRules().map((rule) => ({
 				name: `rule:${rule.name}`,
 				description: rule.description,
 				source: "rule",
