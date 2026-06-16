@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.4](https://github.com/fleetagent/pi/compare/@fleetagent/pi-ai-v0.1.3...@fleetagent/pi-ai-v0.1.4) (2026-06-16)
+
+
+### Features
+
+* **coding-agent:** add lazy tool loading ([47e0bd0](https://github.com/fleetagent/pi/commit/47e0bd01d10b15ddc852dd271d878ac44274159d))
+
 ## [0.1.3](https://github.com/fleetagent/pi/compare/@fleetagent/pi-ai-v0.1.2...@fleetagent/pi-ai-v0.1.3) (2026-06-14)
 
 

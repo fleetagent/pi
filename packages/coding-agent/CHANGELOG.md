@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.1.4](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.1.3...@fleetagent/pi-coding-agent-v0.1.4) (2026-06-16)
+
+
+### Features
+
+* **coding-agent:** add lazy tool loading ([47e0bd0](https://github.com/fleetagent/pi/commit/47e0bd01d10b15ddc852dd271d878ac44274159d))
+* **coding-agent:** add RPC instruction registration ([ea05b58](https://github.com/fleetagent/pi/commit/ea05b5828b7cf0b6f94394cca35d7d492fbcaec2))
+
+
+### Bug Fixes
+
+* **coding-agent:** hide lazy lifecycle tools until needed ([ed04177](https://github.com/fleetagent/pi/commit/ed04177043035f5b708a163b3905a917b6a186a0))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @fleetagent/pi-agent-core bumped from ^0.1.3 to ^0.1.4
+    * @fleetagent/pi-ai bumped from ^0.1.3 to ^0.1.4
+    * @fleetagent/pi-tui bumped from ^0.1.3 to ^0.1.4
+
 ## [0.1.3](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.1.2...@fleetagent/pi-coding-agent-v0.1.3) (2026-06-14)
 
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.4](https://github.com/fleetagent/pi/compare/@fleetagent/pi-daemon-v0.1.3...@fleetagent/pi-daemon-v0.1.4) (2026-06-16)
+
+
+### Miscellaneous Chores
+
+* **@fleetagent/pi-daemon:** Synchronize pi versions
+
 ## [0.1.3](https://github.com/fleetagent/pi/compare/@fleetagent/pi-daemon-v0.1.2...@fleetagent/pi-daemon-v0.1.3) (2026-06-14)
 
 
