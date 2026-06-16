@@ -400,6 +400,32 @@ export class ExtensionRunner {
 		return Array.from(toolsByName.values());
 	}
 
+	getAvailableRegisteredTools(): RegisteredTool[] {
+		return this.getAllRegisteredTools().filter((tool) => tool.lazy === true);
+	}
+
+	loadRegisteredTool(toolName: string): boolean {
+		const tool = this.getFirstRegisteredTool(toolName);
+		if (!tool || tool.lazy !== true) return false;
+		tool.loaded = true;
+		return true;
+	}
+
+	unloadRegisteredTool(toolName: string): boolean {
+		const tool = this.getFirstRegisteredTool(toolName);
+		if (!tool || tool.lazy !== true) return false;
+		tool.loaded = false;
+		return true;
+	}
+
+	private getFirstRegisteredTool(toolName: string): RegisteredTool | undefined {
+		for (const ext of this.extensions) {
+			const tool = ext.tools.get(toolName);
+			if (tool) return tool;
+		}
+		return undefined;
+	}
+
 	/** Get a tool definition by name. Returns undefined if not found. */
 	getToolDefinition(toolName: string): RegisteredTool["definition"] | undefined {
 		for (const ext of this.extensions) {

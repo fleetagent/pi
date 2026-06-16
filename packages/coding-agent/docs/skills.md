@@ -146,7 +146,22 @@ Per the [Agent Skills specification](https://agentskills.io/specification#frontm
 | `compatibility` | No | Max 500 chars. Environment requirements. |
 | `metadata` | No | Arbitrary key-value mapping. |
 | `allowed-tools` | No | Space-delimited list of pre-approved tools (experimental). |
+| `tools` | No | Tool name or YAML list of lazy tools to load automatically when the skill is loaded via `read` or `/skill:name`. |
 | `disable-model-invocation` | No | When `true`, skill is hidden from system prompt. Users must use `/skill:name`. |
+
+Example with associated lazy tools:
+
+```yaml
+---
+name: github-pr-workflow
+description: Create and update GitHub PRs following repository policy.
+tools:
+  - github_create_pr
+  - github_get_pr
+---
+```
+
+When the agent loads this skill, pi loads those tools into the active tool context for the next turn.
 
 ### Name Rules
 

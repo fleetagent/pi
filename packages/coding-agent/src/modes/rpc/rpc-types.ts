@@ -5,12 +5,13 @@
  * Responses and events are emitted as JSON lines on stdout.
  */
 
-import type { AgentMessage, ThinkingLevel } from "@fleetagent/pi-agent-core";
+import type { AgentMessage, AgentToolResult, ThinkingLevel } from "@fleetagent/pi-agent-core";
 import type { ImageContent, Model } from "@fleetagent/pi-ai";
 import type { TSchema } from "typebox";
 import type { SessionStats, StructuredResponse } from "../../core/agent-session.ts";
 import type { BashResult } from "../../core/bash-executor.ts";
 import type { CompactionResult } from "../../core/compaction/index.ts";
+import type { ToolDefinition, ToolInfo } from "../../core/extensions/index.ts";
 import type { SessionInfo } from "../../core/session/types.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
 import type { ToolBackendInfo } from "../../core/tools/index.ts";
@@ -18,6 +19,14 @@ import type { ToolBackendInfo } from "../../core/tools/index.ts";
 // ============================================================================
 // RPC Commands (stdin)
 // ============================================================================
+
+export interface RpcToolDefinition
+	extends Pick<
+		ToolDefinition,
+		"name" | "label" | "description" | "promptSnippet" | "promptGuidelines" | "parameters" | "executionMode"
+	> {
+	lazy?: boolean;
+}
 
 export type RpcCommand =
 	// Prompting
@@ -86,7 +95,14 @@ export type RpcCommand =
 	| { id?: string; type: "get_messages" }
 
 	// Commands (available for invocation via prompt)
-	| { id?: string; type: "get_commands" };
+	| { id?: string; type: "get_commands" }
+
+	// Session-scoped RPC tools
+	| { id?: string; type: "register_tool"; tool: RpcToolDefinition }
+	| { id?: string; type: "unregister_tool"; name: string }
+	| { id?: string; type: "get_available_tools" }
+	| { id?: string; type: "rpc_tool_result"; requestId: string; result: AgentToolResult<unknown> }
+	| { id?: string; type: "rpc_tool_error"; requestId: string; error: string };
 
 // ============================================================================
 // RPC Session List
@@ -258,8 +274,27 @@ export type RpcResponse =
 			data: { commands: RpcSlashCommand[] };
 	  }
 
+	// Session-scoped RPC tools
+	| { id?: string; type: "response"; command: "register_tool"; success: true }
+	| { id?: string; type: "response"; command: "unregister_tool"; success: true; data: { unregistered: boolean } }
+	| { id?: string; type: "response"; command: "get_available_tools"; success: true; data: { tools: ToolInfo[] } }
+	| { id?: string; type: "response"; command: "rpc_tool_result"; success: true }
+	| { id?: string; type: "response"; command: "rpc_tool_error"; success: true }
+
 	// Error response (any command can fail)
 	| { id?: string; type: "response"; command: string; success: false; error: string };
+
+// ============================================================================
+// RPC Tool Events (stdout)
+// ============================================================================
+
+export interface RpcToolCallRequest {
+	type: "rpc_tool_call";
+	requestId: string;
+	toolName: string;
+	toolCallId: string;
+	args: unknown;
+}
 
 // ============================================================================
 // Extension UI Events (stdout)

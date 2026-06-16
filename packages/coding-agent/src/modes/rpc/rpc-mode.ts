@@ -13,6 +13,7 @@
 
 import * as crypto from "node:crypto";
 import { stat } from "node:fs/promises";
+import type { AgentToolResult } from "@fleetagent/pi-agent-core";
 import type {
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
@@ -37,6 +38,7 @@ import type {
 	RpcResponse,
 	RpcSessionState,
 	RpcSlashCommand,
+	RpcToolCallRequest,
 } from "./rpc-types.ts";
 
 // Re-export types for consumers
@@ -48,6 +50,8 @@ export type {
 	RpcListSessionsResponse,
 	RpcResponse,
 	RpcSessionState,
+	RpcToolCallRequest,
+	RpcToolDefinition,
 } from "./rpc-types.ts";
 
 const DEFAULT_RPC_SESSION_LIST_LIMIT = 100;
@@ -86,6 +90,10 @@ export async function runRpcMode(runtimeHost: PiAgentRuntimeHost): Promise<never
 	const pendingExtensionRequests = new Map<
 		string,
 		{ resolve: (value: any) => void; reject: (error: Error) => void }
+	>();
+	const pendingRpcToolRequests = new Map<
+		string,
+		{ resolve: (result: AgentToolResult<unknown>) => void; reject: (error: Error) => void; abort: () => void }
 	>();
 
 	// Shutdown request flag
@@ -752,6 +760,81 @@ export async function runRpcMode(runtimeHost: PiAgentRuntimeHost): Promise<never
 				return success(id, "get_commands", { commands });
 			}
 
+			case "register_tool": {
+				session.registerSessionTool(
+					{
+						name: command.tool.name,
+						label: command.tool.label,
+						description: command.tool.description,
+						promptSnippet: command.tool.promptSnippet,
+						promptGuidelines: command.tool.promptGuidelines,
+						parameters: command.tool.parameters,
+						executionMode: command.tool.executionMode,
+						execute: (toolCallId, params, signal) => {
+							const requestId = crypto.randomUUID();
+							const request: RpcToolCallRequest = {
+								type: "rpc_tool_call",
+								requestId,
+								toolName: command.tool.name,
+								toolCallId,
+								args: params,
+							};
+							return new Promise<AgentToolResult<unknown>>((resolve, reject) => {
+								let timeoutId: ReturnType<typeof setTimeout> | undefined;
+								const cleanup = () => {
+									if (timeoutId) clearTimeout(timeoutId);
+									signal?.removeEventListener("abort", onAbort);
+									pendingRpcToolRequests.delete(requestId);
+								};
+								const onAbort = () => {
+									cleanup();
+									reject(new Error(`RPC tool aborted: ${command.tool.name}`));
+								};
+								if (signal?.aborted) {
+									onAbort();
+									return;
+								}
+								signal?.addEventListener("abort", onAbort, { once: true });
+								timeoutId = setTimeout(
+									() => {
+										cleanup();
+										reject(new Error(`Timed out waiting for RPC tool result: ${command.tool.name}`));
+									},
+									5 * 60 * 1000,
+								);
+								pendingRpcToolRequests.set(requestId, {
+									resolve: (result) => {
+										cleanup();
+										resolve(result);
+									},
+									reject: (error) => {
+										cleanup();
+										reject(error);
+									},
+									abort: onAbort,
+								});
+								output(request);
+							});
+						},
+					},
+					{ lazy: command.tool.lazy },
+				);
+				return success(id, "register_tool");
+			}
+
+			case "unregister_tool": {
+				return success(id, "unregister_tool", { unregistered: session.unregisterSessionTool(command.name) });
+			}
+
+			case "get_available_tools": {
+				return success(id, "get_available_tools", { tools: session.getAvailableSessionTools() });
+			}
+
+			case "rpc_tool_result":
+			case "rpc_tool_error": {
+				return success(id, command.type);
+			}
+
 			default: {
 				const unknownCommand = command as { type: string };
 				return error(undefined, unknownCommand.type, `Unknown command: ${unknownCommand.type}`);
@@ -775,6 +858,10 @@ export async function runRpcMode(runtimeHost: PiAgentRuntimeHost): Promise<never
 		}
 		unsubscribe?.();
 		unsubscribeBackpressure?.();
+		for (const pending of pendingRpcToolRequests.values()) {
+			pending.abort();
+		}
+		pendingRpcToolRequests.clear();
 		await runtimeHost.dispose();
 		detachInput();
 		process.stdin.pause();
@@ -806,19 +893,34 @@ export async function runRpcMode(runtimeHost: PiAgentRuntimeHost): Promise<never
 		}
 
 		// Handle extension UI responses
-		if (
-			typeof parsed === "object" &&
-			parsed !== null &&
-			"type" in parsed &&
-			parsed.type === "extension_ui_response"
-		) {
-			const response = parsed as RpcExtensionUIResponse;
-			const pending = pendingExtensionRequests.get(response.id);
-			if (pending) {
-				pendingExtensionRequests.delete(response.id);
-				pending.resolve(response);
+		if (typeof parsed === "object" && parsed !== null && "type" in parsed) {
+			if (parsed.type === "extension_ui_response") {
+				const response = parsed as RpcExtensionUIResponse;
+				const pending = pendingExtensionRequests.get(response.id);
+				if (pending) {
+					pendingExtensionRequests.delete(response.id);
+					pending.resolve(response);
+				}
+				return;
 			}
-			return;
+
+			if (parsed.type === "rpc_tool_result") {
+				const response = parsed as Extract<RpcCommand, { type: "rpc_tool_result" }>;
+				const pending = pendingRpcToolRequests.get(response.requestId);
+				if (pending) {
+					pending.resolve(response.result);
+				}
+				return;
+			}
+
+			if (parsed.type === "rpc_tool_error") {
+				const response = parsed as Extract<RpcCommand, { type: "rpc_tool_error" }>;
+				const pending = pendingRpcToolRequests.get(response.requestId);
+				if (pending) {
+					pending.reject(new Error(response.error));
+				}
+				return;
+			}
 		}
 
 		const command = parsed as RpcCommand;

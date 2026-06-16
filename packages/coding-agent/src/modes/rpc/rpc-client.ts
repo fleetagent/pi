@@ -5,12 +5,13 @@
  */
 
 import { type ChildProcess, spawn } from "node:child_process";
-import type { AgentEvent, AgentMessage, ThinkingLevel } from "@fleetagent/pi-agent-core";
+import type { AgentEvent, AgentMessage, AgentToolResult, ThinkingLevel } from "@fleetagent/pi-agent-core";
 import type { ImageContent } from "@fleetagent/pi-ai";
 import type { Static, TSchema } from "typebox";
 import type { SessionStats, StructuredResponse } from "../../core/agent-session.ts";
 import type { BashResult } from "../../core/bash-executor.ts";
 import type { CompactionResult } from "../../core/compaction/index.ts";
+import type { ToolInfo } from "../../core/extensions/index.ts";
 import type { SessionInfo } from "../../core/session/types.ts";
 import type { ToolBackendInfo } from "../../core/tools/index.ts";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
@@ -22,6 +23,8 @@ import type {
 	RpcResponse,
 	RpcSessionState,
 	RpcSlashCommand,
+	RpcToolCallRequest,
+	RpcToolDefinition,
 } from "./rpc-types.ts";
 
 // ============================================================================
@@ -66,6 +69,10 @@ export interface ModelInfo {
 }
 
 export type RpcEventListener = (event: AgentEvent) => void;
+export type RpcToolHandler = (
+	args: unknown,
+	context: { toolName: string; toolCallId: string; signal: AbortSignal },
+) => Promise<AgentToolResult<unknown>> | AgentToolResult<unknown>;
 
 // ============================================================================
 // RPC Client
@@ -77,6 +84,8 @@ export class RpcClient {
 	private eventListeners: RpcEventListener[] = [];
 	private pendingRequests: Map<string, { resolve: (response: RpcResponse) => void; reject: (error: Error) => void }> =
 		new Map();
+	private toolHandlers: Map<string, RpcToolHandler> = new Map();
+	private activeToolCalls: Map<string, AbortController> = new Map();
 	private requestId = 0;
 	private stderr = "";
 	private exitError: Error | null = null;
@@ -188,6 +197,10 @@ export class RpcClient {
 
 		this.process = null;
 		this.pendingRequests.clear();
+		for (const controller of this.activeToolCalls.values()) {
+			controller.abort();
+		}
+		this.activeToolCalls.clear();
 	}
 
 	/**
@@ -513,6 +526,33 @@ export class RpcClient {
 		return this.getData<{ commands: RpcSlashCommand[] }>(response).commands;
 	}
 
+	/**
+	 * Register a session-scoped RPC-hosted tool. Lazy tools are advertised in the
+	 * system prompt and become active only after the agent calls load_tool.
+	 */
+	async registerTool(tool: RpcToolDefinition, handler: RpcToolHandler): Promise<void> {
+		this.toolHandlers.set(tool.name, handler);
+		try {
+			await this.send({ type: "register_tool", tool });
+		} catch (error) {
+			this.toolHandlers.delete(tool.name);
+			throw error;
+		}
+	}
+
+	/** Remove a session-scoped RPC-hosted tool from the active RPC agent session. */
+	async unregisterTool(name: string): Promise<{ unregistered: boolean }> {
+		this.toolHandlers.delete(name);
+		const response = await this.send({ type: "unregister_tool", name });
+		return this.getData(response);
+	}
+
+	/** List session-scoped RPC-hosted tools registered with the active session. */
+	async getAvailableTools(): Promise<ToolInfo[]> {
+		const response = await this.send({ type: "get_available_tools" });
+		return this.getData<{ tools: ToolInfo[] }>(response).tools;
+	}
+
 	// =========================================================================
 	// Helpers
 	// =========================================================================
@@ -591,6 +631,11 @@ export class RpcClient {
 		try {
 			const data = JSON.parse(line);
 
+			if (data.type === "rpc_tool_call") {
+				void this.handleRpcToolCall(data as RpcToolCallRequest);
+				return;
+			}
+
 			// Check if it's a response to a pending request
 			if (data.type === "response" && data.id && this.pendingRequests.has(data.id)) {
 				const pending = this.pendingRequests.get(data.id)!;
@@ -608,6 +653,37 @@ export class RpcClient {
 		}
 	}
 
+	private async handleRpcToolCall(request: RpcToolCallRequest): Promise<void> {
+		const handler = this.toolHandlers.get(request.toolName);
+		if (!handler) {
+			this.writeFireAndForget({
+				type: "rpc_tool_error",
+				requestId: request.requestId,
+				error: `No RPC tool handler registered for ${request.toolName}`,
+			});
+			return;
+		}
+
+		const abortController = new AbortController();
+		this.activeToolCalls.set(request.requestId, abortController);
+		try {
+			const result = await handler(request.args, {
+				toolName: request.toolName,
+				toolCallId: request.toolCallId,
+				signal: abortController.signal,
+			});
+			this.writeFireAndForget({ type: "rpc_tool_result", requestId: request.requestId, result });
+		} catch (error: unknown) {
+			this.writeFireAndForget({
+				type: "rpc_tool_error",
+				requestId: request.requestId,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		} finally {
+			this.activeToolCalls.delete(request.requestId);
+		}
+	}
+
 	private createProcessExitError(code: number | null, signal: NodeJS.Signals | null): Error {
 		return new Error(`Agent process exited (code=${code} signal=${signal}). Stderr: ${this.stderr}`);
 	}
@@ -617,6 +693,14 @@ export class RpcClient {
 			pending.reject(error);
 		}
 		this.pendingRequests.clear();
+	}
+
+	private writeFireAndForget(command: RpcCommandBody): void {
+		const stdin = this.process?.stdin;
+		if (!stdin || stdin.destroyed || !stdin.writable) {
+			return;
+		}
+		stdin.write(serializeJsonLine(command));
 	}
 
 	private async send(command: RpcCommandBody): Promise<RpcResponse> {

@@ -147,7 +147,11 @@ export function createExtensionRuntime(): ExtensionRuntime {
 		setLabel: notInitialized,
 		getActiveTools: notInitialized,
 		getAllTools: notInitialized,
+		getAvailableTools: notInitialized,
 		setActiveTools: notInitialized,
+		unregisterTool: notInitialized,
+		loadTool: notInitialized,
+		unloadTool: notInitialized,
 		// registerTool() is valid during extension load; refresh is only needed post-bind.
 		refreshTools: () => {},
 		getCommands: notInitialized,
@@ -235,13 +239,39 @@ function createExtensionAPI(
 			extension.handlers.set(event, list);
 		},
 
-		registerTool(tool: ToolDefinition): void {
+		registerTool(tool: ToolDefinition, options?: { lazy?: boolean }): void {
 			runtime.assertActive();
 			extension.tools.set(tool.name, {
 				definition: tool,
 				sourceInfo: extension.sourceInfo,
+				lazy: options?.lazy === true,
+				loaded: options?.lazy === true ? false : undefined,
 			});
 			runtime.refreshTools();
+		},
+
+		unregisterTool(name: string): boolean {
+			runtime.assertActive();
+			const deleted = extension.tools.delete(name);
+			if (deleted) {
+				runtime.refreshTools();
+			}
+			return deleted;
+		},
+
+		loadTool(name: string): boolean {
+			runtime.assertActive();
+			return runtime.loadTool(name);
+		},
+
+		unloadTool(name: string): boolean {
+			runtime.assertActive();
+			return runtime.unloadTool(name);
+		},
+
+		getAvailableTools() {
+			runtime.assertActive();
+			return runtime.getAvailableTools();
 		},
 
 		registerCommand(name: string, options: Omit<RegisteredCommand, "name" | "sourceInfo">): void {
@@ -266,6 +296,7 @@ function createExtensionAPI(
 				baseDir: skill.baseDir ?? (skill.filePath ? path.dirname(filePath) : extensionDir),
 				sourceInfo: extension.sourceInfo,
 				disableModelInvocation: skill.disableModelInvocation ?? false,
+				tools: skill.tools ?? [],
 				...(skill.content !== undefined && { content: skill.content }),
 			});
 		},
@@ -283,6 +314,7 @@ function createExtensionAPI(
 				baseDir: rule.baseDir ?? (rule.filePath ? path.dirname(filePath) : extensionDir),
 				sourceInfo: extension.sourceInfo,
 				disableModelInvocation: rule.disableModelInvocation ?? false,
+				tools: rule.tools ?? [],
 				...(rule.content !== undefined && { content: rule.content }),
 			});
 		},

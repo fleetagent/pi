@@ -316,6 +316,9 @@ export {
 	type RpcListSessionsResponse,
 	type RpcResponse,
 	type RpcSessionState,
+	type RpcToolCallRequest,
+	type RpcToolDefinition,
+	type RpcToolHandler,
 	runPrintMode,
 	runRpcMode,
 } from "./modes/index.ts";

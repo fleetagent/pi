@@ -68,6 +68,7 @@ function addIgnoreRules(ig: IgnoreMatcher, dir: string, rootDir: string): void {
 export interface SkillFrontmatter {
 	name?: string;
 	description?: string;
+	tools?: string | string[];
 	"disable-model-invocation"?: boolean;
 	[key: string]: unknown;
 }
@@ -79,6 +80,7 @@ export interface Skill {
 	baseDir: string;
 	sourceInfo: SourceInfo;
 	disableModelInvocation: boolean;
+	tools?: string[];
 	content?: string;
 }
 
@@ -116,6 +118,19 @@ function validateName(name: string): string[] {
 /**
  * Validate description per Agent Skills spec.
  */
+function normalizeFrontmatterTools(value: unknown): string[] {
+	const raw = Array.isArray(value) ? value : typeof value === "string" ? value.split(/[\s,]+/) : [];
+	const tools: string[] = [];
+	for (const entry of raw) {
+		if (typeof entry !== "string") continue;
+		const trimmed = entry.trim();
+		if (trimmed.length > 0 && !tools.includes(trimmed)) {
+			tools.push(trimmed);
+		}
+	}
+	return tools;
+}
+
 function validateDescription(description: string | undefined): string[] {
 	const errors: string[] = [];
 
@@ -317,6 +332,7 @@ function loadSkillFromFile(
 				baseDir: skillDir,
 				sourceInfo: createSkillSourceInfo(filePath, skillDir, source),
 				disableModelInvocation: frontmatter["disable-model-invocation"] === true,
+				tools: normalizeFrontmatterTools(frontmatter.tools),
 			},
 			diagnostics,
 		};
@@ -562,6 +578,7 @@ async function loadSkillFromFileWithOperations(
 				baseDir: skillDir,
 				sourceInfo: createSkillSourceInfo(filePath, skillDir, source),
 				disableModelInvocation: frontmatter["disable-model-invocation"] === true,
+				tools: normalizeFrontmatterTools(frontmatter.tools),
 			},
 			diagnostics,
 		};

@@ -83,7 +83,22 @@ See [examples](references/examples.md).
 |-------|----------|-------------|
 | `name` | Yes | Max 64 chars. Lowercase a-z, 0-9, hyphens. Falls back to parent directory name. |
 | `description` | Yes | Max 1024 chars. Defines when the rule applies. |
+| `tools` | No | Tool name or YAML list of lazy tools to load automatically when the rule is loaded via `read` or `/rule:name`. |
 | `disable-model-invocation` | No | When `true`, the rule is hidden from the system prompt. Users must use `/rule:name`. |
+
+Example with associated lazy tools:
+
+```yaml
+---
+name: github-review
+description: Mandatory PR review rules. Load when reviewing GitHub pull requests.
+tools:
+  - github_get_pr
+  - github_list_review_comments
+---
+```
+
+When the agent loads this rule, pi loads those tools into the active tool context for the next turn.
 
 ## Description Best Practices
 
