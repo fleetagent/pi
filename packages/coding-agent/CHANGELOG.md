@@ -13,6 +13,8 @@
 * Abort stuck extension context hooks when an agent run is aborted.
 * Refresh active tools and system prompt before the next turn in a run.
 * Preserve extension-modified run prompts during tool refresh.
+* Show a pnpm metadata recovery hint when self-update fails.
+* Skip the saved default model during startup when it lacks configured auth.
 * Process BMP images from disk by converting them to a supported inline format.
 * Surface auth storage save failures to callers.
 * Allow extra fields in edit tool replacement arguments.

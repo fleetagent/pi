@@ -9,6 +9,7 @@
 ### Fixed
 
 * Clamp OpenAI Responses `max_output_tokens` to the API minimum.
+* Detect DS4 context overflow errors.
 * Honor server-provided OAuth device-code `slow_down` polling intervals.
 * Rotate stale Codex websocket sessions.
 * Enable Bedrock prompt caching for Claude 5 models.
