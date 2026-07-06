@@ -911,9 +911,12 @@ export class PiAgent {
 			if (options.startupBenchmark) {
 				await interactiveMode.init();
 				time("interactiveMode.init");
-				printTimings();
+				// Give the TUI's stdin handler a brief chance to consume terminal query replies
+				// (Kitty keyboard protocol, device attributes, cell size) before restoring the terminal.
+				await new Promise((resolve) => setTimeout(resolve, 150));
 				interactiveMode.stop();
 				stopThemeWatcher();
+				printTimings();
 				if (process.stdout.writableLength > 0) {
 					await new Promise<void>((resolve) => process.stdout.once("drain", resolve));
 				}

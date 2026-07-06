@@ -15,6 +15,8 @@
 * Preserve extension-modified run prompts during tool refresh.
 * Show a pnpm metadata recovery hint when self-update fails.
 * Handle undici mid-stream client errors without crashing.
+* Preserve extension timing measurements in startup benchmark output.
+* Show loaded resources before restored session messages when resuming sessions.
 * Reject invalid non-empty session files without modifying them.
 * Show length stop errors for incomplete assistant messages.
 * Serialize split-turn compaction summary requests.

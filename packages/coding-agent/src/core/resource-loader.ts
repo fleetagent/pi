@@ -20,6 +20,7 @@ import { SettingsManager } from "./settings-manager.ts";
 import type { Skill } from "./skills.ts";
 import { loadSkills, loadSkillsWithOperations } from "./skills.ts";
 import { createSourceInfo, type SourceInfo } from "./source-info.ts";
+import { resetTimings } from "./timings.ts";
 import type { ToolOperations } from "./tools/operations.ts";
 
 export interface ResourceExtensionPaths {
@@ -476,6 +477,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 	}
 
 	async reload(): Promise<void> {
+		resetTimings("extensions");
 		await this.settingsManager.reload();
 		const resolvedPaths = await this.packageManager.resolve();
 		const cliExtensionPaths = await this.packageManager.resolveExtensionSources(this.additionalExtensionPaths, {

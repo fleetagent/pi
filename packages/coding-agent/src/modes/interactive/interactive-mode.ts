@@ -240,6 +240,7 @@ export class InteractiveMode {
 	private runtimeHost: PiAgentRuntimeHost;
 	private options: InteractiveModeOptions;
 	private ui: TUI;
+	private loadedResourcesContainer: Container;
 	private chatContainer: Container;
 	private pendingMessagesContainer: Container;
 	private statusContainer: Container;
@@ -371,6 +372,7 @@ export class InteractiveMode {
 		this.ui = new TUI(new ProcessTerminal(), this.settingsManager.getShowHardwareCursor());
 		this.ui.setClearOnShrink(this.settingsManager.getClearOnShrink());
 		this.headerContainer = new Container();
+		this.loadedResourcesContainer = new Container();
 		this.chatContainer = new Container();
 		this.pendingMessagesContainer = new Container();
 		this.statusContainer = new Container();
@@ -668,6 +670,8 @@ export class InteractiveMode {
 			this.headerContainer.addChild(this.builtInHeader);
 		}
 
+		this.ui.addChild(this.headerContainer);
+		this.ui.addChild(this.loadedResourcesContainer);
 		this.ui.addChild(this.chatContainer);
 		this.ui.addChild(this.pendingMessagesContainer);
 		this.ui.addChild(this.statusContainer);
@@ -1296,6 +1300,10 @@ export class InteractiveMode {
 		force?: boolean;
 		showDiagnosticsWhenQuiet?: boolean;
 	}): void {
+		// Resource rendering is idempotent; chat clears no longer clear this separate container.
+		const loadedResourcesContainer = this.loadedResourcesContainer ?? this.chatContainer;
+		loadedResourcesContainer.clear();
+
 		const showListing = options?.force || this.options.verbose || !this.settingsManager.getQuietStartup();
 		const showDiagnostics = showListing || options?.showDiagnosticsWhenQuiet === true;
 		if (!showListing && !showDiagnostics) {
@@ -1323,8 +1331,8 @@ export class InteractiveMode {
 				0,
 				0,
 			);
-			this.chatContainer.addChild(section);
-			this.chatContainer.addChild(new Spacer(1));
+			loadedResourcesContainer.addChild(section);
+			loadedResourcesContainer.addChild(new Spacer(1));
 		};
 
 		const skillsResult = this.session.resourceLoader.getSkills();
@@ -1367,7 +1375,7 @@ export class InteractiveMode {
 		if (showListing) {
 			const contextFiles = this.session.resourceLoader.getAgentsFiles().agentsFiles;
 			if (contextFiles.length > 0) {
-				this.chatContainer.addChild(new Spacer(1));
+				loadedResourcesContainer.addChild(new Spacer(1));
 				const contextBackendInfo = this.session.getToolBackendInfo?.();
 				const contextBackendIcon =
 					contextBackendInfo?.type === "ssh" || contextBackendInfo?.type === "remote" ? "☁" : "🖥";
@@ -1479,24 +1487,28 @@ export class InteractiveMode {
 			const skillDiagnostics = skillsResult.diagnostics;
 			if (skillDiagnostics.length > 0) {
 				const warningLines = this.formatDiagnostics(skillDiagnostics, sourceInfos);
-				this.chatContainer.addChild(new Text(`${theme.fg("warning", "[Skill conflicts]")}\n${warningLines}`, 0, 0));
-				this.chatContainer.addChild(new Spacer(1));
+				loadedResourcesContainer.addChild(
+					new Text(`${theme.fg("warning", "[Skill conflicts]")}\n${warningLines}`, 0, 0),
+				);
+				loadedResourcesContainer.addChild(new Spacer(1));
 			}
 
 			const ruleDiagnostics = rulesResult.diagnostics;
 			if (ruleDiagnostics.length > 0) {
 				const warningLines = this.formatDiagnostics(ruleDiagnostics, sourceInfos);
-				this.chatContainer.addChild(new Text(`${theme.fg("warning", "[Rule conflicts]")}\n${warningLines}`, 0, 0));
-				this.chatContainer.addChild(new Spacer(1));
+				loadedResourcesContainer.addChild(
+					new Text(`${theme.fg("warning", "[Rule conflicts]")}\n${warningLines}`, 0, 0),
+				);
+				loadedResourcesContainer.addChild(new Spacer(1));
 			}
 
 			const promptDiagnostics = promptsResult.diagnostics;
 			if (promptDiagnostics.length > 0) {
 				const warningLines = this.formatDiagnostics(promptDiagnostics, sourceInfos);
-				this.chatContainer.addChild(
+				loadedResourcesContainer.addChild(
 					new Text(`${theme.fg("warning", "[Prompt conflicts]")}\n${warningLines}`, 0, 0),
 				);
-				this.chatContainer.addChild(new Spacer(1));
+				loadedResourcesContainer.addChild(new Spacer(1));
 			}
 
 			const extensionDiagnostics: ResourceDiagnostic[] = [];
@@ -1516,17 +1528,19 @@ export class InteractiveMode {
 
 			if (extensionDiagnostics.length > 0) {
 				const warningLines = this.formatDiagnostics(extensionDiagnostics, sourceInfos);
-				this.chatContainer.addChild(
+				loadedResourcesContainer.addChild(
 					new Text(`${theme.fg("warning", "[Extension issues]")}\n${warningLines}`, 0, 0),
 				);
-				this.chatContainer.addChild(new Spacer(1));
+				loadedResourcesContainer.addChild(new Spacer(1));
 			}
 
 			const themeDiagnostics = themesResult.diagnostics;
 			if (themeDiagnostics.length > 0) {
 				const warningLines = this.formatDiagnostics(themeDiagnostics, sourceInfos);
-				this.chatContainer.addChild(new Text(`${theme.fg("warning", "[Theme conflicts]")}\n${warningLines}`, 0, 0));
-				this.chatContainer.addChild(new Spacer(1));
+				loadedResourcesContainer.addChild(
+					new Text(`${theme.fg("warning", "[Theme conflicts]")}\n${warningLines}`, 0, 0),
+				);
+				loadedResourcesContainer.addChild(new Spacer(1));
 			}
 		}
 	}
@@ -1658,6 +1672,7 @@ export class InteractiveMode {
 	}
 
 	private renderCurrentSessionState(): void {
+		(this.loadedResourcesContainer ?? this.chatContainer).clear();
 		this.chatContainer.clear();
 		this.pendingMessagesContainer.clear();
 		this.compactionQueuedMessages = [];
@@ -3590,9 +3605,14 @@ export class InteractiveMode {
 		if (isExpandable(activeHeader)) {
 			activeHeader.setExpanded(expanded);
 		}
-		for (const child of this.chatContainer.children) {
-			if (isExpandable(child)) {
-				child.setExpanded(expanded);
+		const expandableContainers = this.loadedResourcesContainer
+			? [this.loadedResourcesContainer, this.chatContainer]
+			: [this.chatContainer];
+		for (const container of expandableContainers) {
+			for (const child of container.children) {
+				if (isExpandable(child)) {
+					child.setExpanded(expanded);
+				}
 			}
 		}
 		this.ui.requestRender();
