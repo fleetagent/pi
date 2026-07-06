@@ -4,6 +4,7 @@
 
 ### Fixed
 
+* Reject invalid harness shell execution timeouts.
 * Fixed harness session storage short entry ids to use the random tail of generated uuidv7 ids instead of the timestamp prefix.
 * Serialize split-turn compaction summary requests in the harness.
 

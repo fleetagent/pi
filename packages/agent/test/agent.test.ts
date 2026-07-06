@@ -301,6 +301,27 @@ describe("Agent", () => {
 		expect(agent.state.messages).not.toContainEqual(message);
 	});
 
+	it("passes next-turn context to context-aware preparation hooks", async () => {
+		let seenContextMessages: string[] = [];
+		const agent = new Agent({
+			streamFn: () => {
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("ok") });
+				});
+				return stream;
+			},
+			prepareNextTurnWithContext: (context) => {
+				seenContextMessages = context.context.messages.map((message) => message.role);
+				return undefined;
+			},
+		});
+
+		await agent.prompt("hello");
+
+		expect(seenContextMessages).toEqual(["user", "assistant"]);
+	});
+
 	it("should handle abort controller", () => {
 		const agent = new Agent();
 

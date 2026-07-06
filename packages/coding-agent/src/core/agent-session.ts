@@ -23,6 +23,7 @@ import type {
 	AgentMessage,
 	AgentState,
 	AgentTool,
+	PrepareNextTurnContext,
 	ThinkingLevel,
 } from "@fleetagent/pi-agent-core";
 import type {
@@ -698,9 +699,13 @@ export class AgentSession {
 	}
 
 	private _installAgentTurnPreparation(): void {
-		const previousPrepareNextTurn = this.agent.prepareNextTurn;
-		this.agent.prepareNextTurn = async (signal) => {
-			const previousUpdate = await previousPrepareNextTurn?.(signal);
+		const previousPrepareNextTurnWithContext =
+			this.agent.prepareNextTurnWithContext ??
+			(this.agent.prepareNextTurn
+				? async (_turn: PrepareNextTurnContext, signal?: AbortSignal) => await this.agent.prepareNextTurn?.(signal)
+				: undefined);
+		this.agent.prepareNextTurnWithContext = async (turn, signal) => {
+			const previousUpdate = await previousPrepareNextTurnWithContext?.(turn, signal);
 			await this._drainExtensionCompactionQueue("between-turns");
 
 			// Always rebuild the loop context so session-driven changes to the active
@@ -708,7 +713,7 @@ export class AgentSession {
 			// the next turn within the same run instead of waiting for a new prompt.
 			return {
 				...previousUpdate,
-				context: this._buildCurrentAgentContext(previousUpdate?.context),
+				context: this._buildCurrentAgentContext(previousUpdate?.context ?? turn.context),
 			} satisfies AgentLoopTurnUpdate;
 		};
 	}

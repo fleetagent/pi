@@ -285,4 +285,30 @@ describe("NodeExecutionEnv", () => {
 		expect(fullOutput.split("\n").length).toBeGreaterThan(10000);
 		expect(result.output.length).toBeLessThan(fullOutput.length);
 	});
+
+	it("rejects non-positive shell execution timeouts", async () => {
+		const root = createTempDir();
+		const env = new NodeExecutionEnv({ cwd: root });
+
+		const zero = await env.exec("echo unreachable", { timeout: 0 });
+		const negative = await env.exec("echo unreachable", { timeout: -1 });
+
+		expect(zero.ok).toBe(false);
+		if (zero.ok) throw new Error("expected timeout validation error");
+		expect(zero.error.code).toBe("timeout");
+		expect(zero.error.message).toBe("Invalid timeout: must be a finite number of seconds");
+		expect(negative.ok).toBe(false);
+	});
+
+	it("rejects oversized shell execution timeouts", async () => {
+		const root = createTempDir();
+		const env = new NodeExecutionEnv({ cwd: root });
+
+		const result = await env.exec("echo unreachable", { timeout: 2_147_483_648 / 1000 });
+
+		expect(result.ok).toBe(false);
+		if (result.ok) throw new Error("expected timeout validation error");
+		expect(result.error.code).toBe("timeout");
+		expect(result.error.message).toBe("Invalid timeout: maximum is 2147483.647 seconds");
+	});
 });
