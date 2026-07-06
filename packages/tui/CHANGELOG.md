@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+* Update the Markdown parser dependency.
+
 ### Fixed
 
 * Preserve source backslash escapes when requested by Markdown callers.

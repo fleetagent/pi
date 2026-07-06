@@ -6,6 +6,10 @@
 
 * Support custom headers for Bedrock requests.
 
+### Changed
+
+* Update Mistral SDK dependency.
+
 ### Fixed
 
 * Clamp OpenAI Responses `max_output_tokens` to the API minimum.

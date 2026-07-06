@@ -9,6 +9,10 @@
 * Add an `outputPad` setting for user message, assistant message, and thinking horizontal padding.
 * Reject invalid bash timeout values.
 
+### Changed
+
+* Update runtime and clipboard dependencies.
+
 ### Fixed
 
 * Abort stuck extension context hooks when an agent run is aborted.
