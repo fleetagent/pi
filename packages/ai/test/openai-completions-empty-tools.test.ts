@@ -93,7 +93,7 @@ describe("openai-completions empty tools handling", () => {
 		expect("tools" in (params as object)).toBe(false);
 	});
 
-	it("does not send default max token fields", async () => {
+	it("sends default max tokens clamped to context", async () => {
 		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
 		const model = { ...baseModel, api: "openai-completions" } as const;
 
@@ -107,7 +107,7 @@ describe("openai-completions empty tools handling", () => {
 
 		const params = mockState.lastParams as { max_tokens?: number; max_completion_tokens?: number };
 		expect(params.max_tokens).toBeUndefined();
-		expect(params.max_completion_tokens).toBeUndefined();
+		expect(params.max_completion_tokens).toBe(model.maxTokens);
 	});
 
 	it("sends explicit maxTokens", async () => {

@@ -9,6 +9,7 @@
 ### Fixed
 
 * Clamp OpenAI Responses `max_output_tokens` to the API minimum.
+* Clamp default `streamSimple` max-token budgets against estimated remaining context.
 * Refresh generated model catalogs.
 * Preserve Z.AI thinking content across tool calls.
 * Classify explicit provider retry guidance as retryable.

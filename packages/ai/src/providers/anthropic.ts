@@ -738,7 +738,7 @@ export const streamSimpleAnthropic: StreamFunction<"anthropic-messages", SimpleS
 		throw new Error(`No API key for provider: ${model.provider}`);
 	}
 
-	const base = buildBaseOptions(model, options, apiKey);
+	const base = buildBaseOptions(model, context, options, apiKey);
 	if (!options?.reasoning) {
 		return streamAnthropic(model, context, { ...base, thinkingEnabled: false } satisfies AnthropicOptions);
 	}
