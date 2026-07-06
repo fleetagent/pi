@@ -15,6 +15,7 @@
 * Preserve extension-modified run prompts during tool refresh.
 * Show a pnpm metadata recovery hint when self-update fails.
 * Handle undici mid-stream client errors without crashing.
+* Add an `externalEditor` setting for the Ctrl+G editor command.
 * Emit session name changes to extensions.
 * Retry assistant failures when providers explicitly ask clients to retry.
 * Preserve backslash escapes in rendered user messages.
