@@ -33,6 +33,7 @@
 * Process BMP images from disk by converting them to a supported inline format.
 * Surface auth storage save failures to callers.
 * Allow extra fields in edit tool replacement arguments.
+* Include the request ID in RPC unknown-command errors.
 
 ## [0.1.4](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.1.3...@fleetagent/pi-coding-agent-v0.1.4) (2026-06-16)
 
