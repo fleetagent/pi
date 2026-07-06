@@ -9,6 +9,7 @@
 ### Fixed
 
 * Clamp OpenAI Responses `max_output_tokens` to the API minimum.
+* Refresh generated model catalogs.
 * Preserve Z.AI thinking content across tool calls.
 * Classify explicit provider retry guidance as retryable.
 * Surface provider HTTP error bodies when SDK errors expose them.
