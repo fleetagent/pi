@@ -18,6 +18,7 @@
 * Detect DS4 context overflow errors.
 * Honor server-provided OAuth device-code `slow_down` polling intervals.
 * Rotate stale Codex websocket sessions.
+* Avoid browser User-Agent fallback races on first Codex requests.
 * Enable Bedrock prompt caching for Claude 5 models.
 
 ## [0.1.4](https://github.com/fleetagent/pi/compare/@fleetagent/pi-ai-v0.1.3...@fleetagent/pi-ai-v0.1.4) (2026-06-16)

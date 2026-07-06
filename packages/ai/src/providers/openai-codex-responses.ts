@@ -6,19 +6,23 @@ import type {
 	ResponseStreamEvent,
 } from "openai/resources/responses/responses.js";
 
+type ProcessWithOsBuiltinModule = typeof process & {
+	getBuiltinModule?: (id: "node:os") => typeof NodeOs;
+};
+
+function loadNodeOs(): typeof NodeOs | null {
+	if (typeof process === "undefined" || !(process.versions?.node || process.versions?.bun)) {
+		return null;
+	}
+	return (process as ProcessWithOsBuiltinModule).getBuiltinModule?.("node:os") ?? null;
+}
+
 // NEVER convert to top-level runtime imports - breaks browser/Vite builds
-let _os: typeof NodeOs | null = null;
+const _os: typeof NodeOs | null = loadNodeOs();
 
 type DynamicImport = (specifier: string) => Promise<unknown>;
 
 const dynamicImport: DynamicImport = (specifier) => import(specifier);
-const NODE_OS_SPECIFIER = "node:" + "os";
-
-if (typeof process !== "undefined" && (process.versions?.node || process.versions?.bun)) {
-	dynamicImport(NODE_OS_SPECIFIER).then((m) => {
-		_os = m as typeof NodeOs;
-	});
-}
 
 import { clampThinkingLevel } from "../models.ts";
 import { registerSessionResourceCleanup } from "../session-resources.ts";
