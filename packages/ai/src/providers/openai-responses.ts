@@ -14,6 +14,7 @@ import type {
 	StreamOptions,
 	Usage,
 } from "../types.ts";
+import { formatProviderError, normalizeProviderError } from "../utils/error-body.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { isCloudflareProvider, resolveCloudflareBaseUrl } from "./cloudflare.ts";
@@ -55,19 +56,7 @@ function getPromptCacheRetention(
 }
 
 function formatOpenAIResponsesError(error: unknown): string {
-	if (error instanceof Error) {
-		const status = (error as Error & { status?: unknown }).status;
-		const statusCode = typeof status === "number" ? status : undefined;
-		if (statusCode !== undefined) {
-			return `OpenAI API error (${statusCode}): ${error.message}`;
-		}
-		return error.message;
-	}
-	try {
-		return JSON.stringify(error);
-	} catch {
-		return String(error);
-	}
+	return formatProviderError(normalizeProviderError(error), "OpenAI API error");
 }
 
 // OpenAI Responses-specific options

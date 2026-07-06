@@ -30,6 +30,7 @@ import type {
 	ToolCall,
 	ToolResultMessage,
 } from "../types.ts";
+import { formatProviderError, normalizeProviderError } from "../utils/error-body.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { parseStreamingJson } from "../utils/json-parse.ts";
@@ -411,10 +412,10 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				delete (block as { streamIndex?: number }).streamIndex;
 			}
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-			output.errorMessage = error instanceof Error ? error.message : JSON.stringify(error);
+			output.errorMessage = formatProviderError(normalizeProviderError(error));
 			// Some providers via OpenRouter give additional information in this field.
-			const rawMetadata = (error as any)?.error?.metadata?.raw;
-			if (rawMetadata) output.errorMessage += `\n${rawMetadata}`;
+			const rawMetadata = (error as { error?: { metadata?: { raw?: unknown } } })?.error?.metadata?.raw;
+			if (typeof rawMetadata === "string" && rawMetadata.length > 0) output.errorMessage += `\n${rawMetadata}`;
 			stream.push({ type: "error", reason: output.stopReason, error: output });
 			stream.end();
 		}

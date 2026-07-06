@@ -9,6 +9,7 @@
 ### Fixed
 
 * Clamp OpenAI Responses `max_output_tokens` to the API minimum.
+* Surface provider HTTP error bodies when SDK errors expose them.
 * Delay GitHub Copilot device-code token polling until the server interval elapses.
 * Detect DS4 context overflow errors.
 * Honor server-provided OAuth device-code `slow_down` polling intervals.
