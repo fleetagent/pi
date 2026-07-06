@@ -562,7 +562,18 @@ function buildParams(
 	}
 
 	if (compat.thinkingFormat === "zai" && model.reasoning) {
-		(params as any).enable_thinking = !!options?.reasoningEffort;
+		const zaiParams = params as Omit<typeof params, "reasoning_effort"> & {
+			thinking?: { type: "enabled" | "disabled"; clear_thinking?: boolean };
+			reasoning_effort?: string;
+		};
+		zaiParams.thinking = options?.reasoningEffort ? { type: "enabled", clear_thinking: false } : { type: "disabled" };
+		if (options?.reasoningEffort && compat.supportsReasoningEffort) {
+			const mappedEffort = model.thinkingLevelMap?.[options.reasoningEffort];
+			const effort = mappedEffort === undefined ? options.reasoningEffort : mappedEffort;
+			if (typeof effort === "string") {
+				zaiParams.reasoning_effort = effort;
+			}
+		}
 	} else if (compat.thinkingFormat === "qwen" && model.reasoning) {
 		(params as any).enable_thinking = !!options?.reasoningEffort;
 	} else if (compat.thinkingFormat === "qwen-chat-template" && model.reasoning) {
