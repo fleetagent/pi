@@ -120,6 +120,22 @@ function shellQuote(value: string): string {
 	return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
+const MAX_TIMEOUT_MS = 2_147_483_647;
+const MAX_TIMEOUT_SECONDS = MAX_TIMEOUT_MS / 1000;
+
+function resolveTimeoutMs(timeout: number | undefined): number | undefined {
+	if (timeout === undefined) return undefined;
+	if (!Number.isFinite(timeout) || timeout <= 0) {
+		throw new Error("Invalid timeout: must be a finite number of seconds");
+	}
+
+	const timeoutMs = timeout * 1000;
+	if (timeoutMs > MAX_TIMEOUT_MS) {
+		throw new Error(`Invalid timeout: maximum is ${MAX_TIMEOUT_SECONDS} seconds`);
+	}
+	return timeoutMs;
+}
+
 function parseSshTarget(value: string): ParsedSshTarget {
 	const separatorIndex = value.indexOf(":");
 	if (separatorIndex === -1) {
@@ -235,17 +251,18 @@ async function runSshBuffer(
 	command: string,
 	options: { input?: Buffer | string; signal?: AbortSignal; timeout?: number } = {},
 ): Promise<Buffer> {
+	const timeoutMs = resolveTimeoutMs(options.timeout);
 	return new Promise((resolve, reject) => {
 		const child = spawn("ssh", sshArgs(remote, command), { stdio: ["pipe", "pipe", "pipe"] });
 		const stdout: Buffer[] = [];
 		const stderr: Buffer[] = [];
 		let timedOut = false;
 		let timeoutHandle: NodeJS.Timeout | undefined;
-		if (options.timeout !== undefined && options.timeout > 0) {
+		if (timeoutMs !== undefined) {
 			timeoutHandle = setTimeout(() => {
 				timedOut = true;
 				child.kill();
-			}, options.timeout * 1000);
+			}, timeoutMs);
 		}
 		child.stdout.on("data", (data: Buffer) => stdout.push(data));
 		child.stderr.on("data", (data: Buffer) => stderr.push(data));
@@ -287,6 +304,7 @@ export class LocalToolOperations implements ToolOperations {
 	}
 
 	async exec(command: string, options: ToolExecOptions): Promise<{ exitCode: number | null }> {
+		const timeoutMs = resolveTimeoutMs(options.timeout);
 		const cwd = options.cwd ?? this.cwd;
 		const { shell, args } = getShellConfig(this.shellPath);
 		try {
@@ -308,11 +326,11 @@ export class LocalToolOperations implements ToolOperations {
 			if (child.pid) trackDetachedChildPid(child.pid);
 			let timedOut = false;
 			let timeoutHandle: NodeJS.Timeout | undefined;
-			if (options.timeout !== undefined && options.timeout > 0) {
+			if (timeoutMs !== undefined) {
 				timeoutHandle = setTimeout(() => {
 					timedOut = true;
 					if (child.pid) killProcessTree(child.pid);
-				}, options.timeout * 1000);
+				}, timeoutMs);
 			}
 			child.stdout?.on("data", options.onData);
 			child.stderr?.on("data", options.onData);
@@ -405,6 +423,7 @@ export class SshToolOperations implements ToolOperations {
 	}
 
 	async exec(command: string, options: ToolExecOptions): Promise<{ exitCode: number | null }> {
+		const timeoutMs = resolveTimeoutMs(options.timeout);
 		const cwd = options.cwd ?? this.cwd;
 		const remoteCommand = `cd ${shellQuote(cwd)} && bash -s`;
 		return new Promise((resolve, reject) => {
@@ -413,11 +432,11 @@ export class SshToolOperations implements ToolOperations {
 			});
 			let timedOut = false;
 			let timeoutHandle: NodeJS.Timeout | undefined;
-			if (options.timeout !== undefined && options.timeout > 0) {
+			if (timeoutMs !== undefined) {
 				timeoutHandle = setTimeout(() => {
 					timedOut = true;
 					child.kill();
-				}, options.timeout * 1000);
+				}, timeoutMs);
 			}
 			child.stdout?.on("data", options.onData);
 			child.stderr?.on("data", options.onData);
@@ -911,6 +930,7 @@ export class RemoteToolOperations implements ToolOperations {
 	}
 
 	async exec(command: string, options: ToolExecOptions): Promise<{ exitCode: number | null }> {
+		const timeoutMs = resolveTimeoutMs(options.timeout);
 		const id = `remote-${this.nextId++}`;
 		let timeoutHandle: NodeJS.Timeout | undefined;
 		return new Promise((resolve, reject) => {
@@ -941,7 +961,7 @@ export class RemoteToolOperations implements ToolOperations {
 				},
 			});
 			options.signal?.addEventListener("abort", onAbort, { once: true });
-			if (options.timeout !== undefined && options.timeout > 0) {
+			if (timeoutMs !== undefined) {
 				timeoutHandle = setTimeout(() => {
 					try {
 						this.send({ id, method: "cancel" });
@@ -952,7 +972,7 @@ export class RemoteToolOperations implements ToolOperations {
 						cleanup();
 						pending.reject(new Error(`timeout:${options.timeout}`));
 					}
-				}, options.timeout * 1000);
+				}, timeoutMs);
 			}
 			try {
 				this.send({

@@ -21,7 +21,7 @@ import {
 	ToolResultStatus,
 } from "@aws-sdk/client-bedrock-runtime";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
-import type { DocumentType } from "@smithy/types";
+import type { BuildMiddleware, DocumentType, MetadataBearer } from "@smithy/types";
 import { calculateCost } from "../models.ts";
 import type {
 	Api,
@@ -182,6 +182,9 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 
 		try {
 			const client = new BedrockRuntimeClient(config);
+			if (options.headers && Object.keys(options.headers).length > 0) {
+				addCustomHeadersMiddleware(client, options.headers);
+			}
 			const cacheRetention = resolveCacheRetention(options.cacheRetention);
 			const inferenceMaxTokens = options.maxTokens ?? (isAnthropicClaudeModel(model) ? model.maxTokens : undefined);
 			let commandInput = {
@@ -294,6 +297,42 @@ function formatBedrockError(error: unknown): string {
 		return `${prefix}: ${message}`;
 	}
 	return message;
+}
+
+/**
+ * Header keys that must never be overwritten by caller-supplied headers.
+ * `host` and `x-amz-*` participate in the SigV4 canonical request; `authorization`
+ * is owned by SigV4 or the bearer-token path (config.token + authSchemePreference).
+ * Compared case-insensitively (caller key is lower-cased before lookup).
+ */
+const RESERVED_HEADER_EXACT = new Set(["authorization", "host"]);
+
+function isReservedHeader(key: string): boolean {
+	const lower = key.toLowerCase();
+	return lower.startsWith("x-amz-") || RESERVED_HEADER_EXACT.has(lower);
+}
+
+/**
+ * Attach caller-supplied headers to the outgoing Bedrock request via a Smithy
+ * `build`-step middleware. The `build` step runs after request serialisation but
+ * before SigV4 signing, so injected headers are covered by the signature. Reserved
+ * SigV4 / auth headers (`x-amz-*`, `authorization`, `host`) are silently skipped;
+ * all other caller headers override any existing same-named header on the request.
+ */
+function addCustomHeadersMiddleware(client: BedrockRuntimeClient, headers: Record<string, string>): void {
+	const middleware: BuildMiddleware<object, MetadataBearer> = (next) => async (args) => {
+		const request = args.request;
+		if (request && typeof request === "object" && "headers" in request) {
+			const requestHeaders = (request as { headers: Record<string, string> }).headers;
+			for (const [key, value] of Object.entries(headers)) {
+				if (!isReservedHeader(key)) {
+					requestHeaders[key] = value;
+				}
+			}
+		}
+		return next(args);
+	};
+	client.middlewareStack.add(middleware, { step: "build", name: "pi-ai-custom-headers", priority: "low" });
 }
 
 export const streamSimpleBedrock: StreamFunction<"bedrock-converse-stream", SimpleStreamOptions> = (
@@ -544,7 +583,7 @@ function isAnthropicClaudeModel(model: Model<"bedrock-converse-stream">): boolea
 
 /**
  * Check if the model supports prompt caching.
- * Supported: Claude 3.5 Haiku, Claude 3.7 Sonnet, Claude 4.x models
+ * Supported: Claude 3.5 Haiku, Claude 3.7 Sonnet, Claude 4.x models, Claude 5 models
  *
  * For base models and system-defined inference profiles the model ID / ARN
  * contains the model name, so we can decide locally.
@@ -564,6 +603,8 @@ function supportsPromptCaching(model: Model<"bedrock-converse-stream">): boolean
 		if (typeof process !== "undefined" && process.env.AWS_BEDROCK_FORCE_CACHE === "1") return true;
 		return false;
 	}
+	// Claude 5 models (fable-5, sonnet-5)
+	if (candidates.some((s) => s.includes("fable-5") || s.includes("sonnet-5"))) return true;
 	// Claude 4.x models (opus-4, sonnet-4, haiku-4)
 	if (candidates.some((s) => s.includes("-4-"))) return true;
 	// Claude 3.7 Sonnet

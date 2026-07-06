@@ -602,6 +602,7 @@ export async function runRpcMode(runtimeHost: PiAgentRuntimeHost): Promise<never
 				const result = await session.executeBash(command.command, undefined, {
 					record: command.record,
 					truncate: command.truncate,
+					excludeFromContext: command.excludeFromContext,
 				});
 				return success(id, "bash", result);
 			}
@@ -691,6 +692,22 @@ export async function runRpcMode(runtimeHost: PiAgentRuntimeHost): Promise<never
 			case "get_fork_messages": {
 				const messages = session.getUserMessagesForForking();
 				return success(id, "get_fork_messages", { messages });
+			}
+
+			case "get_entries": {
+				let entries = session.session.getEntries();
+				if (command.since !== undefined) {
+					const sinceIndex = entries.findIndex((entry) => entry.id === command.since);
+					if (sinceIndex === -1) {
+						return error(id, "get_entries", `Entry not found: ${command.since}`);
+					}
+					entries = entries.slice(sinceIndex + 1);
+				}
+				return success(id, "get_entries", { entries, leafId: session.session.getLeafId() });
+			}
+
+			case "get_tree": {
+				return success(id, "get_tree", { tree: session.session.getTree(), leafId: session.session.getLeafId() });
 			}
 
 			case "get_last_assistant_text": {

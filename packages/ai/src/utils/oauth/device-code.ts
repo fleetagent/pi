@@ -10,7 +10,7 @@ const SLOW_DOWN_INTERVAL_INCREMENT_MS = 5000;
 
 export type OAuthDeviceCodePollResult =
 	| { status: "pending" }
-	| { status: "slow_down" }
+	| { status: "slow_down"; intervalSeconds?: number }
 	| { status: "complete"; accessToken: string }
 	| { status: "failed"; message: string };
 
@@ -69,8 +69,15 @@ export async function pollOAuthDeviceCodeFlow(options: OAuthDeviceCodePollOption
 		}
 		if (result.status === "slow_down") {
 			slowDownResponses += 1;
-			// RFC 8628 section 3.5: apply this increase to this and all subsequent requests.
-			intervalMs = Math.max(MINIMUM_INTERVAL_MS, intervalMs + SLOW_DOWN_INTERVAL_INCREMENT_MS);
+			// Use the server-provided interval when given (GitHub reports the new required minimum
+			// in `interval`); trusting only a client-tracked value risks polling early forever under
+			// WSL/VM clock drift. Otherwise apply RFC 8628 section 3.5: increase by 5 seconds.
+			intervalMs =
+				typeof result.intervalSeconds === "number" &&
+				Number.isFinite(result.intervalSeconds) &&
+				result.intervalSeconds > 0
+					? Math.max(MINIMUM_INTERVAL_MS, Math.floor(result.intervalSeconds * 1000))
+					: Math.max(MINIMUM_INTERVAL_MS, intervalMs + SLOW_DOWN_INTERVAL_INCREMENT_MS);
 			continue;
 		}
 		throw new Error(result.message);

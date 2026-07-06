@@ -38,6 +38,7 @@ type DeviceTokenSuccessResponse = {
 type DeviceTokenErrorResponse = {
 	error: string;
 	error_description?: string;
+	interval?: number;
 };
 
 export function normalizeDomain(input: string): string | null {
@@ -167,13 +168,13 @@ async function pollForGitHubAccessToken(domain: string, device: DeviceCodeRespon
 			}
 
 			if (raw && typeof raw === "object" && typeof (raw as DeviceTokenErrorResponse).error === "string") {
-				const { error, error_description: description } = raw as DeviceTokenErrorResponse;
+				const { error, error_description: description, interval } = raw as DeviceTokenErrorResponse;
 				if (error === "authorization_pending") {
 					return { status: "pending" };
 				}
 
 				if (error === "slow_down") {
-					return { status: "slow_down" };
+					return { status: "slow_down", intervalSeconds: typeof interval === "number" ? interval : undefined };
 				}
 
 				const descriptionSuffix = description ? `: ${description}` : "";

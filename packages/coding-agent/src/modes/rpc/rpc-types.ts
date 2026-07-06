@@ -13,7 +13,7 @@ import type { BashResult } from "../../core/bash-executor.ts";
 import type { CompactionResult } from "../../core/compaction/index.ts";
 import type { ToolDefinition, ToolInfo } from "../../core/extensions/index.ts";
 import type { ExtensionInstructionRegistration } from "../../core/extensions/types.ts";
-import type { SessionInfo } from "../../core/session/types.ts";
+import type { SessionEntry, SessionInfo, SessionTreeNode } from "../../core/session/types.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
 import type { ToolBackendInfo } from "../../core/tools/index.ts";
 
@@ -78,7 +78,14 @@ export type RpcCommand =
 	| { id?: string; type: "abort_retry" }
 
 	// Bash
-	| { id?: string; type: "bash"; command: string; record?: boolean; truncate?: boolean }
+	| {
+			id?: string;
+			type: "bash";
+			command: string;
+			record?: boolean;
+			truncate?: boolean;
+			excludeFromContext?: boolean;
+	  }
 	| { id?: string; type: "abort_bash" }
 
 	// Remote sandbox
@@ -95,6 +102,8 @@ export type RpcCommand =
 	| { id?: string; type: "fork"; entryId: string }
 	| { id?: string; type: "clone" }
 	| { id?: string; type: "get_fork_messages" }
+	| { id?: string; type: "get_entries"; since?: string }
+	| { id?: string; type: "get_tree" }
 	| { id?: string; type: "get_last_assistant_text" }
 	| { id?: string; type: "set_session_name"; name: string }
 
@@ -265,6 +274,20 @@ export type RpcResponse =
 			command: "get_fork_messages";
 			success: true;
 			data: { messages: Array<{ entryId: string; text: string }> };
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "get_entries";
+			success: true;
+			data: { entries: SessionEntry[]; leafId: string | null };
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "get_tree";
+			success: true;
+			data: { tree: SessionTreeNode[]; leafId: string | null };
 	  }
 	| {
 			id?: string;

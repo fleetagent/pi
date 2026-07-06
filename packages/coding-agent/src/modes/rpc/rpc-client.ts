@@ -12,7 +12,7 @@ import type { SessionStats, StructuredResponse } from "../../core/agent-session.
 import type { BashResult } from "../../core/bash-executor.ts";
 import type { CompactionResult } from "../../core/compaction/index.ts";
 import type { ToolInfo } from "../../core/extensions/index.ts";
-import type { SessionInfo } from "../../core/session/types.ts";
+import type { SessionEntry, SessionInfo, SessionTreeNode } from "../../core/session/types.ts";
 import type { ToolBackendInfo } from "../../core/tools/index.ts";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
 import type {
@@ -399,8 +399,17 @@ export class RpcClient {
 	 * Set options.record to false to avoid adding the result to session history.
 	 * Set options.truncate to false to return complete output.
 	 */
-	async bash(command: string, options: { record?: boolean; truncate?: boolean } = {}): Promise<BashResult> {
-		const response = await this.send({ type: "bash", command, record: options.record, truncate: options.truncate });
+	async bash(
+		command: string,
+		options: { record?: boolean; truncate?: boolean; excludeFromContext?: boolean } = {},
+	): Promise<BashResult> {
+		const response = await this.send({
+			type: "bash",
+			command,
+			record: options.record,
+			truncate: options.truncate,
+			excludeFromContext: options.excludeFromContext,
+		});
 		return this.getData(response);
 	}
 
@@ -494,6 +503,22 @@ export class RpcClient {
 	async getForkMessages(): Promise<Array<{ entryId: string; text: string }>> {
 		const response = await this.send({ type: "get_fork_messages" });
 		return this.getData<{ messages: Array<{ entryId: string; text: string }> }>(response).messages;
+	}
+
+	/**
+	 * Get session entries in append order, optionally only those after the `since` entry id.
+	 */
+	async getEntries(since?: string): Promise<{ entries: SessionEntry[]; leafId: string | null }> {
+		const response = await this.send({ type: "get_entries", since });
+		return this.getData<{ entries: SessionEntry[]; leafId: string | null }>(response);
+	}
+
+	/**
+	 * Get the session entry tree.
+	 */
+	async getTree(): Promise<{ tree: SessionTreeNode[]; leafId: string | null }> {
+		const response = await this.send({ type: "get_tree" });
+		return this.getData<{ tree: SessionTreeNode[]; leafId: string | null }>(response);
 	}
 
 	/**

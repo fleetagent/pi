@@ -208,6 +208,7 @@ export {
 	type SessionInfoEntry,
 	type SessionManager,
 	type SessionMessageEntry,
+	type SessionTreeNode,
 	type ThinkingLevelChangeEntry,
 } from "./core/session-manager.ts";
 export {

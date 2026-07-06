@@ -1,5 +1,22 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+* Add RPC commands for reading session entries and the session tree.
+* Add an RPC bash option to exclude command output from model context.
+* Reject invalid bash timeout values.
+
+### Fixed
+
+* Abort stuck extension context hooks when an agent run is aborted.
+* Refresh active tools and system prompt before the next turn in a run.
+* Preserve extension-modified run prompts during tool refresh.
+* Process BMP images from disk by converting them to a supported inline format.
+* Surface auth storage save failures to callers.
+* Allow extra fields in edit tool replacement arguments.
+
 ## [0.1.4](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.1.3...@fleetagent/pi-coding-agent-v0.1.4) (2026-06-16)
 
 
