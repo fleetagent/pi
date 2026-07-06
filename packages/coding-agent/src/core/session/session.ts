@@ -1,3 +1,4 @@
+import { statSync } from "node:fs";
 import type { ImageContent, Message, TextContent } from "@fleetagent/pi-ai";
 import type { BashExecutionMessage, CustomMessage } from "../messages.ts";
 import { CURRENT_SESSION_VERSION } from "./constants.ts";
@@ -119,9 +120,12 @@ export abstract class Session {
 		if (this.store.exists(sessionReference)) {
 			this.store.setEntries(this.store.load(sessionReference));
 
-			// If the opened session has no valid header, start fresh to avoid
-			// appending messages without a session header.
+			// If the file is empty, initialize it with a valid session header. If it was
+			// non-empty but did not parse as a pi session, fail without modifying it.
 			if (this.store.getFileEntries().length === 0) {
+				if (statSync(sessionReference).size > 0) {
+					throw new Error(`Session file is not a valid pi session: ${sessionReference}`);
+				}
 				this.newSession();
 				this.store.setSessionReference(sessionReference);
 				this.store.saveSnapshot();

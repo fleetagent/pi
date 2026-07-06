@@ -192,6 +192,16 @@ function forkSessionOrExit(sourcePath: string, cwd: string, sessionDir?: string)
 	}
 }
 
+function openSessionOrExit(path: string, cwd: string, sessionDir?: string): Session {
+	try {
+		return new LocalSessionManager({ cwd, sessionDir }).openReference(path);
+	} catch (error: unknown) {
+		const message = error instanceof Error ? error.message : String(error);
+		console.error(chalk.red(`Error: ${message}`));
+		process.exit(1);
+	}
+}
+
 interface RemoteSessionCliOptions {
 	baseUrl: string;
 	token: string;
@@ -302,7 +312,7 @@ async function resolveInitialSession(
 		switch (resolved.type) {
 			case "path":
 			case "local":
-				return new LocalSessionManager({ cwd: process.cwd(), sessionDir: sessionDir }).openReference(resolved.path);
+				return openSessionOrExit(resolved.path, process.cwd(), sessionDir);
 
 			case "global": {
 				console.log(chalk.yellow(`Session found in different project: ${resolved.cwd}`));
@@ -331,7 +341,7 @@ async function resolveInitialSession(
 				console.log(chalk.dim("No session selected"));
 				process.exit(0);
 			}
-			return new LocalSessionManager({ cwd: process.cwd(), sessionDir: sessionDir }).openReference(selectedPath);
+			return openSessionOrExit(selectedPath, process.cwd(), sessionDir);
 		} finally {
 			stopThemeWatcher();
 		}

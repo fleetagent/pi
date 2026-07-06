@@ -15,6 +15,7 @@
 * Preserve extension-modified run prompts during tool refresh.
 * Show a pnpm metadata recovery hint when self-update fails.
 * Handle undici mid-stream client errors without crashing.
+* Reject invalid non-empty session files without modifying them.
 * Show length stop errors for incomplete assistant messages.
 * Serialize split-turn compaction summary requests.
 * Skip the saved default model during startup when it lacks configured auth.
