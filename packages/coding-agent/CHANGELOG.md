@@ -6,6 +6,7 @@
 
 * Add RPC commands for reading session entries and the session tree.
 * Add an RPC bash option to exclude command output from model context.
+* Add an `outputPad` setting for user message, assistant message, and thinking horizontal padding.
 * Reject invalid bash timeout values.
 
 ### Fixed

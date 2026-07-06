@@ -109,6 +109,7 @@ export interface Settings {
 	treeFilterMode?: "default" | "no-tools" | "user-only" | "labeled-only" | "all"; // Default filter when opening /tree
 	thinkingBudgets?: ThinkingBudgetsSettings; // Custom token budgets for thinking levels
 	editorPaddingX?: number; // Horizontal padding for input editor (default: 0)
+	outputPad?: 0 | 1; // Horizontal padding for user, assistant, and thinking output (default: 1)
 	autocompleteMaxVisible?: number; // Max visible items in autocomplete dropdown (default: 5)
 	showHardwareCursor?: boolean; // Show terminal cursor while still positioning it for IME
 	markdown?: MarkdownSettings;
@@ -1094,6 +1095,16 @@ export class SettingsManager {
 	setEditorPaddingX(padding: number): void {
 		this.globalSettings.editorPaddingX = Math.max(0, Math.min(3, Math.floor(padding)));
 		this.markModified("editorPaddingX");
+		this.save();
+	}
+
+	getOutputPad(): 0 | 1 {
+		return this.settings.outputPad === 0 ? 0 : 1;
+	}
+
+	setOutputPad(padding: number): void {
+		this.globalSettings.outputPad = padding === 0 ? 0 : 1;
+		this.markModified("outputPad");
 		this.save();
 	}
 

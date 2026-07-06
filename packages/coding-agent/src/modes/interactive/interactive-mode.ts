@@ -289,6 +289,7 @@ export class InteractiveMode {
 
 	// Thinking block visibility state
 	private hideThinkingBlock = false;
+	private outputPad = 1;
 
 	// Skill commands: command name -> skill file path
 	private skillCommands = new Map<string, string>();
@@ -395,6 +396,7 @@ export class InteractiveMode {
 
 		// Load hide thinking block setting
 		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
+		this.outputPad = this.settingsManager.getOutputPad();
 
 		// Register themes from resource loader and initialize
 		setRegisteredThemes(this.session.resourceLoader.getThemes().themes);
@@ -1640,6 +1642,7 @@ export class InteractiveMode {
 		this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);
 		this.footerDataProvider.setCwd(this.activeSession.getCwd());
 		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
+		this.outputPad = this.settingsManager.getOutputPad();
 		this.ui.setShowHardwareCursor(this.settingsManager.getShowHardwareCursor());
 		this.ui.setClearOnShrink(this.settingsManager.getClearOnShrink());
 		const editorPaddingX = this.settingsManager.getEditorPaddingX();
@@ -2814,6 +2817,7 @@ export class InteractiveMode {
 						this.hideThinkingBlock,
 						this.getMarkdownThemeWithSettings(),
 						this.hiddenThinkingLabel,
+						this.outputPad,
 					);
 					this.streamingMessage = event.message;
 					this.chatContainer.addChild(this.streamingComponent);
@@ -3182,11 +3186,16 @@ export class InteractiveMode {
 							const userComponent = new UserMessageComponent(
 								skillBlock.userMessage,
 								this.getMarkdownThemeWithSettings(),
+								this.outputPad,
 							);
 							this.chatContainer.addChild(userComponent);
 						}
 					} else {
-						const userComponent = new UserMessageComponent(textContent, this.getMarkdownThemeWithSettings());
+						const userComponent = new UserMessageComponent(
+							textContent,
+							this.getMarkdownThemeWithSettings(),
+							this.outputPad,
+						);
 						this.chatContainer.addChild(userComponent);
 					}
 					if (options?.populateHistory) {
@@ -3201,6 +3210,7 @@ export class InteractiveMode {
 					this.hideThinkingBlock,
 					this.getMarkdownThemeWithSettings(),
 					this.hiddenThinkingLabel,
+					this.outputPad,
 				);
 				this.chatContainer.addChild(assistantComponent);
 				break;
@@ -3989,6 +3999,7 @@ export class InteractiveMode {
 					treeFilterMode: this.settingsManager.getTreeFilterMode(),
 					showHardwareCursor: this.settingsManager.getShowHardwareCursor(),
 					editorPaddingX: this.settingsManager.getEditorPaddingX(),
+					outputPad: this.settingsManager.getOutputPad(),
 					autocompleteMaxVisible: this.settingsManager.getAutocompleteMaxVisible(),
 					quietStartup: this.settingsManager.getQuietStartup(),
 					clearOnShrink: this.settingsManager.getClearOnShrink(),
@@ -4093,6 +4104,23 @@ export class InteractiveMode {
 						if (this.editor !== this.defaultEditor && this.editor.setPaddingX !== undefined) {
 							this.editor.setPaddingX(padding);
 						}
+					},
+					onOutputPadChange: (padding) => {
+						this.settingsManager.setOutputPad(padding);
+						this.outputPad = padding;
+						if (this.streamingComponent || this.session.isStreaming) {
+							for (const child of this.chatContainer.children) {
+								if (child instanceof AssistantMessageComponent || child instanceof UserMessageComponent) {
+									child.setOutputPad(padding);
+								}
+							}
+							if (this.streamingComponent) {
+								this.streamingComponent.setOutputPad(padding);
+							}
+							this.ui.requestRender();
+							return;
+						}
+						this.rebuildChatFromMessages();
 					},
 					onAutocompleteMaxVisibleChange: (maxVisible) => {
 						this.settingsManager.setAutocompleteMaxVisible(maxVisible);
@@ -5041,6 +5069,7 @@ export class InteractiveMode {
 			}
 			setRegisteredThemes(this.session.resourceLoader.getThemes().themes);
 			this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
+			this.outputPad = this.settingsManager.getOutputPad();
 			const themeName = this.settingsManager.getTheme();
 			const themeResult = themeName ? setTheme(themeName, true) : { success: true };
 			if (!themeResult.success) {
