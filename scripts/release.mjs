@@ -166,6 +166,7 @@ console.log();
 // 4. Generate publish shrinkwrap
 console.log("Generating coding-agent shrinkwrap...");
 run("npm run shrinkwrap:coding-agent");
+run("npm run install-lock:coding-agent");
 console.log();
 
 // 5. Commit and tag

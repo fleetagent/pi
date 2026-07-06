@@ -1,0 +1,18 @@
+{
+	"name": "@fleetagent/pi-coding-agent-install",
+	"version": "0.1.4",
+	"private": true,
+	"description": "Lockfile root used by the Pi installer and updater.",
+	"dependencies": {
+		"@fleetagent/pi-coding-agent": "0.1.4"
+	},
+	"overrides": {
+		"rimraf": "6.1.2",
+		"gaxios": {
+			"rimraf": "6.1.2"
+		}
+	},
+	"engines": {
+		"node": ">=22.19.0"
+	}
+}
