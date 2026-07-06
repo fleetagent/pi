@@ -17,6 +17,7 @@ export type OAuthDeviceCodePollResult =
 export type OAuthDeviceCodePollOptions = {
 	intervalSeconds?: number;
 	expiresInSeconds?: number;
+	waitBeforeFirstPoll?: boolean;
 	poll: () => Promise<OAuthDeviceCodePollResult>;
 	signal?: AbortSignal;
 };
@@ -52,20 +53,24 @@ export async function pollOAuthDeviceCodeFlow(options: OAuthDeviceCodePollOption
 	);
 
 	let slowDownResponses = 0;
+	if (options.waitBeforeFirstPoll) {
+		const remainingMs = deadline - Date.now();
+		if (remainingMs > 0) {
+			await abortableSleep(Math.min(intervalMs, remainingMs), options.signal, CANCEL_MESSAGE);
+		}
+	}
+
 	while (Date.now() < deadline) {
 		if (options.signal?.aborted) {
 			throw new Error(CANCEL_MESSAGE);
 		}
 
-		const remainingMs = deadline - Date.now();
-		await abortableSleep(Math.min(intervalMs, remainingMs), options.signal, CANCEL_MESSAGE);
-
 		const result = await options.poll();
 		if (result.status === "complete") {
 			return result.accessToken;
 		}
-		if (result.status === "pending") {
-			continue;
+		if (result.status === "failed") {
+			throw new Error(result.message);
 		}
 		if (result.status === "slow_down") {
 			slowDownResponses += 1;
@@ -78,9 +83,14 @@ export async function pollOAuthDeviceCodeFlow(options: OAuthDeviceCodePollOption
 				result.intervalSeconds > 0
 					? Math.max(MINIMUM_INTERVAL_MS, Math.floor(result.intervalSeconds * 1000))
 					: Math.max(MINIMUM_INTERVAL_MS, intervalMs + SLOW_DOWN_INTERVAL_INCREMENT_MS);
-			continue;
 		}
-		throw new Error(result.message);
+
+		const remainingMs = deadline - Date.now();
+		if (remainingMs <= 0) {
+			break;
+		}
+
+		await abortableSleep(Math.min(intervalMs, remainingMs), options.signal, CANCEL_MESSAGE);
 	}
 
 	throw new Error(slowDownResponses > 0 ? SLOW_DOWN_TIMEOUT_MESSAGE : TIMEOUT_MESSAGE);

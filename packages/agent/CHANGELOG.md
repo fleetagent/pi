@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+* Fixed harness session storage short entry ids to use the random tail of generated uuidv7 ids instead of the timestamp prefix.
+* Serialize split-turn compaction summary requests in the harness.
+
 ## [0.1.4](https://github.com/fleetagent/pi/compare/@fleetagent/pi-agent-core-v0.1.3...@fleetagent/pi-agent-core-v0.1.4) (2026-06-16)
 
 

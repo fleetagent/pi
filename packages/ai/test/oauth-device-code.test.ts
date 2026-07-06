@@ -6,7 +6,7 @@ describe("OAuth device-code polling", () => {
 		vi.useRealTimers();
 	});
 
-	it("waits before the first poll and returns the completed value", async () => {
+	it("polls immediately by default and returns the completed value", async () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(new Date("2026-03-09T00:00:00Z"));
 
@@ -24,18 +24,41 @@ describe("OAuth device-code polling", () => {
 			poll,
 		});
 
+		await vi.advanceTimersByTimeAsync(0);
+		expect(pollTimes).toEqual([new Date("2026-03-09T00:00:00Z").getTime()]);
+
+		await vi.advanceTimersByTimeAsync(1999);
+		expect(pollTimes).toEqual([new Date("2026-03-09T00:00:00Z").getTime()]);
+
+		await vi.advanceTimersByTimeAsync(1);
+		await expect(resultPromise).resolves.toBe("token");
+		expect(pollTimes).toEqual([
+			new Date("2026-03-09T00:00:00Z").getTime(),
+			new Date("2026-03-09T00:00:02Z").getTime(),
+		]);
+	});
+
+	it("waits before the first poll when requested", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date("2026-03-09T00:00:00Z"));
+
+		const pollTimes: number[] = [];
+		const resultPromise = pollOAuthDeviceCodeFlow({
+			intervalSeconds: 2,
+			expiresInSeconds: 30,
+			waitBeforeFirstPoll: true,
+			poll: async () => {
+				pollTimes.push(Date.now());
+				return { status: "complete", accessToken: "token" };
+			},
+		});
+
 		await vi.advanceTimersByTimeAsync(1999);
 		expect(pollTimes).toEqual([]);
 
 		await vi.advanceTimersByTimeAsync(1);
-		expect(pollTimes).toEqual([new Date("2026-03-09T00:00:02Z").getTime()]);
-
-		await vi.advanceTimersByTimeAsync(2000);
 		await expect(resultPromise).resolves.toBe("token");
-		expect(pollTimes).toEqual([
-			new Date("2026-03-09T00:00:02Z").getTime(),
-			new Date("2026-03-09T00:00:04Z").getTime(),
-		]);
+		expect(pollTimes).toEqual([new Date("2026-03-09T00:00:02Z").getTime()]);
 	});
 
 	it("cancels an in-flight wait", async () => {

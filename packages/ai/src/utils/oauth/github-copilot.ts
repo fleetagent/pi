@@ -147,6 +147,7 @@ async function pollForGitHubAccessToken(domain: string, device: DeviceCodeRespon
 	return pollOAuthDeviceCodeFlow({
 		intervalSeconds: device.interval,
 		expiresInSeconds: device.expires_in,
+		waitBeforeFirstPoll: true,
 		signal,
 		poll: async () => {
 			const raw = await fetchJson(urls.accessTokenUrl, {

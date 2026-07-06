@@ -242,10 +242,6 @@ describe("GitHub Copilot OAuth device flow", () => {
 		await vi.advanceTimersByTimeAsync(1);
 		await rejection;
 
-		expect(accessTokenPollTimes).toEqual([
-			startTime.getTime() + 5000,
-			startTime.getTime() + 15000,
-			startTime.getTime() + 25000,
-		]);
+		expect(accessTokenPollTimes).toEqual([startTime.getTime() + 5000, startTime.getTime() + 15000]);
 	});
 });
