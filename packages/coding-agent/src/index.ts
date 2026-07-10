@@ -152,6 +152,35 @@ export {
 } from "./core/extensions/index.ts";
 // Footer data provider (git branch + extension statuses - data not otherwise available to extensions)
 export type { ReadonlyFooterDataProvider } from "./core/footer-data-provider.ts";
+export {
+	createLspCodeActionsTool,
+	createLspDefinitionTool,
+	createLspDiagnosticsTool,
+	createLspHoverTool,
+	createLspReferencesTool,
+	createLspRenameTool,
+	createLspRuntimeState,
+	formatAutoDiagnosticsForChangedFile,
+	getLspLanguageId,
+	LSP_LANGUAGE_BY_EXTENSION,
+	LspClient,
+	type LspClientOptions,
+	type LspClientStartResult,
+	type LspCodeActionsDetails,
+	type LspDiagnosticsDetails,
+	LspFileSync,
+	type LspHoverDetails,
+	type LspLifecycleOptions,
+	type LspLocationDetails,
+	LspManager,
+	type LspManagerOptions,
+	type LspRenameDetails,
+	type LspRuntimeState,
+	type LspServerConfig,
+	type LspServerStatus,
+	type LspTrackedDocument,
+	registerLspLifecycleHandlers,
+} from "./core/lsp/index.ts";
 export { convertToLlm } from "./core/messages.ts";
 export { ModelRegistry } from "./core/model-registry.ts";
 export type {

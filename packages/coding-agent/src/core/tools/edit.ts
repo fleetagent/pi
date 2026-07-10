@@ -1,428 +1,380 @@
-import type { AgentTool } from "@fleetagent/pi-agent-core";
-import { Box, Container, Spacer, Text } from "@fleetagent/pi-tui";
-
+import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@fleetagent/pi-agent-core";
+import { Text } from "@fleetagent/pi-tui";
+import { createTwoFilesPatch } from "diff";
 import { type Static, Type } from "typebox";
-import { renderDiff } from "../../modes/interactive/components/diff.ts";
+import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
-import {
-	applyEditsToNormalizedContent,
-	computeEditsDiff,
-	detectLineEnding,
-	type Edit,
-	type EditDiffError,
-	type EditDiffResult,
-	generateDiffString,
-	generateUnifiedPatch,
-	normalizeToLF,
-	restoreLineEndings,
-	stripBom,
-} from "./edit-diff.ts";
 import { withFileMutationQueue } from "./file-mutation-queue.ts";
+import { applyEdits, fmtBoundaryWarning, type HTEdit, initHasher, lineHashes, resEdits } from "./hashline/index.ts";
 import type { ToolBackendInfo, ToolOperations } from "./operations.ts";
 import { resolveToCwd } from "./path-utils.ts";
 import { formatBackendIcon, invalidArgText, shortenPath, str } from "./render-utils.ts";
+import { detectEnding, genDiff, restoreEndings, stripBOM, toLF } from "./replace-diff.ts";
+import { normReq } from "./replace-normalize.ts";
+import { fmtCall, getPreviewInput, type RPreview, type RRState } from "./replace-render.ts";
+import { abortIf } from "./runtime.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
-type EditPreview = EditDiffResult | EditDiffError;
+const contentLinesSchema = Type.Array(Type.String(), {
+	description:
+		"Literal replacement content, one string per line. Use [] to delete the range. Do not include HASH│ prefixes from read output.",
+});
 
-type EditRenderState = {
-	callComponent?: EditCallRenderComponent;
-};
+const hashRangeInclusiveSchema = Type.Tuple(
+	[
+		Type.String({ description: "Start 3-character hash anchor from read output" }),
+		Type.String({ description: "End 3-character hash anchor from read output" }),
+	],
+	{ description: "Inclusive hash range to replace [start_hash, end_hash]. Use hash anchors only." },
+);
 
-const replaceEditSchema = Type.Object(
+const editItemSchema = Type.Object(
 	{
-		oldText: Type.String({
-			description:
-				"Exact text for one targeted replacement. It must be unique in the original file and must not overlap with any other edits[].oldText in the same call.",
-		}),
-		newText: Type.String({ description: "Replacement text for this targeted edit." }),
+		hash_range_inclusive: hashRangeInclusiveSchema,
+		content_lines: contentLinesSchema,
 	},
-	{},
+	{ additionalProperties: false },
 );
 
 const editSchema = Type.Object(
 	{
 		path: Type.String({ description: "Path to the file to edit (relative or absolute)" }),
-		edits: Type.Array(replaceEditSchema, {
-			description:
-				"One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead.",
+		changes: Type.Array(editItemSchema, {
+			description: "One or more hash-anchored replacements. All anchors must come from the same read snapshot.",
 		}),
 	},
-	{},
+	{ additionalProperties: false },
 );
 
 export type EditToolInput = Static<typeof editSchema>;
-type LegacyEditToolInput = EditToolInput & {
-	oldText?: unknown;
-	newText?: unknown;
+
+export type ReqParams = {
+	path: string;
+	changes: HTEdit[];
 };
 
-export interface EditToolDetails {
-	/** Display-oriented diff of the changes made */
+export type RMetrics = {
+	edits_attempted: number;
+	edits_noop: number;
+	warnings: number;
+	classification: "applied" | "noop";
+	changed_lines?: { first: number; last: number };
+	added_lines?: number;
+	removed_lines?: number;
+};
+
+export interface ReplaceDetails {
 	diff: string;
-	/** Standard unified patch of the changes made */
 	patch: string;
-	/** Line number of the first change in the new file (for editor navigation) */
 	firstChangedLine?: number;
+	classification?: "noop";
+	metrics?: RMetrics;
 }
+
+export type EditToolDetails = ReplaceDetails;
 
 export interface EditToolOptions {}
 
-function prepareEditArguments(input: unknown): EditToolInput {
-	if (!input || typeof input !== "object") {
-		return input as EditToolInput;
-	}
-
-	const args = input as Record<string, unknown>;
-
-	// Some models (Opus 4.6, GLM-5.1) send edits as a JSON string instead of an array
-	if (typeof args.edits === "string") {
-		try {
-			const parsed = JSON.parse(args.edits);
-			if (Array.isArray(parsed)) args.edits = parsed;
-		} catch {}
-	}
-
-	const legacy = args as LegacyEditToolInput;
-	if (typeof legacy.oldText !== "string" || typeof legacy.newText !== "string") {
-		return args as EditToolInput;
-	}
-
-	const edits = Array.isArray(legacy.edits) ? [...legacy.edits] : [];
-	edits.push({ oldText: legacy.oldText, newText: legacy.newText });
-	const { oldText: _oldText, newText: _newText, ...rest } = legacy;
-	return { ...rest, edits } as EditToolInput;
-}
-
-function validateEditInput(input: EditToolInput): { path: string; edits: Edit[] } {
-	if (!Array.isArray(input.edits) || input.edits.length === 0) {
-		throw new Error("Edit tool input is invalid. edits must contain at least one replacement.");
-	}
-	return { path: input.path, edits: input.edits };
-}
+type EditRenderState = RRState;
 
 type RenderableEditArgs = {
 	path?: string;
 	file_path?: string;
-	edits?: Edit[];
-	oldText?: string;
-	newText?: string;
+	changes?: HTEdit[];
+	edits?: HTEdit[];
+	hash_range_inclusive?: [string, string];
+	content_lines?: string[];
 };
 
-type EditToolResultLike = {
-	content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
-	details?: EditToolDetails;
-};
-
-type EditCallRenderComponent = Box & {
-	preview?: EditPreview;
-	previewArgsKey?: string;
-	previewPending?: boolean;
-	settledError?: boolean;
-};
-
-function createEditCallRenderComponent(): EditCallRenderComponent {
-	return Object.assign(new Box(1, 1, (text: string) => text), {
-		preview: undefined as EditPreview | undefined,
-		previewArgsKey: undefined as string | undefined,
-		previewPending: false,
-		settledError: false,
-	});
+function countDiffLines(diff: string, marker: "+" | "-"): number {
+	let count = 0;
+	for (const line of diff.split("\n")) {
+		if (line.startsWith(marker) && !line.startsWith(`${marker}${marker}${marker}`)) {
+			count++;
+		}
+	}
+	return count;
 }
 
-function getEditCallRenderComponent(state: EditRenderState, lastComponent: unknown): EditCallRenderComponent {
-	if (lastComponent instanceof Box) {
-		const component = lastComponent as EditCallRenderComponent;
-		state.callComponent = component;
-		return component;
-	}
-	if (state.callComponent) {
-		return state.callComponent;
-	}
-	const component = createEditCallRenderComponent();
-	state.callComponent = component;
-	return component;
-}
-
-function getRenderablePreviewInput(args: RenderableEditArgs | undefined): { path: string; edits: Edit[] } | null {
-	if (!args) {
-		return null;
-	}
-
-	const path = typeof args.path === "string" ? args.path : typeof args.file_path === "string" ? args.file_path : null;
-	if (!path) {
-		return null;
-	}
-
-	if (
-		Array.isArray(args.edits) &&
-		args.edits.length > 0 &&
-		args.edits.every((edit) => typeof edit?.oldText === "string" && typeof edit?.newText === "string")
-	) {
-		return { path, edits: args.edits };
-	}
-
-	if (typeof args.oldText === "string" && typeof args.newText === "string") {
-		return { path, edits: [{ oldText: args.oldText, newText: args.newText }] };
-	}
-
-	return null;
+function hashStoreKey(operations: ToolOperations, absolutePath: string): string {
+	const backend = operations.getBackendInfo?.();
+	if (!backend) return absolutePath;
+	if (backend.type === "ssh") return `ssh:${backend.remote}:${absolutePath}`;
+	if (backend.type === "remote" && backend.configured) return `remote:${backend.url}:${absolutePath}`;
+	return absolutePath;
 }
 
 function formatEditCall(
 	args: RenderableEditArgs | undefined,
-	theme: typeof import("../../modes/interactive/theme/theme.ts").theme,
+	theme: Theme,
+	backendInfo: ToolBackendInfo | undefined,
 ): string {
+	const previewInput = getPreviewInput(args);
+	if (previewInput) {
+		return formatBackendIcon(backendInfo, theme) + fmtCall(previewInput, {}, false, theme).replace("replace", "edit");
+	}
 	const invalidArg = invalidArgText(theme);
 	const rawPath = str(args?.file_path ?? args?.path);
 	const path = rawPath !== null ? shortenPath(rawPath) : null;
 	const pathDisplay = path === null ? invalidArg : path ? theme.fg("accent", path) : theme.fg("toolOutput", "...");
-	return `${theme.fg("toolTitle", theme.bold("edit"))} ${pathDisplay}`;
+	return `${formatBackendIcon(backendInfo, theme)}${theme.fg("toolTitle", theme.bold("edit"))} ${pathDisplay}`;
 }
 
-function formatEditResult(
-	args: RenderableEditArgs | undefined,
-	preview: EditPreview | undefined,
-	result: EditToolResultLike,
-	theme: typeof import("../../modes/interactive/theme/theme.ts").theme,
-	isError: boolean,
-): string | undefined {
-	const rawPath = str(args?.file_path ?? args?.path);
-	const previewDiff = preview && !("error" in preview) ? preview.diff : undefined;
-	const previewError = preview && "error" in preview ? preview.error : undefined;
-	if (isError) {
-		const errorText = result.content
-			.filter((c) => c.type === "text")
-			.map((c) => c.text || "")
-			.join("\n");
-		if (!errorText || errorText === previewError) {
-			return undefined;
+async function computePreview(request: ReqParams, operations: ToolOperations): Promise<RPreview> {
+	try {
+		await initHasher();
+		const absolutePath = resolveToCwd(request.path, operations.cwd);
+		await operations.access(absolutePath, "read");
+		const rawContent = (await operations.readFile(absolutePath)).toString("utf-8");
+		const { text } = stripBOM(rawContent);
+		const originalNormalized = toLF(text);
+		const originalHashes = await lineHashes(originalNormalized, hashStoreKey(operations, absolutePath));
+		const result = applyEdits(
+			originalNormalized,
+			resEdits(request.changes),
+			undefined,
+			originalHashes,
+			request.path,
+		).content;
+		if (originalNormalized === result) {
+			return { error: `No changes made to ${request.path}. The edits produced identical content.` };
 		}
-		return theme.fg("error", errorText);
+		const resultHashes = await lineHashes(result);
+		return { diff: genDiff(originalNormalized, result, 4, resultHashes, originalHashes).diff };
+	} catch (error) {
+		return { error: error instanceof Error ? error.message : String(error) };
 	}
-
-	const resultDiff = result.details?.diff;
-	if (resultDiff && resultDiff !== previewDiff) {
-		return renderDiff(resultDiff, { filePath: rawPath ?? undefined });
-	}
-
-	return undefined;
 }
 
-function getEditHeaderBg(
-	preview: EditPreview | undefined,
-	settledError: boolean | undefined,
-	theme: typeof import("../../modes/interactive/theme/theme.ts").theme,
-): (text: string) => string {
-	if (preview) {
-		if ("error" in preview) {
-			return (text: string) => theme.bg("toolErrorBg", text);
+function normalizeEditArguments(input: unknown): EditToolInput {
+	return normReq(input) as EditToolInput;
+}
+
+function assertReq(request: unknown): asserts request is ReqParams {
+	if (!request || typeof request !== "object" || Array.isArray(request)) {
+		throw new Error("[E_BAD_SHAPE] Edit request must be an object.");
+	}
+	const record = request as Record<string, unknown>;
+	for (const legacyKey of ["oldText", "newText", "old_text", "new_text", "old_range", "start", "end", "lines"]) {
+		if (Object.hasOwn(record, legacyKey)) {
+			throw new Error(
+				`[E_LEGACY_SHAPE] "${legacyKey}" is not supported. Call read first, then use {hash_range_inclusive: ["<START>", "<END>"], content_lines: [...]}.`,
+			);
 		}
-		return (text: string) => theme.bg("toolSuccessBg", text);
 	}
-	if (settledError) {
-		return (text: string) => theme.bg("toolErrorBg", text);
+	const unknown = Object.keys(record).filter((key) => key !== "path" && key !== "changes");
+	if (unknown.length > 0) {
+		throw new Error(`[E_BAD_SHAPE] Edit request contains unknown or unsupported fields: ${unknown.join(", ")}.`);
 	}
-	return (text: string) => theme.bg("toolPendingBg", text);
-}
-
-function buildEditCallComponent(
-	component: EditCallRenderComponent,
-	args: RenderableEditArgs | undefined,
-	theme: typeof import("../../modes/interactive/theme/theme.ts").theme,
-	backendInfo: ToolBackendInfo | undefined,
-): EditCallRenderComponent {
-	component.setBgFn(getEditHeaderBg(component.preview, component.settledError, theme));
-	component.clear();
-	component.addChild(new Text(formatBackendIcon(backendInfo, theme) + formatEditCall(args, theme), 0, 0));
-
-	if (!component.preview) {
-		return component;
+	if (typeof record.path !== "string" || record.path.length === 0) {
+		throw new Error('[E_BAD_SHAPE] Edit request requires a non-empty "path" string.');
 	}
-
-	const body =
-		"error" in component.preview ? theme.fg("error", component.preview.error) : renderDiff(component.preview.diff);
-	component.addChild(new Spacer(1));
-	component.addChild(new Text(body, 0, 0));
-	return component;
-}
-
-function setEditPreview(
-	component: EditCallRenderComponent,
-	preview: EditPreview,
-	argsKey: string | undefined,
-): boolean {
-	const current = component.preview;
-	const changed =
-		current === undefined ||
-		("error" in current && "error" in preview
-			? current.error !== preview.error
-			: "error" in current !== "error" in preview) ||
-		(!("error" in current) &&
-			!("error" in preview) &&
-			(current.diff !== preview.diff || current.firstChangedLine !== preview.firstChangedLine));
-	component.preview = preview;
-	component.previewArgsKey = argsKey;
-	component.previewPending = false;
-	return changed;
+	if (!Array.isArray(record.changes) || record.changes.length === 0) {
+		throw new Error('[E_BAD_SHAPE] Edit request requires a non-empty "changes" array.');
+	}
 }
 
 export function createEditToolDefinition(
 	operations: ToolOperations,
 	_options?: EditToolOptions,
 ): ToolDefinition<typeof editSchema, EditToolDetails | undefined, EditRenderState> {
-	const ops = operations;
-	const cwd = operations.cwd;
 	return {
 		name: "edit",
 		label: "edit",
 		description:
-			"Edit a single file using exact text replacement. Every edits[].oldText must match a unique, non-overlapping region of the original file. If two changes affect the same block or nearby lines, merge them into one edit instead of emitting overlapping edits. Do not include large unchanged regions just to connect distant changes.",
-		promptSnippet:
-			"Make precise file edits with exact text replacement, including multiple disjoint edits in one call",
+			"Edit a file using hash-anchored line replacements. Call read first; it returns HASH│content lines. Use hash_range_inclusive with the 3-character start/end hashes and content_lines with literal replacement lines only.",
+		promptSnippet: "Edit files using hashline anchors from read output",
 		promptGuidelines: [
-			"Use edit for precise changes (edits[].oldText must match exactly)",
-			"When changing multiple separate locations in one file, use one edit call with multiple entries in edits[] instead of multiple edit calls",
-			"Each edits[].oldText is matched against the original file, not after earlier edits are applied. Do not emit overlapping or nested edits. Merge nearby changes into one edit.",
-			"Keep edits[].oldText as small as possible while still being unique in the file. Do not pad with large unchanged regions.",
+			"Use read before edit to get HASH│content anchors.",
+			"Use edit with changes: [{ hash_range_inclusive: [startHash, endHash], content_lines: [...] }].",
+			"hash_range_inclusive contains only the 3-character hashes, not line numbers and not HASH│content.",
+			"content_lines contains literal file content only; do not include HASH│ prefixes. Use [] to delete a range.",
+			"After a successful edit, call read again before follow-up edits unless the response includes current warning anchors.",
 		],
 		parameters: editSchema,
-		renderShell: "self",
-		prepareArguments: prepareEditArguments,
-		async execute(_toolCallId, input: EditToolInput, signal?: AbortSignal, _onUpdate?, _ctx?) {
-			const { path, edits } = validateEditInput(input);
-			const absolutePath = resolveToCwd(path, cwd);
-
+		renderShell: "default",
+		prepareArguments: normalizeEditArguments,
+		async execute(_toolCallId, input: EditToolInput, signal?: AbortSignal) {
+			const normalized = normReq(input);
+			assertReq(normalized);
+			const path = normalized.path;
+			const absolutePath = resolveToCwd(path, operations.cwd);
 			return withFileMutationQueue(absolutePath, async () => {
-				let aborted = signal?.aborted ?? false;
-				const onAbort = () => {
-					aborted = true;
-				};
-				const throwIfAborted = (): void => {
-					if (aborted || signal?.aborted) {
-						throw new Error("Operation aborted");
-					}
-				};
-
-				signal?.addEventListener("abort", onAbort, { once: true });
+				abortIf(signal);
+				await initHasher();
 				try {
-					throwIfAborted();
+					await operations.access(absolutePath, "readwrite");
+				} catch (error) {
+					const message =
+						error instanceof Error && "code" in error ? `Error code: ${String(error.code)}` : String(error);
+					throw new Error(`Could not edit file: ${path}. ${message}.`);
+				}
+				const rawContent = (await operations.readFile(absolutePath)).toString("utf-8");
+				const { bom, text } = stripBOM(rawContent);
+				const originalEnding = detectEnding(text);
+				const originalNormalized = toLF(text);
+				const storeKey = hashStoreKey(operations, absolutePath);
+				const originalHashes = await lineHashes(originalNormalized, storeKey);
+				const resolved = resEdits(normalized.changes);
+				const anchorResult = applyEdits(originalNormalized, resolved, signal, originalHashes, path);
+				const result = anchorResult.content;
 
-					// Check if file exists.
-					try {
-						await ops.access(absolutePath, "readwrite");
-					} catch (error: unknown) {
-						throwIfAborted();
-						const errorMessage =
-							error instanceof Error && "code" in error ? `Error code: ${error.code}` : String(error);
-						throw new Error(`Could not edit file: ${path}. ${errorMessage}.`);
+				const removedHashes = new Set<string>();
+				for (const edit of resolved) {
+					const startLine = originalHashes.indexOf(edit.hash_range_inclusive[0].hash);
+					const endLine = originalHashes.indexOf(edit.hash_range_inclusive[1].hash);
+					if (startLine >= 0 && endLine >= 0) {
+						for (let i = startLine; i <= endLine; i++) {
+							const hash = originalHashes[i];
+							if (hash) removedHashes.add(hash);
+						}
 					}
-					throwIfAborted();
+				}
+				const resultHashes = await lineHashes(result, storeKey, {
+					content: originalNormalized,
+					hashes: originalHashes,
+					removedHashes,
+				});
+				const warnings = [...(anchorResult.warnings ?? [])];
+				const resultLines = result.split("\n");
+				for (const warning of anchorResult.boundaryWarnings ?? []) {
+					let seen = 0;
+					let matchIndex = -1;
+					for (let i = 0; i < resultLines.length; i++) {
+						if (resultLines[i] === warning.survivingLineContent) {
+							if (seen === warning.occurrence) {
+								matchIndex = i;
+								break;
+							}
+							seen++;
+						}
+					}
+					if (matchIndex >= 0) {
+						warnings.push(
+							fmtBoundaryWarning({
+								kind: warning.kind,
+								survivingContent: warning.survivingLineContent,
+								matchIndex,
+								resultLines,
+								resultHashes,
+							}),
+						);
+					}
+				}
 
-					// Read the file.
-					const buffer = await ops.readFile(absolutePath);
-					throwIfAborted();
-
-					// Strip BOM before matching. The model will not include an invisible BOM in oldText.
-					const rawContent = buffer.toString("utf-8");
-					const { bom, text: content } = stripBom(rawContent);
-					const originalEnding = detectLineEnding(content);
-					const normalizedContent = normalizeToLF(content);
-					const { baseContent, newContent } = applyEditsToNormalizedContent(normalizedContent, edits, path);
-					throwIfAborted();
-
-					const finalContent = bom + restoreLineEndings(newContent, originalEnding);
-					await ops.writeFile(absolutePath, finalContent);
-					throwIfAborted();
-
-					const diffResult = generateDiffString(baseContent, newContent);
-					const patch = generateUnifiedPatch(path, baseContent, newContent);
+				if (originalNormalized === result) {
 					return {
 						content: [
 							{
-								type: "text",
-								text: `Successfully replaced ${edits.length} block(s) in ${path}.`,
+								type: "text" as const,
+								text: `No changes made to ${path}. The edits produced identical content.`,
 							},
 						],
-						details: { diff: diffResult.diff, patch, firstChangedLine: diffResult.firstChangedLine },
+						details: {
+							diff: "",
+							patch: "",
+							classification: "noop" as const,
+							metrics: {
+								edits_attempted: normalized.changes.length,
+								edits_noop: anchorResult.noopEdits?.length ?? 0,
+								warnings: warnings.length,
+								classification: "noop" as const,
+							},
+						},
 					};
-				} finally {
-					signal?.removeEventListener("abort", onAbort);
 				}
+
+				abortIf(signal);
+				await operations.writeFile(absolutePath, bom + restoreEndings(result, originalEnding));
+				const diffResult = genDiff(originalNormalized, result, 2, resultHashes, originalHashes);
+				const warningBlock = warnings.length > 0 ? `\n\nWarnings:\n${warnings.join("\n")}` : "";
+				return {
+					content: [{ type: "text" as const, text: `Successfully replaced in ${path}.${warningBlock}` }],
+					details: {
+						diff: diffResult.diff,
+						patch: createTwoFilesPatch(path, path, originalNormalized, result),
+						firstChangedLine: anchorResult.firstChangedLine ?? diffResult.firstChangedLine,
+						metrics: {
+							edits_attempted: normalized.changes.length,
+							edits_noop: anchorResult.noopEdits?.length ?? 0,
+							warnings: warnings.length,
+							classification: "applied" as const,
+							...(anchorResult.firstChangedLine !== undefined && anchorResult.lastChangedLine !== undefined
+								? {
+										changed_lines: {
+											first: anchorResult.firstChangedLine,
+											last: anchorResult.lastChangedLine,
+										},
+									}
+								: {}),
+							added_lines: countDiffLines(diffResult.diff, "+"),
+							removed_lines: countDiffLines(diffResult.diff, "-"),
+						},
+					},
+				};
 			});
 		},
 		renderCall(args, theme, context) {
-			const component = getEditCallRenderComponent(context.state, context.lastComponent);
-			const previewInput = getRenderablePreviewInput(args as RenderableEditArgs | undefined);
-			const argsKey = previewInput
-				? JSON.stringify({ path: previewInput.path, edits: previewInput.edits })
-				: undefined;
-
-			if (component.previewArgsKey !== argsKey) {
-				component.preview = undefined;
-				component.previewArgsKey = argsKey;
-				component.previewPending = false;
-				component.settledError = false;
+			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+			const previewInput = getPreviewInput(args);
+			if (!context.executionStarted && context.argsComplete && previewInput) {
+				const argsKey = JSON.stringify(previewInput);
+				if (context.state.argsKey !== argsKey) {
+					context.state.argsKey = argsKey;
+					context.state.preview = undefined;
+					const generation = (context.state.previewGeneration ?? 0) + 1;
+					context.state.previewGeneration = generation;
+					void computePreview(previewInput, operations).then((preview) => {
+						if (context.state.argsKey === argsKey && context.state.previewGeneration === generation) {
+							context.state.preview = preview;
+							context.invalidate();
+						}
+					});
+				}
+				text.setText(
+					formatBackendIcon(operations.getBackendInfo?.(), theme) +
+						fmtCall(previewInput, context.state, context.expanded, theme).replace("replace", "edit"),
+				);
+				return text;
 			}
-
-			if (context.argsComplete && previewInput && !component.preview && !component.previewPending) {
-				component.previewPending = true;
-				const requestKey = argsKey;
-				void computeEditsDiff(previewInput.path, previewInput.edits, operations).then((preview) => {
-					if (component.previewArgsKey === requestKey) {
-						setEditPreview(component, preview, requestKey);
-						context.invalidate();
-					}
-				});
-			}
-
-			return buildEditCallComponent(component, args, theme, operations.getBackendInfo?.());
+			text.setText(formatEditCall(args as RenderableEditArgs | undefined, theme, operations.getBackendInfo?.()));
+			return text;
 		},
 		renderResult(result, _options, theme, context) {
-			const callComponent = context.state.callComponent;
-			const previewInput = getRenderablePreviewInput(context.args as RenderableEditArgs | undefined);
-			const argsKey = previewInput
-				? JSON.stringify({ path: previewInput.path, edits: previewInput.edits })
-				: undefined;
-			const typedResult = result as EditToolResultLike;
-			const resultDiff = !context.isError ? typedResult.details?.diff : undefined;
-			let changed = false;
-			if (callComponent) {
-				if (typeof resultDiff === "string") {
-					changed =
-						setEditPreview(
-							callComponent,
-							{ diff: resultDiff, firstChangedLine: typedResult.details?.firstChangedLine },
-							argsKey,
-						) || changed;
-				}
-				if (callComponent.settledError !== context.isError) {
-					callComponent.settledError = context.isError;
-					changed = true;
-				}
-				if (changed) {
-					buildEditCallComponent(
-						callComponent,
-						context.args as RenderableEditArgs | undefined,
-						theme,
-						operations.getBackendInfo?.(),
-					);
-				}
+			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+			if (context.isError) {
+				const errorText = result.content
+					?.filter((entry) => entry.type === "text")
+					.map((entry) => entry.text ?? "")
+					.join("\n");
+				text.setText(errorText ? `\n${theme.fg("error", errorText)}` : "");
+				return text;
 			}
-
-			const output = formatEditResult(context.args, callComponent?.preview, typedResult, theme, context.isError);
-			const component = (context.lastComponent as Container | undefined) ?? new Container();
-			component.clear();
-			if (!output) {
-				return component;
+			const diff = result.details?.diff;
+			if (!diff) {
+				text.setText("");
+				return text;
 			}
-			component.addChild(new Spacer(1));
-			component.addChild(new Text(output, 1, 0));
-			return component;
+			const lines = diff.split("\n").map((line) => {
+				if (line.startsWith("+") && !line.startsWith("+++")) return theme.fg("success", line);
+				if (line.startsWith("-") && !line.startsWith("---")) return theme.fg("error", line);
+				return theme.fg("dim", line);
+			});
+			text.setText(`\n${lines.join("\n")}`);
+			return text;
 		},
 	};
 }
 
-export function createEditTool(operations: ToolOperations, options?: EditToolOptions): AgentTool<typeof editSchema> {
-	return wrapToolDefinition(createEditToolDefinition(operations, options));
+type CompatibleEditAgentTool = AgentTool<typeof editSchema, EditToolDetails> & {
+	execute: (
+		toolCallId: string,
+		params: Record<string, unknown>,
+		signal?: AbortSignal,
+		onUpdate?: AgentToolUpdateCallback<EditToolDetails>,
+	) => Promise<AgentToolResult<EditToolDetails>>;
+};
+
+export function createEditTool(operations: ToolOperations, options?: EditToolOptions): CompatibleEditAgentTool {
+	return wrapToolDefinition(createEditToolDefinition(operations, options)) as CompatibleEditAgentTool;
 }

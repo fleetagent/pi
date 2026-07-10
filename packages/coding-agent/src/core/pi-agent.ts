@@ -6,7 +6,7 @@ import chalk from "chalk";
 import { getAgentDir } from "../config.ts";
 import { InteractiveMode, runPrintMode, runRpcMode } from "../modes/index.ts";
 import { stopThemeWatcher } from "../modes/interactive/theme/theme.ts";
-import { AgentSession } from "./agent-session.ts";
+import { AgentSession, DEFAULT_ACTIVE_TOOL_NAMES } from "./agent-session.ts";
 import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
 import { AuthStorage } from "./auth-storage.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
@@ -35,7 +35,7 @@ import {
 import { SettingsManager } from "./settings-manager.ts";
 import { isInstallTelemetryEnabled } from "./telemetry.ts";
 import { printTimings, time } from "./timings.ts";
-import type { ToolName, ToolOperations } from "./tools/index.ts";
+import type { ToolOperations } from "./tools/index.ts";
 
 export interface PiAgentDiagnostic {
 	type: "info" | "warning" | "error";
@@ -452,7 +452,7 @@ export class PiAgent {
 		}
 		thinkingLevel = model ? (clampThinkingLevel(model, thinkingLevel) as ThinkingLevel) : "off";
 
-		const defaultActiveToolNames: ToolName[] = ["read", "bash", "edit", "write"];
+		const defaultActiveToolNames: string[] = [...DEFAULT_ACTIVE_TOOL_NAMES];
 		const allowedToolNames = sessionOptions.tools ?? (sessionOptions.noTools === "all" ? [] : undefined);
 		const initialActiveToolNames: string[] = sessionOptions.tools
 			? [...sessionOptions.tools]

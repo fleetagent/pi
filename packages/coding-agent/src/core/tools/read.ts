@@ -10,6 +10,8 @@ import { getLanguageFromPath, highlightCode, type Theme } from "../../modes/inte
 import { processImage } from "../../utils/image-process.ts";
 import { formatPathRelativeToCwdOrAbsolute } from "../../utils/paths.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
+import { fmtRegion, HASH_SEP, initHasher, lineHashes } from "./hashline/index.ts";
+import { visLines as hashlineVisLines } from "./hashline-utils.ts";
 import type { ToolOperations } from "./operations.ts";
 import { resolveReadPathAsync, resolveToCwd } from "./path-utils.ts";
 import { formatBackendIcon, getTextOutput, invalidArgText, replaceTabs, shortenPath, str } from "./render-utils.ts";
@@ -198,9 +200,12 @@ export function createReadToolDefinition(
 	return {
 		name: "read",
 		label: "read",
-		description: `Read the contents of a file. Supports text files and images (jpg, png, gif, webp). Images are sent as attachments. For text files, output is truncated to ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete.`,
-		promptSnippet: "Read file contents",
-		promptGuidelines: ["Use read to examine files instead of cat or sed."],
+		description: `Read the contents of a file. Supports text files and images (jpg, png, gif, webp). Images are sent as attachments. Text files are returned as HASH│content rows for hash-anchored editing. Output is truncated to ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete.`,
+		promptSnippet: "Read file contents with hashline anchors",
+		promptGuidelines: [
+			"Use read to examine files instead of cat or sed.",
+			"For edits, copy only the 3-character HASH values into edit hash_range_inclusive; do not include HASH│ prefixes in content_lines.",
+		],
 		parameters: readSchema,
 		async execute(
 			_toolCallId,
@@ -254,57 +259,61 @@ export function createReadToolDefinition(
 									];
 								}
 							} else {
-								// Read text content.
+								// Read text content with hashline anchors.
+								await initHasher();
 								const buffer = await readOps.readFile(absolutePath);
-								const textContent = buffer.toString("utf-8");
-								const allLines = textContent.split("\n");
+								const textContent = buffer.toString("utf-8").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+								const allLines = hashlineVisLines(textContent);
 								const totalFileLines = allLines.length;
-								// Apply offset if specified. Convert from 1-indexed input to 0-indexed array access.
 								const startLine = offset ? Math.max(0, offset - 1) : 0;
 								const startLineDisplay = startLine + 1;
-								// Check if offset is out of bounds.
-								if (startLine >= allLines.length) {
-									throw new Error(`Offset ${offset} is beyond end of file (${allLines.length} lines total)`);
-								}
-								let selectedContent: string;
-								let userLimitedLines: number | undefined;
-								// If limit is specified by the user, honor it first. Otherwise truncateHead decides.
-								if (limit !== undefined) {
-									const endLine = Math.min(startLine + limit, allLines.length);
-									selectedContent = allLines.slice(startLine, endLine).join("\n");
-									userLimitedLines = endLine - startLine;
-								} else {
-									selectedContent = allLines.slice(startLine).join("\n");
-								}
-								// Apply truncation, respecting both line and byte limits.
-								const truncation = truncateHead(selectedContent);
-								let outputText: string;
-								if (truncation.firstLineExceedsLimit) {
-									// First line alone exceeds the byte limit. Point the model at a bash fallback.
-									const firstLineSize = formatSize(Buffer.byteLength(allLines[startLine], "utf-8"));
-									outputText = `[Line ${startLineDisplay} is ${firstLineSize}, exceeds ${formatSize(DEFAULT_MAX_BYTES)} limit. Use bash: sed -n '${startLineDisplay}p' ${path} | head -c ${DEFAULT_MAX_BYTES}]`;
-									details = { truncation };
-								} else if (truncation.truncated) {
-									// Truncation occurred. Build an actionable continuation notice.
-									const endLineDisplay = startLineDisplay + truncation.outputLines - 1;
-									const nextOffset = endLineDisplay + 1;
-									outputText = truncation.content;
-									if (truncation.truncatedBy === "lines") {
-										outputText += `\n\n[Showing lines ${startLineDisplay}-${endLineDisplay} of ${totalFileLines}. Use offset=${nextOffset} to continue.]`;
-									} else {
-										outputText += `\n\n[Showing lines ${startLineDisplay}-${endLineDisplay} of ${totalFileLines} (${formatSize(DEFAULT_MAX_BYTES)} limit). Use offset=${nextOffset} to continue.]`;
+								if (totalFileLines === 0) {
+									if (startLineDisplay !== 1) {
+										throw new Error(`Offset ${offset} is beyond end of file (0 lines total)`);
 									}
-									details = { truncation };
-								} else if (userLimitedLines !== undefined && startLine + userLimitedLines < allLines.length) {
-									// User-specified limit stopped early, but the file still has more content.
-									const remaining = allLines.length - (startLine + userLimitedLines);
-									const nextOffset = startLine + userLimitedLines + 1;
-									outputText = `${truncation.content}\n\n[${remaining} more lines in file. Use offset=${nextOffset} to continue.]`;
+									const emptyHash = (await lineHashes(textContent, absolutePath))[0] ?? "";
+									content = [
+										{
+											type: "text",
+											text: `${emptyHash}${HASH_SEP}\n[File is empty. Use edit to insert content.]`,
+										},
+									];
 								} else {
-									// No truncation and no remaining user-limited content.
-									outputText = truncation.content;
+									if (startLine >= totalFileLines) {
+										throw new Error(`Offset ${offset} is beyond end of file (${totalFileLines} lines total)`);
+									}
+									const endLine =
+										limit !== undefined ? Math.min(startLine + limit, totalFileLines) : totalFileLines;
+									const allHashes = await lineHashes(textContent, absolutePath);
+									const selectedContent = fmtRegion(
+										allHashes.slice(startLine, endLine),
+										allLines.slice(startLine, endLine),
+									);
+									const truncation = truncateHead(selectedContent);
+									let outputText: string;
+									if (truncation.firstLineExceedsLimit) {
+										const firstLineSize = formatSize(Buffer.byteLength(allLines[startLine] ?? "", "utf-8"));
+										outputText = `[Line ${startLineDisplay} is ${firstLineSize}, exceeds ${formatSize(DEFAULT_MAX_BYTES)} limit. Hashline output requires full lines; use bash for this line.]`;
+										details = { truncation };
+									} else if (truncation.truncated) {
+										const endLineDisplay = startLineDisplay + truncation.outputLines - 1;
+										const nextOffset = endLineDisplay + 1;
+										outputText = truncation.content;
+										if (truncation.truncatedBy === "lines") {
+											outputText += `\n\n[Showing lines ${startLineDisplay}-${endLineDisplay} of ${totalFileLines}. Use offset=${nextOffset} to continue.]`;
+										} else {
+											outputText += `\n\n[Showing lines ${startLineDisplay}-${endLineDisplay} of ${totalFileLines} (${formatSize(DEFAULT_MAX_BYTES)} limit). Use offset=${nextOffset} to continue.]`;
+										}
+										details = { truncation };
+									} else if (endLine < totalFileLines) {
+										const remaining = totalFileLines - endLine;
+										const nextOffset = endLine + 1;
+										outputText = `${truncation.content}\n\n[${remaining} more lines in file. Use offset=${nextOffset} to continue.]`;
+									} else {
+										outputText = truncation.content;
+									}
+									content = [{ type: "text", text: outputText }];
 								}
-								content = [{ type: "text", text: outputText }];
 							}
 
 							if (aborted) return;

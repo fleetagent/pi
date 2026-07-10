@@ -94,6 +94,17 @@ import {
 	wrapRegisteredTools,
 } from "./extensions/index.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
+import {
+	createLspCodeActionsTool,
+	createLspDefinitionTool,
+	createLspDiagnosticsTool,
+	createLspHoverTool,
+	createLspReferencesTool,
+	createLspRenameTool,
+	createLspRuntimeState,
+	formatAutoDiagnosticsForChangedFile,
+	type LspRuntimeState,
+} from "./lsp/index.ts";
 import { type BashExecutionMessage, type CustomMessage, STRUCTURED_RESPONSE_INTERNAL_CUSTOM_TYPE } from "./messages.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
@@ -118,6 +129,19 @@ import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapp
 
 // ============================================================================
 // Skill Block Parsing
+// ============================================================================
+
+const CORE_DEFAULT_TOOL_NAMES = ["read", "bash", "edit", "write"] as const;
+const LSP_TOOL_NAMES = [
+	"lsp_diagnostics",
+	"lsp_hover",
+	"lsp_definition",
+	"lsp_references",
+	"lsp_rename",
+	"lsp_code_actions",
+] as const;
+export const DEFAULT_ACTIVE_TOOL_NAMES = [...CORE_DEFAULT_TOOL_NAMES, ...LSP_TOOL_NAMES] as const;
+
 // ============================================================================
 
 /** Parsed skill block from a user message */
@@ -446,6 +470,7 @@ export class AgentSession {
 	private _baseToolsOverride?: Record<string, AgentTool>;
 	private _toolOperations?: ToolOperations;
 	private _localResourceToolOperations?: ToolOperations;
+	private _lspRuntimeState?: LspRuntimeState;
 	private _sessionStartEvent: SessionStartEvent;
 	private _extensionUIContext?: ExtensionUIContext;
 	private _extensionCommandContextActions?: ExtensionCommandContextActions;
@@ -482,7 +507,9 @@ export class AgentSession {
 		this._modelRegistry = config.modelRegistry;
 		this._extensionRunnerRef = config.extensionRunnerRef;
 		this._initialActiveToolNames = config.initialActiveToolNames;
-		this._allowedToolNames = config.allowedToolNames ? new Set(config.allowedToolNames) : undefined;
+		this._allowedToolNames = config.allowedToolNames
+			? new Set(this._withCurrentDefaultTools([...config.allowedToolNames]))
+			: undefined;
 		this._baseToolsOverride = config.baseToolsOverride;
 		this._toolOperations = config.toolOperations;
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
@@ -494,7 +521,9 @@ export class AgentSession {
 		this._installAgentTurnPreparation();
 
 		this._buildRuntime({
-			activeToolNames: this._initialActiveToolNames,
+			activeToolNames: this._initialActiveToolNames
+				? this._withCurrentDefaultTools(this._initialActiveToolNames)
+				: undefined,
 			includeAllExtensionTools: true,
 		});
 	}
@@ -642,33 +671,71 @@ export class AgentSession {
 		this.agent.afterToolCall = async ({ toolCall, args, result, isError }) => {
 			this._loadAssociatedToolsForReadToolCall(toolCall.name, args, isError);
 
+			const lspResult = await this._syncLspToolResult(toolCall.name, args, result, isError);
+			const content = lspResult?.content ?? result.content;
+			const details = lspResult?.details ?? result.details;
+			const nextIsError = lspResult?.isError ?? isError;
+
 			const runner = this._extensionRunner;
 			if (!runner.hasHandlers("tool_result")) {
-				return undefined;
+				return lspResult;
 			}
-
 			const hookResult = await runner.emitToolResult({
 				type: "tool_result",
 				toolName: toolCall.name,
 				toolCallId: toolCall.id,
 				input: args as Record<string, unknown>,
-				content: result.content,
-				details: result.details,
-				isError,
+				content,
+				details,
+				isError: nextIsError,
 			});
 
 			if (!hookResult) {
-				return undefined;
+				return lspResult;
 			}
 
 			return {
 				content: hookResult.content,
 				details: hookResult.details,
-				isError: hookResult.isError ?? isError,
+				isError: hookResult.isError ?? nextIsError,
 			};
 		};
 	}
 
+	private async _syncLspToolResult(
+		toolName: string,
+		args: unknown,
+		result: { content: ToolResultMessage["content"]; details?: unknown },
+		isError: boolean,
+	): Promise<{ content: ToolResultMessage["content"]; details?: unknown; isError?: boolean } | undefined> {
+		if (isError || !this._lspRuntimeState || typeof args !== "object" || args === null || !("path" in args)) {
+			return undefined;
+		}
+		const filePath = typeof args.path === "string" ? args.path : undefined;
+		if (!filePath) return undefined;
+
+		try {
+			if (toolName === "read") {
+				await this._lspRuntimeState.fileSync.handleFileRead(filePath, this.getToolOperations());
+				return undefined;
+			}
+
+			if (toolName === "write" || toolName === "edit") {
+				await this._lspRuntimeState.fileSync.handleFileWrite(filePath, this.getToolOperations());
+				const diagnostics = await formatAutoDiagnosticsForChangedFile(this._lspRuntimeState, filePath);
+				if (!diagnostics) return undefined;
+				return {
+					content: [...result.content, { type: "text" as const, text: `\n\n${diagnostics}` }],
+					details: result.details,
+					isError,
+				};
+			}
+		} catch {
+			// LSP synchronization is best-effort and must not affect tool results.
+		}
+
+		return undefined;
+	}
 	private _loadAssociatedInstructionTools(resource: { tools?: string[] }): void {
 		for (const toolName of resource.tools ?? []) {
 			this.loadSessionTool(toolName);
@@ -1001,7 +1068,9 @@ export class AgentSession {
 			this.abortBash();
 			this.agent.abort();
 			void this._localResourceToolOperations?.dispose?.();
+			void this._lspRuntimeState?.manager.shutdownAll();
 			this._localResourceToolOperations = undefined;
+			this._lspRuntimeState = undefined;
 		} catch {
 			// Dispose must succeed even if an abort hook throws.
 		}
@@ -3324,6 +3393,33 @@ export class AgentSession {
 		this._baseToolDefinitions = new Map(
 			Object.entries(baseToolDefinitions).map(([name, tool]) => [name, tool as ToolDefinition]),
 		);
+
+		if (!this._baseToolsOverride) {
+			this._lspRuntimeState = createLspRuntimeState(this._cwd);
+			const getLspState = (): LspRuntimeState => {
+				this._lspRuntimeState ??= createLspRuntimeState(this._cwd);
+				return this._lspRuntimeState;
+			};
+			this._baseToolDefinitions.set(
+				"lsp_diagnostics",
+				createLspDiagnosticsTool(getLspState) as unknown as ToolDefinition,
+			);
+			this._baseToolDefinitions.set("lsp_hover", createLspHoverTool(getLspState) as unknown as ToolDefinition);
+			this._baseToolDefinitions.set(
+				"lsp_definition",
+				createLspDefinitionTool(getLspState) as unknown as ToolDefinition,
+			);
+			this._baseToolDefinitions.set(
+				"lsp_references",
+				createLspReferencesTool(getLspState) as unknown as ToolDefinition,
+			);
+			this._baseToolDefinitions.set("lsp_rename", createLspRenameTool(getLspState) as unknown as ToolDefinition);
+			this._baseToolDefinitions.set(
+				"lsp_code_actions",
+				createLspCodeActionsTool(getLspState) as unknown as ToolDefinition,
+			);
+		}
+
 		this._baseToolDefinitions.set("load_tool", this._createLoadToolDefinition());
 		this._baseToolDefinitions.set("unload_tool", this._createUnloadToolDefinition());
 
@@ -3349,7 +3445,7 @@ export class AgentSession {
 
 		const defaultActiveToolNames = this._baseToolsOverride
 			? Object.keys(this._baseToolsOverride)
-			: ["read", "bash", "edit", "write"];
+			: [...DEFAULT_ACTIVE_TOOL_NAMES];
 		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
 		this._refreshToolRegistry({
 			activeToolNames: baseActiveToolNames,
@@ -3357,14 +3453,25 @@ export class AgentSession {
 		});
 	}
 
+	private _withCurrentDefaultTools(activeToolNames: string[]): string[] {
+		if (this._baseToolsOverride) return activeToolNames;
+		const active = new Set(activeToolNames);
+		const usesDefaultCoreTools = CORE_DEFAULT_TOOL_NAMES.every((toolName) => active.has(toolName));
+		if (!usesDefaultCoreTools) return activeToolNames;
+		return [...activeToolNames, ...DEFAULT_ACTIVE_TOOL_NAMES.filter((toolName) => !active.has(toolName))];
+	}
+
 	async reload(): Promise<void> {
 		const previousFlagValues = this._extensionRunner.getFlagValues();
 		await emitSessionShutdownEvent(this._extensionRunner, { type: "session_shutdown", reason: "reload" });
+		await this._lspRuntimeState?.manager.shutdownAll();
+		this._lspRuntimeState = undefined;
 		await this.settingsManager.reload();
 		resetApiProviders();
 		await this._resourceLoader.reload();
+		const activeToolNames = this._withCurrentDefaultTools(this.getActiveToolNames());
 		this._buildRuntime({
-			activeToolNames: this.getActiveToolNames(),
+			activeToolNames,
 			flagValues: previousFlagValues,
 			includeAllExtensionTools: true,
 		});
