@@ -1299,6 +1299,30 @@ bar`,
 	});
 
 	describe("HTML-like tags in text", () => {
+		it("should hide block HTML comments in reasoning text", () => {
+			const markdown = new Markdown("**Inspecting commit 5.5 context**\n\n<!-- -->", 0, 0, defaultMarkdownTheme);
+
+			const plainText = markdown
+				.render(80)
+				.map((line) => stripAnsi(line))
+				.join("\n");
+
+			assert.ok(plainText.includes("Inspecting commit 5.5 context"));
+			assert.ok(!plainText.includes("<!-- -->"));
+		});
+
+		it("should hide inline HTML comments", () => {
+			const markdown = new Markdown("before <!-- hidden --> after", 0, 0, defaultMarkdownTheme);
+
+			const plainText = markdown
+				.render(80)
+				.map((line) => stripAnsi(line))
+				.join("\n");
+
+			assert.ok(plainText.includes("before  after"));
+			assert.ok(!plainText.includes("<!-- hidden -->"));
+		});
+
 		it("should render content with HTML-like tags as text", () => {
 			// When the model emits something like <thinking>content</thinking> in regular text,
 			// marked might treat it as HTML and hide the content
@@ -1318,6 +1342,17 @@ bar`,
 				joinedPlain.includes("hidden content") || joinedPlain.includes("<thinking>"),
 				"Should render HTML-like tags or their content as text, not hide them",
 			);
+		});
+
+		it("should preserve HTML comments in code blocks", () => {
+			const markdown = new Markdown("```html\n<!-- visible source -->\n```", 0, 0, defaultMarkdownTheme);
+
+			const plainText = markdown
+				.render(80)
+				.map((line) => stripAnsi(line))
+				.join("\n");
+
+			assert.ok(plainText.includes("<!-- visible source -->"));
 		});
 
 		it("should render HTML tags in code blocks correctly", () => {
