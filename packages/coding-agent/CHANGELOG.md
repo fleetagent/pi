@@ -12,6 +12,7 @@
 ### Changed
 
 * Update runtime and clipboard dependencies.
+* Use GPT-5.6 as the default OpenAI Codex model.
 
 ### Fixed
 

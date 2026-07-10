@@ -375,7 +375,7 @@ describe("resolveCliModel", () => {
 describe("default model selection", () => {
 	test("openai defaults track current models", () => {
 		expect(defaultModelPerProvider.openai).toBe("gpt-5.4");
-		expect(defaultModelPerProvider["openai-codex"]).toBe("gpt-5.5");
+		expect(defaultModelPerProvider["openai-codex"]).toBe("gpt-5.6");
 	});
 
 	test("zai, minimax, and cerebras defaults track current models", () => {

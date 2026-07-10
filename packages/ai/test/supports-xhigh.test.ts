@@ -20,11 +20,14 @@ describe("getSupportedThinkingLevels", () => {
 		expect(getSupportedThinkingLevels(model!)).not.toContain("xhigh");
 	});
 
-	it.each(["gpt-5.4", "gpt-5.5"] as const)("includes xhigh for %s models", (modelId) => {
-		const model = getModel("openai-codex", modelId);
-		expect(model).toBeDefined();
-		expect(getSupportedThinkingLevels(model!)).toContain("xhigh");
-	});
+	it.each(["gpt-5.4", "gpt-5.5", "gpt-5.6", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"] as const)(
+		"includes xhigh for %s models",
+		(modelId) => {
+			const model = getModel("openai-codex", modelId);
+			expect(model).toBeDefined();
+			expect(getSupportedThinkingLevels(model!)).toContain("xhigh");
+		},
+	);
 
 	it("includes only high/xhigh plus off for DeepSeek V4 Flash on the DeepSeek provider", () => {
 		const model = getModel("deepseek", "deepseek-v4-flash");

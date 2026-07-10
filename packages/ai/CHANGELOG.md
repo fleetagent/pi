@@ -5,6 +5,7 @@
 ### Added
 
 * Support custom headers for Bedrock requests.
+* Add GPT-5.6 model metadata.
 
 ### Changed
 
