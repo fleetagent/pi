@@ -25,6 +25,8 @@
 * Rotate stale Codex websocket sessions.
 * Avoid browser User-Agent fallback races on first Codex requests.
 * Enable Bedrock prompt caching for Claude 5 models.
+* Correct GPT-5.6 Codex context windows to 272k tokens.
+* Preserve OpenAI Responses reasoning when output items arrive out of order.
 
 ## [0.1.4](https://github.com/fleetagent/pi/compare/@fleetagent/pi-ai-v0.1.3...@fleetagent/pi-ai-v0.1.4) (2026-06-16)
 
