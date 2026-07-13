@@ -113,7 +113,6 @@
 * Process BMP images from disk by converting them to a supported inline format.
 * Surface auth storage save failures to callers.
 * Allow extra fields in edit tool replacement arguments.
-* Use JSON Schema 2020-12-compatible array syntax for edit tool hash anchors.
 * Include the request ID in RPC unknown-command errors.
 * Show resolved subagent models and keep queued, running, completed, and failed TUI states stable until subagent runs finish.
 * Queue editor submissions into the active run after successful auto-compaction instead of racing a new prompt continuation.
