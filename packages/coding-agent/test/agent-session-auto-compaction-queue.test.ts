@@ -64,7 +64,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 		mkdirSync(tempDir, { recursive: true });
 		vi.useFakeTimers();
 
-		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		const model = { ...getModel("anthropic", "claude-sonnet-4-5")!, contextWindow: 200_000 };
 		const agent = new Agent({
 			initialState: {
 				model,
@@ -124,7 +124,37 @@ describe("AgentSession auto-compaction queue resume", () => {
 		await vi.runAllTimersAsync();
 		expect(sequence).toEqual([]);
 
-		const turnUpdate = await session.agent.prepareNextTurn?.(session.agent.signal);
+		const model = session.model!;
+		const message: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "done" }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: Date.now(),
+		};
+		const turnUpdate = await session.agent.prepareNextTurnWithContext?.(
+			{
+				message,
+				toolResults: [],
+				context: {
+					systemPrompt: session.agent.state.systemPrompt,
+					messages: session.agent.state.messages.slice(),
+					tools: session.agent.state.tools.slice(),
+				},
+				newMessages: [message],
+			},
+			session.agent.signal,
+		);
 
 		expect(sequence).toEqual(["compact_complete"]);
 		expect(session.agent.hasQueuedMessages()).toBe(true);

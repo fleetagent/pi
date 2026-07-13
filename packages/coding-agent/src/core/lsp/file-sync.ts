@@ -32,7 +32,7 @@ export class LspFileSync {
 		const uri = this.manager.getFileUri(absolutePath);
 		const existing = this.tracked.get(uri);
 		if (existing) {
-			this.touch(uri, existing);
+			await this.touch(uri, existing);
 			return;
 		}
 
@@ -44,8 +44,8 @@ export class LspFileSync {
 		const content = await this.readUtf8(absolutePath, operations);
 		const document = { uri, languageId, version: 1 };
 		this.tracked.set(uri, document);
-		client.didOpen(uri, languageId, document.version, content);
-		this.touch(uri, document);
+		await client.didOpen(uri, languageId, document.version, content);
+		await this.touch(uri, document);
 	}
 
 	async handleFileWrite(filePath: string, operations: ToolOperations): Promise<void> {
@@ -61,18 +61,18 @@ export class LspFileSync {
 		const existing = this.tracked.get(uri);
 		if (existing) {
 			existing.version++;
-			client.didChange(uri, existing.version, content);
-			this.touch(uri, existing);
+			await client.didChange(uri, existing.version, content);
+			await this.touch(uri, existing);
 			return;
 		}
 
 		const document = { uri, languageId, version: 1 };
 		this.tracked.set(uri, document);
-		client.didOpen(uri, languageId, document.version, content);
-		this.touch(uri, document);
+		await client.didOpen(uri, languageId, document.version, content);
+		await this.touch(uri, document);
 	}
 
-	private touch(uri: string, document: LspTrackedDocument): void {
+	private async touch(uri: string, document: LspTrackedDocument): Promise<void> {
 		this.tracked.delete(uri);
 		this.tracked.set(uri, document);
 
@@ -81,7 +81,7 @@ export class LspFileSync {
 			if (oldest.done) return;
 			const [oldestUri, oldestDocument] = oldest.value;
 			this.tracked.delete(oldestUri);
-			this.manager.getRunningClient(oldestDocument.languageId)?.didClose(oldestUri);
+			await this.manager.getRunningClient(oldestDocument.languageId)?.didClose(oldestUri);
 		}
 	}
 

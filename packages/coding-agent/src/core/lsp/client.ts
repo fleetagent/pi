@@ -141,7 +141,7 @@ export class LspClient {
 		};
 		const result = await this.connection.sendRequest<InitializeResult>("initialize", initializeParams);
 		this.capabilities = result.capabilities;
-		this.connection.sendNotification("initialized", {});
+		await this.connection.sendNotification("initialized", {});
 		this.initialized = true;
 		return { capabilities: result.capabilities };
 	}
@@ -153,26 +153,26 @@ export class LspClient {
 		return this.connection.sendRequest<TResult>(method, params);
 	}
 
-	sendNotification(method: string, params: unknown): void {
+	async sendNotification(method: string, params: unknown): Promise<void> {
 		if (!this.connection || !this.initialized) return;
-		this.connection.sendNotification(method, params);
+		await this.connection.sendNotification(method, params);
 	}
 
-	didOpen(uri: string, languageId: string, version: number, text: string): void {
-		this.sendNotification("textDocument/didOpen", {
+	async didOpen(uri: string, languageId: string, version: number, text: string): Promise<void> {
+		await this.sendNotification("textDocument/didOpen", {
 			textDocument: { uri, languageId, version, text },
 		});
 	}
 
-	didChange(uri: string, version: number, text: string): void {
-		this.sendNotification("textDocument/didChange", {
+	async didChange(uri: string, version: number, text: string): Promise<void> {
+		await this.sendNotification("textDocument/didChange", {
 			textDocument: { uri, version },
 			contentChanges: [{ text }],
 		});
 	}
 
-	didClose(uri: string): void {
-		this.sendNotification("textDocument/didClose", { textDocument: { uri } });
+	async didClose(uri: string): Promise<void> {
+		await this.sendNotification("textDocument/didClose", { textDocument: { uri } });
 	}
 
 	async shutdown(): Promise<void> {
@@ -183,7 +183,7 @@ export class LspClient {
 			if (this.connection) {
 				const shutdown = this.connection.sendRequest("shutdown").catch(() => undefined);
 				await Promise.race([shutdown, new Promise((resolve) => setTimeout(resolve, 3000))]);
-				this.connection.sendNotification("exit");
+				await this.connection.sendNotification("exit");
 			}
 		} catch {
 			// Server may already be gone.

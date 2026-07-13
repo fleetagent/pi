@@ -43,6 +43,8 @@
 * Show resolved subagent models and keep queued, running, completed, and failed TUI states stable until subagent runs finish.
 * Queue editor submissions into the active run after successful auto-compaction instead of racing a new prompt continuation.
 * Create `/new` sessions at the top level instead of threading them beneath the previous session.
+* Preserve extension-requested compaction context between turns.
+* Prevent language-server shutdown write races from crashing the agent.
 
 ## [0.1.4](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.1.3...@fleetagent/pi-coding-agent-v0.1.4) (2026-06-16)
 

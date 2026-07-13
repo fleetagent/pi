@@ -796,14 +796,14 @@ export class AgentSession {
 				: undefined);
 		this.agent.prepareNextTurnWithContext = async (turn, signal) => {
 			const previousUpdate = await previousPrepareNextTurnWithContext?.(turn, signal);
-			await this._drainExtensionCompactionQueue("between-turns");
+			const compacted = await this._drainExtensionCompactionQueue("between-turns");
 
 			// Always rebuild the loop context so session-driven changes to the active
 			// tool set and system prompt (e.g. load_tool / unload_tool) take effect on
 			// the next turn within the same run instead of waiting for a new prompt.
 			return {
 				...previousUpdate,
-				context: this._buildCurrentAgentContext(previousUpdate?.context ?? turn.context),
+				context: this._buildCurrentAgentContext(compacted ? undefined : (previousUpdate?.context ?? turn.context)),
 			} satisfies AgentLoopTurnUpdate;
 		};
 	}
@@ -2528,8 +2528,7 @@ export class AgentSession {
 				if (!options) {
 					break;
 				}
-				compacted = true;
-				await this._runRequestedExtensionCompaction(options, mode === "idle");
+				compacted = (await this._runRequestedExtensionCompaction(options, mode === "idle")) || compacted;
 			}
 		} finally {
 			this._extensionCompactionRunning = false;
@@ -2540,13 +2539,15 @@ export class AgentSession {
 		return compacted;
 	}
 
-	private async _runRequestedExtensionCompaction(options: CompactOptions, abortActiveRun: boolean): Promise<void> {
+	private async _runRequestedExtensionCompaction(options: CompactOptions, abortActiveRun: boolean): Promise<boolean> {
 		try {
 			const result = await this._compactSession(options.customInstructions, { abortActiveRun });
 			options.onComplete?.(result);
+			return true;
 		} catch (error) {
 			const err = error instanceof Error ? error : new Error(String(error));
 			options.onError?.(err);
+			return false;
 		}
 	}
 

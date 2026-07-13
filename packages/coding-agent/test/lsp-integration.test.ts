@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { Diagnostic } from "vscode-languageserver-protocol";
 import { DiagnosticSeverity } from "vscode-languageserver-protocol";
+import type { MessageConnection } from "vscode-languageserver-protocol/node.js";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition, ToolResultEvent } from "../src/core/extensions/types.ts";
 import { LspClient } from "../src/core/lsp/client.ts";
 import { createLspDiagnosticsTool, formatAutoDiagnosticsForChangedFile } from "../src/core/lsp/diagnostics.ts";
@@ -51,15 +52,15 @@ class FakeLspClient extends LspClient {
 		return this.responses.get(method) as TResult;
 	}
 
-	override sendNotification(method: string, params: unknown): void {
+	override async sendNotification(method: string, params: unknown): Promise<void> {
 		this.notifications.push({ method, params });
 	}
 
-	override didOpen(uri: string, languageId: string, version: number, text: string): void {
+	override async didOpen(uri: string, languageId: string, version: number, text: string): Promise<void> {
 		this.notifications.push({ method: "textDocument/didOpen", params: { uri, languageId, version, text } });
 	}
 
-	override didChange(uri: string, version: number, text: string): void {
+	override async didChange(uri: string, version: number, text: string): Promise<void> {
 		this.notifications.push({ method: "textDocument/didChange", params: { uri, version, text } });
 	}
 
@@ -151,6 +152,57 @@ describe("LSP manager lifecycle", () => {
 		await manager.shutdownAll();
 		expect(created[0]?.isDisposed).toBe(true);
 		expect(manager.getRunningClient("typescript")).toBeUndefined();
+	});
+
+	it("awaits and contains a failed exit notification during shutdown", async () => {
+		const cwd = await createTempDir();
+		const client = new LspClient({ command: "fake", args: [], rootDir: cwd, languageId: "typescript" });
+		let rejectExit!: (reason: Error) => void;
+		let exitAttempted = false;
+		const exitWrite = new Promise<void>((_resolve, reject) => {
+			rejectExit = reject;
+		});
+		const connection = {
+			sendRequest: async () => undefined,
+			sendNotification: () => {
+				exitAttempted = true;
+				return exitWrite;
+			},
+			dispose: () => {},
+		} as unknown as MessageConnection;
+		Object.assign(client as unknown as { connection: MessageConnection; initialized: boolean }, {
+			connection,
+			initialized: true,
+		});
+
+		let settled = false;
+		const shutdown = client.shutdown();
+		void shutdown.then(() => {
+			settled = true;
+		});
+		await new Promise((resolve) => setTimeout(resolve, 0));
+
+		expect(exitAttempted).toBe(true);
+		expect(settled).toBe(false);
+		rejectExit(Object.assign(new Error("stream destroyed"), { code: "ERR_STREAM_DESTROYED" }));
+		await expect(shutdown).resolves.toBeUndefined();
+	});
+
+	it("surfaces notification write failures while active", async () => {
+		const cwd = await createTempDir();
+		const client = new LspClient({ command: "fake", args: [], rootDir: cwd, languageId: "typescript" });
+		const error = Object.assign(new Error("stream destroyed"), { code: "ERR_STREAM_DESTROYED" });
+		const connection = {
+			sendNotification: async () => {
+				throw error;
+			},
+		} as unknown as MessageConnection;
+		Object.assign(client as unknown as { connection: MessageConnection; initialized: boolean }, {
+			connection,
+			initialized: true,
+		});
+
+		await expect(client.sendNotification("test", {})).rejects.toBe(error);
 	});
 
 	it("keeps current default tools active when a resumed session provides the core default tool list", async () => {

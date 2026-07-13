@@ -83,7 +83,9 @@ describe("read tool backend routing", () => {
 			{} as ExtensionContext,
 		);
 
-		expect(result.content).toEqual([{ type: "text", text: "read via local" }]);
+		expect(result.content).toEqual([
+			{ type: "text", text: expect.stringMatching(/^[A-Za-z0-9_-]{3}│read via local$/) },
+		]);
 		expect(localOps.readPaths).toEqual([localPath]);
 		expect(remoteOps.readPaths).toEqual([]);
 	});
