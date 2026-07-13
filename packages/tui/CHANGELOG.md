@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.1.5](https://github.com/fleetagent/pi/compare/@fleetagent/pi-tui-v0.1.4...@fleetagent/pi-tui-v0.1.5) (2026-07-13)
+
+
+### Features
+
+* add subagents and harden runtime boundaries ([90c6e9e](https://github.com/fleetagent/pi/commit/90c6e9e72dfa72f893cab757dd615bb2bd37b461))
+
+
+### Bug Fixes
+
+* preserve user backslash escapes ([8e2a5d9](https://github.com/fleetagent/pi/commit/8e2a5d9366a93028da0ec8453a5d83c3fc07fff8))
+* **tui:** hide HTML comments in Markdown ([f7a7498](https://github.com/fleetagent/pi/commit/f7a7498285e5792fdd0a4bf58a0a8095785cb037))
+
 ## [Unreleased]
 
 ### Changed

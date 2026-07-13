@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.1.5](https://github.com/fleetagent/pi/compare/@fleetagent/pi-agent-core-v0.1.4...@fleetagent/pi-agent-core-v0.1.5) (2026-07-13)
+
+
+### Features
+
+* add subagents and harden runtime boundaries ([90c6e9e](https://github.com/fleetagent/pi/commit/90c6e9e72dfa72f893cab757dd615bb2bd37b461))
+
+
+### Bug Fixes
+
+* **coding-agent:** refresh next-turn context safely ([ad03b61](https://github.com/fleetagent/pi/commit/ad03b612ecd5d6897060e8cb5dc0172af92e887e))
+* port upstream runtime fixes ([d8b2aa3](https://github.com/fleetagent/pi/commit/d8b2aa39527245d1035ab959156bc88d1dea8488))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @fleetagent/pi-ai bumped from ^0.1.4 to ^0.1.5
+
 ## [Unreleased]
 
 ### Fixed
