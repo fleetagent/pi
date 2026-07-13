@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.5](https://github.com/fleetagent/pi/compare/@fleetagent/pi-daemon-v0.1.4...@fleetagent/pi-daemon-v0.1.5) (2026-07-13)
+
+
+### Features
+
+* add subagents and harden runtime boundaries ([90c6e9e](https://github.com/fleetagent/pi/commit/90c6e9e72dfa72f893cab757dd615bb2bd37b461))
+
 ## [0.1.4](https://github.com/fleetagent/pi/compare/@fleetagent/pi-daemon-v0.1.3...@fleetagent/pi-daemon-v0.1.4) (2026-06-16)
 
 

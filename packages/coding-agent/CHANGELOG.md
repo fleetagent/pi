@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.1.5](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.1.4...@fleetagent/pi-coding-agent-v0.1.5) (2026-07-13)
+
+
+### Features
+
+* add subagents and harden runtime boundaries ([90c6e9e](https://github.com/fleetagent/pi/commit/90c6e9e72dfa72f893cab757dd615bb2bd37b461))
+* **ai:** add GPT-5.6 Codex models ([441049c](https://github.com/fleetagent/pi/commit/441049cb576f0fdafebe6e4ba9999a3b762b7cfe))
+* **coding-agent:** add external editor setting ([7efe5f3](https://github.com/fleetagent/pi/commit/7efe5f3504bbe77f143bbddc72486e898ec7a52c))
+* **coding-agent:** add installer lock generation ([5f1ab07](https://github.com/fleetagent/pi/commit/5f1ab071cfb484e95efa9fabd5f875d86e06d203))
+* **coding-agent:** add LSP and hashline tools ([5fe04ef](https://github.com/fleetagent/pi/commit/5fe04efdef64894138127de13ca0696cd2c156d9))
+* **coding-agent:** add output padding setting ([7b34978](https://github.com/fleetagent/pi/commit/7b34978809a0fb813c6da32824dda034563574e2))
+
+
+### Bug Fixes
+
+* **ci:** synchronize npm lockfiles ([2e3fae3](https://github.com/fleetagent/pi/commit/2e3fae3b0dc634aced304200933a7dfc1e8087b5))
+* **coding-agent:** refresh next-turn context safely ([ad03b61](https://github.com/fleetagent/pi/commit/ad03b612ecd5d6897060e8cb5dc0172af92e887e))
+* **coding-agent:** return rpc request id for unknown commands ([9a3ebde](https://github.com/fleetagent/pi/commit/9a3ebde4eb0769e8c14d5e08d69f417d55730314))
+* **coding-agent:** stabilize compaction and LSP lifecycle ([a0d31a2](https://github.com/fleetagent/pi/commit/a0d31a2c6934325e297c741dc3ceb31a943f4688))
+* port remaining startup fixes ([7cca1b3](https://github.com/fleetagent/pi/commit/7cca1b32aeef95c86070bc9db3834512deba02f2))
+* port retry and extension events ([7328f37](https://github.com/fleetagent/pi/commit/7328f37d3a470023ae65909ee20b3f9bc310bc18))
+* port startup display fixes ([616376d](https://github.com/fleetagent/pi/commit/616376d124355ab121ca5f42b0e62e183802cf39))
+* port upstream runtime fixes ([d8b2aa3](https://github.com/fleetagent/pi/commit/d8b2aa39527245d1035ab959156bc88d1dea8488))
+* port upstream stability updates ([1128885](https://github.com/fleetagent/pi/commit/112888570031b34ba0c8f421bd58e08dc50a1897))
+* preserve user backslash escapes ([8e2a5d9](https://github.com/fleetagent/pi/commit/8e2a5d9366a93028da0ec8453a5d83c3fc07fff8))
+* reject invalid session files ([fb930fe](https://github.com/fleetagent/pi/commit/fb930fe0719875005765acfabca8c8de918b0871))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @fleetagent/pi-agent-core bumped from ^0.1.4 to ^0.1.5
+    * @fleetagent/pi-ai bumped from ^0.1.4 to ^0.1.5
+    * @fleetagent/pi-tui bumped from ^0.1.4 to ^0.1.5
+
 ## [Unreleased]
 
 ### Added

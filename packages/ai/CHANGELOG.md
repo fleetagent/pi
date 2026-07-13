@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.1.5](https://github.com/fleetagent/pi/compare/@fleetagent/pi-ai-v0.1.4...@fleetagent/pi-ai-v0.1.5) (2026-07-13)
+
+
+### Features
+
+* add subagents and harden runtime boundaries ([90c6e9e](https://github.com/fleetagent/pi/commit/90c6e9e72dfa72f893cab757dd615bb2bd37b461))
+* **ai:** add GPT-5.6 Codex models ([441049c](https://github.com/fleetagent/pi/commit/441049cb576f0fdafebe6e4ba9999a3b762b7cfe))
+
+
+### Bug Fixes
+
+* **ai:** avoid Codex user-agent race ([4307990](https://github.com/fleetagent/pi/commit/4307990bfb605969e49fdefa253e0179e573d022))
+* **ai:** clamp simple stream max tokens ([56cfb7a](https://github.com/fleetagent/pi/commit/56cfb7a786ada4baa82d6b80638e99f1bb8f561a))
+* **ai:** correct GPT-5.6 context and response routing ([ea974f9](https://github.com/fleetagent/pi/commit/ea974f91d5c9ce354bdcd299ff43097cfc57d8a6))
+* **ai:** surface provider error bodies ([fa322f5](https://github.com/fleetagent/pi/commit/fa322f5baa61f2ae09020030e538a5bf23d44c61))
+* port remaining startup fixes ([7cca1b3](https://github.com/fleetagent/pi/commit/7cca1b32aeef95c86070bc9db3834512deba02f2))
+* port retry and extension events ([7328f37](https://github.com/fleetagent/pi/commit/7328f37d3a470023ae65909ee20b3f9bc310bc18))
+* port upstream runtime fixes ([d8b2aa3](https://github.com/fleetagent/pi/commit/d8b2aa39527245d1035ab959156bc88d1dea8488))
+* port upstream stability updates ([1128885](https://github.com/fleetagent/pi/commit/112888570031b34ba0c8f421bd58e08dc50a1897))
+
 ## [Unreleased]
 
 ### Added
