@@ -1,7 +1,7 @@
 {
-	"packages/agent": "0.1.5",
-	"packages/ai": "0.1.5",
-	"packages/coding-agent": "0.1.5",
-	"packages/pi-daemon": "0.1.5",
-	"packages/tui": "0.1.5"
+	"packages/agent": "0.1.6",
+	"packages/ai": "0.1.6",
+	"packages/coding-agent": "0.1.6",
+	"packages/pi-daemon": "0.1.6",
+	"packages/tui": "0.1.6"
 }
