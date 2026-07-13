@@ -4,7 +4,7 @@ import { join } from "node:path";
 import type { AgentTool } from "@fleetagent/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall, type Model } from "@fleetagent/pi-ai";
 import { Type } from "typebox";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { InputEvent } from "../../src/core/extensions/index.ts";
 import type { PromptTemplate } from "../../src/core/prompt-templates.ts";
 import { createSyntheticSourceInfo } from "../../src/core/source-info.ts";
@@ -258,6 +258,29 @@ describe("AgentSession prompt characterization", () => {
 
 		expect(harness.session.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
 		expect(getMessageText(harness.session.messages[0]!)).toBe("from extension");
+	});
+
+	it("starts an incoming extension prompt when post-compaction continuation is no longer valid", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("first response"), fauxAssistantMessage("next response")]);
+		await harness.session.prompt("first");
+
+		const checkCompaction = vi
+			.spyOn(harness.session as unknown as { _checkCompaction: () => Promise<boolean> }, "_checkCompaction")
+			.mockResolvedValueOnce(true)
+			.mockResolvedValue(false);
+
+		await expect(harness.session.sendUserMessage("next iteration")).resolves.toBeUndefined();
+
+		expect(checkCompaction).toHaveBeenCalled();
+		expect(harness.session.messages.map((message) => message.role)).toEqual([
+			"user",
+			"assistant",
+			"user",
+			"assistant",
+		]);
+		expect(getMessageText(harness.session.messages[2]!)).toBe("next iteration");
 	});
 
 	it("does not report streamingBehavior to input handlers while idle", async () => {

@@ -116,6 +116,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	const hasFind = tools.includes("find");
 	const hasLs = tools.includes("ls");
 	const hasRead = tools.includes("read");
+	const hasSubagent = tools.includes("subagent");
 
 	// File exploration guidelines
 	if (hasBash && !hasGrep && !hasFind && !hasLs) {
@@ -137,13 +138,25 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 
 	const guidelines = guidelinesList.map((g) => `- ${g}`).join("\n");
 
-	let prompt = `You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.
+	const orchestrationSection = hasSubagent
+		? `
+			## Orchestration
 
+You are the primary agent and final decision-maker. Use subagents as isolated workers for focused investigation, implementation alternatives, and independent review when delegation improves speed or confidence.
+
+Give each subagent a precise task and expected response format. Treat its output as evidence, not authority: reconcile conflicting findings, verify important claims against source or tests, and integrate the final result yourself.
+
+Work directly when delegation would cost more than completing the task. Do not delegate responsibility for the final answer.
+
+		  `.trim()
+		: "";
+
+	let prompt = `You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.
 Available tools:
 ${toolsList}
 
 In addition to the tools above, you may have access to other custom tools depending on the project.
-
+${orchestrationSection ? `\n${orchestrationSection}\n` : ""}
 Guidelines:
 ${guidelines}
 

@@ -9,6 +9,7 @@ import {
 	deleteAllKittyImages,
 	deleteKittyImage,
 	detectCapabilities,
+	encodeITerm2,
 	encodeKitty,
 	hyperlink,
 	isImageLine,
@@ -328,6 +329,13 @@ describe("Kitty image cursor movement", () => {
 		assert.ok(sequence.startsWith("\x1b_Ga=T,f=100,q=2,C=1,c=2,r=2;"));
 	});
 
+	it("strips terminal string terminators from image protocol payloads", () => {
+		const kitty = encodeKitty("AAAA\x1b\\\x07\x9cBBBB");
+		assert.strictEqual(kitty, "\x1b_Ga=T,f=100,q=2;AAAA\\BBBB\x1b\\");
+		const iterm = encodeITerm2("AAAA\x1b\\\x07\x9cBBBB", { width: "2\x07\x1b]0;owned" });
+		assert.strictEqual(iterm, "\x1b]1337;File=inline=1;width=2]0;owned:AAAA\\BBBB\x07");
+	});
+
 	it("suppresses Kitty replies for delete commands", () => {
 		assert.strictEqual(deleteKittyImage(42), "\x1b_Ga=d,d=I,i=42,q=2\x1b\\");
 		assert.strictEqual(deleteAllKittyImages(), "\x1b_Ga=d,d=A,q=2\x1b\\");
@@ -444,5 +452,12 @@ describe("hyperlink", () => {
 		const result = hyperlink("README.md", "file:///home/user/README.md");
 		assert.ok(result.includes("file:///home/user/README.md"));
 		assert.ok(result.includes("README.md"));
+	});
+
+	it("strips OSC injection sequences from hyperlink URLs and visible text", () => {
+		const result = hyperlink("label\x1b]0;owned\x07tail\x9c", "https://example.com/\x1b\\\x07\x9c");
+		assert.strictEqual(result, "\x1b]8;;https://example.com/\\\x1b\\label]0;ownedtail\x1b]8;;\x1b\\");
+		assert.strictEqual(result.includes("\x07"), false);
+		assert.strictEqual(result.includes("\x9c"), false);
 	});
 });

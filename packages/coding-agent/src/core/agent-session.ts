@@ -125,6 +125,7 @@ import {
 	type ToolBackendInfo,
 	type ToolOperations,
 } from "./tools/index.ts";
+import { createSubagentToolDefinition, formatSubagentModelCatalog, type SubagentRunner } from "./tools/subagent.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
 
 // ============================================================================
@@ -140,7 +141,11 @@ const LSP_TOOL_NAMES = [
 	"lsp_rename",
 	"lsp_code_actions",
 ] as const;
-export const DEFAULT_ACTIVE_TOOL_NAMES = [...CORE_DEFAULT_TOOL_NAMES, ...LSP_TOOL_NAMES] as const;
+export const DEFAULT_ACTIVE_TOOL_NAMES = [...CORE_DEFAULT_TOOL_NAMES, ...LSP_TOOL_NAMES, "subagent"] as const;
+
+export function getDefaultActiveToolNames(): string[] {
+	return [...DEFAULT_ACTIVE_TOOL_NAMES];
+}
 
 // ============================================================================
 
@@ -216,10 +221,12 @@ export interface AgentSessionConfig {
 	toolOperations?: ToolOperations;
 	/** Model registry for API key resolution and model discovery */
 	modelRegistry: ModelRegistry;
-	/** Initial active built-in tool names. Default: [read, bash, edit, write] */
+	/** Initial active built-in tool names. Defaults to DEFAULT_ACTIVE_TOOL_NAMES. */
 	initialActiveToolNames?: string[];
 	/** Optional allowlist of tool names. When provided, only these tool names are exposed. */
 	allowedToolNames?: string[];
+	/** Tool names that must never be exposed in this session. */
+	excludedToolNames?: string[];
 	/**
 	 * Override base tools (useful for custom runtimes).
 	 *
@@ -229,6 +236,10 @@ export interface AgentSessionConfig {
 	baseToolsOverride?: Record<string, AgentTool>;
 	/** Mutable ref used by Agent to access the current ExtensionRunner */
 	extensionRunnerRef?: { current?: ExtensionRunner };
+	/** Runner used to create isolated subagent sessions. */
+	subagentRunner?: SubagentRunner;
+	/** Host-controlled trust grant for project-local subagent presets. */
+	trustProjectAgents?: boolean;
 	/** Session start event metadata emitted when extensions bind to this runtime. */
 	sessionStartEvent?: SessionStartEvent;
 }
@@ -329,6 +340,8 @@ interface StructuredInternalDetails {
 const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high"];
 const DEFAULT_STRUCTURED_RESPONSE_TOOL_NAME = "structured_output";
 const DEFAULT_STRUCTURED_RESPONSE_CORRECTIONS = 2;
+const STALE_EXTENSION_CONTEXT_MESSAGE =
+	"This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For reload, do not use the old ctx after await ctx.reload().";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -429,6 +442,8 @@ export class AgentSession {
 	// Event subscription state
 	private _unsubscribeAgent?: () => void;
 	private _eventListeners: AgentSessionEventListener[] = [];
+	private _disposePromise?: Promise<void>;
+	private _disposed = false;
 
 	/** Tracks pending steering messages for UI display. Removed when delivered. */
 	private _steeringMessages: string[] = [];
@@ -438,6 +453,7 @@ export class AgentSession {
 	private _pendingNextTurnMessages: CustomMessage[] = [];
 
 	// Compaction state
+	private _compactionInFlight?: Promise<unknown>;
 	private _compactionAbortController: AbortController | undefined = undefined;
 	private _autoCompactionAbortController: AbortController | undefined = undefined;
 	private _extensionCompactionQueue: CompactOptions[] = [];
@@ -467,8 +483,11 @@ export class AgentSession {
 	private _extensionRunnerRef?: { current?: ExtensionRunner };
 	private _initialActiveToolNames?: string[];
 	private _allowedToolNames?: Set<string>;
+	private _excludedToolNames: Set<string>;
 	private _baseToolsOverride?: Record<string, AgentTool>;
 	private _toolOperations?: ToolOperations;
+	private _subagentRunner?: SubagentRunner;
+	private _trustProjectAgents: boolean;
 	private _localResourceToolOperations?: ToolOperations;
 	private _lspRuntimeState?: LspRuntimeState;
 	private _sessionStartEvent: SessionStartEvent;
@@ -507,11 +526,15 @@ export class AgentSession {
 		this._modelRegistry = config.modelRegistry;
 		this._extensionRunnerRef = config.extensionRunnerRef;
 		this._initialActiveToolNames = config.initialActiveToolNames;
+		this._excludedToolNames = new Set(config.excludedToolNames ?? []);
+		if (!config.subagentRunner) this._excludedToolNames.add("subagent");
 		this._allowedToolNames = config.allowedToolNames
 			? new Set(this._withCurrentDefaultTools([...config.allowedToolNames]))
 			: undefined;
 		this._baseToolsOverride = config.baseToolsOverride;
 		this._toolOperations = config.toolOperations;
+		this._subagentRunner = config.subagentRunner;
+		this._trustProjectAgents = config.trustProjectAgents === true;
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
 
 		// Always subscribe to agent events for internal handling
@@ -1060,19 +1083,25 @@ export class AgentSession {
 	 * Remove all listeners and disconnect from agent.
 	 * Call this when completely done with the session.
 	 */
-	dispose(): void {
-		try {
-			this.abortRetry();
-			this.abortCompaction();
-			this.abortBranchSummary();
-			this.abortBash();
-			this.agent.abort();
-			void this._localResourceToolOperations?.dispose?.();
-			void this._lspRuntimeState?.manager.shutdownAll();
-			this._localResourceToolOperations = undefined;
-			this._lspRuntimeState = undefined;
-		} catch {
-			// Dispose must succeed even if an abort hook throws.
+	dispose(): Promise<void> {
+		this._disposed = true;
+		this._disposePromise ??= this._dispose();
+		return this._disposePromise;
+	}
+
+	private async _dispose(): Promise<void> {
+		for (const abort of [
+			() => this.abortRetry(),
+			() => this.abortCompaction(),
+			() => this.abortBranchSummary(),
+			() => this.abortBash(),
+			() => this.agent.abort(),
+		]) {
+			try {
+				abort();
+			} catch {
+				// Disposal continues if an abort hook throws.
+			}
 		}
 
 		if (this._extensionCompactionTimer !== undefined) {
@@ -1080,13 +1109,20 @@ export class AgentSession {
 			this._extensionCompactionTimer = undefined;
 		}
 		this._extensionCompactionQueue = [];
-
-		this._extensionRunner.invalidate(
-			"This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For reload, do not use the old ctx after await ctx.reload().",
-		);
+		this._extensionRunner.invalidate(STALE_EXTENSION_CONTEXT_MESSAGE);
 		this._disconnectFromAgent();
 		this._eventListeners = [];
 		cleanupSessionResources(this.sessionId);
+
+		const localResourceToolOperations = this._localResourceToolOperations;
+		const lspRuntimeState = this._lspRuntimeState;
+		this._localResourceToolOperations = undefined;
+		this._lspRuntimeState = undefined;
+		await Promise.allSettled([
+			this._compactionInFlight,
+			Promise.resolve().then(() => localResourceToolOperations?.dispose?.()),
+			Promise.resolve().then(() => lspRuntimeState?.manager.shutdownAll()),
+		]);
 	}
 
 	// =========================================================================
@@ -1135,15 +1171,18 @@ export class AgentSession {
 	 * Get all configured tools with name, description, parameter schema, and source metadata.
 	 */
 	getAllTools(): ToolInfo[] {
-		return Array.from(this._toolDefinitions.values()).map(({ definition, sourceInfo }) => ({
-			name: definition.name,
-			description: definition.description,
-			parameters: definition.parameters,
-			sourceInfo,
-		}));
+		return Array.from(this._toolDefinitions.values())
+			.filter(({ definition }) => this._isToolPermitted(definition.name))
+			.map(({ definition, sourceInfo }) => ({
+				name: definition.name,
+				description: definition.description,
+				parameters: definition.parameters,
+				sourceInfo,
+			}));
 	}
 
 	getToolDefinition(name: string): ToolDefinition | undefined {
+		if (!this._isToolPermitted(name)) return undefined;
 		return this._toolDefinitions.get(name)?.definition ?? this._sessionTools.get(name)?.definition;
 	}
 
@@ -1208,6 +1247,7 @@ export class AgentSession {
 	}
 
 	registerSessionTool(definition: ToolDefinition, options: { lazy?: boolean; sourceInfo?: SourceInfo } = {}): void {
+		if (!this._isToolPermitted(definition.name)) return;
 		this._sessionTools.set(definition.name, {
 			definition,
 			sourceInfo:
@@ -1233,6 +1273,7 @@ export class AgentSession {
 	}
 
 	loadSessionTool(name: string): boolean {
+		if (!this._isToolPermitted(name)) return false;
 		const tool = this._sessionTools.get(name);
 		if (tool) {
 			if (!tool.loaded) {
@@ -1249,6 +1290,7 @@ export class AgentSession {
 	}
 
 	unloadSessionTool(name: string): boolean {
+		if (!this._isToolPermitted(name)) return false;
 		const tool = this._sessionTools.get(name);
 		if (tool) {
 			if (tool.loaded) {
@@ -1265,14 +1307,14 @@ export class AgentSession {
 	}
 
 	getAvailableSessionTools(): ToolInfo[] {
-		return [...Array.from(this._sessionTools.values()), ...this._extensionRunner.getAvailableRegisteredTools()].map(
-			({ definition, sourceInfo }) => ({
+		return [...Array.from(this._sessionTools.values()), ...this._extensionRunner.getAvailableRegisteredTools()]
+			.filter(({ definition }) => this._isToolPermitted(definition.name))
+			.map(({ definition, sourceInfo }) => ({
 				name: definition.name,
 				description: definition.description,
 				parameters: definition.parameters,
 				sourceInfo,
-			}),
-		);
+			}));
 	}
 
 	/**
@@ -1301,6 +1343,7 @@ export class AgentSession {
 	/** Whether compaction or branch summarization is currently running */
 	get isCompacting(): boolean {
 		return (
+			this._compactionInFlight !== undefined ||
 			this._autoCompactionAbortController !== undefined ||
 			this._compactionAbortController !== undefined ||
 			this._branchSummaryAbortController !== undefined
@@ -1427,7 +1470,7 @@ export class AgentSession {
 		const tools = [
 			...Array.from(this._sessionTools.values()).filter((tool) => tool.lazy),
 			...this._extensionRunner.getAvailableRegisteredTools(),
-		];
+		].filter((tool) => this._isToolPermitted(tool.definition.name));
 		if (tools.length === 0) {
 			return undefined;
 		}
@@ -1448,15 +1491,45 @@ export class AgentSession {
 		return lines.join("\n");
 	}
 
+	private _refreshBaseSystemPrompt(): void {
+		this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
+		this.agent.state.systemPrompt = this._systemPromptOverride ?? this._baseSystemPrompt;
+	}
+
+	private _refreshModelDependentRuntime(): void {
+		if (!this._baseToolsOverride && this._baseToolDefinitions.has("subagent")) {
+			this._baseToolDefinitions.set(
+				"subagent",
+				createSubagentToolDefinition({
+					runner: this._subagentRunner,
+					modelCatalog: formatSubagentModelCatalog(this.model, this._modelRegistry.getAvailable()),
+					trustProjectAgents: this._trustProjectAgents,
+				}) as unknown as ToolDefinition,
+			);
+			this._refreshToolRegistry({ activeToolNames: this.getActiveToolNames() });
+			return;
+		}
+		this._refreshBaseSystemPrompt();
+	}
+
 	// =========================================================================
 	// Prompting
 	// =========================================================================
+
+	private async _continueAgentIfReady(): Promise<boolean> {
+		const lastMessage = this.agent.state.messages.at(-1);
+		if (lastMessage?.role === "assistant" && !this.agent.hasQueuedMessages()) {
+			return false;
+		}
+		await this.agent.continue();
+		return true;
+	}
 
 	private async _runAgentPrompt(messages: AgentMessage | AgentMessage[]): Promise<void> {
 		try {
 			await this.agent.prompt(messages);
 			while (await this._handlePostAgentRun()) {
-				await this.agent.continue();
+				if (!(await this._continueAgentIfReady())) break;
 			}
 		} finally {
 			this._systemPromptOverride = undefined;
@@ -1832,9 +1905,10 @@ export class AgentSession {
 			const lastAssistant = this._findLastAssistantMessage();
 			if (lastAssistant && (await this._checkCompaction(lastAssistant, false))) {
 				try {
-					await this.agent.continue();
-					while (await this._handlePostAgentRun()) {
-						await this.agent.continue();
+					if (await this._continueAgentIfReady()) {
+						while (await this._handlePostAgentRun()) {
+							if (!(await this._continueAgentIfReady())) break;
+						}
 					}
 				} finally {
 					this._flushPendingBashMessages();
@@ -2243,6 +2317,7 @@ export class AgentSession {
 
 		// Re-clamp thinking level for new model's capabilities
 		this.setThinkingLevel(thinkingLevel);
+		this._refreshModelDependentRuntime();
 
 		await this._emitModelSelect(model, previousModel, "set");
 	}
@@ -2283,6 +2358,7 @@ export class AgentSession {
 		// - Undefined scoped model thinking level inherits the current session preference
 		// setThinkingLevel clamps to model capabilities.
 		this.setThinkingLevel(thinkingLevel);
+		this._refreshModelDependentRuntime();
 
 		await this._emitModelSelect(next.model, currentModel, "cycle");
 
@@ -2308,6 +2384,7 @@ export class AgentSession {
 
 		// Re-clamp thinking level for new model's capabilities
 		this.setThinkingLevel(thinkingLevel);
+		this._refreshModelDependentRuntime();
 
 		await this._emitModelSelect(nextModel, currentModel, "cycle");
 
@@ -2482,7 +2559,35 @@ export class AgentSession {
 		return this._compactSession(customInstructions, { abortActiveRun: true });
 	}
 
-	private async _compactSession(
+	private async _runWithCompactionGuard<T>(operation: () => Promise<T>): Promise<T> {
+		if (this._disposed) {
+			throw new Error("Agent session is disposed");
+		}
+		if (this._compactionInFlight) {
+			throw new Error("Compaction already in progress");
+		}
+		const inFlight = Promise.resolve().then(() => {
+			if (this._disposed) throw new Error("Agent session is disposed");
+			return operation();
+		});
+		this._compactionInFlight = inFlight;
+		try {
+			return await inFlight;
+		} finally {
+			if (this._compactionInFlight === inFlight) {
+				this._compactionInFlight = undefined;
+			}
+		}
+	}
+
+	private _compactSession(
+		customInstructions: string | undefined,
+		options: { abortActiveRun: boolean },
+	): Promise<CompactionResult> {
+		return this._runWithCompactionGuard(() => this._compactSessionUnlocked(customInstructions, options));
+	}
+
+	private async _compactSessionUnlocked(
 		customInstructions: string | undefined,
 		options: { abortActiveRun: boolean },
 	): Promise<CompactionResult> {
@@ -2491,6 +2596,9 @@ export class AgentSession {
 			this._disconnectFromAgent();
 			disconnected = true;
 			await this.abort();
+			if (this._disposed) {
+				throw new Error("Agent session is disposed");
+			}
 		}
 		this._compactionAbortController = new AbortController();
 		this._emit({ type: "compaction_start", reason: "manual" });
@@ -2616,7 +2724,7 @@ export class AgentSession {
 			throw error;
 		} finally {
 			this._compactionAbortController = undefined;
-			if (disconnected) {
+			if (disconnected && !this._disposed) {
 				this._reconnectToAgent();
 			}
 		}
@@ -2731,9 +2839,13 @@ export class AgentSession {
 	/**
 	 * Internal: Run auto-compaction with events.
 	 */
-	private async _runAutoCompaction(reason: "overflow" | "threshold", willRetry: boolean): Promise<boolean> {
-		const settings = this.settingsManager.getCompactionSettings();
+	private _runAutoCompaction(reason: "overflow" | "threshold", willRetry: boolean): Promise<boolean> {
+		if (this._compactionInFlight || this._disposed) return Promise.resolve(false);
+		return this._runWithCompactionGuard(() => this._runAutoCompactionUnlocked(reason, willRetry));
+	}
 
+	private async _runAutoCompactionUnlocked(reason: "overflow" | "threshold", willRetry: boolean): Promise<boolean> {
+		const settings = this.settingsManager.getCompactionSettings();
 		this._emit({ type: "compaction_start", reason });
 		this._autoCompactionAbortController = new AbortController();
 
@@ -3014,11 +3126,10 @@ export class AgentSession {
 		}
 
 		const refreshedModel = this._modelRegistry.find(currentModel.provider, currentModel.id);
-		if (!refreshedModel || refreshedModel === currentModel) {
-			return;
+		if (refreshedModel && refreshedModel !== currentModel) {
+			this.agent.state.model = refreshedModel;
 		}
-
-		this.agent.state.model = refreshedModel;
+		this._refreshModelDependentRuntime();
 	}
 
 	private _bindExtensionCore(runner: ExtensionRunner): void {
@@ -3267,8 +3378,7 @@ export class AgentSession {
 		const previousRegistryNames = new Set(this._toolRegistry.keys());
 		const previousActiveToolNames = this.getActiveToolNames();
 		const allowedToolNames = this._allowedToolNames;
-		const isAllowedTool = (name: string): boolean => !allowedToolNames || allowedToolNames.has(name);
-
+		const isAllowedTool = (name: string): boolean => this._isToolPermitted(name);
 		const lifecycleToolNames = new Set(["load_tool", "unload_tool"]);
 		const hasAvailableSessionTools = this.getAvailableSessionTools().length > 0;
 		const isVisibleBaseTool = (name: string): boolean =>
@@ -3388,6 +3498,11 @@ export class AgentSession {
 						operationsForPath: (path) => this._getReadOperationsForPath(path, shellPath),
 					},
 					bash: { commandPrefix: shellCommandPrefix },
+					subagent: {
+						runner: this._subagentRunner,
+						modelCatalog: formatSubagentModelCatalog(this.model, this._modelRegistry.getAvailable()),
+						trustProjectAgents: this._trustProjectAgents,
+					},
 				});
 
 		this._baseToolDefinitions = new Map(
@@ -3445,8 +3560,8 @@ export class AgentSession {
 
 		const defaultActiveToolNames = this._baseToolsOverride
 			? Object.keys(this._baseToolsOverride)
-			: [...DEFAULT_ACTIVE_TOOL_NAMES];
-		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
+			: getDefaultActiveToolNames();
+		const baseActiveToolNames = this._withCurrentDefaultTools(options.activeToolNames ?? defaultActiveToolNames);
 		this._refreshToolRegistry({
 			activeToolNames: baseActiveToolNames,
 			includeAllExtensionTools: options.includeAllExtensionTools,
@@ -3454,27 +3569,37 @@ export class AgentSession {
 	}
 
 	private _withCurrentDefaultTools(activeToolNames: string[]): string[] {
-		if (this._baseToolsOverride) return activeToolNames;
+		if (this._baseToolsOverride) return activeToolNames.filter((name) => !this._excludedToolNames.has(name));
 		const active = new Set(activeToolNames);
 		const usesDefaultCoreTools = CORE_DEFAULT_TOOL_NAMES.every((toolName) => active.has(toolName));
-		if (!usesDefaultCoreTools) return activeToolNames;
-		return [...activeToolNames, ...DEFAULT_ACTIVE_TOOL_NAMES.filter((toolName) => !active.has(toolName))];
+		const expanded = usesDefaultCoreTools
+			? [...activeToolNames, ...getDefaultActiveToolNames().filter((toolName) => !active.has(toolName))]
+			: activeToolNames;
+		return expanded.filter((toolName) => !this._excludedToolNames.has(toolName));
+	}
+	private _isToolPermitted(name: string): boolean {
+		return !this._excludedToolNames.has(name) && (!this._allowedToolNames || this._allowedToolNames.has(name));
 	}
 
 	async reload(): Promise<void> {
-		const previousFlagValues = this._extensionRunner.getFlagValues();
-		await emitSessionShutdownEvent(this._extensionRunner, { type: "session_shutdown", reason: "reload" });
-		await this._lspRuntimeState?.manager.shutdownAll();
-		this._lspRuntimeState = undefined;
+		const previousRunner = this._extensionRunner;
+		const previousLspRuntimeState = this._lspRuntimeState;
+		const previousFlagValues = previousRunner.getFlagValues();
 		await this.settingsManager.reload();
-		resetApiProviders();
 		await this._resourceLoader.reload();
+		resetApiProviders();
 		const activeToolNames = this._withCurrentDefaultTools(this.getActiveToolNames());
 		this._buildRuntime({
 			activeToolNames,
 			flagValues: previousFlagValues,
 			includeAllExtensionTools: true,
 		});
+		try {
+			await emitSessionShutdownEvent(previousRunner, { type: "session_shutdown", reason: "reload" });
+		} finally {
+			previousRunner.invalidate(STALE_EXTENSION_CONTEXT_MESSAGE);
+			await previousLspRuntimeState?.manager.shutdownAll();
+		}
 
 		const hasBindings =
 			this._extensionUIContext ||

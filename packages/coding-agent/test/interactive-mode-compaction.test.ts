@@ -54,5 +54,17 @@ describe("InteractiveMode compaction events", () => {
 			}),
 		);
 		expect(fakeThis.flushCompactionQueue).toHaveBeenCalledWith({ willRetry: false });
+
+		await handleEvent.call(fakeThis, {
+			type: "compaction_end",
+			reason: "threshold",
+			result: {
+				tokensBefore: 456,
+				summary: "auto summary",
+			},
+			aborted: false,
+			willRetry: false,
+		});
+		expect(fakeThis.flushCompactionQueue).toHaveBeenLastCalledWith({ willRetry: true });
 	});
 });

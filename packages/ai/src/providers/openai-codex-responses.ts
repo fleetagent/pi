@@ -161,11 +161,16 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 			reject(new Error("Request was aborted"));
 			return;
 		}
-		const timeout = setTimeout(resolve, ms);
-		signal?.addEventListener("abort", () => {
+		const onAbort = () => {
 			clearTimeout(timeout);
+			signal?.removeEventListener("abort", onAbort);
 			reject(new Error("Request was aborted"));
-		});
+		};
+		const timeout = setTimeout(() => {
+			signal?.removeEventListener("abort", onAbort);
+			resolve();
+		}, ms);
+		signal?.addEventListener("abort", onAbort);
 	});
 }
 
@@ -648,15 +653,16 @@ async function* parseSSE(response: Response, signal?: AbortSignal): AsyncGenerat
 			if (done) break;
 			buffer += decoder.decode(value, { stream: true });
 
-			let idx = buffer.indexOf("\n\n");
-			while (idx !== -1) {
-				const chunk = buffer.slice(0, idx);
-				buffer = buffer.slice(idx + 2);
+			const separator = /(?:\r\n|\r|\n)(?:\r\n|\r|\n)/;
+			let match = separator.exec(buffer);
+			while (match) {
+				const chunk = buffer.slice(0, match.index);
+				buffer = buffer.slice(match.index + match[0].length);
 
 				const dataLines = chunk
-					.split("\n")
-					.filter((l) => l.startsWith("data:"))
-					.map((l) => l.slice(5).trim());
+					.split(/\r\n|\r|\n/)
+					.filter((line) => line.startsWith("data:"))
+					.map((line) => line.slice(5).trim());
 				if (dataLines.length > 0) {
 					const data = dataLines.join("\n").trim();
 					if (data && data !== "[DONE]") {
@@ -670,7 +676,7 @@ async function* parseSSE(response: Response, signal?: AbortSignal): AsyncGenerat
 						}
 					}
 				}
-				idx = buffer.indexOf("\n\n");
+				match = separator.exec(buffer);
 			}
 		}
 	} finally {
@@ -781,12 +787,14 @@ export function closeOpenAICodexWebSocketSessions(sessionId?: string): void {
 		const entry = websocketSessionCache.get(sessionId);
 		if (entry) closeEntry(entry);
 		websocketSessionCache.delete(sessionId);
+		resetOpenAICodexWebSocketDebugStats(sessionId);
 		return;
 	}
 	for (const entry of websocketSessionCache.values()) {
 		closeEntry(entry);
 	}
 	websocketSessionCache.clear();
+	resetOpenAICodexWebSocketDebugStats();
 }
 
 registerSessionResourceCleanup(closeOpenAICodexWebSocketSessions);
@@ -1011,6 +1019,10 @@ async function acquireWebSocket(
 				entry: cached,
 				reused: true,
 				release: ({ keep } = {}) => {
+					if (websocketSessionCache.get(sessionId) !== cached) {
+						closeWebSocketSilently(cached.socket);
+						return;
+					}
 					if (!keep || !isWebSocketReusable(cached.socket)) {
 						closeWebSocketSilently(cached.socket);
 						websocketSessionCache.delete(sessionId);
@@ -1045,6 +1057,11 @@ async function acquireWebSocket(
 		entry,
 		reused: false,
 		release: ({ keep } = {}) => {
+			if (websocketSessionCache.get(sessionId) !== entry) {
+				closeWebSocketSilently(entry.socket);
+				if (entry.idleTimer) clearTimeout(entry.idleTimer);
+				return;
+			}
 			if (!keep || !isWebSocketReusable(entry.socket)) {
 				closeWebSocketSilently(entry.socket);
 				if (entry.idleTimer) clearTimeout(entry.idleTimer);
@@ -1134,49 +1151,63 @@ async function* parseWebSocket(
 		resolve();
 	};
 
+	const enqueue = (processEvent: () => void | Promise<void>) => {
+		processing = processing.then(processEvent).catch((cause) => {
+			failed =
+				cause instanceof CodexProtocolError
+					? cause
+					: new CodexProtocolError(`Invalid Codex WebSocket JSON: ${formatThrownValue(cause)}`, { cause });
+			done = true;
+			wake();
+		});
+	};
+
+	let processing = Promise.resolve();
 	const onMessage: WebSocketListener = (event) => {
-		void (async () => {
-			let text: string | null = null;
+		enqueue(async () => {
+			if (!event || typeof event !== "object" || !("data" in event)) return;
+			const text = await decodeWebSocketData((event as { data?: unknown }).data);
+			if (!text) return;
+			let parsed: Record<string, unknown>;
 			try {
-				if (!event || typeof event !== "object" || !("data" in event)) return;
-				text = await decodeWebSocketData((event as { data?: unknown }).data);
-				if (!text) return;
-				const parsed = JSON.parse(text) as Record<string, unknown>;
-				const type = typeof parsed.type === "string" ? parsed.type : "";
-				if (type === "response.completed" || type === "response.done" || type === "response.incomplete") {
-					sawCompletion = true;
-					done = true;
-				}
-				queue.push(parsed);
-				wake();
+				parsed = JSON.parse(text) as Record<string, unknown>;
 			} catch (cause) {
-				failed = new CodexProtocolError(`Invalid Codex WebSocket JSON: ${formatThrownValue(cause)}`, {
+				throw new CodexProtocolError(`Invalid Codex WebSocket JSON: ${formatThrownValue(cause)}`, {
 					cause,
 					payload: text,
 				});
-				done = true;
-				wake();
 			}
-		})();
+			const type = typeof parsed.type === "string" ? parsed.type : "";
+			if (type === "response.completed" || type === "response.done" || type === "response.incomplete") {
+				sawCompletion = true;
+				done = true;
+			}
+			queue.push(parsed);
+			wake();
+		});
 	};
 
 	const onError: WebSocketListener = (event) => {
-		failed = extractWebSocketError(event);
-		done = true;
-		wake();
+		enqueue(() => {
+			failed = extractWebSocketError(event);
+			done = true;
+			wake();
+		});
 	};
 
 	const onClose: WebSocketListener = (event) => {
-		if (sawCompletion) {
+		enqueue(() => {
+			if (sawCompletion) {
+				done = true;
+				wake();
+				return;
+			}
+			if (!failed) {
+				failed = extractWebSocketCloseError(event);
+			}
 			done = true;
 			wake();
-			return;
-		}
-		if (!failed) {
-			failed = extractWebSocketCloseError(event);
-		}
-		done = true;
-		wake();
+		});
 	};
 
 	const onAbort = () => {

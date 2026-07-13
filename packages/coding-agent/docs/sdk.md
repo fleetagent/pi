@@ -245,7 +245,7 @@ const pi = await PiAgent.create({
 await pi.createAgentSession();
 ```
 
-Built-in tool names: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`.
+Built-in tool names: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`, `subagent`, and the `lsp_*` navigation/refactoring tools.
 
 ### Settings
 
@@ -309,7 +309,8 @@ createEventBus
 createCodingTools
 createReadOnlyTools
 createReadTool, createBashTool, createEditTool, createWriteTool
-createGrepTool, createFindTool, createLsTool
+createGrepTool, createFindTool, createLsTool, createSubagentTool
 ```
 
+`createSubagentTool` requires a `SubagentRunner` in its options. `PiAgent` configures the embedded runner automatically; standalone tool construction must provide its own in-process runner.
 For extension types, see [extensions.md](extensions.md).

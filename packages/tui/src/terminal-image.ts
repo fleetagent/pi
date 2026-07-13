@@ -1,4 +1,5 @@
 import { execSync } from "node:child_process";
+import { sanitizeHyperlinkText, sanitizeTerminalControlPayload } from "./terminal-control.ts";
 
 export type ImageProtocol = "kitty" | "iterm2" | null;
 
@@ -167,6 +168,7 @@ export function encodeKitty(
 		moveCursor?: boolean;
 	} = {},
 ): string {
+	const sanitizedData = sanitizeTerminalControlPayload(base64Data);
 	const CHUNK_SIZE = 4096;
 
 	const params: string[] = ["a=T", "f=100", "q=2"];
@@ -176,17 +178,17 @@ export function encodeKitty(
 	if (options.rows) params.push(`r=${options.rows}`);
 	if (options.imageId) params.push(`i=${options.imageId}`);
 
-	if (base64Data.length <= CHUNK_SIZE) {
-		return `\x1b_G${params.join(",")};${base64Data}\x1b\\`;
+	if (sanitizedData.length <= CHUNK_SIZE) {
+		return `\x1b_G${params.join(",")};${sanitizedData}\x1b\\`;
 	}
 
 	const chunks: string[] = [];
 	let offset = 0;
 	let isFirst = true;
 
-	while (offset < base64Data.length) {
-		const chunk = base64Data.slice(offset, offset + CHUNK_SIZE);
-		const isLast = offset + CHUNK_SIZE >= base64Data.length;
+	while (offset < sanitizedData.length) {
+		const chunk = sanitizedData.slice(offset, offset + CHUNK_SIZE);
+		const isLast = offset + CHUNK_SIZE >= sanitizedData.length;
 
 		if (isFirst) {
 			chunks.push(`\x1b_G${params.join(",")},m=1;${chunk}\x1b\\`);
@@ -229,10 +231,11 @@ export function encodeITerm2(
 		inline?: boolean;
 	} = {},
 ): string {
+	const sanitizedData = sanitizeTerminalControlPayload(base64Data);
 	const params: string[] = [`inline=${options.inline !== false ? 1 : 0}`];
 
-	if (options.width !== undefined) params.push(`width=${options.width}`);
-	if (options.height !== undefined) params.push(`height=${options.height}`);
+	if (options.width !== undefined) params.push(`width=${sanitizeTerminalControlPayload(String(options.width))}`);
+	if (options.height !== undefined) params.push(`height=${sanitizeTerminalControlPayload(String(options.height))}`);
 	if (options.name) {
 		const nameBase64 = Buffer.from(options.name).toString("base64");
 		params.push(`name=${nameBase64}`);
@@ -241,7 +244,7 @@ export function encodeITerm2(
 		params.push("preserveAspectRatio=0");
 	}
 
-	return `\x1b]1337;File=${params.join(";")}:${base64Data}\x07`;
+	return `\x1b]1337;File=${params.join(";")}:${sanitizedData}\x07`;
 }
 
 export interface ImageCellSize {
@@ -471,7 +474,7 @@ export function renderImage(
  * @param url - The URL to link to
  */
 export function hyperlink(text: string, url: string): string {
-	return `\x1b]8;;${url}\x1b\\${text}\x1b]8;;\x1b\\`;
+	return `\x1b]8;;${sanitizeTerminalControlPayload(url)}\x1b\\${sanitizeHyperlinkText(text)}\x1b]8;;\x1b\\`;
 }
 
 export function imageFallback(mimeType: string, dimensions?: ImageDimensions, filename?: string): string {

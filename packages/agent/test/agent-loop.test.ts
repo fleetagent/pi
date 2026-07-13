@@ -128,6 +128,102 @@ describe("agentLoop with AgentMessage", () => {
 		expect(eventTypes).toContain("agent_end");
 	});
 
+	it("terminates the detached stream when configuration throws synchronously", async () => {
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [] };
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: () => {
+				throw new Error("configuration failed");
+			},
+		};
+		const events: AgentEvent[] = [];
+		const stream = agentLoop([createUserMessage("start")], context, config);
+
+		for await (const event of stream) events.push(event);
+
+		const result = await stream.result();
+		expect(events.at(-1)?.type).toBe("agent_end");
+		expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
+		expect(result.map((message) => message.role)).toEqual(["user", "assistant"]);
+		expect(result.at(-1)).toMatchObject({
+			role: "assistant",
+			stopReason: "error",
+			errorMessage: "configuration failed",
+		});
+	});
+
+	it("finalizes an active partial assistant when stream iteration rejects", async () => {
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [] };
+		const config: AgentLoopConfig = { model: createModel(), convertToLlm: identityConverter };
+		const partial = createAssistantMessage([{ type: "text", text: "partial output" }]);
+		const events: AgentEvent[] = [];
+		const stream = agentLoop([createUserMessage("start")], context, config, undefined, () => {
+			return {
+				async *[Symbol.asyncIterator]() {
+					yield { type: "start", partial };
+					throw new Error("stream iteration failed");
+				},
+				result: async () => {
+					throw new Error("stream iteration failed");
+				},
+			} as never;
+		});
+
+		for await (const event of stream) events.push(event);
+
+		const result = await stream.result();
+		const assistantStarts = events.filter(
+			(event) => event.type === "message_start" && event.message.role === "assistant",
+		);
+		const assistantEnds = events.filter(
+			(event) => event.type === "message_end" && event.message.role === "assistant",
+		);
+		expect(assistantStarts).toHaveLength(1);
+		expect(assistantEnds).toHaveLength(1);
+		expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
+		expect(result.at(-1)).toMatchObject({
+			role: "assistant",
+			content: [{ type: "text", text: "partial output" }],
+			stopReason: "error",
+			errorMessage: "stream iteration failed",
+		});
+	});
+
+	it("starts a terminal error turn when a between-turn callback rejects", async () => {
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [] };
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			prepareNextTurn: async () => {
+				throw new Error("next-turn preparation failed");
+			},
+		};
+		const events: AgentEvent[] = [];
+		const stream = agentLoop([createUserMessage("start")], context, config, undefined, () => {
+			const response = new MockAssistantStream();
+			queueMicrotask(() => {
+				response.push({
+					type: "done",
+					reason: "stop",
+					message: createAssistantMessage([{ type: "text", text: "completed turn" }]),
+				});
+			});
+			return response;
+		});
+
+		for await (const event of stream) events.push(event);
+
+		const result = await stream.result();
+		expect(events.filter((event) => event.type === "turn_start")).toHaveLength(2);
+		expect(events.filter((event) => event.type === "turn_end")).toHaveLength(2);
+		expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
+		expect(result.map((message) => message.role)).toEqual(["user", "assistant", "assistant"]);
+		expect(result.at(-1)).toMatchObject({
+			stopReason: "error",
+			errorMessage: "next-turn preparation failed",
+		});
+	});
+
 	it("should handle custom message types via convertToLlm", async () => {
 		// Create a custom message type
 		interface CustomNotification {
@@ -1246,6 +1342,31 @@ describe("agentLoopContinue with AgentMessage", () => {
 		expect(() => agentLoopContinue(context, config)).toThrow("Cannot continue: no messages in context");
 	});
 
+	it("terminates the detached continuation stream when the provider throws synchronously", async () => {
+		const context: AgentContext = {
+			systemPrompt: "",
+			messages: [createUserMessage("continue")],
+			tools: [],
+		};
+		const config: AgentLoopConfig = { model: createModel(), convertToLlm: identityConverter };
+		const events: AgentEvent[] = [];
+		const stream = agentLoopContinue(context, config, undefined, () => {
+			throw new Error("provider setup failed");
+		});
+
+		for await (const event of stream) events.push(event);
+
+		const result = await stream.result();
+		expect(events.at(-1)?.type).toBe("agent_end");
+		expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
+		expect(result).toHaveLength(1);
+		expect(result[0]).toMatchObject({
+			role: "assistant",
+			stopReason: "error",
+			errorMessage: "provider setup failed",
+		});
+	});
+
 	it("should continue from existing context without emitting user message events", async () => {
 		const userMessage: AgentMessage = createUserMessage("Hello");
 
@@ -1254,6 +1375,7 @@ describe("agentLoopContinue with AgentMessage", () => {
 			messages: [userMessage],
 			tools: [],
 		};
+		const suppliedMessages = context.messages;
 
 		const config: AgentLoopConfig = {
 			model: createModel(),
@@ -1281,11 +1403,48 @@ describe("agentLoopContinue with AgentMessage", () => {
 		// Should only return the new assistant message (not the existing user message)
 		expect(messages.length).toBe(1);
 		expect(messages[0].role).toBe("assistant");
+		expect(context.messages).toBe(suppliedMessages);
+		expect(context.messages).toEqual([userMessage]);
 
 		// Should NOT have user message events (that's the key difference from agentLoop)
 		const messageEndEvents = events.filter((e) => e.type === "message_end");
 		expect(messageEndEvents.length).toBe(1);
 		expect((messageEndEvents[0] as any).message.role).toBe("assistant");
+	});
+
+	it("keeps supplied messages immutable when a next-turn snapshot aliases them", async () => {
+		const userMessage = createUserMessage("Hello");
+		const suppliedMessages: AgentMessage[] = [userMessage];
+		const context: AgentContext = { systemPrompt: "You are helpful.", messages: suppliedMessages, tools: [] };
+		let followUpPending = true;
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			prepareNextTurn: async () => ({ context }),
+			getFollowUpMessages: async () => {
+				if (!followUpPending) return [];
+				followUpPending = false;
+				return [createUserMessage("Follow up")];
+			},
+		};
+		let responseNumber = 0;
+		const stream = agentLoopContinue(context, config, undefined, () => {
+			const response = new MockAssistantStream();
+			queueMicrotask(() => {
+				responseNumber++;
+				const message = createAssistantMessage([{ type: "text", text: `Response ${responseNumber}` }]);
+				response.push({ type: "done", reason: "stop", message });
+			});
+			return response;
+		});
+
+		for await (const _event of stream) {
+			// consume
+		}
+
+		expect((await stream.result()).map((message) => message.role)).toEqual(["assistant", "user", "assistant"]);
+		expect(context.messages).toBe(suppliedMessages);
+		expect(context.messages).toEqual([userMessage]);
 	});
 
 	it("should allow custom message types as last message (caller responsibility)", async () => {

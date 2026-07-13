@@ -8,11 +8,16 @@
 * Add an RPC bash option to exclude command output from model context.
 * Add an `outputPad` setting for user message, assistant message, and thinking horizontal padding.
 * Reject invalid bash timeout values.
+* Add a built-in `subagent` tool with dynamic personas, response contracts, model selection, and bundled presets.
 
 ### Changed
 
 * Update runtime and clipboard dependencies.
 * Use GPT-5.6 as the default OpenAI Codex model.
+* Run built-in subagents as fresh in-process sessions that share parent authentication and model services, avoiding separate CLI process startup.
+* Remove the legacy subprocess fallback from the built-in subagent tool.
+* Rename the bundled `scout` subagent preset to `explore`.
+* Build subagent presentation state incrementally instead of rescanning retained messages during every streamed update.
 
 ### Fixed
 
@@ -35,6 +40,9 @@
 * Surface auth storage save failures to callers.
 * Allow extra fields in edit tool replacement arguments.
 * Include the request ID in RPC unknown-command errors.
+* Show resolved subagent models and keep queued, running, completed, and failed TUI states stable until subagent runs finish.
+* Queue editor submissions into the active run after successful auto-compaction instead of racing a new prompt continuation.
+* Create `/new` sessions at the top level instead of threading them beneath the previous session.
 
 ## [0.1.4](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.1.3...@fleetagent/pi-coding-agent-v0.1.4) (2026-06-16)
 

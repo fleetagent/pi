@@ -1,7 +1,7 @@
 import { access, chmod, realpath, symlink } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { NodeExecutionEnv } from "../../src/harness/env/nodejs.ts";
+import { MAX_EXEC_OUTPUT_CHARS, NodeExecutionEnv } from "../../src/harness/env/nodejs.ts";
 import { FileError, getOrThrow } from "../../src/harness/types.ts";
 import { executeShellWithCapture } from "../../src/harness/utils/shell-output.ts";
 import { createTempDir } from "./session-test-utils.ts";
@@ -219,6 +219,34 @@ describe("NodeExecutionEnv", () => {
 		expect(result).toEqual({ stdout: "out", stderr: "err", exitCode: 0 });
 		expect(stdout).toBe("out");
 		expect(stderr).toBe("err");
+	});
+
+	it("bounds retained stdout and stderr while preserving streamed chunks", async () => {
+		const root = createTempDir();
+		const env = new NodeExecutionEnv({ cwd: root });
+		let streamedStdoutChars = 0;
+		let streamedStderrChars = 0;
+		const outputChars = MAX_EXEC_OUTPUT_CHARS + 100;
+		const result = getOrThrow(
+			await env.exec(
+				`node -e 'process.stdout.write("a".repeat(${outputChars})); process.stderr.write("b".repeat(${outputChars}))'`,
+				{
+					onStdout: (chunk) => {
+						streamedStdoutChars += chunk.length;
+					},
+					onStderr: (chunk) => {
+						streamedStderrChars += chunk.length;
+					},
+				},
+			),
+		);
+
+		expect(result.stdout).toHaveLength(MAX_EXEC_OUTPUT_CHARS);
+		expect(result.stderr).toHaveLength(MAX_EXEC_OUTPUT_CHARS);
+		expect(result.stdout).toMatch(/^\[\.\.\. earlier output truncated \.\.\.\]\n/);
+		expect(result.stderr).toMatch(/^\[\.\.\. earlier output truncated \.\.\.\]\n/);
+		expect(streamedStdoutChars).toBe(outputChars);
+		expect(streamedStderrChars).toBe(outputChars);
 	});
 
 	it("returns non-zero command exit codes as successful execution results", async () => {

@@ -32,7 +32,12 @@ describe("PiAgent session replacement characterization", () => {
 
 	async function createRuntimeForTest(
 		extensionFactory: ExtensionFactory,
-		options?: { cwd?: string; bootstrapModel?: boolean; bootstrapThinkingLevel?: boolean },
+		options?: {
+			cwd?: string;
+			bootstrapModel?: boolean;
+			bootstrapThinkingLevel?: boolean;
+			failReplacementBuild?: { current: boolean };
+		},
 	) {
 		const tempDir =
 			options?.cwd ?? join(tmpdir(), `pi-runtime-suite-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -81,7 +86,10 @@ describe("PiAgent session replacement characterization", () => {
 				noPromptTemplates: true,
 				noThemes: true,
 			},
-			resolveSessionOptions: () => ({ model, thinkingLevel }),
+			resolveSessionOptions: () => {
+				if (options?.failReplacementBuild?.current) throw new Error("replacement build failed");
+				return { model, thinkingLevel };
+			},
 		});
 		await runtime.createAgentSession();
 		await runtime.session.bindExtensions({});
@@ -211,6 +219,78 @@ describe("PiAgent session replacement characterization", () => {
 				previousSessionFile: secondSessionFile,
 			},
 		]);
+	});
+
+	it("keeps the current session usable when replacement construction fails", async () => {
+		const failReplacementBuild = { current: false };
+		const lifecycleEvents: string[] = [];
+		const { runtime } = await createRuntimeForTest(
+			(pi) => {
+				pi.on("session_shutdown", () => {
+					lifecycleEvents.push("shutdown");
+				});
+			},
+			{ failReplacementBuild },
+		);
+		const originalSession = runtime.session;
+		const originalSessionReference = originalSession.sessionReference;
+
+		failReplacementBuild.current = true;
+		await expect(runtime.newSession()).rejects.toThrow("replacement build failed");
+		failReplacementBuild.current = false;
+
+		expect(runtime.session).toBe(originalSession);
+		expect(runtime.session.sessionReference).toBe(originalSessionReference);
+		expect(lifecycleEvents).toEqual([]);
+		await runtime.session.prompt("still usable");
+		expect(runtime.session.messages.at(-1)).toMatchObject({ role: "assistant" });
+	});
+
+	it("keeps the current session usable when pre-commit invalidation fails", async () => {
+		const { runtime } = await createRuntimeForTest(() => {});
+		const originalSession = runtime.session;
+		runtime.setBeforeSessionInvalidate(() => {
+			throw new Error("invalidation failed");
+		});
+
+		await expect(runtime.newSession()).rejects.toThrow("invalidation failed");
+		runtime.setBeforeSessionInvalidate(undefined);
+
+		expect(runtime.session).toBe(originalSession);
+		await runtime.session.prompt("still usable after invalidation failure");
+		expect(runtime.session.messages.at(-1)).toMatchObject({ role: "assistant" });
+	});
+
+	it("awaits tool-operation and LSP shutdown during disposal", async () => {
+		const { runtime } = await createRuntimeForTest(() => {});
+		let resolveTools!: () => void;
+		let resolveLsp!: () => void;
+		const toolsDisposed = new Promise<void>((resolve) => {
+			resolveTools = resolve;
+		});
+		const lspDisposed = new Promise<void>((resolve) => {
+			resolveLsp = resolve;
+		});
+		const sessionInternals = runtime.session as unknown as {
+			_localResourceToolOperations?: { dispose(): Promise<void> };
+			_lspRuntimeState?: { manager: { shutdownAll(): Promise<void> } };
+		};
+		sessionInternals._localResourceToolOperations = { dispose: () => toolsDisposed };
+		sessionInternals._lspRuntimeState = { manager: { shutdownAll: () => lspDisposed } };
+
+		let settled = false;
+		const disposal = runtime.session.dispose().then(() => {
+			settled = true;
+		});
+		await Promise.resolve();
+		expect(settled).toBe(false);
+
+		resolveTools();
+		await Promise.resolve();
+		expect(settled).toBe(false);
+		resolveLsp();
+		await disposal;
+		expect(settled).toBe(true);
 	});
 
 	it("honors session_before_switch cancellation for new and resume", async () => {

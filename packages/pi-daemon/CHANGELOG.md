@@ -41,3 +41,7 @@
 
 - Added streamed file upload and download methods to the daemon WebSocket protocol.
 - Added the initial Pi remote commander daemon package.
+
+### Fixed
+
+- Bounded WebSocket frame sizes, concurrent RPC work, process output, and file uploads with disconnect cleanup.

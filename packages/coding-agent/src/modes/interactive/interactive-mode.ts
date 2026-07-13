@@ -3028,7 +3028,10 @@ export class InteractiveMode {
 						this.chatContainer.addChild(new Text(theme.fg("error", event.errorMessage), 1, 0));
 					}
 				}
-				void this.flushCompactionQueue({ willRetry: event.willRetry });
+				// Successful auto-compaction is still completing the current session prompt.
+				// Queue editor submissions into that run instead of racing it with a new prompt.
+				const resumeViaCurrentRun = event.reason !== "manual" && event.result !== undefined;
+				void this.flushCompactionQueue({ willRetry: event.willRetry || resumeViaCurrentRun });
 				this.ui.requestRender();
 				break;
 			}

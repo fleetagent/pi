@@ -301,11 +301,13 @@ describe("AgentSession model and extension characterization", () => {
 		).toBe(true);
 	});
 
-	it("bindExtensions emits session_start and reload emits session_shutdown then session_start", async () => {
+	it("bindExtensions emits reload lifecycle events and invalidates the old extension API", async () => {
 		const lifecycleEvents: string[] = [];
+		let initialExtensionApi: ExtensionAPI | undefined;
 		const harness = await createHarness({
 			extensionFactories: [
 				(pi) => {
+					initialExtensionApi ??= pi;
 					pi.on("session_start", async (event) => {
 						lifecycleEvents.push(`start:${event.reason}`);
 					});
@@ -321,5 +323,13 @@ describe("AgentSession model and extension characterization", () => {
 		await harness.session.reload();
 
 		expect(lifecycleEvents).toEqual(["start:startup", "shutdown:reload", "start:reload"]);
+		expect(() =>
+			initialExtensionApi?.sendMessage({
+				customType: "stale",
+				content: "stale",
+				display: false,
+				details: undefined,
+			}),
+		).toThrow("This extension ctx is stale after session replacement or reload");
 	});
 });

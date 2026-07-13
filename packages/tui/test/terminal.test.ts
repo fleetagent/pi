@@ -414,6 +414,55 @@ describe("ProcessTerminal Kitty keyboard protocol negotiation", () => {
 	});
 });
 
+describe("ProcessTerminal OSC output", () => {
+	it("strips OSC terminators and control introducers from titles", () => {
+		const terminal = new ProcessTerminal();
+		const writes: string[] = [];
+		const previousWrite = process.stdout.write;
+		process.stdout.write = ((chunk: string | Uint8Array) => {
+			writes.push(String(chunk));
+			return true;
+		}) as typeof process.stdout.write;
+		try {
+			terminal.setTitle("safe\x07\x1b]2;injected\x1b\\\x9cend");
+		} finally {
+			process.stdout.write = previousWrite;
+		}
+		assert.deepEqual(writes, ["\x1b]0;safe]2;injected\\end\x07"]);
+	});
+});
+
+describe("ProcessTerminal lifecycle", () => {
+	it("replaces handlers without duplicating listeners when started twice", () => {
+		const terminal = new ProcessTerminal();
+		const previousWrite = process.stdout.write;
+		const previousKill = process.kill;
+		const previousSetEncoding = process.stdin.setEncoding;
+		const previousResume = process.stdin.resume;
+		const baselineResizeListeners = process.stdout.listenerCount("resize");
+		process.stdout.write = (() => true) as typeof process.stdout.write;
+		process.kill = (() => true) as typeof process.kill;
+		process.stdin.setEncoding = (() => process.stdin) as typeof process.stdin.setEncoding;
+		process.stdin.resume = (() => process.stdin) as typeof process.stdin.resume;
+		try {
+			const firstResize = () => {};
+			const secondResize = () => {};
+			terminal.start(() => {}, firstResize);
+			terminal.start(() => {}, secondResize);
+			assert.equal(process.stdout.listenerCount("resize"), baselineResizeListeners + 1);
+			assert.equal(process.stdout.listeners("resize").includes(firstResize), false);
+			assert.equal(process.stdout.listeners("resize").includes(secondResize), true);
+		} finally {
+			terminal.stop();
+			process.stdout.write = previousWrite;
+			process.kill = previousKill;
+			process.stdin.setEncoding = previousSetEncoding;
+			process.stdin.resume = previousResume;
+		}
+		assert.equal(process.stdout.listenerCount("resize"), baselineResizeListeners);
+	});
+});
+
 describe("ProcessTerminal dimensions", () => {
 	it("falls back to COLUMNS and LINES before default dimensions", () => {
 		const previousColumnsDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "columns");

@@ -86,6 +86,34 @@ describe("buildSystemPrompt", () => {
 		});
 	});
 
+	describe("subagent orchestration", () => {
+		test("describes the primary agent as the final decision-maker when subagent is active", () => {
+			const prompt = buildSystemPrompt({
+				selectedTools: ["read", "subagent"],
+				toolSnippets: { subagent: "Delegate focused tasks" },
+				contextFiles: [],
+				skills: [],
+				cwd: process.cwd(),
+			});
+
+			expect(prompt).toContain("## Orchestration");
+			expect(prompt).toContain("You are the primary agent and final decision-maker.");
+			expect(prompt).toContain("Treat its output as evidence, not authority");
+			expect(prompt).toContain("Do not delegate responsibility for the final answer.");
+		});
+
+		test("omits orchestration guidance when subagent is unavailable", () => {
+			const prompt = buildSystemPrompt({
+				selectedTools: ["read"],
+				contextFiles: [],
+				skills: [],
+				cwd: process.cwd(),
+			});
+
+			expect(prompt).not.toContain("## Orchestration");
+		});
+	});
+
 	describe("prompt guidelines", () => {
 		test("appends promptGuidelines to default guidelines", () => {
 			const prompt = buildSystemPrompt({

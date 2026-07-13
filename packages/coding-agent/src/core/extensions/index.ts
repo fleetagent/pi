@@ -133,6 +133,8 @@ export type {
 	SetLabelHandler,
 	SetModelHandler,
 	SetThinkingLevelHandler,
+	SubagentToolCallEvent,
+	SubagentToolResultEvent,
 	TerminalInputHandler,
 	// Events - Tool
 	ToolCallEvent,
@@ -169,6 +171,7 @@ export {
 	isGrepToolResult,
 	isLsToolResult,
 	isReadToolResult,
+	isSubagentToolResult,
 	isToolCallEventType,
 	isWriteToolResult,
 } from "./types.ts";

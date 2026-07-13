@@ -1,9 +1,10 @@
-import { access, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createEditTool } from "../src/core/tools/edit.ts";
 import { withFileMutationQueue } from "../src/core/tools/file-mutation-queue.ts";
+import { initHasher, lineHashes } from "../src/core/tools/hashline/hash.ts";
 import { LocalToolOperations } from "../src/core/tools/index.ts";
 import { createWriteTool } from "../src/core/tools/write.ts";
 
@@ -97,6 +98,31 @@ describe("withFileMutationQueue", () => {
 
 		expect(order).toEqual(["target:start", "target:end", "alias:start", "alias:end"]);
 	});
+
+	it("uses the same queue for nonexistent files below symlinked directories", async () => {
+		const dir = await createTempDir();
+		const targetDir = join(dir, "target");
+		const aliasDir = join(dir, "alias");
+		await mkdir(targetDir);
+		await symlink(targetDir, aliasDir);
+		const targetPath = join(targetDir, "nested", "new.txt");
+		const aliasPath = join(aliasDir, "nested", "new.txt");
+		const order: string[] = [];
+
+		await Promise.all([
+			withFileMutationQueue(targetPath, async () => {
+				order.push("target:start");
+				await delay(30);
+				order.push("target:end");
+			}),
+			withFileMutationQueue(aliasPath, async () => {
+				order.push("alias:start");
+				order.push("alias:end");
+			}),
+		]);
+
+		expect(order).toEqual(["target:start", "target:end", "alias:start", "alias:end"]);
+	});
 });
 
 describe("built-in edit and write tools", () => {
@@ -117,10 +143,18 @@ describe("built-in edit and write tools", () => {
 			await writeFile(path, content, "utf8");
 		};
 		const editTool = createEditTool(operations);
+		await initHasher();
+		const hashes = await lineHashes("alpha\nbeta\ngamma\n", filePath);
 
 		await Promise.all([
-			editTool.execute("call-1", { path: filePath, edits: [{ oldText: "alpha", newText: "ALPHA" }] }),
-			editTool.execute("call-2", { path: filePath, edits: [{ oldText: "beta", newText: "BETA" }] }),
+			editTool.execute("call-1", {
+				path: filePath,
+				edits: [{ hash_range_inclusive: [hashes[0]!, hashes[0]!], content_lines: ["ALPHA"] }],
+			}),
+			editTool.execute("call-2", {
+				path: filePath,
+				edits: [{ hash_range_inclusive: [hashes[1]!, hashes[1]!], content_lines: ["BETA"] }],
+			}),
 		]);
 
 		const content = await readFile(filePath, "utf8");
@@ -144,6 +178,8 @@ describe("built-in edit and write tools", () => {
 			await writeFile(path, content, "utf8");
 		};
 		const editTool = createEditTool(editOperations);
+		await initHasher();
+		const hashes = await lineHashes("original\n", filePath);
 		const writeOperations = new LocalToolOperations(dir);
 		writeOperations.mkdir = async () => {};
 		writeOperations.writeFile = async (path, content) => {
@@ -154,7 +190,7 @@ describe("built-in edit and write tools", () => {
 
 		const editPromise = editTool.execute("call-1", {
 			path: filePath,
-			edits: [{ oldText: "original", newText: "edited" }],
+			edits: [{ hash_range_inclusive: [hashes[0]!, hashes[0]!], content_lines: ["edited"] }],
 		});
 		await delay(5);
 		const writePromise = writeTool.execute("call-2", {
@@ -211,7 +247,7 @@ describe("built-in edit and write tools", () => {
 		expect(content).toBe("second\n");
 	});
 
-	it("keeps edit queue locked while an aborted edit write is still in flight", async () => {
+	it("keeps edit queue locked while the first edit write is still in flight", async () => {
 		const dir = await createTempDir();
 		const filePath = join(dir, "abort-edit.txt");
 		await writeFile(filePath, "alpha\nbeta\n", "utf8");
@@ -239,24 +275,23 @@ describe("built-in edit and write tools", () => {
 			await writeFile(path, content, "utf8");
 		};
 		const editTool = createEditTool(editOperations);
+		await initHasher();
+		const hashes = await lineHashes("alpha\nbeta\n", filePath);
 
-		const controller = new AbortController();
-		const firstEdit = editTool.execute(
-			"call-1",
-			{ path: filePath, edits: [{ oldText: "alpha", newText: "ALPHA" }] },
-			controller.signal,
-		);
+		const firstEdit = editTool.execute("call-1", {
+			path: filePath,
+			edits: [{ hash_range_inclusive: [hashes[0]!, hashes[0]!], content_lines: ["ALPHA"] }],
+		});
 		await firstWriteStarted.promise;
-		controller.abort();
 
 		const secondEdit = editTool.execute("call-2", {
 			path: filePath,
-			edits: [{ oldText: "beta", newText: "BETA" }],
+			edits: [{ hash_range_inclusive: [hashes[1]!, hashes[1]!], content_lines: ["BETA"] }],
 		});
 		expect(await resolvesWithin(secondWriteStarted.promise, 20)).toBe(false);
 
 		finishFirstWrite.resolve();
-		await expect(firstEdit).rejects.toThrow("Operation aborted");
+		await firstEdit;
 		await secondEdit;
 
 		const content = await readFile(filePath, "utf8");

@@ -10,6 +10,7 @@
 
 * Preserve source backslash escapes when requested by Markdown callers.
 * Hide HTML comments in rendered Markdown output.
+* Sanitize terminal title, hyperlink, and image control-string payloads.
 
 ## [0.1.4](https://github.com/fleetagent/pi/compare/@fleetagent/pi-tui-v0.1.3...@fleetagent/pi-tui-v0.1.4) (2026-06-16)
 

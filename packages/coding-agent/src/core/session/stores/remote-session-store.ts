@@ -79,9 +79,19 @@ export class RemoteSessionStore extends InMemorySessionStore {
 	}
 
 	async flushPendingSync(): Promise<void> {
-		await this.pendingSync;
-		if (this.lastSyncError) {
-			throw this.lastSyncError;
+		while (true) {
+			const pending = this.pendingSync;
+			await pending;
+			if (this.lastSyncError) {
+				throw this.lastSyncError;
+			}
+			if (pending !== this.pendingSync) continue;
+			if (this.dirtyEntries.length > 0) {
+				const error = new Error(`Remote session synchronization left ${this.dirtyEntries.length} unsaved entries`);
+				this.lastSyncError = error;
+				throw error;
+			}
+			return;
 		}
 	}
 
@@ -107,28 +117,42 @@ export class RemoteSessionStore extends InMemorySessionStore {
 	}
 
 	private async flushDirtyEntries(): Promise<void> {
-		if (!this.reference || this.dirtyEntries.length === 0) return;
-		const entries = [...this.dirtyEntries];
-		const response = await this.client.appendEntries(this.reference, {
-			baseEtag: this.etag,
-			entries,
-		});
-		this.etag = response.etag ?? this.etag;
-		this.lastSyncError = undefined;
+		if (this.dirtyEntries.length === 0) return;
+		if (!this.reference) {
+			throw new Error("Cannot synchronize remote session entries without a session reference");
+		}
 
-		const accepted = Math.max(0, Math.min(response.accepted, entries.length));
-		this.dirtyEntries = this.dirtyEntries.slice(accepted);
+		while (this.dirtyEntries.length > 0) {
+			const entries = [...this.dirtyEntries];
+			const response = await this.client.appendEntries(this.reference, {
+				baseEtag: this.etag,
+				entries,
+			});
+			if (!Number.isInteger(response.accepted) || response.accepted <= 0 || response.accepted > entries.length) {
+				throw new Error(
+					`Remote session append accepted ${response.accepted} of ${entries.length} entries without valid progress`,
+				);
+			}
+			this.etag = response.etag ?? this.etag;
+			this.dirtyEntries = this.dirtyEntries.slice(response.accepted);
+			if (this.dirtyEntries.length > 0 && !response.etag) {
+				throw new Error("Remote session append partially accepted entries without returning an updated ETag");
+			}
+		}
+		this.lastSyncError = undefined;
 	}
 
 	private async replaceSnapshot(): Promise<void> {
 		if (!this.reference) return;
 
+		const entries = this.getFileEntries();
+		const dirtyEntryCount = this.dirtyEntries.length;
 		const response = await this.client.replaceSnapshot(this.reference, {
 			baseEtag: this.etag,
-			entries: this.getFileEntries(),
+			entries,
 		});
 		this.etag = response.etag ?? this.etag;
-		this.dirtyEntries = [];
+		this.dirtyEntries = this.dirtyEntries.slice(dirtyEntryCount);
 		this.lastSyncError = undefined;
 	}
 }

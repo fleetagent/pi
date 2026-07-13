@@ -6,7 +6,7 @@ import chalk from "chalk";
 import { getAgentDir } from "../config.ts";
 import { InteractiveMode, runPrintMode, runRpcMode } from "../modes/index.ts";
 import { stopThemeWatcher } from "../modes/interactive/theme/theme.ts";
-import { AgentSession, DEFAULT_ACTIVE_TOOL_NAMES } from "./agent-session.ts";
+import { AgentSession, getDefaultActiveToolNames } from "./agent-session.ts";
 import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
 import { AuthStorage } from "./auth-storage.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
@@ -20,22 +20,24 @@ import type {
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import { convertToLlm } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
-import { findInitialModel } from "./model-resolver.ts";
+import { findInitialModel, resolveCliModel } from "./model-resolver.ts";
 import { restoreStdout, takeOverStdout } from "./output-guard.ts";
 import { DefaultResourceLoader, type DefaultResourceLoaderOptions, type ResourceLoader } from "./resource-loader.ts";
 import { assertSessionCwdExists } from "./session-cwd.ts";
 import {
 	getDefaultSessionDir,
+	InMemorySessionManager,
 	LocalSessionManager,
 	type Session,
 	type SessionInfo,
 	type SessionListProgress,
 	type SessionManager,
 } from "./session-manager.ts";
-import { SettingsManager } from "./settings-manager.ts";
+import { InMemorySettingsStorage, SettingsManager } from "./settings-manager.ts";
 import { isInstallTelemetryEnabled } from "./telemetry.ts";
 import { printTimings, time } from "./timings.ts";
 import type { ToolOperations } from "./tools/index.ts";
+import type { SubagentRunner, SubagentRunRequest } from "./tools/subagent.ts";
 
 export interface PiAgentDiagnostic {
 	type: "info" | "warning" | "error";
@@ -52,11 +54,21 @@ export interface PiAgentServices {
 	diagnostics: PiAgentDiagnostic[];
 }
 
+interface BuiltAgentSession {
+	session: AgentSession;
+	services: PiAgentServices;
+	diagnostics: PiAgentDiagnostic[];
+	modelFallbackMessage?: string;
+}
+
 export interface PiAgentSessionOptions {
 	model?: Model<any>;
 	thinkingLevel?: ThinkingLevel;
 	scopedModels?: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
 	tools?: string[];
+	excludedTools?: string[];
+	/** Trust project-local subagent presets without an interactive host prompt. */
+	trustProjectAgents?: boolean;
 	noTools?: "all" | "builtin";
 	customTools?: ToolDefinition[];
 	toolOperations?: ToolOperations;
@@ -369,16 +381,79 @@ export class PiAgent {
 			diagnostics,
 		};
 	}
+	private createEmbeddedSubagentRunner(
+		services: PiAgentServices,
+		toolOperations: ToolOperations | undefined,
+		excludedTools: string[],
+	): SubagentRunner {
+		return async (request: SubagentRunRequest) => {
+			const resolvedModel = request.model
+				? resolveCliModel({ cliModel: request.model, modelRegistry: services.modelRegistry })
+				: undefined;
+			if (resolvedModel?.error) {
+				return { exitCode: 1, stderr: resolvedModel.error };
+			}
+
+			const settingsStorage = new InMemorySettingsStorage();
+			settingsStorage.withLock("global", () => JSON.stringify(services.settingsManager.getGlobalSettings()));
+			settingsStorage.withLock("project", () => JSON.stringify(services.settingsManager.getProjectSettings()));
+			const settingsManager = SettingsManager.fromStorage(settingsStorage);
+			const childExcludedTools = new Set(["subagent", ...excludedTools]);
+			const tools = (request.tools ?? getDefaultActiveToolNames()).filter((name) => !childExcludedTools.has(name));
+			const child = await PiAgent.create({
+				mode: "embedded",
+				cwd: request.cwd,
+				agentDir: services.agentDir,
+				sessionManager: new InMemorySessionManager(request.cwd),
+				authStorage: services.authStorage,
+				modelRegistry: services.modelRegistry,
+				settingsManager,
+				model: resolvedModel?.model,
+				thinkingLevel: resolvedModel?.thinkingLevel,
+				tools,
+				excludedTools: Array.from(childExcludedTools),
+				toolOperations,
+				resourceLoaderOptions: {
+					toolOperations,
+					noPromptTemplates: true,
+					noThemes: true,
+					appendSystemPrompt: request.systemPrompt.trim() ? [request.systemPrompt] : undefined,
+				},
+			});
+
+			let session: AgentSession | undefined;
+			let unsubscribe: (() => void) | undefined;
+			const abort = (): void => {
+				if (session) void session.abort();
+			};
+			try {
+				session = await child.createAgentSession();
+				unsubscribe = session.subscribe((event) => {
+					if (event.type !== "message_end") return;
+					if (event.message.role === "assistant" || event.message.role === "toolResult") {
+						request.onMessage(event.message as Message);
+					}
+				});
+				if (request.signal?.aborted) {
+					return { exitCode: 1, stderr: "Subagent was aborted" };
+				}
+				request.signal?.addEventListener("abort", abort, { once: true });
+				await session.prompt(request.prompt);
+				return { exitCode: request.signal?.aborted ? 1 : 0, stderr: "" };
+			} catch (error) {
+				return { exitCode: 1, stderr: error instanceof Error ? error.message : String(error) };
+			} finally {
+				request.signal?.removeEventListener("abort", abort);
+				unsubscribe?.();
+				await child.dispose();
+			}
+		};
+	}
 
 	private async buildAgentSession(
 		activeSession: Session,
 		sessionStartEvent?: SessionStartEvent,
-	): Promise<{
-		session: AgentSession;
-		services: PiAgentServices;
-		diagnostics: PiAgentDiagnostic[];
-		modelFallbackMessage?: string;
-	}> {
+	): Promise<BuiltAgentSession> {
 		const services = await this.createServices(activeSession.getCwd());
 		const diagnostics: PiAgentDiagnostic[] = [
 			...services.diagnostics,
@@ -395,9 +470,11 @@ export class PiAgent {
 			thinkingLevel: resolvedOptions.thinkingLevel ?? this.options.thinkingLevel,
 			scopedModels: resolvedOptions.scopedModels ?? this.options.scopedModels,
 			tools: resolvedOptions.tools ?? this.options.tools,
+			excludedTools: resolvedOptions.excludedTools ?? this.options.excludedTools,
 			noTools: resolvedOptions.noTools ?? this.options.noTools,
 			customTools: resolvedOptions.customTools ?? this.options.customTools,
 			toolOperations: resolvedOptions.toolOperations ?? this.options.toolOperations,
+			trustProjectAgents: resolvedOptions.trustProjectAgents ?? this.options.trustProjectAgents,
 		};
 
 		const existingSession = activeSession.buildSessionContext();
@@ -452,7 +529,7 @@ export class PiAgent {
 		}
 		thinkingLevel = model ? (clampThinkingLevel(model, thinkingLevel) as ThinkingLevel) : "off";
 
-		const defaultActiveToolNames: string[] = [...DEFAULT_ACTIVE_TOOL_NAMES];
+		const defaultActiveToolNames = getDefaultActiveToolNames();
 		const allowedToolNames = sessionOptions.tools ?? (sessionOptions.noTools === "all" ? [] : undefined);
 		const initialActiveToolNames: string[] = sessionOptions.tools
 			? [...sessionOptions.tools]
@@ -582,7 +659,14 @@ export class PiAgent {
 				toolOperations: sessionOptions.toolOperations,
 				modelRegistry: services.modelRegistry,
 				initialActiveToolNames,
+				excludedToolNames: sessionOptions.excludedTools,
 				allowedToolNames,
+				subagentRunner: this.createEmbeddedSubagentRunner(
+					services,
+					sessionOptions.toolOperations,
+					sessionOptions.excludedTools ?? [],
+				),
+				trustProjectAgents: sessionOptions.trustProjectAgents,
 				extensionRunnerRef,
 				sessionStartEvent,
 			}),
@@ -592,12 +676,7 @@ export class PiAgent {
 		};
 	}
 
-	private apply(result: {
-		session: AgentSession;
-		services: PiAgentServices;
-		diagnostics: PiAgentDiagnostic[];
-		modelFallbackMessage?: string;
-	}): void {
+	private apply(result: BuiltAgentSession): void {
 		this._session = result.session;
 		this._services = result.services;
 		this._diagnostics = result.diagnostics;
@@ -699,26 +778,36 @@ export class PiAgent {
 		return { cancelled: result?.cancel === true };
 	}
 
-	private async flushActiveSession(): Promise<void> {
-		const flushPendingSync = (this.session.session as { flushPendingSync?: () => Promise<void> }).flushPendingSync;
+	private async flushSession(session: AgentSession): Promise<void> {
+		const flushPendingSync = (session.session as { flushPendingSync?: () => Promise<void> }).flushPendingSync;
 		if (flushPendingSync) {
-			await flushPendingSync.call(this.session.session);
+			await flushPendingSync.call(session.session);
 		}
 	}
 
-	private async teardownCurrent(
+	private async replaceCurrentSession(
+		result: BuiltAgentSession,
 		reason: SessionShutdownEvent["reason"],
-		targetSessionReference?: string,
+		targetSessionReference: string | undefined,
+		withSession?: (ctx: ReplacedSessionContext) => Promise<void>,
 	): Promise<void> {
-		await emitSessionShutdownEvent(this.session.extensionRunner, {
-			type: "session_shutdown",
-			reason,
-			targetSessionReference,
-			targetSessionFile: targetSessionReference,
-		});
-		await this.flushActiveSession();
-		this.beforeSessionInvalidate?.();
-		this.session.dispose();
+		const previousSession = this.session;
+		try {
+			await emitSessionShutdownEvent(previousSession.extensionRunner, {
+				type: "session_shutdown",
+				reason,
+				targetSessionReference,
+				targetSessionFile: targetSessionReference,
+			});
+			await this.flushSession(previousSession);
+			this.beforeSessionInvalidate?.();
+		} catch (error) {
+			await result.session.dispose();
+			throw error;
+		}
+		await previousSession.dispose();
+		this.apply(result);
+		await this.finishSessionReplacement(withSession);
 	}
 
 	private async finishSessionReplacement(withSession?: (ctx: ReplacedSessionContext) => Promise<void>): Promise<void> {
@@ -742,16 +831,13 @@ export class PiAgent {
 		const previousSessionReference = this.session.sessionReference;
 		const nextSession = await this.sessionManager.openReference(sessionPath, { cwdOverride: options?.cwdOverride });
 		assertSessionCwdExists(nextSession, this.services.cwd);
-		await this.teardownCurrent("resume", nextSession.getSessionReference());
-		this.apply(
-			await this.buildAgentSession(nextSession, {
-				type: "session_start",
-				reason: "resume",
-				previousSessionReference,
-				previousSessionFile: previousSessionReference,
-			}),
-		);
-		await this.finishSessionReplacement(options?.withSession);
+		const result = await this.buildAgentSession(nextSession, {
+			type: "session_start",
+			reason: "resume",
+			previousSessionReference,
+			previousSessionFile: previousSessionReference,
+		});
+		await this.replaceCurrentSession(result, "resume", nextSession.getSessionReference(), options?.withSession);
 		return { cancelled: false };
 	}
 
@@ -767,35 +853,21 @@ export class PiAgent {
 		}
 
 		const previousSessionReference = this.session.sessionReference;
-		const activeSession = this.session.session;
-		const newSessionOptions = {
+		const nextSession = await this.sessionManager.create({
 			id: options?.id,
-			parentSession: options?.parentSession ?? activeSession.getSessionReference(),
-		};
-		let nextSession: Session;
-		try {
-			nextSession = await activeSession.createSubSession(newSessionOptions);
-		} catch (error) {
-			if (!(error instanceof Error && error.message === "Session manager unavailable")) {
-				throw error;
-			}
-			nextSession = await this.sessionManager.create(newSessionOptions);
-		}
+			parentSession: options?.parentSession,
+		});
 
-		await this.teardownCurrent("new", nextSession.getSessionReference());
-		this.apply(
-			await this.buildAgentSession(nextSession, {
-				type: "session_start",
-				reason: "new",
-				previousSessionReference,
-				previousSessionFile: previousSessionReference,
-			}),
-		);
 		if (options?.setup) {
-			await options.setup(this.session.session);
-			this.session.agent.state.messages = this.session.session.buildSessionContext().messages;
+			await options.setup(nextSession);
 		}
-		await this.finishSessionReplacement(options?.withSession);
+		const result = await this.buildAgentSession(nextSession, {
+			type: "session_start",
+			reason: "new",
+			previousSessionReference,
+			previousSessionFile: previousSessionReference,
+		});
+		await this.replaceCurrentSession(result, "new", nextSession.getSessionReference(), options?.withSession);
 		return { cancelled: false };
 	}
 
@@ -837,16 +909,13 @@ export class PiAgent {
 			}
 			nextSession = await this.sessionManager.forkSession(activeSession, targetLeafId);
 		}
-		await this.teardownCurrent("fork", nextSession.getSessionReference());
-		this.apply(
-			await this.buildAgentSession(nextSession, {
-				type: "session_start",
-				reason: "fork",
-				previousSessionReference,
-				previousSessionFile: previousSessionReference,
-			}),
-		);
-		await this.finishSessionReplacement(options?.withSession);
+		const result = await this.buildAgentSession(nextSession, {
+			type: "session_start",
+			reason: "fork",
+			previousSessionReference,
+			previousSessionFile: previousSessionReference,
+		});
+		await this.replaceCurrentSession(result, "fork", nextSession.getSessionReference(), options?.withSession);
 		return { cancelled: false, selectedText };
 	}
 
@@ -864,16 +933,13 @@ export class PiAgent {
 		const previousSessionReference = this.session.sessionReference;
 		const nextSession = await this.sessionManager.importJsonl(resolvedPath, { cwdOverride: cwdOverride });
 		assertSessionCwdExists(nextSession, this.services.cwd);
-		await this.teardownCurrent("resume", nextSession.getSessionReference());
-		this.apply(
-			await this.buildAgentSession(nextSession, {
-				type: "session_start",
-				reason: "resume",
-				previousSessionReference,
-				previousSessionFile: previousSessionReference,
-			}),
-		);
-		await this.finishSessionReplacement();
+		const result = await this.buildAgentSession(nextSession, {
+			type: "session_start",
+			reason: "resume",
+			previousSessionReference,
+			previousSessionFile: previousSessionReference,
+		});
+		await this.replaceCurrentSession(result, "resume", nextSession.getSessionReference());
 		return { cancelled: false };
 	}
 
@@ -977,9 +1043,9 @@ export class PiAgent {
 			type: "session_shutdown",
 			reason: "quit",
 		});
-		await this.flushActiveSession();
+		await this.flushSession(this.session);
 		this.beforeSessionInvalidate?.();
-		this.session.dispose();
+		await this.session.dispose();
 		this._session = undefined;
 	}
 }

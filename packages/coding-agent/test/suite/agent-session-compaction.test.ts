@@ -122,6 +122,62 @@ describe("AgentSession compaction characterization", () => {
 		expect(harness.session.messages[0]?.role).toBe("compactionSummary");
 	});
 
+	it("rejects a concurrent compaction without replacing in-flight state", async () => {
+		let releaseFirstCompaction: (() => void) | undefined;
+		let markFirstCompactionStarted: (() => void) | undefined;
+		const firstCompactionGate = new Promise<void>((resolve) => {
+			releaseFirstCompaction = resolve;
+		});
+		const firstCompactionStarted = new Promise<void>((resolve) => {
+			markFirstCompactionStarted = resolve;
+		});
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", async (event) => {
+						markFirstCompactionStarted?.();
+						await firstCompactionGate;
+						return {
+							compaction: {
+								summary: "serialized summary",
+								firstKeptEntryId: event.preparation.firstKeptEntryId,
+								tokensBefore: event.preparation.tokensBefore,
+							},
+						};
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		seedCompactableSession(harness);
+
+		const firstCompaction = harness.session.compact();
+		await firstCompactionStarted;
+		await expect(harness.session.compact()).rejects.toThrow("Compaction already in progress");
+		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
+		await expect(sessionInternals._runAutoCompaction("threshold", false)).resolves.toBe(false);
+		expect(harness.session.isCompacting).toBe(true);
+		releaseFirstCompaction?.();
+
+		await expect(firstCompaction).resolves.toMatchObject({ summary: "serialized summary" });
+		expect(harness.session.isCompacting).toBe(false);
+		expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction")).toHaveLength(1);
+	});
+
+	it("does not start deferred auto-compaction after disposal", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		seedCompactableSession(harness);
+		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
+
+		const autoCompaction = sessionInternals._runAutoCompaction("threshold", false);
+		const disposal = harness.session.dispose();
+
+		await expect(autoCompaction).rejects.toThrow("Agent session is disposed");
+		await expect(disposal).resolves.toBeUndefined();
+		expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction")).toHaveLength(0);
+	});
+
 	it("throws when compacting without a model", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);

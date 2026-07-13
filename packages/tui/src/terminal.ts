@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { setKittyProtocolActive } from "./keys.ts";
 import { isNativeModifierPressed } from "./native-modifiers.ts";
 import { StdinBuffer } from "./stdin-buffer.ts";
+import { sanitizeTerminalControlPayload } from "./terminal-control.ts";
 
 const cjsRequire = createRequire(import.meta.url);
 
@@ -99,6 +100,7 @@ export interface Terminal {
  */
 export class ProcessTerminal implements Terminal {
 	private wasRaw = false;
+	private started = false;
 	private inputHandler?: (data: string) => void;
 	private resizeHandler?: () => void;
 	private _kittyProtocolActive = false;
@@ -132,9 +134,18 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	start(onInput: (data: string) => void, onResize: () => void): void {
+		if (this.started) {
+			this.inputHandler = onInput;
+			if (this.resizeHandler !== onResize) {
+				if (this.resizeHandler) process.stdout.removeListener("resize", this.resizeHandler);
+				this.resizeHandler = onResize;
+				process.stdout.on("resize", onResize);
+			}
+			return;
+		}
+		this.started = true;
 		this.inputHandler = onInput;
 		this.resizeHandler = onResize;
-
 		// Save previous state and enable raw mode
 		this.wasRaw = process.stdin.isRaw || false;
 		if (process.stdin.setRawMode) {
@@ -439,6 +450,7 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	stop(): void {
+		this.started = false;
 		if (this.clearProgressInterval()) {
 			process.stdout.write(TERMINAL_PROGRESS_CLEAR_SEQUENCE);
 		}
@@ -545,7 +557,7 @@ export class ProcessTerminal implements Terminal {
 
 	setTitle(title: string): void {
 		// OSC 0;title BEL - set terminal window title
-		process.stdout.write(`\x1b]0;${title}\x07`);
+		process.stdout.write(`\x1b]0;${sanitizeTerminalControlPayload(title)}\x07`);
 	}
 
 	setProgress(active: boolean): void {

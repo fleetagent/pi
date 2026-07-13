@@ -188,7 +188,9 @@ cat README.md | pi -p "Summarize this text"
 | `--no-tools`, `-nt` | Disable all tools |
 | `--remote <url>` | Run built-in tools through a remote commander (`ws://` or `wss://`) |
 
-Built-in tools: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`.
+Built-in tools: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`, `subagent`.
+
+The `subagent` tool runs fresh in-memory agent sessions in single, parallel, or chained mode. Each session has an isolated conversation while sharing parent authentication and model services, avoiding separate process startup. Each task can provide an optional named preset, persona (`systemPrompt`), output contract (`responseFormat`), model, tool allowlist, and working directory. Without a model it inherits the parent model; the parent receives authenticated same-family model metadata including context and token costs. Bundled presets are `explore`, `worker`, and `reviewer`. User definitions in `~/.pi/agent/agents/*.md` override bundled presets; project definitions in `.pi/agents/*.md` are opt-in through `agentScope` and require interactive confirmation by default.
 
 Use `--remote-deferred --remote-cwd <path>` to start without a connected tool backend, then connect from interactive mode with `/remote ssh <user@host[:/path]> [path]` or `/remote daemon <ws://url>`. Connecting reloads project instruction resources from the selected backend.
 
@@ -281,6 +283,6 @@ pi --tools read,grep,find,ls -p "Review the code"
 
 Pi keeps the core small and pushes workflow-specific behavior into extensions, skills, rules, prompt templates, and packages.
 
-It intentionally does not include built-in MCP, sub-agents, permission popups, plan mode, to-dos, or background bash. You can build or install those workflows as extensions or packages, or use external tools such as containers and tmux.
+Pi includes a focused subagent delegation tool but keeps broader workflow-specific behavior in extensions, skills, rules, prompt templates, and packages. It intentionally does not include built-in MCP, permission popups, plan mode, to-dos, or background bash. You can build or install those workflows as extensions or packages, or use external tools such as containers and tmux.
 
 For the full rationale, read the [blog post](https://mariozechner.at/posts/2025-11-30-pi-coding-agent/).

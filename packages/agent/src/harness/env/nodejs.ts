@@ -30,7 +30,15 @@ import {
 
 const MAX_TIMEOUT_MS = 2_147_483_647;
 const MAX_TIMEOUT_SECONDS = MAX_TIMEOUT_MS / 1000;
+export const MAX_EXEC_OUTPUT_CHARS = 1_000_000;
+const OUTPUT_TRUNCATION_MARKER = "[... earlier output truncated ...]\n";
 
+function appendBoundedOutput(current: string, chunk: string): string {
+	if (current.length + chunk.length <= MAX_EXEC_OUTPUT_CHARS) return current + chunk;
+	const retainedChars = MAX_EXEC_OUTPUT_CHARS - OUTPUT_TRUNCATION_MARKER.length;
+	const tail = chunk.length >= retainedChars ? chunk.slice(-retainedChars) : (current + chunk).slice(-retainedChars);
+	return OUTPUT_TRUNCATION_MARKER + tail;
+}
 function resolveTimeoutMs(timeout: number | undefined): Result<number | undefined, ExecutionError> {
 	if (timeout === undefined) return ok(undefined);
 	if (!Number.isFinite(timeout) || timeout <= 0) {
@@ -137,7 +145,7 @@ async function runCommand(
 		}, timeoutMs);
 		child.stdout?.setEncoding("utf8");
 		child.stdout?.on("data", (chunk: string) => {
-			stdout += chunk;
+			stdout = appendBoundedOutput(stdout, chunk);
 		});
 		child.on("error", () => {
 			clearTimeout(timeout);
@@ -327,7 +335,7 @@ export class NodeExecutionEnv implements ExecutionEnv {
 			child.stdout?.setEncoding("utf8");
 			child.stderr?.setEncoding("utf8");
 			child.stdout?.on("data", (chunk: string) => {
-				stdout += chunk;
+				stdout = appendBoundedOutput(stdout, chunk);
 				try {
 					options?.onStdout?.(chunk);
 				} catch (error) {
@@ -337,7 +345,7 @@ export class NodeExecutionEnv implements ExecutionEnv {
 				}
 			});
 			child.stderr?.on("data", (chunk: string) => {
-				stderr += chunk;
+				stderr = appendBoundedOutput(stderr, chunk);
 				try {
 					options?.onStderr?.(chunk);
 				} catch (error) {

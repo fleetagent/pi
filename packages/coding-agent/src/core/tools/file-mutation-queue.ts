@@ -1,5 +1,5 @@
 import { realpath } from "node:fs/promises";
-import { resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 
 const fileMutationQueues = new Map<string, Promise<void>>();
 let registrationQueue = Promise.resolve();
@@ -15,13 +15,20 @@ function isMissingPathError(error: unknown): boolean {
 
 async function getMutationQueueKey(filePath: string): Promise<string> {
 	const resolvedPath = resolve(filePath);
-	try {
-		return await realpath(resolvedPath);
-	} catch (error) {
-		if (isMissingPathError(error)) {
-			return resolvedPath;
+	const missingSegments: string[] = [];
+	let existingAncestor = resolvedPath;
+
+	while (true) {
+		try {
+			const canonicalAncestor = await realpath(existingAncestor);
+			return missingSegments.length > 0 ? join(canonicalAncestor, ...missingSegments) : canonicalAncestor;
+		} catch (error) {
+			if (!isMissingPathError(error)) throw error;
+			const parent = dirname(existingAncestor);
+			if (parent === existingAncestor) return resolvedPath;
+			missingSegments.unshift(basename(existingAncestor));
+			existingAncestor = parent;
 		}
-		throw error;
 	}
 }
 

@@ -19,6 +19,7 @@ export class Loader extends Text {
 	private intervalMs = DEFAULT_INTERVAL_MS;
 	private currentFrame = 0;
 	private intervalId: NodeJS.Timeout | null = null;
+	private started = false;
 	private ui: TUI | null = null;
 	private renderIndicatorVerbatim = false;
 	private spinnerColorFn: (str: string) => string;
@@ -41,15 +42,19 @@ export class Loader extends Text {
 	}
 
 	render(width: number): string[] {
+		if (!this.started) this.start();
 		return ["", ...super.render(width)];
 	}
 
 	start(): void {
+		if (this.started) return;
+		this.started = true;
 		this.updateDisplay();
 		this.restartAnimation();
 	}
 
 	stop(): void {
+		this.started = false;
 		if (this.intervalId) {
 			clearInterval(this.intervalId);
 			this.intervalId = null;
@@ -66,11 +71,13 @@ export class Loader extends Text {
 		this.frames = indicator?.frames !== undefined ? [...indicator.frames] : [...DEFAULT_FRAMES];
 		this.intervalMs = indicator?.intervalMs && indicator.intervalMs > 0 ? indicator.intervalMs : DEFAULT_INTERVAL_MS;
 		this.currentFrame = 0;
-		this.start();
+		this.updateDisplay();
+		if (this.started) this.restartAnimation();
 	}
 
 	private restartAnimation(): void {
-		this.stop();
+		if (this.intervalId) clearInterval(this.intervalId);
+		this.intervalId = null;
 		if (this.frames.length <= 1) {
 			return;
 		}

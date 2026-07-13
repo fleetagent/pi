@@ -2,7 +2,6 @@
 
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { once } from "node:events";
 import { constants, createReadStream, createWriteStream, type WriteStream } from "node:fs";
 import { access, mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage } from "node:http";
@@ -15,11 +14,19 @@ interface JsonRpcMessage {
 	params?: unknown;
 }
 
+interface UploadState {
+	stream: WriteStream;
+	bytes: number;
+}
+
 interface ClientConnection {
 	socket: Socket;
 	buffer: Buffer;
 	execs: Map<string, ChildProcessWithoutNullStreams>;
-	uploads: Map<string, WriteStream>;
+	uploads: Map<string, UploadState>;
+	requestControllers: Set<AbortController>;
+	activeRequests: number;
+	closed: boolean;
 }
 
 const port = Number(process.env.PORT ?? process.env.PI_DAEMON_PORT ?? "8787");
@@ -27,6 +34,16 @@ const host = process.env.HOST ?? process.env.PI_DAEMON_HOST ?? "127.0.0.1";
 const cwd = resolve(process.env.PI_DAEMON_CWD ?? process.cwd());
 const token = process.env.PI_DAEMON_TOKEN;
 const fileTransferChunkSize = 64 * 1024;
+const maxFramePayloadBytes = Number(process.env.PI_DAEMON_MAX_FRAME_BYTES ?? 1024 * 1024);
+const maxConnectionRequests = Number(process.env.PI_DAEMON_MAX_CONNECTION_REQUESTS ?? 8);
+const maxGlobalRequests = Number(process.env.PI_DAEMON_MAX_GLOBAL_REQUESTS ?? 64);
+const maxConnectionBufferBytes = maxFramePayloadBytes + 14;
+const maxConnectionUploads = Number(process.env.PI_DAEMON_MAX_CONNECTION_UPLOADS ?? 4);
+const maxGlobalUploads = Number(process.env.PI_DAEMON_MAX_GLOBAL_UPLOADS ?? 32);
+const maxUploadBytes = Number(process.env.PI_DAEMON_MAX_UPLOAD_BYTES ?? 100 * 1024 * 1024);
+const maxBufferedProcessOutputBytes = Number(process.env.PI_DAEMON_MAX_BUFFERED_OUTPUT_BYTES ?? 8 * 1024 * 1024);
+let activeGlobalRequests = 0;
+let activeGlobalUploads = 0;
 
 function createFrame(payload: unknown): Buffer {
 	const data = Buffer.from(JSON.stringify(payload));
@@ -47,14 +64,39 @@ function createFrame(payload: unknown): Buffer {
 	return Buffer.concat([header, data]);
 }
 
-function sendFrame(socket: Socket, payload: unknown): void {
-	socket.write(createFrame(payload));
+function sendFrame(socket: Socket, payload: unknown): boolean {
+	if (socket.destroyed || !socket.writable) return true;
+	return socket.write(createFrame(payload));
+}
+
+function waitForSocketDrain(socket: Socket): Promise<void> {
+	return new Promise((resolvePromise, reject) => {
+		const cleanup = () => {
+			socket.off("drain", onDrain);
+			socket.off("close", onClose);
+			socket.off("error", onError);
+		};
+		const onDrain = () => {
+			cleanup();
+			resolvePromise();
+		};
+		const onClose = () => {
+			cleanup();
+			reject(new Error("Socket closed before write drained"));
+		};
+		const onError = (error: Error) => {
+			cleanup();
+			reject(error);
+		};
+		socket.once("drain", onDrain);
+		socket.once("close", onClose);
+		socket.once("error", onError);
+	});
 }
 
 async function sendFrameAsync(socket: Socket, payload: unknown): Promise<void> {
-	if (!socket.write(createFrame(payload))) {
-		await once(socket, "drain");
-	}
+	if (socket.destroyed || !socket.writable) throw new Error("Socket is closed");
+	if (!socket.write(createFrame(payload))) await waitForSocketDrain(socket);
 }
 
 function sendResult(connection: ClientConnection, id: string, result: unknown): void {
@@ -124,42 +166,79 @@ function buildRgArgs(params: Record<string, unknown>): string[] {
 	return args;
 }
 
-async function runBuffered(command: string, args: string[], runCwd: string): Promise<Buffer> {
+async function runBuffered(command: string, args: string[], runCwd: string, signal?: AbortSignal): Promise<Buffer> {
 	return new Promise((resolvePromise, reject) => {
 		const child = spawn(command, args, { cwd: runCwd, stdio: ["ignore", "pipe", "pipe"] });
 		const stdout: Buffer[] = [];
 		const stderr: Buffer[] = [];
-		child.stdout.on("data", (data: Buffer) => stdout.push(data));
-		child.stderr.on("data", (data: Buffer) => stderr.push(data));
-		child.on("error", reject);
-		child.on("close", (code) => {
-			if (code === 0) {
-				resolvePromise(Buffer.concat(stdout));
+		let bufferedBytes = 0;
+		let settled = false;
+		const finish = (error?: Error, output?: Buffer) => {
+			if (settled) return;
+			settled = true;
+			signal?.removeEventListener("abort", onAbort);
+			if (error) reject(error);
+			else resolvePromise(output ?? Buffer.alloc(0));
+		};
+		const onAbort = () => {
+			child.kill();
+			finish(new Error("Request cancelled"));
+		};
+		const collect = (target: Buffer[], data: Buffer) => {
+			bufferedBytes += data.length;
+			if (bufferedBytes > maxBufferedProcessOutputBytes) {
+				child.kill();
+				finish(new Error(`Process output exceeds ${maxBufferedProcessOutputBytes} bytes`));
 				return;
 			}
-			reject(new Error(Buffer.concat(stderr).toString("utf-8").trim() || `${command} exited with code ${code}`));
+			target.push(data);
+		};
+		signal?.addEventListener("abort", onAbort, { once: true });
+		child.stdout.on("data", (data: Buffer) => collect(stdout, data));
+		child.stderr.on("data", (data: Buffer) => collect(stderr, data));
+		child.on("error", (error) => finish(error));
+		child.on("close", (code) => {
+			if (settled) return;
+			if (code === 0) {
+				finish(undefined, Buffer.concat(stdout));
+				return;
+			}
+			finish(new Error(Buffer.concat(stderr).toString("utf-8").trim() || `${command} exited with code ${code}`));
 		});
 	});
 }
 
-function handleExec(connection: ClientConnection, id: string, params: Record<string, unknown>): void {
-	const command = requireString(params.command, "command");
-	const runCwd = optionalString(params.cwd) ?? cwd;
-	const timeout = optionalNumber(params.timeout);
-	const env = isRecord(params.env)
-		? Object.fromEntries(
-				Object.entries(params.env).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
-			)
-		: undefined;
-	const child = spawn("bash", ["-lc", command], {
-		cwd: runCwd,
-		detached: process.platform !== "win32",
-		env: env ? { ...process.env, ...env } : process.env,
-	});
-	connection.execs.set(id, child);
-	let timeoutHandle: NodeJS.Timeout | undefined;
-	if (timeout !== undefined && timeout > 0) {
-		timeoutHandle = setTimeout(() => {
+function removeUpload(connection: ClientConnection, id: string, destroy: boolean): UploadState | undefined {
+	const upload = connection.uploads.get(id);
+	if (!upload) return undefined;
+	connection.uploads.delete(id);
+	activeGlobalUploads--;
+	if (destroy) upload.stream.destroy();
+	return upload;
+}
+
+function handleExec(
+	connection: ClientConnection,
+	id: string,
+	params: Record<string, unknown>,
+	signal: AbortSignal,
+): Promise<void> {
+	return new Promise((resolvePromise) => {
+		const command = requireString(params.command, "command");
+		const runCwd = optionalString(params.cwd) ?? cwd;
+		const timeout = optionalNumber(params.timeout);
+		const env = isRecord(params.env)
+			? Object.fromEntries(
+					Object.entries(params.env).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+				)
+			: undefined;
+		const child = spawn("bash", ["-lc", command], {
+			cwd: runCwd,
+			detached: process.platform !== "win32",
+			env: env ? { ...process.env, ...env } : process.env,
+		});
+		connection.execs.set(id, child);
+		const kill = () => {
 			if (process.platform !== "win32" && child.pid) {
 				try {
 					process.kill(-child.pid);
@@ -169,23 +248,55 @@ function handleExec(connection: ClientConnection, id: string, params: Record<str
 			} else {
 				child.kill();
 			}
-		}, timeout * 1000);
-	}
-	child.stdout.on("data", (data: Buffer) => {
-		sendFrame(connection.socket, { id, event: "data", stream: "stdout", dataBase64: data.toString("base64") });
-	});
-	child.stderr.on("data", (data: Buffer) => {
-		sendFrame(connection.socket, { id, event: "data", stream: "stderr", dataBase64: data.toString("base64") });
-	});
-	child.on("error", (error) => {
-		if (timeoutHandle) clearTimeout(timeoutHandle);
-		connection.execs.delete(id);
-		sendFrame(connection.socket, { id, event: "error", error: { message: error.message } });
-	});
-	child.on("close", (code) => {
-		if (timeoutHandle) clearTimeout(timeoutHandle);
-		connection.execs.delete(id);
-		sendFrame(connection.socket, { id, event: "exit", exitCode: code });
+		};
+		signal.addEventListener("abort", kill, { once: true });
+		let timeoutHandle: NodeJS.Timeout | undefined;
+		if (timeout !== undefined && timeout > 0) timeoutHandle = setTimeout(kill, timeout * 1000);
+		const cleanup = () => {
+			if (timeoutHandle) clearTimeout(timeoutHandle);
+			signal.removeEventListener("abort", kill);
+			resolvePromise();
+		};
+		let drainPromise: Promise<void> | undefined;
+		const pausedStreams = new Set<typeof child.stdout>();
+		const sendExecData = (stream: typeof child.stdout, data: Buffer, streamName: "stdout" | "stderr") => {
+			const writable = sendFrame(connection.socket, {
+				id,
+				event: "data",
+				stream: streamName,
+				dataBase64: data.toString("base64"),
+			});
+			if (writable) return;
+			stream.pause();
+			pausedStreams.add(stream);
+			if (drainPromise) return;
+			drainPromise = waitForSocketDrain(connection.socket);
+			void drainPromise
+				.then(
+					() => {
+						for (const pausedStream of pausedStreams) pausedStream.resume();
+						pausedStreams.clear();
+					},
+					() => kill(),
+				)
+				.finally(() => {
+					drainPromise = undefined;
+				});
+		};
+		child.stdout.on("data", (data: Buffer) => sendExecData(child.stdout, data, "stdout"));
+		child.stderr.on("data", (data: Buffer) => sendExecData(child.stderr, data, "stderr"));
+		child.on("error", (error) => {
+			const active = connection.execs.get(id) === child;
+			if (active) connection.execs.delete(id);
+			if (active) sendFrame(connection.socket, { id, event: "error", error: { message: error.message } });
+			cleanup();
+		});
+		child.on("close", (code) => {
+			const active = connection.execs.get(id) === child;
+			if (active) connection.execs.delete(id);
+			if (active) sendFrame(connection.socket, { id, event: "exit", exitCode: code });
+			cleanup();
+		});
 	});
 }
 
@@ -205,13 +316,25 @@ function cancelExec(connection: ClientConnection, id: string): void {
 	sendFrame(connection.socket, { id, event: "exit", exitCode: null, cancelled: true });
 }
 
-async function handleDownloadFile(connection: ClientConnection, id: string, path: string): Promise<void> {
+async function handleDownloadFile(
+	connection: ClientConnection,
+	id: string,
+	path: string,
+	signal: AbortSignal,
+): Promise<void> {
 	try {
-		for await (const chunk of createReadStream(path, { highWaterMark: fileTransferChunkSize })) {
-			const buffer = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
-			await sendFrameAsync(connection.socket, { id, event: "fileData", dataBase64: buffer.toString("base64") });
+		const readStream = createReadStream(path, { highWaterMark: fileTransferChunkSize });
+		const cancel = () => readStream.destroy(new Error("Request cancelled"));
+		signal.addEventListener("abort", cancel, { once: true });
+		try {
+			for await (const chunk of readStream) {
+				const buffer = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+				await sendFrameAsync(connection.socket, { id, event: "fileData", dataBase64: buffer.toString("base64") });
+			}
+			await sendFrameAsync(connection.socket, { id, event: "fileEnd" });
+		} finally {
+			signal.removeEventListener("abort", cancel);
 		}
-		await sendFrameAsync(connection.socket, { id, event: "fileEnd" });
 	} catch (error) {
 		sendFrame(connection.socket, {
 			id,
@@ -253,7 +376,11 @@ function closeUploadStream(stream: WriteStream): Promise<void> {
 	});
 }
 
-async function handleRequest(connection: ClientConnection, message: JsonRpcMessage): Promise<void> {
+async function handleRequest(
+	connection: ClientConnection,
+	message: JsonRpcMessage,
+	signal: AbortSignal,
+): Promise<void> {
 	const id = requireString(message.id, "id");
 	const method = requireString(message.method, "method");
 	const params = isRecord(message.params) ? message.params : {};
@@ -263,7 +390,7 @@ async function handleRequest(connection: ClientConnection, message: JsonRpcMessa
 			return;
 		}
 		if (method === "exec") {
-			handleExec(connection, id, params);
+			await handleExec(connection, id, params, signal);
 			return;
 		}
 		if (method === "capabilities") {
@@ -299,41 +426,51 @@ async function handleRequest(connection: ClientConnection, message: JsonRpcMessa
 			return;
 		}
 		if (method === "downloadFile") {
-			await handleDownloadFile(connection, id, requireString(params.path, "path"));
+			await handleDownloadFile(connection, id, requireString(params.path, "path"), signal);
 			return;
 		}
 		if (method === "uploadFileStart") {
+			if (connection.uploads.has(id)) throw new Error(`Upload already exists: ${id}`);
+			if (connection.uploads.size >= maxConnectionUploads) {
+				throw new Error(`Too many concurrent uploads for this connection (max ${maxConnectionUploads})`);
+			}
+			if (activeGlobalUploads >= maxGlobalUploads) {
+				throw new Error(`Too many concurrent daemon uploads (max ${maxGlobalUploads})`);
+			}
 			const path = requireString(params.path, "path");
 			const stream = createWriteStream(path);
-			stream.on("error", () => undefined);
-			connection.uploads.set(id, stream);
+			const upload: UploadState = { stream, bytes: 0 };
+			connection.uploads.set(id, upload);
+			activeGlobalUploads++;
+			stream.once("error", () => removeUpload(connection, id, false));
 			sendResult(connection, id, {});
 			return;
 		}
 		if (method === "uploadFileChunk") {
 			const uploadId = requireString(params.uploadId, "uploadId");
-			const stream = connection.uploads.get(uploadId);
-			if (!stream) throw new Error(`Unknown upload: ${uploadId}`);
-			await writeUploadChunk(stream, Buffer.from(requireString(params.dataBase64, "dataBase64"), "base64"));
+			const upload = connection.uploads.get(uploadId);
+			if (!upload) throw new Error(`Unknown upload: ${uploadId}`);
+			const chunk = Buffer.from(requireString(params.dataBase64, "dataBase64"), "base64");
+			if (upload.bytes + chunk.length > maxUploadBytes) {
+				removeUpload(connection, uploadId, true);
+				throw new Error(`Upload exceeds ${maxUploadBytes} bytes`);
+			}
+			upload.bytes += chunk.length;
+			await writeUploadChunk(upload.stream, chunk);
 			sendResult(connection, id, {});
 			return;
 		}
 		if (method === "uploadFileEnd") {
 			const uploadId = requireString(params.uploadId, "uploadId");
-			const stream = connection.uploads.get(uploadId);
-			if (!stream) throw new Error(`Unknown upload: ${uploadId}`);
-			connection.uploads.delete(uploadId);
-			await closeUploadStream(stream);
+			const upload = removeUpload(connection, uploadId, false);
+			if (!upload) throw new Error(`Unknown upload: ${uploadId}`);
+			await closeUploadStream(upload.stream);
 			sendResult(connection, id, {});
 			return;
 		}
 		if (method === "uploadFileCancel") {
 			const uploadId = requireString(params.uploadId, "uploadId");
-			const stream = connection.uploads.get(uploadId);
-			if (stream) {
-				connection.uploads.delete(uploadId);
-				stream.destroy();
-			}
+			removeUpload(connection, uploadId, true);
 			sendResult(connection, id, {});
 			return;
 		}
@@ -355,14 +492,14 @@ async function handleRequest(connection: ClientConnection, message: JsonRpcMessa
 			const pattern = requireString(params.pattern, "pattern");
 			const runCwd = requireString(params.cwd, "cwd");
 			const limit = optionalNumber(params.limit) ?? 1000;
-			const output = await runBuffered("fd", buildFdArgs(pattern, runCwd, limit), runCwd);
+			const output = await runBuffered("fd", buildFdArgs(pattern, runCwd, limit), runCwd, signal);
 			sendResult(connection, id, { matches: output.toString("utf-8").split("\n").filter(Boolean) });
 			return;
 		}
 		if (method === "grep") {
 			const pathParam = requireString(params.path, "path");
 			const isDirectory = (await stat(pathParam)).isDirectory();
-			const output = await runBuffered("rg", buildRgArgs(params), cwd);
+			const output = await runBuffered("rg", buildRgArgs(params), cwd, signal);
 			const matches = output
 				.toString("utf-8")
 				.split("\n")
@@ -383,7 +520,12 @@ async function handleRequest(connection: ClientConnection, message: JsonRpcMessa
 			return;
 		}
 		if (method === "detectImageMimeType") {
-			const output = await runBuffered("file", ["--mime-type", "-b", requireString(params.path, "path")], cwd);
+			const output = await runBuffered(
+				"file",
+				["--mime-type", "-b", requireString(params.path, "path")],
+				cwd,
+				signal,
+			);
 			const mimeType = output.toString("utf-8").trim();
 			sendResult(connection, id, {
 				mimeType: ["image/jpeg", "image/png", "image/gif", "image/webp"].includes(mimeType) ? mimeType : null,
@@ -396,11 +538,57 @@ async function handleRequest(connection: ClientConnection, message: JsonRpcMessa
 	}
 }
 
+function getIncomingDeclaredPayloadLength(buffer: Buffer, chunk: Buffer): bigint | undefined {
+	const header = Buffer.concat([buffer.subarray(0, 10), chunk.subarray(0, Math.max(0, 10 - buffer.length))]);
+	if (header.length < 2) return undefined;
+	const marker = header[1] & 0x7f;
+	if (marker < 126) return BigInt(marker);
+	if (marker === 126) return header.length >= 4 ? BigInt(header.readUInt16BE(2)) : undefined;
+	return header.length >= 10 ? header.readBigUInt64BE(2) : undefined;
+}
+
+function dispatchRequest(connection: ClientConnection, message: JsonRpcMessage): void {
+	const id = typeof message.id === "string" ? message.id : "unknown";
+	if (message.method === "cancel") {
+		cancelExec(connection, id);
+		return;
+	}
+	if (connection.activeRequests >= maxConnectionRequests) {
+		sendError(
+			connection,
+			id,
+			new Error(`Too many concurrent requests for this connection (max ${maxConnectionRequests})`),
+		);
+		return;
+	}
+	if (activeGlobalRequests >= maxGlobalRequests) {
+		sendError(connection, id, new Error(`Too many concurrent daemon requests (max ${maxGlobalRequests})`));
+		return;
+	}
+	const controller = new AbortController();
+	connection.requestControllers.add(controller);
+	connection.activeRequests++;
+	activeGlobalRequests++;
+	void handleRequest(connection, message, controller.signal)
+		.catch((error: unknown) => sendError(connection, id, error))
+		.finally(() => {
+			connection.requestControllers.delete(controller);
+			connection.activeRequests--;
+			activeGlobalRequests--;
+		});
+}
+
 function parseFrames(connection: ClientConnection): void {
 	while (connection.buffer.length >= 2) {
 		const first = connection.buffer[0];
 		const second = connection.buffer[1];
+		const reservedBits = first & 0x70;
+		if (reservedBits !== 0) {
+			connection.socket.destroy(new Error("WebSocket reserved bits require a negotiated extension"));
+			return;
+		}
 		const opcode = first & 0x0f;
+		const final = (first & 0x80) !== 0;
 		const masked = (second & 0x80) !== 0;
 		let payloadLength = second & 0x7f;
 		let offset = 2;
@@ -417,6 +605,22 @@ function parseFrames(connection: ClientConnection): void {
 			}
 			payloadLength = Number(largeLength);
 			offset += 8;
+		}
+		if (payloadLength > maxFramePayloadBytes) {
+			connection.socket.destroy(new Error(`WebSocket frame exceeds ${maxFramePayloadBytes} bytes`));
+			return;
+		}
+		if (!final && (opcode === 0x0 || opcode === 0x1 || opcode === 0x2)) {
+			connection.socket.destroy(new Error("Fragmented WebSocket messages are not supported"));
+			return;
+		}
+		if (opcode >= 0x8 && (!final || payloadLength > 125)) {
+			connection.socket.destroy(new Error("Invalid WebSocket control frame"));
+			return;
+		}
+		if (opcode !== 0x1 && opcode !== 0x8) {
+			connection.socket.destroy(new Error(`Unsupported WebSocket opcode: ${opcode}`));
+			return;
 		}
 		if (!masked) {
 			connection.socket.destroy(new Error("Client WebSocket frames must be masked"));
@@ -445,7 +649,32 @@ function parseFrames(connection: ClientConnection): void {
 			sendFrame(connection.socket, { type: "pong", timestamp: message.timestamp });
 			continue;
 		}
-		void handleRequest(connection, message as JsonRpcMessage);
+		dispatchRequest(connection, message as JsonRpcMessage);
+	}
+}
+
+function receiveSocketData(connection: ClientConnection, chunk: Buffer): void {
+	let remaining = chunk;
+	while (remaining.length > 0 && !connection.socket.destroyed) {
+		const available = maxConnectionBufferBytes - connection.buffer.length;
+		if (available <= 0) {
+			connection.socket.destroy(new Error(`WebSocket receive buffer exceeds ${maxConnectionBufferBytes} bytes`));
+			return;
+		}
+		const next = remaining.subarray(0, available);
+		const declaredPayloadLength = getIncomingDeclaredPayloadLength(connection.buffer, next);
+		if (declaredPayloadLength !== undefined && declaredPayloadLength > BigInt(maxFramePayloadBytes)) {
+			connection.socket.destroy(new Error(`WebSocket frame exceeds ${maxFramePayloadBytes} bytes`));
+			return;
+		}
+		connection.buffer = Buffer.concat([connection.buffer, next]);
+		remaining = remaining.subarray(next.length);
+		const bufferedBeforeParse = connection.buffer.length;
+		parseFrames(connection);
+		if (remaining.length > 0 && connection.buffer.length === bufferedBeforeParse) {
+			connection.socket.destroy(new Error(`WebSocket receive buffer exceeds ${maxConnectionBufferBytes} bytes`));
+			return;
+		}
 	}
 }
 
@@ -494,20 +723,23 @@ server.on("upgrade", (request, socket) => {
 		buffer: Buffer.alloc(0),
 		execs: new Map(),
 		uploads: new Map(),
+		requestControllers: new Set(),
+		activeRequests: 0,
+		closed: false,
 	};
-	netSocket.on("data", (chunk: Buffer) => {
-		connection.buffer = Buffer.concat([connection.buffer, chunk]);
-		parseFrames(connection);
-	});
+	netSocket.on("error", () => undefined);
+	netSocket.on("data", (chunk: Buffer) => receiveSocketData(connection, chunk));
 	netSocket.on("close", () => {
+		connection.closed = true;
+		for (const controller of connection.requestControllers) controller.abort();
+		connection.requestControllers.clear();
 		for (const child of connection.execs.values()) {
 			child.kill();
 		}
 		connection.execs.clear();
-		for (const stream of connection.uploads.values()) {
-			stream.destroy();
+		for (const uploadId of Array.from(connection.uploads.keys())) {
+			removeUpload(connection, uploadId, true);
 		}
-		connection.uploads.clear();
 	});
 });
 

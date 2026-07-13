@@ -75,6 +75,8 @@ import type {
 	LsToolInput,
 	ReadToolDetails,
 	ReadToolInput,
+	SubagentDetails,
+	SubagentToolInput,
 	WriteToolInput,
 } from "../tools/index.ts";
 import type { ToolBackendInfo, ToolOperations } from "../tools/operations.ts";
@@ -844,6 +846,11 @@ export interface LsToolCallEvent extends ToolCallEventBase {
 	input: LsToolInput;
 }
 
+export interface SubagentToolCallEvent extends ToolCallEventBase {
+	toolName: "subagent";
+	input: SubagentToolInput;
+}
+
 export interface CustomToolCallEvent extends ToolCallEventBase {
 	toolName: string;
 	input: Record<string, unknown>;
@@ -863,6 +870,7 @@ export type ToolCallEvent =
 	| GrepToolCallEvent
 	| FindToolCallEvent
 	| LsToolCallEvent
+	| SubagentToolCallEvent
 	| CustomToolCallEvent;
 
 interface ToolResultEventBase {
@@ -908,6 +916,11 @@ export interface LsToolResultEvent extends ToolResultEventBase {
 	details: LsToolDetails | undefined;
 }
 
+export interface SubagentToolResultEvent extends ToolResultEventBase {
+	toolName: "subagent";
+	details: SubagentDetails | undefined;
+}
+
 export interface CustomToolResultEvent extends ToolResultEventBase {
 	toolName: string;
 	details: unknown;
@@ -922,6 +935,7 @@ export type ToolResultEvent =
 	| GrepToolResultEvent
 	| FindToolResultEvent
 	| LsToolResultEvent
+	| SubagentToolResultEvent
 	| CustomToolResultEvent;
 
 // Type guards for ToolResultEvent
@@ -945,6 +959,9 @@ export function isFindToolResult(e: ToolResultEvent): e is FindToolResultEvent {
 }
 export function isLsToolResult(e: ToolResultEvent): e is LsToolResultEvent {
 	return e.toolName === "ls";
+}
+export function isSubagentToolResult(e: ToolResultEvent): e is SubagentToolResultEvent {
+	return e.toolName === "subagent";
 }
 
 /**
@@ -974,6 +991,7 @@ export function isToolCallEventType(toolName: "write", event: ToolCallEvent): ev
 export function isToolCallEventType(toolName: "grep", event: ToolCallEvent): event is GrepToolCallEvent;
 export function isToolCallEventType(toolName: "find", event: ToolCallEvent): event is FindToolCallEvent;
 export function isToolCallEventType(toolName: "ls", event: ToolCallEvent): event is LsToolCallEvent;
+export function isToolCallEventType(toolName: "subagent", event: ToolCallEvent): event is SubagentToolCallEvent;
 export function isToolCallEventType<TName extends string, TInput extends Record<string, unknown>>(
 	toolName: TName,
 	event: ToolCallEvent,

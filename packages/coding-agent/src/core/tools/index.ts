@@ -66,6 +66,19 @@ export {
 	type ReadToolOptions,
 } from "./read.ts";
 export {
+	createSubagentTool,
+	createSubagentToolDefinition,
+	type SubagentDetails,
+	type SubagentResult,
+	type SubagentRunner,
+	type SubagentRunOutcome,
+	type SubagentRunRequest,
+	type SubagentStatus,
+	type SubagentToolInput,
+	type SubagentToolOptions,
+	type SubagentUsageStats,
+} from "./subagent.ts";
+export {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
 	formatSize,
@@ -91,12 +104,13 @@ import { createGrepTool, createGrepToolDefinition, type GrepToolOptions } from "
 import { createLsTool, createLsToolDefinition, type LsToolOptions } from "./ls.ts";
 import type { ToolOperations } from "./operations.ts";
 import { createReadTool, createReadToolDefinition, type ReadToolOptions } from "./read.ts";
+import { createSubagentTool, createSubagentToolDefinition, type SubagentToolOptions } from "./subagent.ts";
 import { createWriteTool, createWriteToolDefinition, type WriteToolOptions } from "./write.ts";
 
 export type Tool = AgentTool<any>;
 export type ToolDef = ToolDefinition<any, any>;
-export type ToolName = "read" | "bash" | "edit" | "write" | "grep" | "find" | "ls";
-export const allToolNames: Set<ToolName> = new Set(["read", "bash", "edit", "write", "grep", "find", "ls"]);
+export type ToolName = "read" | "bash" | "edit" | "write" | "grep" | "find" | "ls" | "subagent";
+export const allToolNames: Set<ToolName> = new Set(["read", "bash", "edit", "write", "grep", "find", "ls", "subagent"]);
 
 export interface ToolsOptions {
 	read?: ReadToolOptions;
@@ -106,6 +120,7 @@ export interface ToolsOptions {
 	grep?: GrepToolOptions;
 	find?: FindToolOptions;
 	ls?: LsToolOptions;
+	subagent?: SubagentToolOptions;
 }
 
 export function createToolDefinition(toolName: ToolName, operations: ToolOperations, options?: ToolsOptions): ToolDef {
@@ -124,6 +139,8 @@ export function createToolDefinition(toolName: ToolName, operations: ToolOperati
 			return createFindToolDefinition(operations, options?.find);
 		case "ls":
 			return createLsToolDefinition(operations, options?.ls);
+		case "subagent":
+			return createSubagentToolDefinition(options?.subagent);
 		default:
 			throw new Error(`Unknown tool name: ${toolName}`);
 	}
@@ -145,6 +162,8 @@ export function createTool(toolName: ToolName, operations: ToolOperations, optio
 			return createFindTool(operations, options?.find);
 		case "ls":
 			return createLsTool(operations, options?.ls);
+		case "subagent":
+			return createSubagentTool(options?.subagent);
 		default:
 			throw new Error(`Unknown tool name: ${toolName}`);
 	}
@@ -180,6 +199,7 @@ export function createAllToolDefinitions(
 		grep: createGrepToolDefinition(operations, options?.grep),
 		find: createFindToolDefinition(operations, options?.find),
 		ls: createLsToolDefinition(operations, options?.ls),
+		subagent: createSubagentToolDefinition(options?.subagent),
 	};
 }
 
@@ -210,5 +230,6 @@ export function createAllTools(operations: ToolOperations, options?: ToolsOption
 		grep: createGrepTool(operations, options?.grep),
 		find: createFindTool(operations, options?.find),
 		ls: createLsTool(operations, options?.ls),
+		subagent: createSubagentTool(options?.subagent),
 	};
 }

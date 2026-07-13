@@ -3,8 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+	closeOpenAICodexWebSocketSessions,
 	getOpenAICodexWebSocketDebugStats,
-	resetOpenAICodexWebSocketDebugStats,
 	streamOpenAICodexResponses,
 	streamSimpleOpenAICodexResponses,
 } from "../src/providers/openai-codex-responses.ts";
@@ -19,7 +19,7 @@ afterEach(() => {
 	} else {
 		process.env.PI_CODING_AGENT_DIR = originalAgentDir;
 	}
-	resetOpenAICodexWebSocketDebugStats();
+	closeOpenAICodexWebSocketSessions();
 	vi.useRealTimers();
 	vi.restoreAllMocks();
 });
@@ -79,7 +79,159 @@ function buildSSEPayload({
 	return `${events.join("\n\n")}\n\n`;
 }
 
+function createCodexModel(): Model<"openai-codex-responses"> {
+	return {
+		id: "gpt-5.1-codex",
+		name: "GPT-5.1 Codex",
+		api: "openai-codex-responses",
+		provider: "openai-codex",
+		baseUrl: "https://chatgpt.com/backend-api",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 400000,
+		maxTokens: 128000,
+	};
+}
+
 describe("openai-codex streaming", () => {
+	it("produces identical events for LF and CRLF SSE framing", async () => {
+		const runFixture = async (lineEnding: "\n" | "\r\n" | "\r") => {
+			const payload = buildSSEPayload({ status: "completed" }).replaceAll("\n", lineEnding);
+			const splitAt = payload.indexOf(`${lineEnding}${lineEnding}`) + 1;
+			const encoder = new TextEncoder();
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(
+					async () =>
+						new Response(
+							new ReadableStream<Uint8Array>({
+								start(controller) {
+									controller.enqueue(encoder.encode(payload.slice(0, splitAt)));
+									controller.enqueue(encoder.encode(payload.slice(splitAt)));
+									controller.close();
+								},
+							}),
+							{ status: 200, headers: { "content-type": "text/event-stream" } },
+						),
+				),
+			);
+			const events: string[] = [];
+			const responseStream = streamOpenAICodexResponses(
+				createCodexModel(),
+				{ systemPrompt: "You are helpful.", messages: [{ role: "user", content: "Hello", timestamp: 1 }] },
+				{ apiKey: mockToken(), transport: "sse" },
+			);
+			for await (const event of responseStream) {
+				events.push(event.type === "text_delta" ? `${event.type}:${event.delta}` : event.type);
+			}
+			const result = await responseStream.result();
+			return { events, content: result.content, stopReason: result.stopReason, usage: result.usage };
+		};
+
+		const lf = await runFixture("\n");
+		const crlf = await runFixture("\r\n");
+		const cr = await runFixture("\r");
+		expect(lf.stopReason).toBe("stop");
+		expect(lf.content.find((content) => content.type === "text")?.text).toBe("Hello");
+		expect(lf.events).toContain("text_delta:Hello");
+		expect(lf.events).toContain("done");
+		expect(crlf).toEqual(lf);
+		expect(cr).toEqual(lf);
+	});
+
+	it("decodes WebSocket frames in arrival order before handling close", async () => {
+		const responseEvents = [
+			{
+				type: "response.output_item.added",
+				item: { type: "message", id: "msg_1", role: "assistant", status: "in_progress", content: [] },
+			},
+			{ type: "response.content_part.added", part: { type: "output_text", text: "" } },
+			{ type: "response.output_text.delta", delta: "Hello" },
+			{
+				type: "response.output_item.done",
+				item: {
+					type: "message",
+					id: "msg_1",
+					role: "assistant",
+					status: "completed",
+					content: [{ type: "output_text", text: "Hello" }],
+				},
+			},
+			{
+				type: "response.completed",
+				response: {
+					status: "completed",
+					usage: {
+						input_tokens: 5,
+						output_tokens: 3,
+						total_tokens: 8,
+						input_tokens_details: { cached_tokens: 0 },
+					},
+				},
+			},
+		];
+
+		class OrderedMockWebSocket {
+			private listeners = new Map<string, Set<(event: unknown) => void>>();
+
+			constructor() {
+				queueMicrotask(() => this.dispatch("open", {}));
+			}
+
+			addEventListener(type: string, listener: (event: unknown) => void): void {
+				let listeners = this.listeners.get(type);
+				if (!listeners) {
+					listeners = new Set();
+					this.listeners.set(type, listeners);
+				}
+				listeners.add(listener);
+			}
+
+			removeEventListener(type: string, listener: (event: unknown) => void): void {
+				this.listeners.get(type)?.delete(listener);
+			}
+
+			send(): void {
+				const firstFrame = JSON.stringify(responseEvents[0]);
+				queueMicrotask(() => {
+					this.dispatch("message", {
+						data: {
+							arrayBuffer: async () => {
+								await new Promise((resolve) => setTimeout(resolve, 10));
+								return new TextEncoder().encode(firstFrame).buffer;
+							},
+						},
+					});
+					for (const event of responseEvents.slice(1)) {
+						this.dispatch("message", { data: JSON.stringify(event) });
+					}
+					this.dispatch("close", { code: 1000, reason: "done", wasClean: true });
+				});
+			}
+
+			close(): void {}
+
+			private dispatch(type: string, event: unknown): void {
+				for (const listener of this.listeners.get(type) ?? []) listener(event);
+			}
+		}
+
+		vi.stubGlobal("WebSocket", OrderedMockWebSocket);
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => new Response("unexpected SSE fallback", { status: 500 })),
+		);
+		const result = await streamOpenAICodexResponses(
+			createCodexModel(),
+			{ systemPrompt: "You are helpful.", messages: [{ role: "user", content: "Hello", timestamp: 1 }] },
+			{ apiKey: mockToken(), transport: "websocket" },
+		).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(result.content.find((content) => content.type === "text")?.text).toBe("Hello");
+		expect(global.fetch).not.toHaveBeenCalled();
+	});
 	it("streams SSE responses into AssistantMessageEventStream", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "pi-codex-stream-"));
 		process.env.PI_CODING_AGENT_DIR = tempDir;
@@ -1099,6 +1251,8 @@ describe("openai-codex streaming", () => {
 			cachedContextRequests: 1,
 			fullContextRequests: 1,
 		});
+		closeOpenAICodexWebSocketSessions("session-auto");
+		expect(getOpenAICodexWebSocketDebugStats("session-auto")).toBeUndefined();
 	});
 
 	it("sends only response input deltas in websocket-cached mode", async () => {
@@ -1307,10 +1461,14 @@ describe("openai-codex streaming", () => {
 			systemPrompt: "You are a helpful assistant.",
 			messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }],
 		};
+		const abortController = new AbortController();
+		const addAbortListener = vi.spyOn(abortController.signal, "addEventListener");
+		const removeAbortListener = vi.spyOn(abortController.signal, "removeEventListener");
 
 		const resultPromise = streamOpenAICodexResponses(model, context, {
 			apiKey: token,
 			transport: "sse",
+			signal: abortController.signal,
 			maxRetries: 1,
 		}).result();
 		await vi.advanceTimersByTimeAsync(0);
@@ -1320,6 +1478,7 @@ describe("openai-codex streaming", () => {
 		const result = await resultPromise;
 		expect(result.content.find((content) => content.type === "text")?.text).toBe("Hello");
 		expect(codexRequests).toBe(2);
+		expect(removeAbortListener).toHaveBeenCalledTimes(addAbortListener.mock.calls.length);
 	});
 
 	it("uses exponential backoff across repeated SSE retries without retry headers", async () => {

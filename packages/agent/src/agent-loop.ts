@@ -36,19 +36,12 @@ export function agentLoop(
 	streamFn?: StreamFn,
 ): EventStream<AgentEvent, AgentMessage[]> {
 	const stream = createAgentStream();
+	const state: DetachedAgentStreamState = { messages: [] };
 
-	void runAgentLoop(
-		prompts,
-		context,
-		config,
-		async (event) => {
-			stream.push(event);
-		},
-		signal,
-		streamFn,
-	).then((messages) => {
-		stream.end(messages);
-	});
+	void runAgentLoop(prompts, context, config, createDetachedEventSink(stream, state), signal, streamFn).then(
+		(messages) => stream.end(messages),
+		(error: unknown) => terminateDetachedAgentStream(stream, state, config, error),
+	);
 
 	return stream;
 }
@@ -76,18 +69,12 @@ export function agentLoopContinue(
 	}
 
 	const stream = createAgentStream();
+	const state: DetachedAgentStreamState = { messages: [] };
 
-	void runAgentLoopContinue(
-		context,
-		config,
-		async (event) => {
-			stream.push(event);
-		},
-		signal,
-		streamFn,
-	).then((messages) => {
-		stream.end(messages);
-	});
+	void runAgentLoopContinue(context, config, createDetachedEventSink(stream, state), signal, streamFn).then(
+		(messages) => stream.end(messages),
+		(error: unknown) => terminateDetachedAgentStream(stream, state, config, error),
+	);
 
 	return stream;
 }
@@ -133,7 +120,7 @@ export async function runAgentLoopContinue(
 	}
 
 	const newMessages: AgentMessage[] = [];
-	const currentContext: AgentContext = { ...context };
+	const currentContext: AgentContext = { ...context, messages: [...context.messages] };
 
 	await emit({ type: "agent_start" });
 	await emit({ type: "turn_start" });
@@ -147,6 +134,72 @@ function createAgentStream(): EventStream<AgentEvent, AgentMessage[]> {
 		(event: AgentEvent) => event.type === "agent_end",
 		(event: AgentEvent) => (event.type === "agent_end" ? event.messages : []),
 	);
+}
+
+interface DetachedAgentStreamState {
+	messages: AgentMessage[];
+	activeAssistant?: AssistantMessage;
+	turnOpen?: boolean;
+}
+
+function createDetachedEventSink(
+	stream: EventStream<AgentEvent, AgentMessage[]>,
+	state: DetachedAgentStreamState,
+): AgentEventSink {
+	return (event) => {
+		if (event.type === "turn_start") {
+			state.turnOpen = true;
+		} else if (event.type === "turn_end") {
+			state.turnOpen = false;
+		} else if (event.type === "message_start" && event.message.role === "assistant") {
+			state.activeAssistant = event.message;
+		} else if (event.type === "message_update" && event.message.role === "assistant") {
+			state.activeAssistant = event.message;
+		} else if (event.type === "message_end") {
+			state.messages.push(event.message);
+			if (event.message.role === "assistant") state.activeAssistant = undefined;
+		}
+		stream.push(event);
+	};
+}
+
+function terminateDetachedAgentStream(
+	stream: EventStream<AgentEvent, AgentMessage[]>,
+	state: DetachedAgentStreamState,
+	config: AgentLoopConfig,
+	error: unknown,
+): void {
+	const errorMessage = error instanceof Error ? error.message : String(error);
+	const message: AssistantMessage = state.activeAssistant
+		? { ...state.activeAssistant, stopReason: "error", errorMessage }
+		: {
+				role: "assistant",
+				content: [],
+				api: config.model.api,
+				provider: config.model.provider,
+				model: config.model.id,
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "error",
+				errorMessage,
+				timestamp: Date.now(),
+			};
+	if (!state.turnOpen) {
+		stream.push({ type: "turn_start" });
+		state.turnOpen = true;
+	}
+	state.messages.push(message);
+	if (!state.activeAssistant) stream.push({ type: "message_start", message });
+	stream.push({ type: "message_end", message });
+	stream.push({ type: "turn_end", message, toolResults: [] });
+	state.turnOpen = false;
+	stream.push({ type: "agent_end", messages: [...state.messages] });
 }
 
 /**
@@ -225,7 +278,12 @@ async function runLoop(
 			};
 			const nextTurnSnapshot = await config.prepareNextTurn?.(nextTurnContext);
 			if (nextTurnSnapshot) {
-				currentContext = nextTurnSnapshot.context ?? currentContext;
+				if (nextTurnSnapshot.context) {
+					currentContext = {
+						...nextTurnSnapshot.context,
+						messages: [...nextTurnSnapshot.context.messages],
+					};
+				}
 				config = {
 					...config,
 					model: nextTurnSnapshot.model ?? config.model,
@@ -630,7 +688,7 @@ async function executePreparedToolCall(
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 ): Promise<ExecutedToolCallOutcome> {
-	const updateEvents: Promise<void>[] = [];
+	let updateEvents = Promise.resolve();
 
 	try {
 		const result = await prepared.tool.execute(
@@ -638,23 +696,21 @@ async function executePreparedToolCall(
 			prepared.args as never,
 			signal,
 			(partialResult) => {
-				updateEvents.push(
-					Promise.resolve(
-						emit({
-							type: "tool_execution_update",
-							toolCallId: prepared.toolCall.id,
-							toolName: prepared.toolCall.name,
-							args: prepared.toolCall.arguments,
-							partialResult,
-						}),
-					),
+				updateEvents = updateEvents.then(() =>
+					emit({
+						type: "tool_execution_update",
+						toolCallId: prepared.toolCall.id,
+						toolName: prepared.toolCall.name,
+						args: prepared.toolCall.arguments,
+						partialResult,
+					}),
 				);
 			},
 		);
-		await Promise.all(updateEvents);
+		await updateEvents;
 		return { result, isError: false };
 	} catch (error) {
-		await Promise.all(updateEvents);
+		await updateEvents;
 		return {
 			result: createErrorToolResult(error instanceof Error ? error.message : String(error)),
 			isError: true,

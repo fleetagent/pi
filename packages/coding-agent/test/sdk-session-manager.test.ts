@@ -62,7 +62,7 @@ describe("PiAgent session manager defaults", () => {
 		await pi.dispose();
 	});
 
-	it("creates a new session from an explicit unmanaged session", async () => {
+	it("creates a new top-level session from an explicit unmanaged session", async () => {
 		const model = getModel("anthropic", "claude-sonnet-4-5");
 		expect(model).toBeTruthy();
 
@@ -78,9 +78,28 @@ describe("PiAgent session manager defaults", () => {
 		const result = await pi.newSession();
 
 		expect(result.cancelled).toBe(false);
-		expect(initialSession.getSessionReference()).toMatch(/^memory:/);
 		expect(pi.session.session).not.toBe(session.session);
-		expect(pi.session.session.getHeader()?.parentSession).toBe(initialSession.getSessionReference());
+		expect(pi.session.session.getHeader()?.parentSession).toBeUndefined();
+
+		await pi.dispose();
+	});
+
+	it("preserves an explicitly assigned parent for a new session", async () => {
+		const model = getModel("anthropic", "claude-sonnet-4-5");
+		expect(model).toBeTruthy();
+
+		const pi = await PiAgent.create({
+			cwd,
+			agentDir,
+			model: model!,
+			sessionManager: new InMemorySessionManager(cwd),
+		});
+		await pi.createAgentSession();
+
+		const result = await pi.newSession({ parentSession: "memory:parent" });
+
+		expect(result.cancelled).toBe(false);
+		expect(pi.session.session.getHeader()?.parentSession).toBe("memory:parent");
 
 		await pi.dispose();
 	});

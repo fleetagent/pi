@@ -111,6 +111,114 @@ describe("RemoteSessionManager", () => {
 		});
 	});
 
+	it("retries partially accepted appends until every dirty entry is saved", async () => {
+		const appendRequests: Array<{ baseEtag?: string; entries: FileEntry[] }> = [];
+		const manager = new RemoteSessionManager({
+			baseUrl: "https://sessions.example.test",
+			token: "secret-token",
+			cwd: "/repo",
+			fetch: async (_input, init) => {
+				if (init?.method === "GET") {
+					return jsonResponse({
+						reference: "remote:session-1",
+						id: "session-1",
+						entries: [header("session-1")],
+						etag: "v1",
+					});
+				}
+				const body = JSON.parse(String(init?.body)) as { baseEtag?: string; entries: FileEntry[] };
+				appendRequests.push(body);
+				return jsonResponse({
+					accepted: appendRequests.length === 1 ? 1 : body.entries.length,
+					etag: `v${appendRequests.length + 1}`,
+				});
+			},
+		});
+		const session = await manager.openReference("remote:session-1");
+		session.appendMessage({ role: "user", content: "one", timestamp: 1 });
+		session.appendMessage({ role: "user", content: "two", timestamp: 2 });
+
+		await expect(session.flushPendingSync()).resolves.toBeUndefined();
+
+		expect(appendRequests.map((request) => request.entries.length)).toEqual([2, 1]);
+		expect(appendRequests.map((request) => request.baseEtag)).toEqual(["v1", "v2"]);
+		expect(session.getLastSyncError()).toBeUndefined();
+	});
+
+	it("includes entries queued while a flush is in flight", async () => {
+		let releaseFirstAppend: (() => void) | undefined;
+		let markFirstAppendStarted: (() => void) | undefined;
+		const firstAppendGate = new Promise<void>((resolve) => {
+			releaseFirstAppend = resolve;
+		});
+		const firstAppendStarted = new Promise<void>((resolve) => {
+			markFirstAppendStarted = resolve;
+		});
+		const appendRequests: Array<{ baseEtag?: string; entries: FileEntry[] }> = [];
+		const manager = new RemoteSessionManager({
+			baseUrl: "https://sessions.example.test",
+			token: "secret-token",
+			cwd: "/repo",
+			fetch: async (_input, init) => {
+				if (init?.method === "GET") {
+					return jsonResponse({
+						reference: "remote:session-1",
+						id: "session-1",
+						entries: [header("session-1")],
+						etag: "v1",
+					});
+				}
+				const body = JSON.parse(String(init?.body)) as { baseEtag?: string; entries: FileEntry[] };
+				appendRequests.push(body);
+				if (appendRequests.length === 1) {
+					markFirstAppendStarted?.();
+					await firstAppendGate;
+				}
+				return jsonResponse({ accepted: body.entries.length, etag: `v${appendRequests.length + 1}` });
+			},
+		});
+		const session = await manager.openReference("remote:session-1");
+		session.appendMessage({ role: "user", content: "one", timestamp: 1 });
+		const flush = session.flushPendingSync();
+		await firstAppendStarted;
+		session.appendMessage({ role: "user", content: "two", timestamp: 2 });
+		releaseFirstAppend?.();
+
+		await expect(flush).resolves.toBeUndefined();
+
+		expect(appendRequests.map((request) => request.entries.length)).toEqual([1, 1]);
+		expect(appendRequests.map((request) => request.baseEtag)).toEqual(["v1", "v2"]);
+	});
+
+	it("rejects flushes when append acceptance makes no progress", async () => {
+		let appendRequests = 0;
+		const manager = new RemoteSessionManager({
+			baseUrl: "https://sessions.example.test",
+			token: "secret-token",
+			cwd: "/repo",
+			fetch: async (_input, init) => {
+				if (init?.method === "GET") {
+					return jsonResponse({
+						reference: "remote:session-1",
+						id: "session-1",
+						entries: [header("session-1")],
+						etag: "v1",
+					});
+				}
+				appendRequests++;
+				return jsonResponse({ accepted: 0, etag: "v1" });
+			},
+		});
+		const session = await manager.openReference("remote:session-1");
+		session.appendMessage({ role: "user", content: "unsaved", timestamp: 1 });
+
+		await expect(session.flushPendingSync()).rejects.toThrow(
+			"Remote session append accepted 0 of 1 entries without valid progress",
+		);
+		expect(appendRequests).toBe(1);
+		expect(session.getLastSyncError()).toBeInstanceOf(Error);
+	});
+
 	it("normalizes listed sessions from JSON responses", async () => {
 		const listedSession: RemoteSessionInfo = {
 			reference: "remote:session-1",
