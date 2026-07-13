@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.1.7](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.1.6...@fleetagent/pi-coding-agent-v0.1.7) (2026-07-13)
+
+
+### Bug Fixes
+
+* **release:** sync installer lock during releases ([8a3f20a](https://github.com/fleetagent/pi/commit/8a3f20a56c543e9eb45ca6b5fae00d2ffffade8b))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @fleetagent/pi-agent-core bumped from ^0.1.6 to ^0.1.7
+    * @fleetagent/pi-ai bumped from ^0.1.6 to ^0.1.7
+    * @fleetagent/pi-tui bumped from ^0.1.6 to ^0.1.7
+
 ## [0.1.6](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.1.5...@fleetagent/pi-coding-agent-v0.1.6) (2026-07-13)
 
 
