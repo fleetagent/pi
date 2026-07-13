@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.8](https://github.com/fleetagent/pi/compare/@fleetagent/pi-ai-v0.1.7...@fleetagent/pi-ai-v0.1.8) (2026-07-13)
+
+
+### Bug Fixes
+
+* **coding-agent:** use compatible edit anchor schema ([03a15ef](https://github.com/fleetagent/pi/commit/03a15ef028811a8dfd211769fbec265210a9ed80))
+
 ## [0.1.7](https://github.com/fleetagent/pi/compare/@fleetagent/pi-ai-v0.1.6...@fleetagent/pi-ai-v0.1.7) (2026-07-13)
 
 
