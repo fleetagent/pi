@@ -1347,8 +1347,7 @@
 			"license": "MIT",
 			"bin": {
 				"jiti": "lib/jiti-cli.mjs"
-			},
-			"peer": true
+			}
 		},
 		"node_modules/json-bigint": {
 			"version": "1.0.0",
