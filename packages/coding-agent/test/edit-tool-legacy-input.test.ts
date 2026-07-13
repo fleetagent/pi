@@ -27,6 +27,18 @@ describe("edit tool hashline input", () => {
 		expect(definition.parameters.properties).toHaveProperty("changes");
 	});
 
+	it("uses JSON Schema 2020-12-compatible syntax for hash anchor pairs", () => {
+		const definition = createEditToolDefinition(new LocalToolOperations(process.cwd()));
+		const hashRangeSchema = definition.parameters.properties.changes.items.properties.hash_range_inclusive;
+		expect(hashRangeSchema).toMatchObject({
+			type: "array",
+			items: { type: "string" },
+			minItems: 2,
+			maxItems: 2,
+		});
+		expect(hashRangeSchema).not.toHaveProperty("additionalItems");
+	});
+
 	it("normalizes flat hashline input into changes", () => {
 		const definition = createEditToolDefinition(new LocalToolOperations(process.cwd()));
 		const prepared = definition.prepareArguments!({

@@ -20,13 +20,11 @@ const contentLinesSchema = Type.Array(Type.String(), {
 		"Literal replacement content, one string per line. Use [] to delete the range. Do not include HASH│ prefixes from read output.",
 });
 
-const hashRangeInclusiveSchema = Type.Tuple(
-	[
-		Type.String({ description: "Start 3-character hash anchor from read output" }),
-		Type.String({ description: "End 3-character hash anchor from read output" }),
-	],
-	{ description: "Inclusive hash range to replace [start_hash, end_hash]. Use hash anchors only." },
-);
+const hashRangeInclusiveSchema = Type.Array(Type.String(), {
+	description: "Inclusive hash range to replace [start_hash, end_hash]. Use hash anchors only.",
+	minItems: 2,
+	maxItems: 2,
+});
 
 const editItemSchema = Type.Object(
 	{

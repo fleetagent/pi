@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+* Use JSON Schema 2020-12-compatible array syntax for edit tool hash anchors.
+
 ## [0.1.7](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.1.6...@fleetagent/pi-coding-agent-v0.1.7) (2026-07-13)
 
 
