@@ -155,6 +155,15 @@ export {
 // Footer data provider (git branch + extension statuses - data not otherwise available to extensions)
 export type { ReadonlyFooterDataProvider } from "./core/footer-data-provider.ts";
 export {
+	formatInstructionResourcesForPrompt,
+	type InstructionResource,
+	type InstructionResourceFrontmatter,
+	InstructionResourceLoader,
+	type InstructionResourceLoaderConfig,
+	type InstructionResourceLoaderOptions,
+	type InstructionResourceLoaderWithOperationsOptions,
+} from "./core/instruction-resource-loader.ts";
+export {
 	createLspCodeActionsTool,
 	createLspDefinitionTool,
 	createLspDiagnosticsTool,
@@ -211,11 +220,14 @@ export { DefaultResourceLoader, loadProjectContextFiles } from "./core/resource-
 export {
 	formatRulesForPrompt,
 	type LoadRulesFromDirOptions,
+	type LoadRulesOptions,
 	type LoadRulesResult,
+	type LoadRulesWithOperationsOptions,
 	loadRules,
 	loadRulesFromDir,
 	type Rule,
 	type RuleFrontmatter,
+	RuleLoader,
 } from "./core/rules.ts";
 export {
 	type BranchSummaryEntry,
@@ -254,11 +266,14 @@ export {
 export {
 	formatSkillsForPrompt,
 	type LoadSkillsFromDirOptions,
+	type LoadSkillsOptions,
 	type LoadSkillsResult,
+	type LoadSkillsWithOperationsOptions,
 	loadSkills,
 	loadSkillsFromDir,
 	type Skill,
 	type SkillFrontmatter,
+	SkillLoader,
 } from "./core/skills.ts";
 export { createSyntheticSourceInfo } from "./core/source-info.ts";
 // Tools

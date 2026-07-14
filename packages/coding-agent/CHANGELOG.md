@@ -20,6 +20,10 @@
 
 ## [Unreleased]
 
+### Added
+
+* Add shared instruction resource loaders for skills and rules.
+
 ### Fixed
 
 * Use JSON Schema 2020-12-compatible array syntax for edit tool hash anchors.
