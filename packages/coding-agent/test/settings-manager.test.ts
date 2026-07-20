@@ -340,4 +340,17 @@ describe("SettingsManager", () => {
 			expect(manager.getSessionDir()).toBe(join(homedir(), "sessions"));
 		});
 	});
+
+	describe("LSP settings", () => {
+		it("keeps global and project layers separate instead of shallow-merging them", () => {
+			const globalLsp = { servers: [{ id: "global", enabled: false }] };
+			const projectLsp = { enabled: false };
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ lsp: globalLsp }));
+			writeFileSync(join(projectDir, ".pi", "settings.json"), JSON.stringify({ lsp: projectLsp }));
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getGlobalLspConfiguration()).toEqual(globalLsp);
+			expect(manager.getProjectLspConfiguration()).toEqual(projectLsp);
+		});
+	});
 });

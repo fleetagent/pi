@@ -85,6 +85,13 @@ describe("ExtensionRunner", () => {
 		getSystemPrompt: () => "",
 		getToolOperations: () => new LocalToolOperations(tempDir),
 		getToolBackendInfo: () => ({ type: "local", cwd: tempDir }),
+		getLspStatus: () => ({
+			owner: "standalone",
+			enabled: false,
+			configuration: { enabled: false, servers: [] },
+			servers: [],
+		}),
+		configureLsp: async () => ({ enabled: false, servers: [] }),
 		execToolBackend: async () => ({ output: "", exitCode: 0, cancelled: false, truncated: false }),
 	};
 

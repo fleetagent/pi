@@ -33,6 +33,8 @@ export interface Args {
 	session?: string;
 	fork?: string;
 	sessionDir?: string;
+	lspConfig?: string;
+	noLsp?: boolean;
 	remoteSessionBaseUrl?: string;
 	remoteSessionToken?: string;
 	remoteProjectId?: string;
@@ -116,6 +118,16 @@ export function parseArgs(args: string[]): Args {
 			result.fork = args[++i];
 		} else if (arg === "--session-dir" && i + 1 < args.length) {
 			result.sessionDir = args[++i];
+		} else if (arg === "--lsp-config") {
+			const next = args[i + 1];
+			if (next === undefined || next.startsWith("-")) {
+				result.diagnostics.push({ type: "error", message: "--lsp-config requires a file path" });
+			} else {
+				result.lspConfig = next;
+				i++;
+			}
+		} else if (arg === "--no-lsp") {
+			result.noLsp = true;
 		} else if (arg === "--remote-session-base-url" && i + 1 < args.length) {
 			result.remoteSessionBaseUrl = args[++i];
 		} else if (arg === "--remote-session-token" && i + 1 < args.length) {
@@ -268,6 +280,8 @@ ${chalk.bold("Options:")}
   --session <path|id>            Use specific session file or partial UUID
   --fork <path|id>               Fork specific session file or partial UUID into a new session
   --session-dir <dir>            Directory for session storage and lookup
+  --lsp-config <file>            Load an explicit LSP configuration file
+  --no-lsp                      Disable the LSP runtime regardless of tool selection
   --remote-session-base-url <url> Use remote session service for persistence
   --remote-session-token <token> Bearer token for remote session service
   --remote-project-id <id>       Project id sent to remote session service
@@ -410,5 +424,14 @@ ${chalk.bold("Built-in Tool Names:")}
   grep   - Search file contents (read-only, off by default)
   find   - Find files by glob pattern (read-only, off by default)
   ls     - List directory contents (read-only, off by default)
+
+${chalk.bold("Conditional LSP Tool Names:")}
+  Requires a valid LSP configuration; unavailable when LSP is disabled or unconfigured.
+  lsp_diagnostics   - Get diagnostics for a file
+  lsp_hover         - Get hover information for a symbol
+  lsp_definition    - Find a symbol definition
+  lsp_references    - Find symbol references
+  lsp_rename        - Preview a symbol rename
+  lsp_code_actions  - List code actions and refactorings
 `);
 }

@@ -259,6 +259,40 @@ const pi = await PiAgent.create({ settingsManager });
 await pi.createAgentSession();
 ```
 
+## Language servers
+
+Each active `AgentSession` owns exactly one LSP runtime; `PiAgent` resolves its configuration and replaces it with the session lifecycle. Supply the same validated configuration used by settings or the CLI through `lsp`:
+
+```typescript
+import { InMemorySessionManager, PiAgent } from "@fleetagent/pi-coding-agent";
+
+const pi = await PiAgent.create({
+  cwd: process.cwd(),
+  sessionManager: new InMemorySessionManager(process.cwd()),
+  lsp: {
+    type: "configuration",
+    configuration: {
+      servers: [
+        {
+          id: "typescript",
+          selectors: [{ languageId: "typescript", pattern: "**/*.ts" }],
+          transport: { type: "tcp", host: "127.0.0.1", port: 2087 },
+          lifecycle: { type: "attached" },
+          workspace: { type: "session" },
+        },
+      ],
+    },
+  },
+});
+
+const session = await pi.createAgentSession();
+console.log(session.getLspStatus());
+```
+
+Hosts can also provide `lspConnectionFactories`, grant `trustProjectLspTransports` after applying their own trust policy, and return destination-specific LSP options from `resolveSessionOptions`. The grant covers every active project-origin transport and positive project `enabled: true` activation because both commands and attached endpoints can expose document content; project settings cannot grant it to themselves. `PiAgent.create()` and `resolveSessionOptions` inputs propagate through new, resumed, forked, and cross-cwd replacement sessions; source-relative paths are re-resolved for the destination cwd. Use `session.configureLsp(layer)` for a validated session-runtime-only replacement; normal reload or session replacement re-applies the configured sources. `session.reload()` returns current raw, source- and JSON-path-attributed LSP configuration diagnostics. `pi.diagnostics` exposes formatted diagnostics from initial session creation and refreshes them after reload or session replacement. Invalid or unreadable LSP configuration yields nonfatal diagnostics at the applicable error or warning severity and an empty disabled LSP state rather than retaining stale runtime state; unrelated application diagnostics remain fatal.
+
+See [Language Server Protocol](lsp.md) for complete configuration, a host-provided connection-factory example, lifecycle ownership, status fields, reload behavior, and migration guidance.
+
 ## Run Modes
 
 The SDK exports run mode utilities for building custom interfaces on top of `PiAgent`.
@@ -310,7 +344,11 @@ createCodingTools
 createReadOnlyTools
 createReadTool, createBashTool, createEditTool, createWriteTool
 createGrepTool, createFindTool, createLsTool, createSubagentTool
+LspClient, LspManager, LspFileSync, LspRouter, LspPathMapper
+loadLspConfiguration, parseLspConfiguration, resolveLspConfiguration
+createManagedStdioConnectionFactory, createTcpConnectionFactory
+registerStandaloneLspLifecycleHandlers
 ```
 
-`createSubagentTool` requires a `SubagentRunner` in its options. `PiAgent` configures the embedded runner automatically; standalone tool construction must provide its own in-process runner.
-For extension types, see [extensions.md](extensions.md).
+`core/lsp/index.ts` defines the authoritative public LSP type and runtime-value surface, and the core and package-root barrels re-export that same contract. `createSubagentTool` requires a `SubagentRunner` in its options. `PiAgent` configures the embedded runner automatically; standalone tool construction must provide its own in-process runner.
+For extension types, see [extensions.md](extensions.md). For LSP configuration, lifecycle, transport, routing, status, and public type exports, see [Language Server Protocol](lsp.md).

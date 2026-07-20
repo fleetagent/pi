@@ -1,5 +1,5 @@
-import { describe, expect, test } from "vitest";
-import { parseArgs } from "../src/cli/args.ts";
+import { describe, expect, test, vi } from "vitest";
+import { parseArgs, printHelp } from "../src/cli/args.ts";
 
 describe("parseArgs", () => {
 	describe("--version flag", () => {
@@ -164,6 +164,42 @@ describe("parseArgs", () => {
 			const result = parseArgs(["--models", "gpt-4o,claude-sonnet,gemini-pro"]);
 			expect(result.models).toEqual(["gpt-4o", "claude-sonnet", "gemini-pro"]);
 		});
+	});
+
+	describe("LSP flags", () => {
+		test("parses --lsp-config and --no-lsp without treating them as extension flags", () => {
+			const result = parseArgs(["--lsp-config", "./lsp.json", "--no-lsp"]);
+			expect(result.lspConfig).toBe("./lsp.json");
+			expect(result.noLsp).toBe(true);
+			expect(result.unknownFlags.size).toBe(0);
+		});
+
+		test("reports a missing --lsp-config path", () => {
+			const result = parseArgs(["--lsp-config", "--no-lsp"]);
+			expect(result.noLsp).toBe(true);
+			expect(result.diagnostics).toContainEqual({ type: "error", message: "--lsp-config requires a file path" });
+		});
+	});
+
+	test("help lists every conditional LSP tool and its configuration requirement", () => {
+		const log = vi.spyOn(console, "log").mockImplementation(() => {});
+		try {
+			printHelp();
+			const help = String(log.mock.calls[0]?.[0]);
+			expect(help).toContain("Requires a valid LSP configuration");
+			for (const name of [
+				"lsp_diagnostics",
+				"lsp_hover",
+				"lsp_definition",
+				"lsp_references",
+				"lsp_rename",
+				"lsp_code_actions",
+			]) {
+				expect(help).toContain(name);
+			}
+		} finally {
+			log.mockRestore();
+		}
 	});
 
 	describe("--no-session flag", () => {

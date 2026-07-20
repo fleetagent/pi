@@ -18,6 +18,12 @@ import type {
 	ToolDefinition,
 } from "./extensions/index.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
+import {
+	type LspConfigurationInput,
+	type LspConfigurationSourceDiagnostic,
+	type LspConnectionFactoryRegistry,
+	loadLspConfiguration,
+} from "./lsp/index.ts";
 import { convertToLlm } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import { findInitialModel, resolveCliModel } from "./model-resolver.ts";
@@ -42,6 +48,12 @@ import type { SubagentRunner, SubagentRunRequest } from "./tools/subagent.ts";
 export interface PiAgentDiagnostic {
 	type: "info" | "warning" | "error";
 	message: string;
+	/** Whether this diagnostic must prevent application startup. Errors are fatal by default. */
+	fatal?: boolean;
+}
+
+export function isFatalPiAgentDiagnostic(diagnostic: PiAgentDiagnostic): boolean {
+	return diagnostic.type === "error" && diagnostic.fatal !== false;
 }
 
 export interface PiAgentServices {
@@ -57,8 +69,19 @@ export interface PiAgentServices {
 interface BuiltAgentSession {
 	session: AgentSession;
 	services: PiAgentServices;
-	diagnostics: PiAgentDiagnostic[];
+	baseDiagnostics: PiAgentDiagnostic[];
+	lspDiagnostics: PiAgentDiagnostic[];
 	modelFallbackMessage?: string;
+}
+
+function formatLspConfigurationDiagnostics(
+	diagnostics: readonly LspConfigurationSourceDiagnostic[],
+): PiAgentDiagnostic[] {
+	return diagnostics.map((diagnostic) => ({
+		type: diagnostic.severity,
+		...(diagnostic.severity === "error" ? { fatal: false } : {}),
+		message: `LSP configuration (${diagnostic.source}) ${diagnostic.path}: ${diagnostic.message}`,
+	}));
 }
 
 export interface PiAgentSessionOptions {
@@ -69,6 +92,12 @@ export interface PiAgentSessionOptions {
 	excludedTools?: string[];
 	/** Trust project-local subagent presets without an interactive host prompt. */
 	trustProjectAgents?: boolean;
+	/** LSP layers or files supplied by a CLI, SDK, or host. Host scope is the default. */
+	lsp?: LspConfigurationInput | LspConfigurationInput[];
+	/** Host-provided factories referenced by LSP transports with type `connection`. */
+	lspConnectionFactories?: LspConnectionFactoryRegistry;
+	/** Trust active LSP transports from project settings after applying a host-controlled approval policy. */
+	trustProjectLspTransports?: boolean;
 	noTools?: "all" | "builtin";
 	customTools?: ToolDefinition[];
 	toolOperations?: ToolOperations;
@@ -273,6 +302,8 @@ export class PiAgent {
 	private _session?: AgentSession;
 	private _services?: PiAgentServices;
 	private _diagnostics: PiAgentDiagnostic[] = [];
+	private _baseDiagnostics: PiAgentDiagnostic[] = [];
+	private _lspDiagnostics: PiAgentDiagnostic[] = [];
 	private _modelFallbackMessage?: string;
 	private rebindSession?: (session: AgentSession) => Promise<void>;
 	private beforeSessionInvalidate?: () => void;
@@ -475,7 +506,24 @@ export class PiAgent {
 			customTools: resolvedOptions.customTools ?? this.options.customTools,
 			toolOperations: resolvedOptions.toolOperations ?? this.options.toolOperations,
 			trustProjectAgents: resolvedOptions.trustProjectAgents ?? this.options.trustProjectAgents,
+			trustProjectLspTransports: resolvedOptions.trustProjectLspTransports ?? this.options.trustProjectLspTransports,
+			lspConnectionFactories: resolvedOptions.lspConnectionFactories ?? this.options.lspConnectionFactories,
 		};
+		const asLspInputs = (
+			input: LspConfigurationInput | LspConfigurationInput[] | undefined,
+		): LspConfigurationInput[] => (input === undefined ? [] : Array.isArray(input) ? input : [input]);
+		const lspInputs = [...asLspInputs(this.options.lsp), ...asLspInputs(resolvedOptions.lsp)];
+		const resolveSessionLspConfiguration = () =>
+			loadLspConfiguration({
+				settingsManager: services.settingsManager,
+				cwd: services.cwd,
+				agentDir: services.agentDir,
+				inputs: lspInputs,
+				trustProjectLspTransports: sessionOptions.trustProjectLspTransports,
+			});
+		const lspResult = await resolveSessionLspConfiguration();
+		const lspDiagnostics = formatLspConfigurationDiagnostics(lspResult.diagnostics);
+		const baseDiagnostics = [...diagnostics];
 
 		const existingSession = activeSession.buildSessionContext();
 		const hasExistingSession = existingSession.messages.length > 0;
@@ -667,11 +715,18 @@ export class PiAgent {
 					sessionOptions.excludedTools ?? [],
 				),
 				trustProjectAgents: sessionOptions.trustProjectAgents,
+				lspConfiguration: lspResult.configuration,
+				lspConnectionFactories: sessionOptions.lspConnectionFactories,
+				resolveLspConfiguration: resolveSessionLspConfiguration,
+				onLspConfigurationDiagnostics: (nextDiagnostics) => {
+					this.setLspConfigurationDiagnostics(nextDiagnostics);
+				},
 				extensionRunnerRef,
 				sessionStartEvent,
 			}),
 			services,
-			diagnostics,
+			baseDiagnostics,
+			lspDiagnostics,
 			modelFallbackMessage,
 		};
 	}
@@ -679,8 +734,15 @@ export class PiAgent {
 	private apply(result: BuiltAgentSession): void {
 		this._session = result.session;
 		this._services = result.services;
-		this._diagnostics = result.diagnostics;
+		this._baseDiagnostics = result.baseDiagnostics;
+		this._lspDiagnostics = result.lspDiagnostics;
+		this._diagnostics = [...this._baseDiagnostics, ...this._lspDiagnostics];
 		this._modelFallbackMessage = result.modelFallbackMessage;
+	}
+
+	private setLspConfigurationDiagnostics(diagnostics: readonly LspConfigurationSourceDiagnostic[]): void {
+		this._lspDiagnostics = formatLspConfigurationDiagnostics(diagnostics);
+		this._diagnostics = [...this._baseDiagnostics, ...this._lspDiagnostics];
 	}
 
 	async createAgentSession(options: CreatePiAgentSessionOptions = {}): Promise<AgentSession> {

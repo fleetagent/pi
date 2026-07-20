@@ -20,11 +20,44 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+* Remove `getLspLanguageId`, `LSP_LANGUAGE_BY_EXTENSION`, the built-in TypeScript LSP server, and implicit extension mappings; LSP now requires explicit selectors and external configuration.
+* Replace the language-keyed `LspServerConfig` manager API with validated server-ID configuration, document selectors, workspace roots, and transport factories.
+* Require direct `LspClient` users to provide a server ID and `LspConnectionFactory` instead of process command options.
+
 ### Added
 
 * Add shared instruction resource loaders for skills and rules.
+* Add validated global, project, CLI, and SDK/host LSP configuration loading with source-relative paths and host-controlled project transport trust.
+* Add selector-based LSP routing, nested workspace discovery, and reversible agent-path/server-URI mappings.
+* Add managed stdio, TCP, Unix socket, named-pipe, and host-provided LSP connection adapters.
+* Add configurable LSP initialization, workspace settings, request cancellation, lifecycle ownership, status, and lazy reconnect behavior.
+* Add per-client LSP document synchronization with capability-aware changes, save/close notifications, reconnect replay, and remote-backend mapping checks.
+* Add capability-aware multi-server LSP tool aggregation with deterministic priority, result attribution, deduplication, and safe rename conflict reporting.
+* Add AgentSession and extension APIs for inspecting and reconfiguring the single built-in LSP runtime across reloads and session replacement.
+* Add a complete external LSP guide covering configuration, trust, transports, remote mapping, SDK/extension APIs, migration, and troubleshooting.
+* Export the authoritative public LSP type and runtime-value surface through the LSP, core, and package-root barrels.
+
+### Changed
+
+* Make LSP startup lazy and configuration-driven, preserve explicit tool allowlists, and keep synchronization independent from model tool exposure.
+* Aggregate capability-aware results from overlapping language servers deterministically and isolate ordinary provider failures.
+* Disconnect attached LSP endpoints without terminating shared service processes by default; protocol shutdown is explicit.
+* Deprecate `registerLspLifecycleHandlers` in favor of the AgentSession-owned runtime or `registerStandaloneLspLifecycleHandlers` for standalone hosts.
 
 ### Fixed
+
+* Block untrusted project-origin LSP endpoints, commands, and positive activation of inherited transports; preserve safe disable/removal controls.
+* Keep malformed or unreadable LSP configuration nonfatal and fail-closed across initial creation, reload, and replacement, with `--no-lsp` as a reliable recovery path and no stale runtime or diagnostic state.
+* Advertise consumed code-action and workspace-edit protocol capabilities, and replace clients whose synchronization delivery leaves remote document state indeterminate.
+* Preserve the latest exact LSP runtime owned by superseded extension runners during shutdown and hierarchically serialize reentrant lifecycle changes.
+* Bound connection creation, apply one shared deadline across each initialization and shutdown handshake, and serialize late-handle cleanup across lifecycle races.
+* Preserve POSIX, Windows drive, and UNC path flavor and case in LSP routing, compare Windows/UNC identities case-insensitively, and discover workspace markers through the active tool backend.
+* Keep every running matching LSP client synchronized across externally observed reads, writes, reconnects, provider failures, cancellation, eviction, and shutdown.
+* Make multi-server LSP navigation, rename consensus, wildcard attribution, cancellation, unavailable diagnostics, and full-range code-action context deterministic and semantically safe.
+* Keep status and bookkeeping accurate after failed synchronization replay, show detailed expanded diagnostics, avoid duplicate interactive startup/backend-reload diagnostics, and reject non-positive or fractional LSP tool positions.
+* Serialize detached AgentSession LSP lifecycle work and remove duplicate or stale standalone tools when runtime ownership changes.
 
 * Use JSON Schema 2020-12-compatible array syntax for edit tool hash anchors.
 

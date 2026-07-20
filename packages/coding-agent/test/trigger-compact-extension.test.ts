@@ -10,6 +10,13 @@ function createContext(tokens: number | null, compact = vi.fn()): ExtensionConte
 		cwd: process.cwd(),
 		toolOperations: new LocalToolOperations(process.cwd()),
 		getToolBackendInfo: () => ({ type: "local", cwd: process.cwd() }),
+		getLspStatus: () => ({
+			owner: "standalone",
+			enabled: false,
+			configuration: { enabled: false, servers: [] },
+			servers: [],
+		}),
+		configureLsp: async () => ({ enabled: false, servers: [] }),
 		execToolBackend: async () => ({ output: "", exitCode: 0, cancelled: false, truncated: false }),
 		session: {} as ExtensionContext["session"],
 		modelRegistry: {} as ExtensionContext["modelRegistry"],

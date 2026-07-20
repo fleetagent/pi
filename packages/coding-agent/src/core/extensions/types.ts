@@ -47,6 +47,8 @@ import type { EventBus } from "../event-bus.ts";
 import type { ExecOptions, ExecResult } from "../exec.ts";
 import type { ReadonlyFooterDataProvider } from "../footer-data-provider.ts";
 import type { KeybindingsManager } from "../keybindings.ts";
+import type { LspConfigurationLayer, ResolvedLspConfiguration } from "../lsp/config.ts";
+import type { LspSessionStatus } from "../lsp/integration.ts";
 import type { CustomMessage } from "../messages.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { PromptTemplate } from "../prompt-templates.ts";
@@ -319,6 +321,10 @@ export interface ExtensionContext {
 	toolOperations: ToolOperations;
 	/** Get active file/tool backend metadata. */
 	getToolBackendInfo(): ToolBackendInfo;
+	/** Inspect the AgentSession-owned LSP runtime without creating another manager. */
+	getLspStatus(): LspSessionStatus;
+	/** Replace the AgentSession-owned LSP configuration after validation. Relative paths are resolved from the session cwd. */
+	configureLsp(configuration: LspConfigurationLayer): Promise<ResolvedLspConfiguration>;
 	/** Execute a shell command through the active file/tool backend. */
 	execToolBackend(command: string, options?: ExtensionToolBackendExecOptions): Promise<BashResult>;
 	/** Current session (read-only) */
@@ -1625,6 +1631,8 @@ export interface ExtensionContextActions {
 	getSystemPrompt: () => string;
 	getToolOperations: () => ToolOperations;
 	getToolBackendInfo: () => ToolBackendInfo;
+	getLspStatus: () => LspSessionStatus;
+	configureLsp: (configuration: LspConfigurationLayer) => Promise<ResolvedLspConfiguration>;
 	execToolBackend: (command: string, options?: ExtensionToolBackendExecOptions) => Promise<BashResult>;
 }
 

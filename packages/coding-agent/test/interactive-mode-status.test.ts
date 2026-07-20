@@ -79,6 +79,50 @@ describe("InteractiveMode.showStatus", () => {
 	});
 });
 
+describe("InteractiveMode.showRuntimeDiagnostics", () => {
+	test("renders current runtime diagnostics according to severity", () => {
+		const fakeThis = {
+			runtimeHost: {
+				diagnostics: [
+					{ type: "error", fatal: false, message: "invalid project LSP" },
+					{ type: "warning", message: "blocked project transport" },
+					{ type: "info", message: "LSP configured" },
+				],
+			},
+			showError: vi.fn(),
+			showWarning: vi.fn(),
+			showStatus: vi.fn(),
+		};
+
+		(InteractiveMode as any).prototype.showRuntimeDiagnostics.call(fakeThis);
+
+		expect(fakeThis.showError).toHaveBeenCalledWith("invalid project LSP");
+		expect(fakeThis.showWarning).toHaveBeenCalledWith("blocked project transport");
+		expect(fakeThis.showStatus).toHaveBeenCalledWith("LSP configured");
+	});
+
+	test("replaces prior transient diagnostics when a backend change reloads runtime resources", async () => {
+		let renderedDiagnostics = ["previous diagnostic"];
+		const fakeThis = {
+			session: { reload: vi.fn().mockResolvedValue({}) },
+			rebuildChatFromMessages: vi.fn(() => {
+				renderedDiagnostics = [];
+			}),
+			showRuntimeDiagnostics: vi.fn(() => {
+				renderedDiagnostics.push("current diagnostic");
+			}),
+			setupAutocompleteProvider: vi.fn(),
+			showLoadedResources: vi.fn(),
+		};
+
+		await (InteractiveMode as any).prototype.reloadResourcesAfterBackendChange.call(fakeThis);
+
+		expect(renderedDiagnostics).toEqual(["current diagnostic"]);
+		expect(fakeThis.rebuildChatFromMessages).toHaveBeenCalledOnce();
+		expect(fakeThis.showRuntimeDiagnostics).toHaveBeenCalledOnce();
+	});
+});
+
 describe("InteractiveMode.setToolsExpanded", () => {
 	test("applies expansion state to the active header and chat entries", () => {
 		const header = { setExpanded: vi.fn() };

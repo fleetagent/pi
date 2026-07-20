@@ -28,10 +28,11 @@ import { AuthStorage } from "./core/auth-storage.ts";
 import { exportFromFile } from "./core/export-html/index.ts";
 import type { ExtensionFactory } from "./core/extensions/types.ts";
 import { KeybindingsManager } from "./core/keybindings.ts";
+import type { LspConfigurationInput } from "./core/lsp/index.ts";
 import type { ModelRegistry } from "./core/model-registry.ts";
 import { resolveCliModel, resolveModelScope, type ScopedModel } from "./core/model-resolver.ts";
 import type { PiAgentAppMode, PiAgentDiagnostic, PiAgentSessionOptions } from "./core/pi-agent.ts";
-import { PiAgent } from "./core/pi-agent.ts";
+import { isFatalPiAgentDiagnostic, PiAgent } from "./core/pi-agent.ts";
 import {
 	formatMissingSessionCwdPrompt,
 	getMissingSessionCwdIssue,
@@ -638,6 +639,13 @@ export async function main(args: string[], options?: MainOptions) {
 	const resolvedRulePaths = resolveCliPaths(instructionPathCwd, parsed.rules);
 	const resolvedPromptTemplatePaths = resolveCliPaths(instructionPathCwd, parsed.promptTemplates);
 	const resolvedThemePaths = resolveCliPaths(cwd, parsed.themes);
+	const cliLspInputs: LspConfigurationInput[] = [];
+	if (parsed.lspConfig) {
+		cliLspInputs.push({ type: "file", path: resolvePath(parsed.lspConfig, cwd), scope: "cli" });
+	}
+	if (parsed.noLsp) {
+		cliLspInputs.push({ type: "disabled", source: "--no-lsp", scope: "cli" });
+	}
 	const piAgent = await PiAgent.create({
 		mode: appMode,
 		cwd: initialSession.getCwd(),
@@ -707,6 +715,7 @@ export async function main(args: string[], options?: MainOptions) {
 				noTools: sessionOptions.noTools,
 				customTools: sessionOptions.customTools,
 				toolOperations,
+				lsp: cliLspInputs,
 				diagnostics,
 			};
 		},
@@ -749,8 +758,11 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 
 	time("resolveModelScope");
-	reportDiagnostics(runtime.diagnostics);
-	if (runtime.diagnostics.some((diagnostic) => diagnostic.type === "error")) {
+	const hasFatalDiagnostics = runtime.diagnostics.some(isFatalPiAgentDiagnostic);
+	if (piAgent.mode !== "interactive" || hasFatalDiagnostics) {
+		reportDiagnostics(runtime.diagnostics);
+	}
+	if (hasFatalDiagnostics) {
 		process.exit(1);
 	}
 	time("createAgentSession");

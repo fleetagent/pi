@@ -303,6 +303,10 @@ export class LocalToolOperations implements ToolOperations {
 		this.shellPath = options.shellPath;
 	}
 
+	setShellPath(shellPath: string | undefined): void {
+		this.shellPath = shellPath;
+	}
+
 	async exec(command: string, options: ToolExecOptions): Promise<{ exitCode: number | null }> {
 		const timeoutMs = resolveTimeoutMs(options.timeout);
 		const cwd = options.cwd ?? this.cwd;

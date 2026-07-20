@@ -623,7 +623,7 @@ export async function runRpcMode(runtimeHost: PiAgentRuntimeHost): Promise<never
 			}
 
 			case "clear_remote_sandbox": {
-				session.clearRemoteSandbox();
+				await session.clearRemoteSandbox();
 				await session.reload();
 				return success(id, "clear_remote_sandbox", session.getToolBackendInfo());
 			}

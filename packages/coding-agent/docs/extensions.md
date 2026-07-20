@@ -43,6 +43,7 @@ See [examples/extensions/](../examples/extensions/) for working implementations.
   - [Model Events](#model-events)
   - [Tool Events](#tool-events)
 - [ExtensionContext](#extensioncontext)
+  - [LSP runtime](#ctxgetlspstatus--ctxconfigurelsp)
 - [ExtensionCommandContext](#extensioncommandcontext)
 - [ExtensionAPI Methods](#extensionapi-methods)
 - [State Management](#state-management)
@@ -915,6 +916,35 @@ Options:
 - `onChunk` - streaming output callback
 
 Use `ctx.toolOperations` directly when you need backend-aware file operations such as `readFile`, `writeFile`, `stat`, `readdir`, `glob`, or `grep`.
+
+### ctx.getLspStatus() / ctx.configureLsp()
+
+Normal Pi extensions share the single `AgentSession`-owned LSP runtime. Inspect it without creating a parallel manager:
+
+```typescript
+pi.on("session_start", async (_event, ctx) => {
+  const status = ctx.getLspStatus();
+  console.log(status.owner, status.enabled, status.servers);
+
+  if (!status.enabled) {
+    await ctx.configureLsp({
+      servers: [
+        {
+          id: "attached-typescript",
+          selectors: [{ languageId: "typescript", pattern: "**/*.ts" }],
+          transport: { type: "tcp", host: "127.0.0.1", port: 2087 },
+          lifecycle: { type: "attached" },
+          workspace: { type: "session" },
+        },
+      ],
+    });
+  }
+});
+```
+
+`getLspStatus()` returns `owner`, the resolved configuration, and per-server/workspace-instance status including lifecycle ownership, shutdown mode, capabilities, diagnostics count, stderr, synchronization errors, and transport/request errors. The current runner observes live AgentSession status. If reload or session replacement supersedes a runner, its `session_shutdown` callback observes the latest LSP configuration and exact manager that runner owned, including successful intermediate `configureLsp()` calls, rather than the replacement or its original bind-time state. `configureLsp()` validates one complete replacement layer, resolves relative paths from `ctx.cwd`, and replaces the current session runtime. Old contexts become stale after reload or session replacement and cannot mutate the replacement runtime. LSP tool cancellation propagates through routing, lazy startup, synchronization, unavailable-reason resolution, and server requests.
+
+Do not call `registerLspLifecycleHandlers()` inside `AgentSession`; it is a deprecated alias retained for compatibility. Extension hosts without `AgentSession` should migrate to `registerStandaloneLspLifecycleHandlers()`, which registers one tool set per `ExtensionAPI` and unregisters it if ownership moves to AgentSession. In normal Pi, use the context APIs above. See [Language Server Protocol](lsp.md#extensions-and-status) for status, lifecycle, and migration details.
 
 ### ctx.session
 

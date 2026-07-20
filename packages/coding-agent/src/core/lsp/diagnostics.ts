@@ -1,9 +1,11 @@
-import { relative } from "node:path";
 import { Text } from "@fleetagent/pi-tui";
 import { type Static, Type } from "typebox";
 import { type Diagnostic, DiagnosticSeverity } from "vscode-languageserver-protocol";
 import type { ToolDefinition } from "../extensions/types.ts";
+import { throwIfAborted } from "./abort.ts";
 import type { LspRuntimeState } from "./integration.ts";
+import type { LspClientRoute, LspClientRouteFailure } from "./manager.ts";
+import { relativePortablePath } from "./portable-path.ts";
 
 const DIAGNOSTICS_SETTLE_DELAY_MS = 250;
 const AUTO_DIAGNOSTICS_MAX_ERRORS = 10;
@@ -21,6 +23,14 @@ export interface LspDiagnosticsDetails {
 	errors: number;
 	warnings: number;
 	files: number;
+	unavailable?: true;
+}
+
+interface DiagnosticEntry {
+	filePath: string;
+	diagnostic: Diagnostic;
+	sources: string[];
+	identity: string;
 }
 
 interface FormattedDiagnostics {
@@ -43,16 +53,64 @@ function diagnosticSeverityName(severity: number | undefined): string {
 	}
 }
 
-function diagnosticLine(filePath: string, diagnostic: Diagnostic): string {
-	const line = diagnostic.range.start.line + 1;
-	const column = diagnostic.range.start.character + 1;
-	const severity = diagnosticSeverityName(diagnostic.severity);
-	const code = diagnostic.code === undefined ? "" : ` (${String(diagnostic.code)})`;
-	const source = diagnostic.source ? ` [${diagnostic.source}]` : "";
-	return `${filePath}:${line}:${column} ${severity}: ${diagnostic.message}${code}${source}`;
+function diagnosticLine(entry: DiagnosticEntry, attribute: boolean): string {
+	const line = entry.diagnostic.range.start.line + 1;
+	const column = entry.diagnostic.range.start.character + 1;
+	const severity = diagnosticSeverityName(entry.diagnostic.severity);
+	const code = entry.diagnostic.code === undefined ? "" : ` (${String(entry.diagnostic.code)})`;
+	const source = entry.diagnostic.source ? ` [${entry.diagnostic.source}]` : "";
+	const providers = attribute ? ` {LSP: ${entry.sources.join(", ")}}` : "";
+	return `${entry.filePath}:${line}:${column} ${severity}: ${entry.diagnostic.message}${code}${source}${providers}`;
 }
 
-function summarizeDiagnostics(entries: Array<{ filePath: string; diagnostic: Diagnostic }>): LspDiagnosticsDetails {
+function createDiagnosticEntry(
+	route: LspClientRoute,
+	filePath: string,
+	diagnostic: Diagnostic,
+	source: string,
+): DiagnosticEntry {
+	const relatedInformation = diagnostic.relatedInformation?.map((information) => {
+		const mapped = route.target.mapper.serverUriToAgentPath(information.location.uri);
+		return {
+			message: information.message,
+			location: {
+				uri: mapped.ok ? mapped.value : `[unmapped URI: ${mapped.reason}]`,
+				range: information.location.range,
+			},
+		};
+	});
+	const identity = JSON.stringify({
+		filePath,
+		range: diagnostic.range,
+		severity: diagnostic.severity,
+		code: diagnostic.code,
+		codeDescription: diagnostic.codeDescription,
+		source: diagnostic.source,
+		message: diagnostic.message,
+		tags: diagnostic.tags,
+		relatedInformation,
+		data: diagnostic.data,
+	});
+	return { filePath, diagnostic, sources: [source], identity };
+}
+
+function mergeDiagnosticEntries(entries: readonly DiagnosticEntry[]): DiagnosticEntry[] {
+	const merged = new Map<string, DiagnosticEntry>();
+	for (const entry of entries) {
+		const key = entry.identity;
+		const existing = merged.get(key);
+		if (existing) {
+			for (const source of entry.sources) {
+				if (!existing.sources.includes(source)) existing.sources.push(source);
+			}
+		} else {
+			merged.set(key, { ...entry, sources: [...entry.sources] });
+		}
+	}
+	return [...merged.values()];
+}
+
+function summarizeDiagnostics(entries: readonly DiagnosticEntry[]): LspDiagnosticsDetails {
 	let errors = 0;
 	let warnings = 0;
 	for (const entry of entries) {
@@ -67,11 +125,9 @@ function summarizeDiagnostics(entries: Array<{ filePath: string; diagnostic: Dia
 	};
 }
 
-function formatDiagnosticEntries(entries: Array<{ filePath: string; diagnostic: Diagnostic }>): FormattedDiagnostics {
+function formatDiagnosticEntries(entries: DiagnosticEntry[], attribute: boolean): FormattedDiagnostics {
 	const details = summarizeDiagnostics(entries);
-	if (entries.length === 0) {
-		return { text: "No diagnostics.", details };
-	}
+	if (entries.length === 0) return { text: "No diagnostics.", details };
 	const other = entries.length - details.errors - details.warnings;
 	const summary = [
 		`${entries.length} diagnostic(s)`,
@@ -82,20 +138,37 @@ function formatDiagnosticEntries(entries: Array<{ filePath: string; diagnostic: 
 		.filter((part): part is string => part !== undefined)
 		.join(", ");
 	return {
-		text: `${summary}\n\n${entries.map((entry) => diagnosticLine(entry.filePath, entry.diagnostic)).join("\n")}`,
+		text: `${summary}\n\n${entries.map((entry) => diagnosticLine(entry, attribute)).join("\n")}`,
 		details,
 	};
 }
 
-function uriToPath(uri: string): string {
-	if (uri.startsWith("file://")) {
-		return new URL(uri).pathname;
-	}
-	return uri;
+function failureText(failures: readonly LspClientRouteFailure[]): string {
+	const unique = [
+		...new Map(failures.map((failure) => [`${failure.serverId}\u0000${failure.reason}`, failure])).values(),
+	];
+	return unique.length === 0
+		? ""
+		: `\n\nUnavailable or unsupported servers:\n${unique.map((failure) => `- ${failure.serverId}: ${failure.reason}`).join("\n")}`;
 }
 
-async function delay(ms: number): Promise<void> {
-	await new Promise((resolve) => setTimeout(resolve, ms));
+async function delay(ms: number, signal?: AbortSignal): Promise<void> {
+	throwIfAborted(signal);
+	await new Promise<void>((resolve, reject) => {
+		const onAbort = (): void => {
+			clearTimeout(timer);
+			try {
+				throwIfAborted(signal);
+			} catch (error) {
+				reject(error);
+			}
+		};
+		const timer = setTimeout(() => {
+			signal?.removeEventListener("abort", onAbort);
+			resolve();
+		}, ms);
+		signal?.addEventListener("abort", onAbort, { once: true });
+	});
 }
 
 export function createLspDiagnosticsTool(
@@ -105,48 +178,117 @@ export function createLspDiagnosticsTool(
 		name: "lsp_diagnostics",
 		label: "lsp_diagnostics",
 		description:
-			"Get compiler and language-server diagnostics for a file. Calling this on a TypeScript/JavaScript file lazily starts the configured LSP server.",
-		promptSnippet: "Get compiler and language-server diagnostics for a source file",
+			"Get diagnostics from all matching configured LSP servers for a file. Identical diagnostics are deduplicated and distinct providers are attributed. Use '*' for cached diagnostics from running instances.",
+		promptSnippet: "Get diagnostics for a source file from configured language servers",
 		promptGuidelines: [
-			"Use lsp_diagnostics after code edits when an LSP server is available to check for compiler/type errors.",
+			"Use lsp_diagnostics after code edits when a matching language server is available.",
 			"Use path='*' only to inspect cached diagnostics from already-running LSP servers.",
 		],
 		parameters: diagnosticsSchema,
-		async execute(_toolCallId, params: DiagnosticsInput, _signal, _onUpdate, ctx) {
+		async execute(_toolCallId, params: DiagnosticsInput, signal, _onUpdate, ctx) {
+			throwIfAborted(signal);
 			const state = getState();
+			await state.manager.setToolOperations(ctx.toolOperations, signal);
 			if (params.path === "*") {
+				const routes = state.manager
+					.getRunningClients()
+					.filter((route) => route.target.server.features?.diagnostics !== false);
+				if (routes.length === 0) {
+					return {
+						content: [
+							{ type: "text", text: "No capable running LSP server is available for cached diagnostics." },
+						],
+						details: { count: 0, errors: 0, warnings: 0, files: 0, unavailable: true },
+					};
+				}
+				const formatted = formatWorkspaceDiagnostics(state, routes);
+				return { content: [{ type: "text", text: formatted.text }], details: formatted.details };
+			}
+			let collection = await state.manager.getClientRoutesForFeature(params.path, "diagnostics", signal);
+			if (collection.routes.length === 0) {
+				const message =
+					collection.matchedServerCount === 0
+						? await state.manager.getUnavailableReason(params.path, signal)
+						: `No capable LSP server is available for diagnostics.${failureText(collection.failures)}`;
 				return {
-					content: [{ type: "text", text: formatWorkspaceDiagnostics(state).text }],
-					details: formatWorkspaceDiagnostics(state).details,
+					content: [{ type: "text", text: message }],
+					details: { count: 0, errors: 0, warnings: 0, files: 0, unavailable: true },
 				};
 			}
-
-			const client = await state.manager.getClientForFile(params.path);
-			if (!client) {
-				return {
-					content: [{ type: "text", text: state.manager.getUnavailableReason(params.path) }],
-					details: { count: 0, errors: 0, warnings: 0, files: 0 },
+			const synchronization = await state.fileSync.synchronizeFileRead(params.path, ctx.toolOperations, signal);
+			if (synchronization.lifecycleCancelled) {
+				collection = {
+					...collection,
+					routes: [],
+					failures: [
+						...collection.failures,
+						...collection.routes.map((route) => ({
+							serverId: route.target.serverId,
+							reason: "synchronization was cancelled by an LSP lifecycle change",
+						})),
+					],
 				};
 			}
-
-			await state.fileSync.handleFileRead(params.path, ctx.toolOperations).catch(() => undefined);
-			await delay(DIAGNOSTICS_SETTLE_DELAY_MS);
-			const uri = state.manager.getFileUri(params.path);
-			const relativePath = relative(state.manager.cwd, state.manager.resolvePath(params.path));
-			const diagnostics = client
-				.getDiagnostics(uri)
-				.map((diagnostic) => ({ filePath: relativePath, diagnostic }))
-				.sort(compareDiagnostics);
-			const formatted = formatDiagnosticEntries(diagnostics);
-			return { content: [{ type: "text", text: formatted.text }], details: formatted.details };
+			if (synchronization.failures.length > 0) {
+				const failedInstances = new Set(synchronization.failures.map((failure) => failure.instanceKey));
+				collection = {
+					...collection,
+					routes: collection.routes.filter((route) => !failedInstances.has(route.target.instanceKey)),
+					failures: [
+						...collection.failures,
+						...synchronization.failures.map((failure) => ({
+							serverId: failure.serverId,
+							reason: failure.reason,
+						})),
+					],
+				};
+			}
+			if (collection.routes.length === 0) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `No capable LSP server is available for diagnostics.${failureText(collection.failures)}`,
+						},
+					],
+					details: { count: 0, errors: 0, warnings: 0, files: 0, unavailable: true },
+				};
+			}
+			await delay(DIAGNOSTICS_SETTLE_DELAY_MS, signal);
+			const relativePath = relativePortablePath(state.manager.cwd, state.manager.resolvePath(params.path));
+			const entries = mergeDiagnosticEntries(
+				collection.routes.flatMap((route) =>
+					route.client
+						.getDiagnostics(route.target.serverUri)
+						.map((diagnostic) => createDiagnosticEntry(route, relativePath, diagnostic, route.target.serverId)),
+				),
+			).sort(compareDiagnostics);
+			const formatted = formatDiagnosticEntries(entries, collection.matchedServerCount > 1);
+			return {
+				content: [{ type: "text", text: `${formatted.text}${failureText(collection.failures)}` }],
+				details: formatted.details,
+			};
 		},
 		renderCall(args, theme) {
 			const path = args.path === "*" ? "cached workspace" : args.path;
 			return new Text(`${theme.fg("toolTitle", theme.bold("lsp_diagnostics"))} ${theme.fg("accent", path)}`, 0, 0);
 		},
-		renderResult(result, _options, theme) {
+		renderResult(result, { expanded }, theme) {
 			const details = result.details;
-			if (details.count === 0) return new Text(theme.fg("success", "No diagnostics"), 0, 0);
+			if (expanded) {
+				const output = result.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n");
+				return new Text(theme.fg(details.unavailable ? "error" : "toolOutput", output), 0, 0);
+			}
+			if (details.count === 0) {
+				return new Text(
+					theme.fg(
+						details.unavailable ? "error" : "success",
+						details.unavailable ? "LSP unavailable" : "No diagnostics",
+					),
+					0,
+					0,
+				);
+			}
 			const parts = [`${details.count} diagnostic(s)`];
 			if (details.errors > 0) parts.push(`${details.errors} error(s)`);
 			if (details.warnings > 0) parts.push(`${details.warnings} warning(s)`);
@@ -159,54 +301,55 @@ export async function formatAutoDiagnosticsForChangedFile(
 	state: LspRuntimeState,
 	filePath: string,
 ): Promise<string | undefined> {
-	const languageId = state.manager.getLanguageId(filePath);
-	if (!languageId) return undefined;
-	const client = state.manager.getRunningClient(languageId);
-	if (!client) return undefined;
-
+	const targets = (await state.manager.resolveTargets(filePath)).targets;
+	const routes = targets.flatMap((target) => {
+		if (target.server.features?.diagnostics === false) return [];
+		const client = state.manager.getRunningClient(target.instanceKey);
+		return client ? [{ client, target }] : [];
+	});
+	if (routes.length === 0) return undefined;
 	await delay(DIAGNOSTICS_SETTLE_DELAY_MS);
-	const uri = state.manager.getFileUri(filePath);
-	const relativePath = relative(state.manager.cwd, state.manager.resolvePath(filePath));
-	const errors = client
-		.getDiagnostics(uri)
-		.filter((diagnostic) => diagnostic.severity === DiagnosticSeverity.Error)
-		.map((diagnostic) => ({ filePath: relativePath, diagnostic }))
-		.sort(compareDiagnostics);
+	const relativePath = relativePortablePath(state.manager.cwd, state.manager.resolvePath(filePath));
+	const errors = mergeDiagnosticEntries(
+		routes.flatMap((route) =>
+			route.client
+				.getDiagnostics(route.target.serverUri)
+				.filter((diagnostic) => diagnostic.severity === DiagnosticSeverity.Error)
+				.map((diagnostic) => createDiagnosticEntry(route, relativePath, diagnostic, route.target.serverId)),
+		),
+	).sort(compareDiagnostics);
 	if (errors.length === 0) return undefined;
-
 	const shown = errors.slice(0, AUTO_DIAGNOSTICS_MAX_ERRORS);
-	const lines = shown.map((entry) => diagnosticLine(entry.filePath, entry.diagnostic));
-	if (errors.length > shown.length) {
-		lines.push(`... and ${errors.length - shown.length} more error(s)`);
-	}
+	const lines = shown.map((entry) => diagnosticLine(entry, routes.length > 1));
+	if (errors.length > shown.length) lines.push(`... and ${errors.length - shown.length} more error(s)`);
 	return `LSP: ${errors.length} error(s) in ${relativePath}:\n${lines.join("\n")}`;
 }
 
-function formatWorkspaceDiagnostics(state: LspRuntimeState): FormattedDiagnostics {
-	const entries: Array<{ filePath: string; diagnostic: Diagnostic }> = [];
-	for (const status of state.manager.getStatus()) {
-		if (!status.running) continue;
-		const client = state.manager.getRunningClient(status.languageId);
-		if (!client) continue;
-		for (const [uri, diagnostics] of client.getAllDiagnostics()) {
-			const filePath = relative(state.manager.cwd, uriToPath(uri));
-			for (const diagnostic of diagnostics) {
-				entries.push({ filePath, diagnostic });
-			}
+function formatWorkspaceDiagnostics(state: LspRuntimeState, routes: readonly LspClientRoute[]): FormattedDiagnostics {
+	const entries: DiagnosticEntry[] = [];
+	for (const route of routes) {
+		if (route.target.server.features?.diagnostics === false) continue;
+		const identity = `server=${route.target.serverId} root=${route.target.workspaceRoot}`;
+		for (const [uri, diagnostics] of route.client.getAllDiagnostics()) {
+			const mapped = route.target.mapper.serverUriToAgentPath(uri);
+			const filePath = mapped.ok
+				? relativePortablePath(state.manager.cwd, mapped.value)
+				: `[unmapped URI: ${mapped.reason}]`;
+			for (const diagnostic of diagnostics)
+				entries.push(createDiagnosticEntry(route, filePath, diagnostic, identity));
 		}
 	}
-	return formatDiagnosticEntries(entries.sort(compareDiagnostics));
+	return formatDiagnosticEntries(mergeDiagnosticEntries(entries).sort(compareDiagnostics), true);
 }
 
-function compareDiagnostics(
-	left: { filePath: string; diagnostic: Diagnostic },
-	right: { filePath: string; diagnostic: Diagnostic },
-): number {
+function compareDiagnostics(left: DiagnosticEntry, right: DiagnosticEntry): number {
 	const severity = (left.diagnostic.severity ?? 99) - (right.diagnostic.severity ?? 99);
 	if (severity !== 0) return severity;
 	const path = left.filePath.localeCompare(right.filePath);
 	if (path !== 0) return path;
 	const line = left.diagnostic.range.start.line - right.diagnostic.range.start.line;
 	if (line !== 0) return line;
-	return left.diagnostic.range.start.character - right.diagnostic.range.start.character;
+	const character = left.diagnostic.range.start.character - right.diagnostic.range.start.character;
+	if (character !== 0) return character;
+	return left.diagnostic.message.localeCompare(right.diagnostic.message);
 }

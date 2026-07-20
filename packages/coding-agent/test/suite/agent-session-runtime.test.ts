@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { fauxAssistantMessage, registerFauxProvider } from "@fleetagent/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { AuthStorage } from "../../src/core/auth-storage.ts";
-import { PiAgent } from "../../src/core/pi-agent.ts";
+import type { LspConnectionFactory } from "../../src/core/lsp/transport.ts";
+import { PiAgent, type PiAgentSessionOptions } from "../../src/core/pi-agent.ts";
 import { InMemorySessionManager, LocalSessionManager } from "../../src/core/session-manager.ts";
 import type {
 	ExtensionAPI,
@@ -37,6 +38,8 @@ describe("PiAgent session replacement characterization", () => {
 			bootstrapModel?: boolean;
 			bootstrapThinkingLevel?: boolean;
 			failReplacementBuild?: { current: boolean };
+			lsp?: PiAgentSessionOptions["lsp"];
+			lspConnectionFactories?: PiAgentSessionOptions["lspConnectionFactories"];
 		},
 	) {
 		const tempDir =
@@ -61,6 +64,8 @@ describe("PiAgent session replacement characterization", () => {
 			agentDir: tempDir,
 			authStorage,
 			sessionManager: new LocalSessionManager({ cwd: tempDir }),
+			lsp: options?.lsp,
+			lspConnectionFactories: options?.lspConnectionFactories,
 			resourceLoaderOptions: {
 				extensionFactories: [
 					(pi: ExtensionAPI) => {
@@ -104,6 +109,23 @@ describe("PiAgent session replacement characterization", () => {
 
 		return { runtime, faux, tempDir };
 	}
+
+	it("reuses one local ToolOperations identity across runtime hooks", async () => {
+		const { runtime } = await createRuntimeForTest(() => {});
+		const first = runtime.session.getToolOperations();
+		expect(runtime.session.getToolOperations()).toBe(first);
+		expect(runtime.session.getToolBackendInfo()).toEqual(first.getBackendInfo?.());
+	});
+
+	it("updates the stable local ToolOperations shell path on reload", async () => {
+		const { runtime } = await createRuntimeForTest(() => {});
+		const operations = runtime.session.getToolOperations();
+		const reloadedShellPath = join(tmpdir(), "reloaded-shell");
+		runtime.session.settingsManager.getShellPath = () => reloadedShellPath;
+		await runtime.session.reload();
+		expect(runtime.session.getToolOperations()).toBe(operations);
+		expect((operations as unknown as { shellPath?: string }).shellPath).toBe(reloadedShellPath);
+	});
 
 	it("persists message_end assistant replacements to the session manager", async () => {
 		const { runtime } = await createRuntimeForTest((pi: ExtensionAPI) => {
@@ -293,6 +315,38 @@ describe("PiAgent session replacement characterization", () => {
 		expect(settled).toBe(true);
 	});
 
+	it("waits for an accepted reload before disposing and rejects later transitions", async () => {
+		const { runtime } = await createRuntimeForTest(() => {});
+		let releaseReload!: () => void;
+		let markReloadStarted!: () => void;
+		const reloadGate = new Promise<void>((resolve) => {
+			releaseReload = resolve;
+		});
+		const reloadStarted = new Promise<void>((resolve) => {
+			markReloadStarted = resolve;
+		});
+		const settingsManager = runtime.session.settingsManager;
+		const originalReload = settingsManager.reload.bind(settingsManager);
+		settingsManager.reload = async () => {
+			markReloadStarted();
+			await reloadGate;
+			await originalReload();
+		};
+		const reload = runtime.session.reload();
+		await reloadStarted;
+		let disposalFinished = false;
+		const disposal = runtime.session.dispose().then(() => {
+			disposalFinished = true;
+		});
+		await Promise.resolve();
+		expect(disposalFinished).toBe(false);
+		await expect(runtime.session.configureLsp({ enabled: false })).rejects.toThrow(
+			"Cannot configure LSP after AgentSession disposal",
+		);
+		releaseReload();
+		await Promise.all([reload, disposal]);
+		expect(disposalFinished).toBe(true);
+	});
 	it("honors session_before_switch cancellation for new and resume", async () => {
 		const events: RecordedSessionEvent[] = [];
 		let cancelReason: "new" | "resume" | undefined;
@@ -517,6 +571,77 @@ describe("PiAgent session replacement characterization", () => {
 	it("throws when forking with an invalid entry id", async () => {
 		const { runtime } = await createRuntimeForTest(() => {});
 		await expect(runtime.fork("missing-entry")).rejects.toThrow("Invalid entry ID for forking");
+	});
+
+	it("preserves the single lazy LSP runtime across same- and cross-cwd session replacement", async () => {
+		const firstDir = join(tmpdir(), `pi-runtime-lsp-a-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		const secondDir = join(tmpdir(), `pi-runtime-lsp-b-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		mkdirSync(firstDir, { recursive: true });
+		mkdirSync(secondDir, { recursive: true });
+		cleanups.push(() => rmSync(secondDir, { recursive: true, force: true }));
+		const connectionRoots: string[] = [];
+		const connectionFactory: LspConnectionFactory = async (context) => {
+			connectionRoots.push(context.workspaceRoot);
+			throw new Error("intentional faux LSP connection failure");
+		};
+		const lsp = {
+			type: "configuration" as const,
+			configuration: {
+				servers: [
+					{
+						id: "suite",
+						selectors: [{ languageId: "typescript", pattern: "**/*.ts" }],
+						transport: { type: "connection" as const, id: "suite-factory" },
+						lifecycle: { type: "attached" as const },
+						workspace: { type: "session" as const },
+					},
+				],
+			},
+		};
+		const { runtime } = await createRuntimeForTest(() => {}, {
+			cwd: firstDir,
+			lsp,
+			lspConnectionFactories: { "suite-factory": connectionFactory },
+		});
+		const getManager = () => {
+			const state = (
+				runtime.session as unknown as {
+					_lspRuntimeState?: { manager: { getClientForFile(path: string): Promise<unknown> } };
+				}
+			)._lspRuntimeState;
+			if (!state) throw new Error("expected AgentSession-owned LSP runtime");
+			return state.manager;
+		};
+
+		expect(runtime.session.getLspStatus()).toMatchObject({
+			owner: "agent-session",
+			enabled: true,
+			servers: [{ serverId: "suite", state: "idle" }],
+		});
+		expect(connectionRoots).toEqual([]);
+		await getManager().getClientForFile("fixture.ts");
+		expect(connectionRoots).toEqual([firstDir]);
+
+		const firstSession = runtime.session;
+		await runtime.newSession();
+		expect(runtime.session).not.toBe(firstSession);
+		expect(runtime.session.getLspStatus()).toMatchObject({ enabled: true, servers: [{ serverId: "suite" }] });
+		await getManager().getClientForFile("fixture.ts");
+		expect(connectionRoots).toEqual([firstDir, firstDir]);
+
+		const otherSession = new LocalSessionManager({ cwd: secondDir }).create();
+		otherSession.appendMessage({ role: "user", content: [{ type: "text", text: "other" }], timestamp: Date.now() });
+		const otherReference = otherSession.getSessionReference();
+		if (!otherReference) throw new Error("expected destination session reference");
+		await runtime.switchSession(otherReference, { cwdOverride: secondDir });
+		expect(realpathSync(runtime.cwd)).toBe(realpathSync(secondDir));
+		await getManager().getClientForFile("fixture.ts");
+		expect(connectionRoots).toEqual([firstDir, firstDir, secondDir]);
+
+		await runtime.session.configureLsp({ enabled: false });
+		expect(runtime.session.getLspStatus()).toMatchObject({ enabled: false, servers: [] });
+		expect((runtime.session as unknown as { _lspRuntimeState?: unknown })._lspRuntimeState).toBeUndefined();
+		expect(runtime.session.getToolDefinition("lsp_hover")).toBeUndefined();
 	});
 
 	it("updates the runtime session cwd on cross-cwd session replacement", async () => {

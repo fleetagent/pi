@@ -5,6 +5,7 @@ import lockfile from "proper-lockfile";
 import { CONFIG_DIR_NAME, getAgentDir } from "../config.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
 import { DEFAULT_HTTP_IDLE_TIMEOUT_MS, parseHttpIdleTimeoutMs } from "./http-dispatcher.ts";
+import type { LspConfigurationLayer } from "./lsp/config.ts";
 
 export interface CompactionSettings {
 	enabled?: boolean; // default: true
@@ -115,6 +116,8 @@ export interface Settings {
 	markdown?: MarkdownSettings;
 	warnings?: WarningSettings;
 	sessionDir?: string; // Custom session storage directory (same format as --session-dir CLI flag)
+	/** LSP configuration layer for this settings scope. Global and project layers resolve separately. */
+	lsp?: LspConfigurationLayer;
 	httpIdleTimeoutMs?: number; // HTTP header/body idle timeout in milliseconds; 0 disables it
 	websocketConnectTimeoutMs?: number; // WebSocket connect/open handshake timeout in milliseconds; 0 disables it
 }
@@ -137,6 +140,11 @@ function deepMergeSettings(base: Settings, overrides: Settings): Settings {
 	for (const key of Object.keys(overrides) as (keyof Settings)[]) {
 		const overrideValue = overrides[key];
 		const baseValue = base[key];
+
+		if (key === "lsp") {
+			(result as Record<string, unknown>)[key] = overrideValue;
+			continue;
+		}
 
 		if (overrideValue === undefined) {
 			continue;
@@ -420,6 +428,14 @@ export class SettingsManager {
 		return structuredClone(this.projectSettings);
 	}
 
+	getGlobalLspConfiguration(): unknown {
+		return this.globalSettings.lsp === undefined ? undefined : structuredClone(this.globalSettings.lsp);
+	}
+
+	getProjectLspConfiguration(): unknown {
+		return this.projectSettings.lsp === undefined ? undefined : structuredClone(this.projectSettings.lsp);
+	}
+
 	async reload(): Promise<void> {
 		await this.writeQueue;
 		const globalLoad = SettingsManager.tryLoadFromStorage(this.storage, "global");
@@ -446,6 +462,10 @@ export class SettingsManager {
 		}
 
 		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+	}
+
+	getLoadError(scope: SettingsScope): Error | null {
+		return scope === "global" ? this.globalSettingsLoadError : this.projectSettingsLoadError;
 	}
 
 	/** Apply additional overrides on top of current settings */

@@ -76,7 +76,11 @@ import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.t
 import { createCompactionSummaryMessage } from "../../core/messages.ts";
 import { defaultModelPerProvider, findExactModelReferenceMatch, resolveModelScope } from "../../core/model-resolver.ts";
 import { DefaultPackageManager } from "../../core/package-manager.ts";
-import { type PiAgentRuntimeHost, SessionImportFileNotFoundError } from "../../core/pi-agent.ts";
+import {
+	type PiAgentDiagnostic,
+	type PiAgentRuntimeHost,
+	SessionImportFileNotFoundError,
+} from "../../core/pi-agent.ts";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-names.ts";
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
@@ -692,6 +696,7 @@ export class InteractiveMode {
 
 		// Render initial messages AFTER showing loaded resources
 		this.renderInitialMessages();
+		this.showRuntimeDiagnostics();
 
 		// Set up theme file watcher
 		onThemeChange(() => {
@@ -1679,6 +1684,15 @@ export class InteractiveMode {
 		this.streamingMessage = undefined;
 		this.pendingTools.clear();
 		this.renderInitialMessages();
+		this.showRuntimeDiagnostics();
+	}
+
+	private showRuntimeDiagnostics(diagnostics: readonly PiAgentDiagnostic[] = this.runtimeHost.diagnostics): void {
+		for (const diagnostic of diagnostics) {
+			if (diagnostic.type === "error") this.showError(diagnostic.message);
+			else if (diagnostic.type === "warning") this.showWarning(diagnostic.message);
+			else this.showStatus(diagnostic.message);
+		}
 	}
 
 	/**
@@ -1702,6 +1716,8 @@ export class InteractiveMode {
 			cwd: this.activeSession.getCwd(),
 			toolOperations: this.session.getToolOperations(),
 			getToolBackendInfo: () => this.session.getToolBackendInfo(),
+			getLspStatus: () => this.session.getLspStatus(),
+			configureLsp: (configuration) => this.session.configureLsp(configuration),
 			execToolBackend: (command, options) => {
 				const operations = this.session.getToolOperations();
 				return executeBashWithOperations(command, options?.cwd ?? operations.cwd, operations, options);
@@ -5080,6 +5096,7 @@ export class InteractiveMode {
 				force: false,
 				showDiagnosticsWhenQuiet: true,
 			});
+			this.showRuntimeDiagnostics();
 			const modelsJsonError = this.session.modelRegistry.getError();
 			if (modelsJsonError) {
 				this.showError(`models.json error: ${modelsJsonError}`);
@@ -5317,6 +5334,8 @@ export class InteractiveMode {
 
 	private async reloadResourcesAfterBackendChange(): Promise<void> {
 		await this.session.reload();
+		this.rebuildChatFromMessages();
+		this.showRuntimeDiagnostics();
 		this.setupAutocompleteProvider();
 		this.showLoadedResources({ force: true, showDiagnosticsWhenQuiet: true });
 	}
@@ -5329,7 +5348,7 @@ export class InteractiveMode {
 		}
 		if (args === "clear") {
 			try {
-				this.session.clearRemoteSandbox();
+				await this.session.clearRemoteSandbox();
 				await this.reloadResourcesAfterBackendChange();
 				this.updateToolBackendStatus();
 				this.showStatus("Remote backend cleared");

@@ -28,6 +28,10 @@
           "path": "keybindings.md"
         },
         {
+          "title": "Language Servers",
+          "path": "lsp.md"
+        },
+        {
           "title": "Sessions",
           "path": "sessions.md"
         },

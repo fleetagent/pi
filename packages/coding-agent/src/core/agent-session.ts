@@ -13,6 +13,7 @@
  * Modes use this class and add their own I/O layer on top.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, sep } from "node:path";
 import type {
@@ -103,7 +104,16 @@ import {
 	createLspRenameTool,
 	createLspRuntimeState,
 	formatAutoDiagnosticsForChangedFile,
+	type LoadLspConfigurationResult,
+	type LspConfigurationLayer,
+	type LspConfigurationSourceDiagnostic,
+	type LspConnectionFactoryRegistry,
 	type LspRuntimeState,
+	type LspSessionStatus,
+	parseLspConfiguration,
+	type ResolvedLspConfiguration,
+	resolveLspConfiguration,
+	resolveLspConfigurationLayerPaths,
 } from "./lsp/index.ts";
 import { type BashExecutionMessage, type CustomMessage, STRUCTURED_RESPONSE_INTERNAL_CUSTOM_TYPE } from "./messages.ts";
 import type { ModelRegistry } from "./model-registry.ts";
@@ -240,6 +250,14 @@ export interface AgentSessionConfig {
 	subagentRunner?: SubagentRunner;
 	/** Host-controlled trust grant for project-local subagent presets. */
 	trustProjectAgents?: boolean;
+	/** Validated configuration for the AgentSession-owned LSP runtime. */
+	lspConfiguration?: ResolvedLspConfiguration;
+	/** Host-provided factories referenced by LSP transports with type `connection`. */
+	lspConnectionFactories?: LspConnectionFactoryRegistry;
+	/** Re-resolves settings/file-backed LSP configuration after settings reload. */
+	resolveLspConfiguration?: () => Promise<LoadLspConfigurationResult>;
+	/** Receives current source-attributed diagnostics after each LSP configuration re-resolution. */
+	onLspConfigurationDiagnostics?: (diagnostics: readonly LspConfigurationSourceDiagnostic[]) => void;
 	/** Session start event metadata emitted when extensions bind to this runtime. */
 	sessionStartEvent?: SessionStartEvent;
 }
@@ -250,6 +268,10 @@ export interface ExtensionBindings {
 	abortHandler?: () => void;
 	shutdownHandler?: ShutdownHandler;
 	onError?: ExtensionErrorListener;
+}
+
+export interface AgentSessionReloadResult {
+	lsp?: LoadLspConfigurationResult;
 }
 
 /** Options for AgentSession.prompt() */
@@ -322,6 +344,17 @@ interface ToolDefinitionEntry {
 interface SessionToolEntry extends ToolDefinitionEntry {
 	lazy: boolean;
 	loaded: boolean;
+}
+
+interface ExtensionLspOwnership {
+	configuration: ResolvedLspConfiguration;
+	runtimeState: LspRuntimeState | undefined;
+}
+
+interface RuntimeLifecycleOperationToken {
+	active: boolean;
+	children: Set<Promise<unknown>>;
+	childQueue: Promise<void>;
 }
 
 interface StructuredInternalDetails {
@@ -474,6 +507,7 @@ export class AgentSession {
 
 	// Extension system
 	private _extensionRunner!: ExtensionRunner;
+	private readonly _extensionLspOwnership = new WeakMap<ExtensionRunner, ExtensionLspOwnership>();
 	private _turnIndex = 0;
 
 	private _resourceLoader: ResourceLoader;
@@ -486,10 +520,17 @@ export class AgentSession {
 	private _excludedToolNames: Set<string>;
 	private _baseToolsOverride?: Record<string, AgentTool>;
 	private _toolOperations?: ToolOperations;
+	private _runtimeToolOperations?: LocalToolOperations;
 	private _subagentRunner?: SubagentRunner;
 	private _trustProjectAgents: boolean;
 	private _localResourceToolOperations?: ToolOperations;
 	private _lspRuntimeState?: LspRuntimeState;
+	private _lspConfiguration: ResolvedLspConfiguration;
+	private readonly _lspConnectionFactories: LspConnectionFactoryRegistry;
+	private readonly _resolveLspConfiguration?: () => Promise<LoadLspConfigurationResult>;
+	private readonly _onLspConfigurationDiagnostics?: (diagnostics: readonly LspConfigurationSourceDiagnostic[]) => void;
+	private _runtimeLifecycleQueue: Promise<void> = Promise.resolve();
+	private readonly _runtimeLifecycleContext = new AsyncLocalStorage<RuntimeLifecycleOperationToken>();
 	private _sessionStartEvent: SessionStartEvent;
 	private _extensionUIContext?: ExtensionUIContext;
 	private _extensionCommandContextActions?: ExtensionCommandContextActions;
@@ -528,13 +569,15 @@ export class AgentSession {
 		this._initialActiveToolNames = config.initialActiveToolNames;
 		this._excludedToolNames = new Set(config.excludedToolNames ?? []);
 		if (!config.subagentRunner) this._excludedToolNames.add("subagent");
-		this._allowedToolNames = config.allowedToolNames
-			? new Set(this._withCurrentDefaultTools([...config.allowedToolNames]))
-			: undefined;
+		this._allowedToolNames = config.allowedToolNames ? new Set(config.allowedToolNames) : undefined;
 		this._baseToolsOverride = config.baseToolsOverride;
 		this._toolOperations = config.toolOperations;
 		this._subagentRunner = config.subagentRunner;
 		this._trustProjectAgents = config.trustProjectAgents === true;
+		this._lspConfiguration = structuredClone(config.lspConfiguration ?? { enabled: false, servers: [] });
+		this._lspConnectionFactories = config.lspConnectionFactories ?? {};
+		this._resolveLspConfiguration = config.resolveLspConfiguration;
+		this._onLspConfigurationDiagnostics = config.onLspConfigurationDiagnostics;
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
 
 		// Always subscribe to agent events for internal handling
@@ -557,8 +600,42 @@ export class AgentSession {
 	}
 
 	getToolOperations(): ToolOperations {
+		if (this._toolOperations) return this._toolOperations;
 		const shellPath = this.settingsManager.getShellPath();
-		return this._toolOperations ?? createLocalBashOperations({ cwd: this.session.getCwd(), shellPath });
+		this._runtimeToolOperations ??= new LocalToolOperations(this.session.getCwd(), { shellPath });
+		this._runtimeToolOperations.setShellPath(shellPath);
+		return this._runtimeToolOperations;
+	}
+
+	/** Snapshot of the sole AgentSession-owned LSP runtime and its configured/instantiated servers. */
+	getLspStatus(): LspSessionStatus {
+		return {
+			owner: "agent-session",
+			enabled: this._lspConfiguration.enabled,
+			configuration: structuredClone(this._lspConfiguration),
+			servers: this._lspRuntimeState?.manager.getStatus() ?? [],
+		};
+	}
+
+	/** Validate and replace the AgentSession-owned LSP configuration. Relative paths resolve from the session cwd. */
+	async configureLsp(configuration: LspConfigurationLayer): Promise<ResolvedLspConfiguration> {
+		if (this._disposed) throw new Error("Cannot configure LSP after AgentSession disposal");
+		const parsed = parseLspConfiguration(configuration);
+		if (!parsed.configuration) {
+			throw new Error(
+				`Invalid LSP configuration: ${parsed.diagnostics.map((diagnostic) => `${diagnostic.path}: ${diagnostic.message}`).join("; ")}`,
+			);
+		}
+		const resolvedLayer = resolveLspConfigurationLayerPaths(parsed.configuration, this._cwd);
+		const resolvedValidation = parseLspConfiguration(resolvedLayer);
+		if (!resolvedValidation.configuration) {
+			throw new Error(
+				`Invalid resolved LSP configuration: ${resolvedValidation.diagnostics.map((diagnostic) => `${diagnostic.path}: ${diagnostic.message}`).join("; ")}`,
+			);
+		}
+		const resolved = resolveLspConfiguration([resolvedValidation.configuration]);
+		await this._enqueueRuntimeLifecycle(() => this._replaceLspRuntime(resolved));
+		return structuredClone(resolved);
 	}
 
 	getToolBackendInfo(): ToolBackendInfo {
@@ -611,16 +688,20 @@ export class AgentSession {
 		if (!(this._toolOperations instanceof DeferredRemoteToolOperations)) {
 			throw new Error("Remote backend can only be configured when Pi is started with --remote-deferred");
 		}
-		return options.type === "ssh"
-			? this._toolOperations.configure({ remote: options.remote, cwd: options.cwd })
-			: this._toolOperations.configureRemote(options.url);
+		const info =
+			options.type === "ssh"
+				? await this._toolOperations.configure({ remote: options.remote, cwd: options.cwd })
+				: await this._toolOperations.configureRemote(options.url);
+		await this._lspRuntimeState?.manager.setToolOperations(this._toolOperations);
+		return info;
 	}
 
-	clearRemoteSandbox(): void {
+	async clearRemoteSandbox(): Promise<void> {
 		if (!(this._toolOperations instanceof DeferredRemoteToolOperations)) {
 			throw new Error("Remote backend can only be cleared when Pi is started with --remote-deferred");
 		}
 		this._toolOperations.clear();
+		await this._lspRuntimeState?.manager.setToolOperations(this._toolOperations);
 	}
 
 	private async _getRequiredRequestAuth(model: Model<any>): Promise<{
@@ -712,7 +793,6 @@ export class AgentSession {
 				details,
 				isError: nextIsError,
 			});
-
 			if (!hookResult) {
 				return lspResult;
 			}
@@ -725,13 +805,55 @@ export class AgentSession {
 		};
 	}
 
+	private _runRuntimeLifecycleOperation<T>(operation: () => Promise<T>): Promise<T> {
+		const token: RuntimeLifecycleOperationToken = {
+			active: true,
+			children: new Set(),
+			childQueue: Promise.resolve(),
+		};
+		return this._runtimeLifecycleContext.run(token, async () => {
+			try {
+				return await operation();
+			} finally {
+				while (token.children.size > 0) {
+					await Promise.allSettled([...token.children]);
+				}
+				token.active = false;
+			}
+		});
+	}
+
+	private _enqueueRuntimeLifecycle<T>(operation: () => Promise<T>): Promise<T> {
+		const currentToken = this._runtimeLifecycleContext.getStore();
+		if (currentToken?.active) {
+			const child = currentToken.childQueue.then(() => this._runRuntimeLifecycleOperation(operation));
+			currentToken.childQueue = child.then(
+				() => undefined,
+				() => undefined,
+			);
+			currentToken.children.add(child);
+			void child.then(
+				() => currentToken.children.delete(child),
+				() => currentToken.children.delete(child),
+			);
+			return child;
+		}
+		const result = this._runtimeLifecycleQueue.then(() => this._runRuntimeLifecycleOperation(operation));
+		this._runtimeLifecycleQueue = result.then(
+			() => undefined,
+			() => undefined,
+		);
+		return result;
+	}
+
 	private async _syncLspToolResult(
 		toolName: string,
 		args: unknown,
 		result: { content: ToolResultMessage["content"]; details?: unknown },
 		isError: boolean,
 	): Promise<{ content: ToolResultMessage["content"]; details?: unknown; isError?: boolean } | undefined> {
-		if (isError || !this._lspRuntimeState || typeof args !== "object" || args === null || !("path" in args)) {
+		const runtime = this._lspRuntimeState;
+		if (isError || !runtime || typeof args !== "object" || args === null || !("path" in args)) {
 			return undefined;
 		}
 		const filePath = typeof args.path === "string" ? args.path : undefined;
@@ -739,13 +861,13 @@ export class AgentSession {
 
 		try {
 			if (toolName === "read") {
-				await this._lspRuntimeState.fileSync.handleFileRead(filePath, this.getToolOperations());
+				await runtime.fileSync.handleFileRead(filePath, this.getToolOperations());
 				return undefined;
 			}
 
 			if (toolName === "write" || toolName === "edit") {
-				await this._lspRuntimeState.fileSync.handleFileWrite(filePath, this.getToolOperations());
-				const diagnostics = await formatAutoDiagnosticsForChangedFile(this._lspRuntimeState, filePath);
+				await runtime.fileSync.handleFileWrite(filePath, this.getToolOperations());
+				const diagnostics = await formatAutoDiagnosticsForChangedFile(runtime, filePath);
 				if (!diagnostics) return undefined;
 				return {
 					content: [...result.content, { type: "text" as const, text: `\n\n${diagnostics}` }],
@@ -1090,6 +1212,7 @@ export class AgentSession {
 	}
 
 	private async _dispose(): Promise<void> {
+		await this._runtimeLifecycleQueue;
 		for (const abort of [
 			() => this.abortRetry(),
 			() => this.abortCompaction(),
@@ -3133,8 +3256,29 @@ export class AgentSession {
 		this._refreshModelDependentRuntime();
 	}
 
+	private _updateCurrentRunnerLspOwnership(): void {
+		const ownership = this._extensionLspOwnership.get(this._extensionRunner);
+		if (!ownership) return;
+		ownership.configuration = structuredClone(this._lspConfiguration);
+		ownership.runtimeState = this._lspRuntimeState;
+	}
+
 	private _bindExtensionCore(runner: ExtensionRunner): void {
 		const getToolOperations = (): ToolOperations => this.getToolOperations();
+		const boundLspOwnership: ExtensionLspOwnership = {
+			runtimeState: this._lspRuntimeState,
+			configuration: structuredClone(this._lspConfiguration),
+		};
+		this._extensionLspOwnership.set(runner, boundLspOwnership);
+		const getBoundLspStatus = (): LspSessionStatus =>
+			runner === this._extensionRunner
+				? this.getLspStatus()
+				: {
+						owner: "agent-session",
+						enabled: boundLspOwnership.configuration.enabled,
+						configuration: structuredClone(boundLspOwnership.configuration),
+						servers: boundLspOwnership.runtimeState?.manager.getStatus() ?? [],
+					};
 
 		const getCommands = (): SlashCommandInfo[] => {
 			const extensionCommands: SlashCommandInfo[] = runner.getRegisteredCommands().map((command) => ({
@@ -3239,6 +3383,11 @@ export class AgentSession {
 				getSystemPrompt: () => this.systemPrompt,
 				getToolOperations,
 				getToolBackendInfo: () => this.getToolBackendInfo(),
+				getLspStatus: getBoundLspStatus,
+				configureLsp: (configuration) => {
+					if (runner !== this._extensionRunner) throw new Error(STALE_EXTENSION_CONTEXT_MESSAGE);
+					return this.configureLsp(configuration);
+				},
 				execToolBackend: (command, options) => {
 					const operations = getToolOperations();
 					const prefix = this.settingsManager.getShellCommandPrefix();
@@ -3477,6 +3626,46 @@ export class AgentSession {
 		this.setActiveToolsByName([...new Set(nextActiveToolNames)]);
 	}
 
+	private _registerLspToolDefinitions(getState: () => LspRuntimeState): void {
+		this._baseToolDefinitions.set("lsp_diagnostics", createLspDiagnosticsTool(getState) as unknown as ToolDefinition);
+		this._baseToolDefinitions.set("lsp_hover", createLspHoverTool(getState) as unknown as ToolDefinition);
+		this._baseToolDefinitions.set("lsp_definition", createLspDefinitionTool(getState) as unknown as ToolDefinition);
+		this._baseToolDefinitions.set("lsp_references", createLspReferencesTool(getState) as unknown as ToolDefinition);
+		this._baseToolDefinitions.set("lsp_rename", createLspRenameTool(getState) as unknown as ToolDefinition);
+		this._baseToolDefinitions.set(
+			"lsp_code_actions",
+			createLspCodeActionsTool(getState) as unknown as ToolDefinition,
+		);
+	}
+
+	private async _replaceLspRuntime(configuration: ResolvedLspConfiguration): Promise<void> {
+		const nextConfiguration = structuredClone(configuration);
+		const previous = this._lspRuntimeState;
+		if (previous && nextConfiguration.enabled && !this._baseToolsOverride) {
+			await previous.manager.setConfiguration(nextConfiguration);
+			this._lspConfiguration = nextConfiguration;
+			this._updateCurrentRunnerLspOwnership();
+			return;
+		}
+		const operations = this.getToolOperations();
+		const next =
+			nextConfiguration.enabled && !this._baseToolsOverride
+				? createLspRuntimeState(operations.cwd, {
+						configuration: nextConfiguration,
+						connectionFactories: this._lspConnectionFactories,
+						getToolBackendInfo: () => operations.getBackendInfo?.() ?? { type: "local", cwd: operations.cwd },
+						getToolOperations: () => operations,
+					})
+				: undefined;
+		this._lspConfiguration = nextConfiguration;
+		this._lspRuntimeState = next;
+		this._updateCurrentRunnerLspOwnership();
+		for (const name of LSP_TOOL_NAMES) this._baseToolDefinitions.delete(name);
+		if (next) this._registerLspToolDefinitions(() => next);
+		this._refreshToolRegistry({ activeToolNames: this._withCurrentDefaultTools(this.getActiveToolNames()) });
+		await previous?.manager.shutdownAll();
+	}
+
 	private _buildRuntime(options: {
 		activeToolNames?: string[];
 		flagValues?: Map<string, boolean | string>;
@@ -3485,7 +3674,7 @@ export class AgentSession {
 		const autoResizeImages = this.settingsManager.getImageAutoResize();
 		const shellCommandPrefix = this.settingsManager.getShellCommandPrefix();
 		const shellPath = this.settingsManager.getShellPath();
-		const operations = this._toolOperations ?? new LocalToolOperations(this._cwd, { shellPath });
+		const operations = this.getToolOperations();
 		const baseToolDefinitions = this._baseToolsOverride
 			? Object.fromEntries(
 					Object.entries(this._baseToolsOverride).map(([name, tool]) => [
@@ -3510,30 +3699,20 @@ export class AgentSession {
 			Object.entries(baseToolDefinitions).map(([name, tool]) => [name, tool as ToolDefinition]),
 		);
 
-		if (!this._baseToolsOverride) {
-			this._lspRuntimeState = createLspRuntimeState(this._cwd);
-			const getLspState = (): LspRuntimeState => {
-				this._lspRuntimeState ??= createLspRuntimeState(this._cwd);
+		this._lspRuntimeState =
+			!this._baseToolsOverride && this._lspConfiguration.enabled
+				? createLspRuntimeState(operations.cwd, {
+						configuration: this._lspConfiguration,
+						connectionFactories: this._lspConnectionFactories,
+						getToolBackendInfo: () => operations.getBackendInfo?.() ?? { type: "local", cwd: operations.cwd },
+						getToolOperations: () => operations,
+					})
+				: undefined;
+		if (this._lspRuntimeState) {
+			this._registerLspToolDefinitions(() => {
+				if (!this._lspRuntimeState) throw new Error("LSP was disabled while a tool call was in progress");
 				return this._lspRuntimeState;
-			};
-			this._baseToolDefinitions.set(
-				"lsp_diagnostics",
-				createLspDiagnosticsTool(getLspState) as unknown as ToolDefinition,
-			);
-			this._baseToolDefinitions.set("lsp_hover", createLspHoverTool(getLspState) as unknown as ToolDefinition);
-			this._baseToolDefinitions.set(
-				"lsp_definition",
-				createLspDefinitionTool(getLspState) as unknown as ToolDefinition,
-			);
-			this._baseToolDefinitions.set(
-				"lsp_references",
-				createLspReferencesTool(getLspState) as unknown as ToolDefinition,
-			);
-			this._baseToolDefinitions.set("lsp_rename", createLspRenameTool(getLspState) as unknown as ToolDefinition);
-			this._baseToolDefinitions.set(
-				"lsp_code_actions",
-				createLspCodeActionsTool(getLspState) as unknown as ToolDefinition,
-			);
+			});
 		}
 
 		this._baseToolDefinitions.set("load_tool", this._createLoadToolDefinition());
@@ -3570,7 +3749,9 @@ export class AgentSession {
 	}
 
 	private _withCurrentDefaultTools(activeToolNames: string[]): string[] {
-		if (this._baseToolsOverride) return activeToolNames.filter((name) => !this._excludedToolNames.has(name));
+		if (this._baseToolsOverride || this._allowedToolNames) {
+			return activeToolNames.filter((name) => !this._excludedToolNames.has(name));
+		}
 		const active = new Set(activeToolNames);
 		const usesDefaultCoreTools = CORE_DEFAULT_TOOL_NAMES.every((toolName) => active.has(toolName));
 		const expanded = usesDefaultCoreTools
@@ -3582,11 +3763,22 @@ export class AgentSession {
 		return !this._excludedToolNames.has(name) && (!this._allowedToolNames || this._allowedToolNames.has(name));
 	}
 
-	async reload(): Promise<void> {
+	reload(): Promise<AgentSessionReloadResult> {
+		if (this._disposed) return Promise.reject(new Error("Cannot reload after AgentSession disposal"));
+		return this._enqueueRuntimeLifecycle(() => this._reload());
+	}
+
+	private async _reload(): Promise<AgentSessionReloadResult> {
 		const previousRunner = this._extensionRunner;
 		const previousLspRuntimeState = this._lspRuntimeState;
 		const previousFlagValues = previousRunner.getFlagValues();
 		await this.settingsManager.reload();
+		let lspResult: LoadLspConfigurationResult | undefined;
+		if (this._resolveLspConfiguration) {
+			lspResult = await this._resolveLspConfiguration();
+			this._lspConfiguration = structuredClone(lspResult.configuration);
+			this._onLspConfigurationDiagnostics?.(structuredClone(lspResult.diagnostics));
+		}
 		await this._resourceLoader.reload();
 		resetApiProviders();
 		const activeToolNames = this._withCurrentDefaultTools(this.getActiveToolNames());
@@ -3611,6 +3803,7 @@ export class AgentSession {
 			await this._extensionRunner.emit({ type: "session_start", reason: "reload" });
 			await this.extendResourcesFromExtensions("reload");
 		}
+		return lspResult ? { lsp: structuredClone(lspResult) } : {};
 	}
 
 	// =========================================================================

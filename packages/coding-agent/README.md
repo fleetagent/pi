@@ -52,6 +52,7 @@ I regularly publish my own `pi-mono` work sessions here:
   - [Branching](#branching)
   - [Compaction](#compaction)
 - [Settings](#settings)
+- [Language Servers](#language-servers)
 - [Context Files](#context-files)
 - [Customization](#customization)
   - [Prompt Templates](#prompt-templates)
@@ -94,7 +95,7 @@ pi
 /login  # Then select provider
 ```
 
-Then just talk to pi. By default, pi gives the model file, shell, language-server, and subagent tools. The model uses these to fulfill your requests. Add capabilities via [skills](#skills), [prompt templates](#prompt-templates), [extensions](#extensions), or [pi packages](#pi-packages).
+Then just talk to pi. By default, pi gives the model file, shell, and subagent tools. LSP tools are available after you [configure an external language server](docs/lsp.md). The model uses enabled tools to fulfill your requests. Add capabilities via [skills](#skills), [prompt templates](#prompt-templates), [extensions](#extensions), or [pi packages](#pi-packages).
 
 **Platform notes:** [Windows](docs/windows.md) | [Termux (Android)](docs/termux.md) | [tmux](docs/tmux.md) | [Terminal setup](docs/terminal-setup.md) | [Shell aliases](docs/shell-aliases.md)
 
@@ -294,6 +295,10 @@ Pi has two separate startup features:
 
 Use `--offline` or `PI_OFFLINE=1` to disable all startup network operations described here, including update checks, package update checks, and install/update telemetry.
 
+## Language Servers
+
+Pi supports explicitly configured managed stdio servers, attached TCP/Unix socket/named-pipe endpoints, and host-provided connections with managed or attached semantics. It does not bundle or automatically select a language server. Untrusted project settings cannot add or positively activate transports; malformed or unreadable LSP sources fail closed without terminating Pi, and `--no-lsp` is the per-invocation recovery path. See [docs/lsp.md](docs/lsp.md) for copyable configurations, remote path mapping, project trust, workspace roots, lifecycle ownership, SDK/extension APIs, migration, and troubleshooting.
+
 ---
 
 ## Context Files
@@ -474,7 +479,7 @@ await pi.dispose();
 
 For advanced multi-session flows, use `PiAgent` methods such as `newSession()`, `switchSession()`, `fork()`, and `importFromJsonl()`.
 
-See [docs/sdk.md](docs/sdk.md) and [examples/sdk/](examples/sdk/).
+See [docs/sdk.md](docs/sdk.md), [docs/lsp.md](docs/lsp.md), and [examples/sdk/](examples/sdk/).
 
 ### RPC Mode
 
@@ -568,7 +573,8 @@ cat README.md | pi -p "Summarize this text"
 | `--fork <path\|id>` | Fork specific session file or partial UUID into a new session |
 | `--session-dir <dir>` | Custom session storage directory |
 | `--no-session` | Ephemeral mode (don't save) |
-
+| `--lsp-config <file>` | Load an external LSP layer; the file argument is startup-cwd-relative, while paths declared inside use the file's directory |
+| `--no-lsp` | Disable LSP for this invocation, including recovery from malformed lower-precedence LSP sources |
 ### Tool Options
 
 | Option | Description |
@@ -580,7 +586,7 @@ cat README.md | pi -p "Summarize this text"
 | `--ssh-deferred` | Start in SSH sandbox mode and configure the target later |
 | `--ssh-cwd <path>` | Stable remote cwd for `--ssh-deferred` |
 
-Available built-in tools: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`, `subagent`
+Available built-in tools: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`, `subagent`, and—when externally configured—`lsp_diagnostics`, `lsp_hover`, `lsp_definition`, `lsp_references`, `lsp_rename`, and `lsp_code_actions`.
 
 ### Resource Options
 

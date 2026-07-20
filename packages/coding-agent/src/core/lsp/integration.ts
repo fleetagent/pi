@@ -1,14 +1,23 @@
 import type { ExtensionAPI, ExtensionContext, ToolResultEvent, ToolResultEventResult } from "../extensions/types.ts";
 import { isEditToolResult, isReadToolResult, isWriteToolResult } from "../extensions/types.ts";
+import type { ToolBackendInfo } from "../tools/operations.ts";
+import type { ResolvedLspConfiguration } from "./config.ts";
 import { createLspDiagnosticsTool, formatAutoDiagnosticsForChangedFile } from "./diagnostics.ts";
 import { LspFileSync } from "./file-sync.ts";
-import { LspManager, type LspManagerOptions } from "./manager.ts";
+import { LspManager, type LspManagerOptions, type LspServerStatus } from "./manager.ts";
 import { createLspDefinitionTool, createLspHoverTool, createLspReferencesTool } from "./navigation.ts";
 import { createLspCodeActionsTool, createLspRenameTool } from "./refactor.ts";
 
 export interface LspRuntimeState {
 	manager: LspManager;
 	fileSync: LspFileSync;
+}
+
+export interface LspSessionStatus {
+	owner: "agent-session" | "standalone";
+	enabled: boolean;
+	configuration: ResolvedLspConfiguration;
+	servers: LspServerStatus[];
 }
 
 export interface LspLifecycleOptions extends LspManagerOptions {
@@ -23,40 +32,109 @@ export function createLspRuntimeState(cwd: string, options: LspLifecycleOptions 
 	};
 }
 
-export function registerLspLifecycleHandlers(
+const standaloneRegistrations = new WeakMap<ExtensionAPI, () => LspRuntimeState>();
+
+/**
+ * Register a self-contained LSP runtime for hosts that use the extension system without AgentSession.
+ * AgentSession already owns LSP tools and synchronization; extensions running inside it must use
+ * `ctx.getLspStatus()` and `ctx.configureLsp()` instead of registering another runtime.
+ */
+export function registerStandaloneLspLifecycleHandlers(
 	pi: ExtensionAPI,
 	options: LspLifecycleOptions = {},
 ): () => LspRuntimeState {
+	const existing = standaloneRegistrations.get(pi);
+	if (existing) return existing;
 	let state: LspRuntimeState | undefined;
-
+	let delegatedToAgentSession = false;
+	let toolsRegistered = false;
+	let toolsAvailable = false;
+	let toolBackendInfo: ToolBackendInfo | undefined;
+	let toolOperations: ExtensionContext["toolOperations"] | undefined;
 	const getState = (cwd = process.cwd()): LspRuntimeState => {
-		state ??= createLspRuntimeState(cwd, options);
+		if (delegatedToAgentSession) {
+			throw new Error(
+				"AgentSession already owns LSP. Use ctx.getLspStatus() and ctx.configureLsp() instead of the standalone helper.",
+			);
+		}
+		state ??= createLspRuntimeState(cwd, {
+			...options,
+			getToolBackendInfo: () => toolBackendInfo ?? options.getToolBackendInfo?.() ?? { type: "local", cwd },
+		});
 		return state;
 	};
 
-	pi.registerTool(createLspDiagnosticsTool(() => getState()));
-	pi.registerTool(createLspHoverTool(() => getState()));
-	pi.registerTool(createLspDefinitionTool(() => getState()));
-	pi.registerTool(createLspReferencesTool(() => getState()));
-	pi.registerTool(createLspRenameTool(() => getState()));
-	pi.registerTool(createLspCodeActionsTool(() => getState()));
+	const registerToolsOnce = (): void => {
+		if (toolsRegistered) return;
+		toolsRegistered = true;
+		toolsAvailable = true;
+		pi.registerTool(createLspDiagnosticsTool(() => getState()));
+		pi.registerTool(createLspHoverTool(() => getState()));
+		pi.registerTool(createLspDefinitionTool(() => getState()));
+		pi.registerTool(createLspReferencesTool(() => getState()));
+		pi.registerTool(createLspRenameTool(() => getState()));
+		pi.registerTool(createLspCodeActionsTool(() => getState()));
+	};
+
+	const unregisterTools = (): void => {
+		if (!toolsAvailable) return;
+		toolsAvailable = false;
+		for (const name of [
+			"lsp_diagnostics",
+			"lsp_hover",
+			"lsp_definition",
+			"lsp_references",
+			"lsp_rename",
+			"lsp_code_actions",
+		]) {
+			pi.unregisterTool(name);
+		}
+	};
 
 	pi.on("session_start", (_event, ctx) => {
-		state = createLspRuntimeState(ctx.cwd, options);
+		const previous = state;
+		toolBackendInfo = ctx.toolOperations.getBackendInfo?.() ?? { type: "local", cwd: ctx.toolOperations.cwd };
+		toolOperations = ctx.toolOperations;
+		if (delegatedToAgentSession || ctx.getLspStatus().owner === "agent-session") {
+			delegatedToAgentSession = true;
+			unregisterTools();
+			state = undefined;
+			return previous?.manager.shutdownAll();
+		}
+		delegatedToAgentSession = false;
+		registerToolsOnce();
+		state = createLspRuntimeState(ctx.toolOperations.cwd, {
+			...options,
+			getToolBackendInfo: () => toolBackendInfo ?? { type: "local", cwd: ctx.toolOperations.cwd },
+			getToolOperations: () => toolOperations ?? ctx.toolOperations,
+		});
+		return previous?.manager.shutdownAll();
 	});
 
 	pi.on("tool_result", async (event, ctx) => {
-		return syncToolResult(event, ctx, getState(ctx.cwd));
+		if (delegatedToAgentSession) return undefined;
+		toolOperations = ctx.toolOperations;
+		toolBackendInfo = ctx.toolOperations.getBackendInfo?.() ?? { type: "local", cwd: ctx.toolOperations.cwd };
+		return syncToolResult(event, ctx, getState(ctx.toolOperations.cwd));
 	});
 
 	pi.on("session_shutdown", async () => {
 		const current = state;
 		state = undefined;
+		toolOperations = undefined;
 		await current?.manager.shutdownAll();
 	});
 
-	return () => getState(process.cwd());
+	const registration = () => getState(process.cwd());
+	standaloneRegistrations.set(pi, registration);
+	return registration;
 }
+
+/**
+ * @deprecated Use `registerStandaloneLspLifecycleHandlers` only in standalone extension hosts. In a normal
+ * AgentSession, use its built-in LSP runtime through `ctx.getLspStatus()` and `ctx.configureLsp()`.
+ */
+export const registerLspLifecycleHandlers = registerStandaloneLspLifecycleHandlers;
 
 async function syncToolResult(
 	event: ToolResultEvent,

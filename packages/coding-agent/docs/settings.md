@@ -187,6 +187,32 @@ When multiple sources specify a session directory, precedence is `--session-dir`
 |---------|------|---------|-------------|
 | `markdown.codeBlockIndent` | string | `"  "` | Indentation for code blocks |
 
+### Language Servers
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `lsp` | object | - | Validated external language-server configuration layer |
+
+Pi does not include a default language server. Configure spawned or attached servers explicitly:
+
+```json
+{
+  "lsp": {
+    "servers": [
+      {
+        "id": "rust",
+        "selectors": [{ "languageId": "rust", "pattern": "**/*.rs" }],
+        "transport": { "type": "tcp", "host": "127.0.0.1", "port": 9257 },
+        "lifecycle": { "type": "attached" },
+        "workspace": { "type": "session" }
+      }
+    ]
+  }
+}
+```
+
+Global and project `lsp` values are separate layers; project definitions override complete servers by ID. Active project-settings transports and positive top-level `enabled: true` activation are blocked unless an SDK host grants `trustProjectLspTransports`; this host-only decision cannot be enabled by project settings. Safe disable/removal entries remain effective. Malformed or unreadable LSP sources produce visible nonfatal diagnostics at the applicable error or warning severity and disable LSP; `--no-lsp` remains available as a per-invocation recovery path. CLI and host layers have higher precedence. See [Language Server Protocol](lsp.md) for spawn examples, merge/replace/disable semantics, trust, roots, transports, remote path mapping, and troubleshooting.
+
 ### Resources
 
 These settings define where to load extensions, skills, rules, prompts, and themes from.
@@ -258,7 +284,7 @@ See [packages.md](packages.md) for package management details.
 
 ## Project Overrides
 
-Project settings (`.pi/settings.json`) override global settings. Nested objects are merged:
+Project settings (`.pi/settings.json`) override global settings. Nested objects are merged, except `lsp`, which uses the server-ID layer semantics documented in [Language Servers](#language-servers):
 
 ```json
 // ~/.pi/agent/settings.json (global)
