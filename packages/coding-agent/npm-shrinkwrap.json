@@ -9,9 +9,9 @@
 			"version": "0.1.9",
 			"license": "MIT",
 			"dependencies": {
-				"@fleetagent/pi-agent-core": "^0.1.8",
-				"@fleetagent/pi-ai": "^0.1.8",
-				"@fleetagent/pi-tui": "^0.1.8",
+				"@fleetagent/pi-agent-core": "^0.1.9",
+				"@fleetagent/pi-ai": "^0.1.9",
+				"@fleetagent/pi-tui": "^0.1.9",
 				"@silvia-odwyer/photon-node": "0.3.4",
 				"chalk": "5.6.2",
 				"cross-spawn": "7.0.6",
@@ -476,11 +476,11 @@
 			}
 		},
 		"node_modules/@fleetagent/pi-agent-core": {
-			"version": "0.1.8",
-			"resolved": "https://registry.npmjs.org/@fleetagent/pi-agent-core/-/pi-agent-core-0.1.8.tgz",
+			"version": "0.1.9",
+			"resolved": "https://registry.npmjs.org/@fleetagent/pi-agent-core/-/pi-agent-core-0.1.9.tgz",
 			"license": "MIT",
 			"dependencies": {
-				"@fleetagent/pi-ai": "^0.1.8",
+				"@fleetagent/pi-ai": "^0.1.9",
 				"ignore": "7.0.5",
 				"typebox": "1.1.38",
 				"yaml": "2.9.0"
@@ -490,8 +490,8 @@
 			}
 		},
 		"node_modules/@fleetagent/pi-ai": {
-			"version": "0.1.8",
-			"resolved": "https://registry.npmjs.org/@fleetagent/pi-ai/-/pi-ai-0.1.8.tgz",
+			"version": "0.1.9",
+			"resolved": "https://registry.npmjs.org/@fleetagent/pi-ai/-/pi-ai-0.1.9.tgz",
 			"license": "MIT",
 			"dependencies": {
 				"@anthropic-ai/sdk": "0.91.1",
@@ -514,8 +514,8 @@
 			}
 		},
 		"node_modules/@fleetagent/pi-tui": {
-			"version": "0.1.8",
-			"resolved": "https://registry.npmjs.org/@fleetagent/pi-tui/-/pi-tui-0.1.8.tgz",
+			"version": "0.1.9",
+			"resolved": "https://registry.npmjs.org/@fleetagent/pi-tui/-/pi-tui-0.1.9.tgz",
 			"license": "MIT",
 			"dependencies": {
 				"get-east-asian-width": "1.6.0",
@@ -767,8 +767,7 @@
 			"license": "Apache-2.0",
 			"engines": {
 				"node": ">=8.0.0"
-			},
-			"peer": true
+			}
 		},
 		"node_modules/@opentelemetry/semantic-conventions": {
 			"version": "1.41.1",
@@ -1348,8 +1347,7 @@
 			"license": "MIT",
 			"bin": {
 				"jiti": "lib/jiti-cli.mjs"
-			},
-			"peer": true
+			}
 		},
 		"node_modules/json-bigint": {
 			"version": "1.0.0",
@@ -1832,8 +1830,7 @@
 			"license": "MIT",
 			"funding": {
 				"url": "https://github.com/sponsors/colinhacks"
-			},
-			"peer": true
+			}
 		},
 		"node_modules/zod-to-json-schema": {
 			"version": "3.25.2",
