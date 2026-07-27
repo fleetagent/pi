@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.1.9](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.1.8...@fleetagent/pi-coding-agent-v0.1.9) (2026-07-27)
+
+
+### Features
+
+* **coding-agent:** add configurable external LSP support ([8e440ef](https://github.com/fleetagent/pi/commit/8e440effaca890788f2485ec60463cad0ca9601f))
+* **coding-agent:** add sandboxed daemon tooling ([50006b2](https://github.com/fleetagent/pi/commit/50006b283e359aa6a7ef635a798fb7b8b8672089))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @fleetagent/pi-agent-core bumped from ^0.1.8 to ^0.1.9
+    * @fleetagent/pi-ai bumped from ^0.1.8 to ^0.1.9
+    * @fleetagent/pi-tui bumped from ^0.1.8 to ^0.1.9
+
 ## [0.1.8](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.1.7...@fleetagent/pi-coding-agent-v0.1.8) (2026-07-13)
 
 

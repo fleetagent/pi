@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.9](https://github.com/fleetagent/pi/compare/@fleetagent/pi-ai-v0.1.8...@fleetagent/pi-ai-v0.1.9) (2026-07-27)
+
+
+### Features
+
+* **coding-agent:** add sandboxed daemon tooling ([50006b2](https://github.com/fleetagent/pi/commit/50006b283e359aa6a7ef635a798fb7b8b8672089))
+
 ## [0.1.8](https://github.com/fleetagent/pi/compare/@fleetagent/pi-ai-v0.1.7...@fleetagent/pi-ai-v0.1.8) (2026-07-13)
 
 
