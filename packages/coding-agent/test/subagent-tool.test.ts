@@ -19,7 +19,7 @@ import {
 	formatSubagentTaskPrompt,
 	subagentParamsSchema,
 } from "../src/core/tools/subagent.ts";
-import { discoverAgents } from "../src/core/tools/subagent-agents.ts";
+import { discoverAgents, discoverAgentsWithOperations } from "../src/core/tools/subagent-agents.ts";
 import { createHarness } from "./suite/harness.ts";
 
 const tempDirs: string[] = [];
@@ -64,6 +64,40 @@ describe("native subagent tool", () => {
 			{ cwd, hasUI: false } as unknown as ExtensionContext,
 		);
 		expect(result.content).toEqual([{ type: "text", text: "Subagent runner is not configured for this session." }]);
+	});
+
+	it("discovers daemon project presets through the borrowed workspace backend", async () => {
+		const cwd = createTempDir("pi-subagent-daemon-");
+		mkdirSync(join(cwd, ".pi", "agents"), { recursive: true });
+		writeFileSync(
+			join(cwd, ".pi", "agents", "remote.md"),
+			"---\nname: remote\ndescription: Remote project preset\ntools: read\n---\nRemote instructions.",
+		);
+		const operations = new LocalToolOperations(cwd);
+		Object.defineProperty(operations, "getBackendInfo", {
+			value: () => ({
+				type: "remote",
+				cwd,
+				url: "ws://daemon.test/pi/workspace",
+				protocol: "ws",
+				configured: true,
+				workspace: { id: "subagent-workspace", root: cwd, pathFlavor: "posix" },
+			}),
+		});
+		const discovery = await discoverAgentsWithOperations(
+			createTempDir("pi-subagent-local-cwd-"),
+			"project",
+			operations,
+		);
+		expect(discovery.projectAgentsDir).toBe(join(cwd, ".pi", "agents"));
+		expect(discovery.agents).toEqual([
+			expect.objectContaining({
+				name: "remote",
+				source: "project",
+				systemPrompt: "Remote instructions.",
+				tools: ["read"],
+			}),
+		]);
 	});
 
 	it("bundles default agents and lets user definitions override them", () => {
@@ -351,20 +385,181 @@ describe("native subagent tool", () => {
 			const initialParameters = session.getToolDefinition("subagent")?.parameters as typeof subagentParamsSchema;
 			const initialModelDescription = (initialParameters.properties.model as { description?: string }).description;
 			expect(initialModelDescription).toContain("faux/faux-1.0-alpha");
-			expect(initialModelDescription).not.toContain("faux/faux-2.0-beta");
+			expect(initialModelDescription).toContain("faux/faux-2.0-beta");
 
 			await session.setModel(faux.getModel("faux-2.0-beta")!);
 			const switchedParameters = session.getToolDefinition("subagent")?.parameters as typeof subagentParamsSchema;
 			const switchedModelDescription = (switchedParameters.properties.model as { description?: string }).description;
 			expect(switchedModelDescription).toContain("faux/faux-2.0-beta");
-			expect(switchedModelDescription).not.toContain("faux/faux-1.0-alpha");
+			expect(switchedModelDescription).toContain("faux/faux-1.0-alpha");
+		} finally {
+			await pi.dispose();
+			faux.unregister();
+		}
+	});
+	it("lists subagent runs and continues a completed run by id", async () => {
+		const cwd = createTempDir("pi-subagent-continue-");
+		const agentDir = createTempDir("pi-subagent-continue-config-");
+		const faux = registerFauxProvider({ models: [{ id: "faux-continue", reasoning: true }] });
+		const model = faux.getModel("faux-continue")!;
+		const authStorage = AuthStorage.inMemory();
+		authStorage.setRuntimeApiKey(model.provider, "faux-key");
+		const modelRegistry = ModelRegistry.inMemory(authStorage);
+		modelRegistry.registerProvider(model.provider, {
+			baseUrl: model.baseUrl,
+			apiKey: "faux-key",
+			api: faux.api,
+			models: faux.models.map((registeredModel) => ({
+				id: registeredModel.id,
+				name: registeredModel.name,
+				api: registeredModel.api,
+				reasoning: registeredModel.reasoning,
+				input: registeredModel.input,
+				cost: registeredModel.cost,
+				contextWindow: registeredModel.contextWindow,
+				maxTokens: registeredModel.maxTokens,
+				baseUrl: registeredModel.baseUrl,
+			})),
+		});
+		const childUserTexts: string[] = [];
+		faux.setResponses([
+			(context) => {
+				const user = context.messages.filter((message) => message.role === "user").at(-1);
+				childUserTexts.push(
+					user?.role === "user" && Array.isArray(user.content)
+						? user.content
+								.filter((part): part is { type: "text"; text: string } => part.type === "text")
+								.map((part) => part.text)
+								.join("\n")
+						: "",
+				);
+				return fauxAssistantMessage("first output");
+			},
+			(context) => {
+				const user = context.messages.filter((message) => message.role === "user").at(-1);
+				childUserTexts.push(
+					user?.role === "user" && Array.isArray(user.content)
+						? user.content
+								.filter((part): part is { type: "text"; text: string } => part.type === "text")
+								.map((part) => part.text)
+								.join("\n")
+						: "",
+				);
+				return fauxAssistantMessage("second output");
+			},
+		]);
+
+		const pi = await PiAgent.create({
+			cwd,
+			agentDir,
+			sessionManager: new InMemorySessionManager(cwd),
+			authStorage,
+			modelRegistry,
+			settingsManager: SettingsManager.inMemory(),
+			model,
+		});
+		try {
+			const session = await pi.createAgentSession();
+			const ctx = { cwd, toolOperations: new LocalToolOperations(cwd), model, hasUI: false };
+			const subagent = session.getToolDefinition("subagent")!;
+			const first = await subagent.execute("subagent-1", { task: "First task" }, undefined, undefined, ctx as never);
+			const firstDetails = first.details as
+				| { results: Array<{ runId?: string; sessionReference?: string }> }
+				| undefined;
+			const firstRun = firstDetails?.results[0];
+			expect(firstRun?.runId).toBe("subagent:1");
+			expect(firstRun?.sessionReference).toBeDefined();
+
+			const runs = await session
+				.getToolDefinition("subagent_runs")!
+				.execute("subagent-runs", {}, undefined, undefined, ctx as never);
+			expect(runs.content[0]).toMatchObject({ type: "text" });
+			expect(runs.content[0]?.type === "text" ? runs.content[0].text : "").toContain("subagent:1");
+
+			const second = await subagent.execute(
+				"subagent-2",
+				{ continueSession: "subagent:1", task: "Follow up" },
+				undefined,
+				undefined,
+				ctx as never,
+			);
+			const secondDetails = second.details as { results: Array<{ runId?: string }> } | undefined;
+			expect(secondDetails?.results[0].runId).toBe("subagent:1");
+			expect(second.content[0]).toMatchObject({ type: "text", text: "second output" });
+			expect(childUserTexts).toEqual(["<task>\nFirst task\n</task>", "<task>\nFollow up\n</task>"]);
 		} finally {
 			await pi.dispose();
 			faux.unregister();
 		}
 	});
 
-	it("describes authenticated models from the current model family", () => {
+	it("runs subagents with remote cwd values that do not exist on the host", async () => {
+		const localCwd = createTempDir("pi-subagent-remote-host-cwd-");
+		const remoteCwd = join(tmpdir(), "pi-subagent-remote-workspace-does-not-exist");
+		rmSync(remoteCwd, { recursive: true, force: true });
+		const agentDir = createTempDir("pi-subagent-remote-host-config-");
+		const faux = registerFauxProvider({ models: [{ id: "faux-remote", reasoning: true }] });
+		const model = faux.getModel("faux-remote")!;
+		const authStorage = AuthStorage.inMemory();
+		authStorage.setRuntimeApiKey(model.provider, "faux-key");
+		const modelRegistry = ModelRegistry.inMemory(authStorage);
+		modelRegistry.registerProvider(model.provider, {
+			baseUrl: model.baseUrl,
+			apiKey: "faux-key",
+			api: faux.api,
+			models: faux.models.map((registeredModel) => ({
+				id: registeredModel.id,
+				name: registeredModel.name,
+				api: registeredModel.api,
+				reasoning: registeredModel.reasoning,
+				input: registeredModel.input,
+				cost: registeredModel.cost,
+				contextWindow: registeredModel.contextWindow,
+				maxTokens: registeredModel.maxTokens,
+				baseUrl: registeredModel.baseUrl,
+			})),
+		});
+		const operations = new LocalToolOperations(localCwd);
+		operations.cwd = remoteCwd;
+		Object.defineProperty(operations, "getBackendInfo", {
+			configurable: true,
+			value: () => ({ type: "remote" as const, cwd: remoteCwd, configured: false as const }),
+		});
+		faux.setResponses([
+			fauxAssistantMessage(fauxToolCall("subagent", { task: "Return child output" }), { stopReason: "toolUse" }),
+			fauxAssistantMessage("child output"),
+			fauxAssistantMessage("parent output"),
+		]);
+		const pi = await PiAgent.create({
+			cwd: remoteCwd,
+			agentDir,
+			sessionManager: new InMemorySessionManager(remoteCwd),
+			authStorage,
+			modelRegistry,
+			settingsManager: SettingsManager.inMemory(),
+			model,
+			toolOperations: operations,
+			resourceLoaderOptions: { toolOperations: operations },
+		});
+		try {
+			const session = await pi.createAgentSession();
+			await session.prompt("delegate");
+			const toolResult = session.messages.find((message) => message.role === "toolResult");
+			const toolText =
+				toolResult?.role === "toolResult"
+					? toolResult.content
+							.filter((part): part is { type: "text"; text: string } => part.type === "text")
+							.map((part) => part.text)
+							.join("\n")
+					: "";
+			expect(toolText).toBe("child output");
+			expect(faux.state.callCount).toBe(3);
+		} finally {
+			await pi.dispose();
+			faux.unregister();
+		}
+	});
+	it("describes authenticated models from the current provider", () => {
 		const current = getModel("openai-codex", "gpt-5.6");
 		const catalog = formatSubagentModelCatalog(current, [
 			current,
@@ -373,7 +568,7 @@ describe("native subagent tool", () => {
 		]);
 		expect(catalog).toContain("openai-codex/gpt-5.6");
 		expect(catalog).toContain("openai-codex/gpt-5.6-luna");
-		expect(catalog).not.toContain("openai-codex/gpt-5.5");
+		expect(catalog).toContain("openai-codex/gpt-5.5");
 		expect(catalog).toContain("input $");
 		expect(catalog).toContain("output $");
 		const parameters = createSubagentToolDefinition({ modelCatalog: catalog }).parameters;

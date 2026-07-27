@@ -424,7 +424,7 @@ export class RpcClient {
 	 * Configure or reconfigure the deferred remote sandbox.
 	 */
 	async setRemoteSandbox(
-		options: { backend: "ssh"; remote: string; cwd?: string } | { backend: "daemon"; url: string },
+		options: { backend: "ssh"; remote: string; cwd?: string } | { backend: "daemon"; url: string; token?: string },
 	): Promise<ToolBackendInfo> {
 		const response = await this.send({ type: "set_remote_sandbox", ...options });
 		return this.getData(response);

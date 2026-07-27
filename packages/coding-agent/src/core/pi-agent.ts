@@ -1,7 +1,14 @@
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { Agent, type AgentMessage, type ThinkingLevel } from "@fleetagent/pi-agent-core";
-import { clampThinkingLevel, type ImageContent, type Message, type Model, streamSimple } from "@fleetagent/pi-ai";
+import {
+	clampThinkingLevel,
+	type ImageContent,
+	type Message,
+	type Model,
+	refreshModelCatalog,
+	streamSimple,
+} from "@fleetagent/pi-ai";
 import chalk from "chalk";
 import { getAgentDir } from "../config.ts";
 import { InteractiveMode, runPrintMode, runRpcMode } from "../modes/index.ts";
@@ -42,8 +49,8 @@ import {
 import { InMemorySettingsStorage, SettingsManager } from "./settings-manager.ts";
 import { isInstallTelemetryEnabled } from "./telemetry.ts";
 import { printTimings, time } from "./timings.ts";
-import type { ToolOperations } from "./tools/index.ts";
-import type { SubagentRunner, SubagentRunRequest } from "./tools/subagent.ts";
+import { type BorrowedToolOperations, borrowToolOperations, type ToolOperations } from "./tools/index.ts";
+import type { SubagentRunInfo, SubagentRunner, SubagentRunRegistry, SubagentRunRequest } from "./tools/subagent.ts";
 
 export interface PiAgentDiagnostic {
 	type: "info" | "warning" | "error";
@@ -114,6 +121,8 @@ export interface ResolvePiAgentSessionOptionsResult extends PiAgentSessionOption
 }
 
 export interface CreatePiAgentOptions extends PiAgentSessionOptions {
+	/** Dispose toolOperations with this top-level PiAgent. Child sessions and subagents always borrow it. */
+	ownsToolOperations?: boolean;
 	/** Runtime mode. Default: embedded SDK usage. */
 	mode?: PiAgentAppMode;
 	cwd?: string;
@@ -307,6 +316,10 @@ export class PiAgent {
 	private _modelFallbackMessage?: string;
 	private rebindSession?: (session: AgentSession) => Promise<void>;
 	private beforeSessionInvalidate?: () => void;
+	private readonly borrowedToolOperations: BorrowedToolOperations | undefined;
+	private toolOperationsDisposed = false;
+	private disposePromise: Promise<void> | undefined;
+	private readonly subagentCleanupCallbacks = new Set<() => Promise<void>>();
 
 	private constructor(
 		options: CreatePiAgentOptions,
@@ -318,6 +331,7 @@ export class PiAgent {
 		},
 	) {
 		this.options = options;
+		this.borrowedToolOperations = options.toolOperations ? borrowToolOperations(options.toolOperations) : undefined;
 		this._mode = options.mode ?? "embedded";
 		this.initialCwd = resolved.cwd;
 		this.agentDir = resolved.agentDir;
@@ -373,6 +387,9 @@ export class PiAgent {
 
 	private async createServices(cwd: string): Promise<PiAgentServices> {
 		const settingsManager = this.options.settingsManager ?? SettingsManager.create(cwd, this.agentDir);
+		if (process.env.PI_MODEL_CATALOG_URL) {
+			await refreshModelCatalog().catch(() => undefined);
+		}
 		const modelRegistry =
 			this.options.modelRegistry ?? ModelRegistry.create(this.authStorage, join(this.agentDir, "models.json"));
 		const resourceLoader =
@@ -382,7 +399,9 @@ export class PiAgent {
 				cwd,
 				agentDir: this.agentDir,
 				settingsManager,
-				toolOperations: this.options.resourceLoaderOptions?.toolOperations ?? this.options.toolOperations,
+				toolOperations: this.options.resourceLoaderOptions?.toolOperations
+					? borrowToolOperations(this.options.resourceLoaderOptions.toolOperations)
+					: this.borrowedToolOperations,
 			});
 		await resourceLoader.reload();
 
@@ -412,11 +431,31 @@ export class PiAgent {
 			diagnostics,
 		};
 	}
+	private createSubagentRunRegistry(): SubagentRunRegistry & {
+		upsert(run: SubagentRunInfo): void;
+		get(runId: string): SubagentRunInfo | undefined;
+	} {
+		const runs = new Map<string, SubagentRunInfo>();
+		return {
+			list: () => Array.from(runs.values()).sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
+			upsert: (run) => runs.set(run.runId, structuredClone(run)),
+			get: (runId) => runs.get(runId),
+		};
+	}
+
 	private createEmbeddedSubagentRunner(
 		services: PiAgentServices,
 		toolOperations: ToolOperations | undefined,
 		excludedTools: string[],
+		registry: ReturnType<PiAgent["createSubagentRunRegistry"]>,
 	): SubagentRunner {
+		let nextRunNumber = 1;
+		const children = new Map<string, { child: PiAgent; session: AgentSession; run: SubagentRunInfo }>();
+		const cleanup = async (): Promise<void> => {
+			for (const { child } of children.values()) await child.dispose();
+			children.clear();
+		};
+		this.subagentCleanupCallbacks.add(cleanup);
 		return async (request: SubagentRunRequest) => {
 			const resolvedModel = request.model
 				? resolveCliModel({ cliModel: request.model, modelRegistry: services.modelRegistry })
@@ -425,58 +464,135 @@ export class PiAgent {
 				return { exitCode: 1, stderr: resolvedModel.error };
 			}
 
-			const settingsStorage = new InMemorySettingsStorage();
-			settingsStorage.withLock("global", () => JSON.stringify(services.settingsManager.getGlobalSettings()));
-			settingsStorage.withLock("project", () => JSON.stringify(services.settingsManager.getProjectSettings()));
-			const settingsManager = SettingsManager.fromStorage(settingsStorage);
-			const childExcludedTools = new Set(["subagent", ...excludedTools]);
-			const tools = (request.tools ?? getDefaultActiveToolNames()).filter((name) => !childExcludedTools.has(name));
-			const child = await PiAgent.create({
-				mode: "embedded",
-				cwd: request.cwd,
-				agentDir: services.agentDir,
-				sessionManager: new InMemorySessionManager(request.cwd),
-				authStorage: services.authStorage,
-				modelRegistry: services.modelRegistry,
-				settingsManager,
-				model: resolvedModel?.model,
-				thinkingLevel: resolvedModel?.thinkingLevel,
-				tools,
-				excludedTools: Array.from(childExcludedTools),
-				toolOperations,
-				resourceLoaderOptions: {
-					toolOperations,
-					noPromptTemplates: true,
-					noThemes: true,
-					appendSystemPrompt: request.systemPrompt.trim() ? [request.systemPrompt] : undefined,
-				},
-			});
+			let runId = request.continueSession;
+			let childState = runId ? children.get(runId) : undefined;
+			if (request.continueSession && !childState) {
+				return { exitCode: 1, stderr: `Unknown subagent run id: ${request.continueSession}` };
+			}
 
-			let session: AgentSession | undefined;
+			if (!childState) {
+				runId = `subagent:${nextRunNumber++}`;
+				const settingsStorage = new InMemorySettingsStorage();
+				settingsStorage.withLock("global", () => JSON.stringify(services.settingsManager.getGlobalSettings()));
+				settingsStorage.withLock("project", () => JSON.stringify(services.settingsManager.getProjectSettings()));
+				const settingsManager = SettingsManager.fromStorage(settingsStorage);
+				const childExcludedTools = new Set(["subagent", "subagent_runs", ...excludedTools]);
+				const tools = (request.tools ?? getDefaultActiveToolNames()).filter(
+					(name) => !childExcludedTools.has(name),
+				);
+				const child = await PiAgent.create({
+					mode: "embedded",
+					cwd: request.cwd,
+					agentDir: services.agentDir,
+					sessionManager: new InMemorySessionManager(request.cwd),
+					authStorage: services.authStorage,
+					modelRegistry: services.modelRegistry,
+					settingsManager,
+					model: resolvedModel?.model,
+					thinkingLevel: resolvedModel?.thinkingLevel,
+					tools,
+					excludedTools: Array.from(childExcludedTools),
+					toolOperations,
+					resourceLoaderOptions: {
+						toolOperations,
+						noPromptTemplates: true,
+						noThemes: true,
+						appendSystemPrompt: request.systemPrompt.trim() ? [request.systemPrompt] : undefined,
+					},
+				});
+				const session = await child.createAgentSession();
+				const now = new Date().toISOString();
+				const run: SubagentRunInfo = {
+					runId,
+					sessionReference: session.sessionReference,
+					status: "running",
+					agent: request.agent,
+					task: request.task,
+					cwd: request.cwd,
+					model: request.model,
+					createdAt: now,
+					updatedAt: now,
+				};
+				childState = { child, session, run };
+				children.set(runId, childState);
+				registry.upsert(run);
+			} else {
+				const now = new Date().toISOString();
+				childState.run = {
+					...childState.run,
+					status: "running",
+					task: request.task,
+					updatedAt: now,
+				};
+				registry.upsert(childState.run);
+			}
+
+			const session = childState.session;
+			let lastOutput = childState.run.lastOutput;
 			let unsubscribe: (() => void) | undefined;
 			const abort = (): void => {
-				if (session) void session.abort();
+				void session.abort();
 			};
 			try {
-				session = await child.createAgentSession();
 				unsubscribe = session.subscribe((event) => {
 					if (event.type !== "message_end") return;
 					if (event.message.role === "assistant" || event.message.role === "toolResult") {
 						request.onMessage(event.message as Message);
 					}
+					if (event.message.role === "assistant") {
+						lastOutput =
+							event.message.content
+								.filter((part) => part.type === "text")
+								.map((part) => part.text)
+								.join("\n") || lastOutput;
+						childState.run = {
+							...childState.run,
+							lastOutput,
+							updatedAt: new Date().toISOString(),
+						};
+						registry.upsert(childState.run);
+					}
 				});
 				if (request.signal?.aborted) {
-					return { exitCode: 1, stderr: "Subagent was aborted" };
+					return {
+						exitCode: 1,
+						stderr: "Subagent was aborted",
+						runId,
+						sessionReference: session.sessionReference,
+					};
 				}
 				request.signal?.addEventListener("abort", abort, { once: true });
 				await session.prompt(request.prompt);
-				return { exitCode: request.signal?.aborted ? 1 : 0, stderr: "" };
+				const status = request.signal?.aborted ? "failed" : "completed";
+				childState.run = {
+					...childState.run,
+					status,
+					lastOutput,
+					updatedAt: new Date().toISOString(),
+				};
+				registry.upsert(childState.run);
+				return {
+					exitCode: request.signal?.aborted ? 1 : 0,
+					stderr: "",
+					runId,
+					sessionReference: session.sessionReference,
+				};
 			} catch (error) {
-				return { exitCode: 1, stderr: error instanceof Error ? error.message : String(error) };
+				childState.run = {
+					...childState.run,
+					status: "failed",
+					updatedAt: new Date().toISOString(),
+				};
+				registry.upsert(childState.run);
+				return {
+					exitCode: 1,
+					stderr: error instanceof Error ? error.message : String(error),
+					runId,
+					sessionReference: session.sessionReference,
+				};
 			} finally {
 				request.signal?.removeEventListener("abort", abort);
 				unsubscribe?.();
-				await child.dispose();
 			}
 		};
 	}
@@ -504,7 +620,9 @@ export class PiAgent {
 			excludedTools: resolvedOptions.excludedTools ?? this.options.excludedTools,
 			noTools: resolvedOptions.noTools ?? this.options.noTools,
 			customTools: resolvedOptions.customTools ?? this.options.customTools,
-			toolOperations: resolvedOptions.toolOperations ?? this.options.toolOperations,
+			toolOperations: resolvedOptions.toolOperations
+				? borrowToolOperations(resolvedOptions.toolOperations)
+				: this.borrowedToolOperations,
 			trustProjectAgents: resolvedOptions.trustProjectAgents ?? this.options.trustProjectAgents,
 			trustProjectLspTransports: resolvedOptions.trustProjectLspTransports ?? this.options.trustProjectLspTransports,
 			lspConnectionFactories: resolvedOptions.lspConnectionFactories ?? this.options.lspConnectionFactories,
@@ -514,13 +632,15 @@ export class PiAgent {
 		): LspConfigurationInput[] => (input === undefined ? [] : Array.isArray(input) ? input : [input]);
 		const lspInputs = [...asLspInputs(this.options.lsp), ...asLspInputs(resolvedOptions.lsp)];
 		const resolveSessionLspConfiguration = () =>
-			loadLspConfiguration({
-				settingsManager: services.settingsManager,
-				cwd: services.cwd,
-				agentDir: services.agentDir,
-				inputs: lspInputs,
-				trustProjectLspTransports: sessionOptions.trustProjectLspTransports,
-			});
+			sessionOptions.toolOperations?.getBackendInfo?.().type === "remote"
+				? Promise.resolve({ configuration: { enabled: false, servers: [] }, diagnostics: [] })
+				: loadLspConfiguration({
+						settingsManager: services.settingsManager,
+						cwd: services.cwd,
+						agentDir: services.agentDir,
+						inputs: lspInputs,
+						trustProjectLspTransports: sessionOptions.trustProjectLspTransports,
+					});
 		const lspResult = await resolveSessionLspConfiguration();
 		const lspDiagnostics = formatLspConfigurationDiagnostics(lspResult.diagnostics);
 		const baseDiagnostics = [...diagnostics];
@@ -695,6 +815,8 @@ export class PiAgent {
 			activeSession.appendThinkingLevelChange(thinkingLevel);
 		}
 
+		const subagentRunRegistry = this.createSubagentRunRegistry();
+
 		return {
 			session: new AgentSession({
 				agent,
@@ -713,7 +835,9 @@ export class PiAgent {
 					services,
 					sessionOptions.toolOperations,
 					sessionOptions.excludedTools ?? [],
+					subagentRunRegistry,
 				),
+				subagentRunRegistry,
 				trustProjectAgents: sessionOptions.trustProjectAgents,
 				lspConfiguration: lspResult.configuration,
 				lspConnectionFactories: sessionOptions.lspConnectionFactories,
@@ -745,9 +869,16 @@ export class PiAgent {
 		this._diagnostics = [...this._baseDiagnostics, ...this._lspDiagnostics];
 	}
 
+	private shouldValidateSessionCwdOnHost(): boolean {
+		const backendInfo = this.borrowedToolOperations?.getBackendInfo?.();
+		return backendInfo === undefined || backendInfo.type === "local";
+	}
+
 	async createAgentSession(options: CreatePiAgentSessionOptions = {}): Promise<AgentSession> {
 		const initialSession = options.session ?? (await this.sessionManager.create());
-		assertSessionCwdExists(initialSession, initialSession.getCwd());
+		if (this.shouldValidateSessionCwdOnHost()) {
+			assertSessionCwdExists(initialSession, initialSession.getCwd());
+		}
 		this.apply(await this.buildAgentSession(initialSession, options.sessionStartEvent));
 		return this.session;
 	}
@@ -892,7 +1023,9 @@ export class PiAgent {
 
 		const previousSessionReference = this.session.sessionReference;
 		const nextSession = await this.sessionManager.openReference(sessionPath, { cwdOverride: options?.cwdOverride });
-		assertSessionCwdExists(nextSession, this.services.cwd);
+		if (this.shouldValidateSessionCwdOnHost()) {
+			assertSessionCwdExists(nextSession, this.services.cwd);
+		}
 		const result = await this.buildAgentSession(nextSession, {
 			type: "session_start",
 			reason: "resume",
@@ -994,7 +1127,9 @@ export class PiAgent {
 
 		const previousSessionReference = this.session.sessionReference;
 		const nextSession = await this.sessionManager.importJsonl(resolvedPath, { cwdOverride: cwdOverride });
-		assertSessionCwdExists(nextSession, this.services.cwd);
+		if (this.shouldValidateSessionCwdOnHost()) {
+			assertSessionCwdExists(nextSession, this.services.cwd);
+		}
 		const result = await this.buildAgentSession(nextSession, {
 			type: "session_start",
 			reason: "resume",
@@ -1097,17 +1232,30 @@ export class PiAgent {
 		return this.sessionManager.listAll(onProgress);
 	}
 
-	async dispose(): Promise<void> {
-		if (!this._session) {
-			return;
+	dispose(): Promise<void> {
+		this.disposePromise ??= this.disposeRuntime();
+		return this.disposePromise;
+	}
+
+	private async disposeRuntime(): Promise<void> {
+		try {
+			if (this._session) {
+				await emitSessionShutdownEvent(this.session.extensionRunner, {
+					type: "session_shutdown",
+					reason: "quit",
+				});
+				await this.flushSession(this.session);
+				this.beforeSessionInvalidate?.();
+				await this.session.dispose();
+				this._session = undefined;
+			}
+		} finally {
+			if (this.options.ownsToolOperations && !this.toolOperationsDisposed) {
+				this.toolOperationsDisposed = true;
+				await this.options.toolOperations?.dispose?.();
+			}
+			for (const cleanup of this.subagentCleanupCallbacks) await cleanup();
+			this.subagentCleanupCallbacks.clear();
 		}
-		await emitSessionShutdownEvent(this.session.extensionRunner, {
-			type: "session_shutdown",
-			reason: "quit",
-		});
-		await this.flushSession(this.session);
-		this.beforeSessionInvalidate?.();
-		await this.session.dispose();
-		this._session = undefined;
 	}
 }

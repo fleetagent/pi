@@ -2,6 +2,7 @@ import { Text } from "@fleetagent/pi-tui";
 import { type Static, Type } from "typebox";
 import type { Hover, Location, LocationLink, MarkedString, MarkupContent } from "vscode-languageserver-protocol";
 import type { ToolDefinition } from "../extensions/types.ts";
+import type { ToolOperations } from "../tools/operations.ts";
 import { throwIfAborted } from "./abort.ts";
 import type { LspRuntimeState } from "./integration.ts";
 import type {
@@ -126,14 +127,14 @@ function failureText(failures: readonly LspClientRouteFailure[]): string {
 async function getClientsAndSync(
 	state: LspRuntimeState,
 	input: PositionInput,
-	ctx: Parameters<ToolDefinition["execute"]>[4],
+	operations: ToolOperations,
 	feature: LspToolFeature,
 	signal?: AbortSignal,
 ): Promise<LspClientRouteCollection> {
-	await state.manager.setToolOperations(ctx.toolOperations, signal);
+	await state.manager.setToolOperations(operations, signal);
 	const collection = await state.manager.getClientRoutesForFeature(input.path, feature, signal);
 	if (collection.routes.length > 0) {
-		const result = await state.fileSync.synchronizeFileRead(input.path, ctx.toolOperations, signal);
+		const result = await state.fileSync.synchronizeFileRead(input.path, operations, signal);
 		if (result.lifecycleCancelled) {
 			return {
 				...collection,
@@ -200,6 +201,7 @@ function attributedLine(location: AttributedLocation, attribute: boolean): strin
 
 export function createLspHoverTool(
 	getState: () => LspRuntimeState,
+	getOperations?: () => ToolOperations,
 ): ToolDefinition<typeof hoverSchema, LspHoverDetails> {
 	return {
 		name: "lsp_hover",
@@ -210,7 +212,13 @@ export function createLspHoverTool(
 		parameters: hoverSchema,
 		async execute(_toolCallId, input: PositionInput, signal, _onUpdate, ctx) {
 			const state = getState();
-			const collection = await getClientsAndSync(state, input, ctx, "hover", signal);
+			const collection = await getClientsAndSync(
+				state,
+				input,
+				getOperations?.() ?? ctx.toolOperations,
+				"hover",
+				signal,
+			);
 			if (collection.routes.length === 0) {
 				return {
 					content: [{ type: "text", text: await noCapableResult(state, input.path, "hover", collection, signal) }],
@@ -258,6 +266,7 @@ export function createLspHoverTool(
 
 export function createLspDefinitionTool(
 	getState: () => LspRuntimeState,
+	getOperations?: () => ToolOperations,
 ): ToolDefinition<typeof definitionSchema, LspLocationDetails> {
 	return {
 		name: "lsp_definition",
@@ -268,7 +277,13 @@ export function createLspDefinitionTool(
 		parameters: definitionSchema,
 		async execute(_toolCallId, input: PositionInput, signal, _onUpdate, ctx) {
 			const state = getState();
-			const collection = await getClientsAndSync(state, input, ctx, "definition", signal);
+			const collection = await getClientsAndSync(
+				state,
+				input,
+				getOperations?.() ?? ctx.toolOperations,
+				"definition",
+				signal,
+			);
 			if (collection.routes.length === 0) {
 				return {
 					content: [
@@ -335,6 +350,7 @@ export function createLspDefinitionTool(
 
 export function createLspReferencesTool(
 	getState: () => LspRuntimeState,
+	getOperations?: () => ToolOperations,
 ): ToolDefinition<typeof referencesSchema, LspLocationDetails> {
 	return {
 		name: "lsp_references",
@@ -345,7 +361,13 @@ export function createLspReferencesTool(
 		parameters: referencesSchema,
 		async execute(_toolCallId, input: ReferencesInput, signal, _onUpdate, ctx) {
 			const state = getState();
-			const collection = await getClientsAndSync(state, input, ctx, "references", signal);
+			const collection = await getClientsAndSync(
+				state,
+				input,
+				getOperations?.() ?? ctx.toolOperations,
+				"references",
+				signal,
+			);
 			if (collection.routes.length === 0) {
 				return {
 					content: [

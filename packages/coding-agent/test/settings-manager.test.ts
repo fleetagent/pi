@@ -340,7 +340,60 @@ describe("SettingsManager", () => {
 			expect(manager.getSessionDir()).toBe(join(homedir(), "sessions"));
 		});
 	});
+	describe("sandbox settings", () => {
+		it("merges global and project sandbox settings", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({
+					sandbox: { image: "global-image", dockerBinary: "podman", daemonPort: 9000 },
+				}),
+			);
+			writeFileSync(
+				join(projectDir, ".pi", "settings.json"),
+				JSON.stringify({
+					sandbox: { image: "project-image", cleanup: "remove" },
+				}),
+			);
+			const manager = SettingsManager.create(projectDir, agentDir);
 
+			expect(manager.getSandboxSettings()).toEqual({
+				image: "project-image",
+				dockerBinary: "podman",
+				daemonPort: 9000,
+				cleanup: "remove",
+			});
+		});
+	});
+
+	describe("tools settings", () => {
+		it("merges global and project tool settings per tool name", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({
+					tools: {
+						websearch: { provider: "brave", apiKey: "global-key" },
+						custom: { enabled: true },
+					},
+				}),
+			);
+			writeFileSync(
+				join(projectDir, ".pi", "settings.json"),
+				JSON.stringify({
+					tools: {
+						websearch: { baseUrl: "https://search.example.test" },
+					},
+				}),
+			);
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getToolSettings("websearch")).toEqual({
+				provider: "brave",
+				apiKey: "global-key",
+				baseUrl: "https://search.example.test",
+			});
+			expect(manager.getToolSettings("custom")).toEqual({ enabled: true });
+		});
+	});
 	describe("LSP settings", () => {
 		it("keeps global and project layers separate instead of shallow-merging them", () => {
 			const globalLsp = { servers: [{ id: "global", enabled: false }] };

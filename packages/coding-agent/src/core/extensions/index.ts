@@ -157,6 +157,8 @@ export type {
 	// Events - User Bash
 	UserBashEvent,
 	UserBashEventResult,
+	WebsearchToolCallEvent,
+	WebsearchToolResultEvent,
 	WidgetPlacement,
 	WorkingIndicatorOptions,
 	WriteToolCallEvent,
@@ -173,6 +175,7 @@ export {
 	isReadToolResult,
 	isSubagentToolResult,
 	isToolCallEventType,
+	isWebsearchToolResult,
 	isWriteToolResult,
 } from "./types.ts";
 export { wrapRegisteredTool, wrapRegisteredTools } from "./wrapper.ts";

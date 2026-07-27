@@ -60,6 +60,24 @@ class FakeSshToolOperations implements ToolOperations {
 	}
 }
 
+class FakeDaemonToolOperations extends FakeSshToolOperations {
+	async readResource(path: string): Promise<Buffer> {
+		if (path !== "SANDBOX.md") throw new Error(`missing resource: ${path}`);
+		return Buffer.from("Sandbox instructions from daemon.", "utf8");
+	}
+
+	override getBackendInfo(): ToolBackendInfo {
+		return {
+			type: "remote",
+			cwd: this.cwd,
+			url: "ws://daemon.test/pi/workspace",
+			protocol: "ws",
+			configured: true,
+			workspace: { id: "authenticated-workspace", root: this.cwd, pathFlavor: "posix" },
+		};
+	}
+}
+
 describe("DefaultResourceLoader", () => {
 	let tempDir: string;
 	let agentDir: string;
@@ -85,6 +103,23 @@ describe("DefaultResourceLoader", () => {
 			expect(loader.getSkills().skills).toEqual([]);
 			expect(loader.getPrompts().prompts).toEqual([]);
 			expect(loader.getThemes().themes).toEqual([]);
+		});
+
+		it("loads daemon sandbox instructions as a project context file", async () => {
+			const loader = new DefaultResourceLoader({
+				cwd,
+				agentDir,
+				toolOperations: new FakeDaemonToolOperations(cwd),
+			});
+
+			await loader.reload();
+
+			expect(loader.getAgentsFiles().agentsFiles).toContainEqual(
+				expect.objectContaining({
+					path: "SANDBOX.md",
+					content: "Sandbox instructions from daemon.",
+				}),
+			);
 		});
 
 		it("should discover skills from agentDir", async () => {
@@ -270,6 +305,64 @@ Remote rule.`,
 			);
 			expect(loader.getAgentsFiles().agentsFiles.map((file) => file.content)).toContain(
 				"Remote project instructions.",
+			);
+		});
+
+		it("attributes daemon project resources and stops ancestor discovery at the authenticated workspace root", async () => {
+			const remoteCwd = join(tempDir, "daemon-project");
+			mkdirSync(join(remoteCwd, ".pi", "skills", "daemon-skill"), { recursive: true });
+			mkdirSync(join(agentDir, "skills", "daemon-skill"), { recursive: true });
+			writeFileSync(
+				join(agentDir, "skills", "daemon-skill", "SKILL.md"),
+				"---\nname: daemon-skill\ndescription: local collision\n---\nLocal body.",
+			);
+			writeFileSync(
+				join(remoteCwd, ".pi", "skills", "daemon-skill", "SKILL.md"),
+				"---\nname: daemon-skill\ndescription: daemon skill\n---\nRemote body.",
+			);
+			writeFileSync(join(remoteCwd, "AGENTS.md"), "Inside daemon root.");
+			mkdirSync(join(remoteCwd, ".pi", "extensions"), { recursive: true });
+			writeFileSync(
+				join(remoteCwd, ".pi", "extensions", "must-not-load.ts"),
+				`throw new Error("daemon project extension was loaded")`,
+			);
+			writeFileSync(join(tempDir, "AGENTS.md"), "Outside daemon root.");
+			const loader = new DefaultResourceLoader({
+				cwd,
+				agentDir,
+				toolOperations: new FakeDaemonToolOperations(remoteCwd),
+			});
+			await loader.reload();
+			const skill = loader.getSkills().skills.find((entry) => entry.name === "daemon-skill");
+			expect(skill?.sourceInfo).toMatchObject({
+				source: "remote",
+				scope: "project",
+				workspace: { id: "authenticated-workspace", root: remoteCwd, pathFlavor: "posix" },
+			});
+			expect(skill?.filePath).toBe(join(remoteCwd, ".pi", "skills", "daemon-skill", "SKILL.md"));
+			expect(loader.getSkills().diagnostics).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({
+						type: "collision",
+						collision: expect.objectContaining({ name: "daemon-skill", winnerPath: skill?.filePath }),
+					}),
+				]),
+			);
+			const context = loader.getAgentsFiles().agentsFiles;
+			expect(context.map((file) => file.content)).toContain("Inside daemon root.");
+			expect(context.map((file) => file.content)).not.toContain("Outside daemon root.");
+			expect(context.find((file) => file.content === "Inside daemon root.")?.sourceInfo).toMatchObject({
+				source: "remote",
+				workspace: { id: "authenticated-workspace" },
+			});
+			expect(loader.getExtensions().extensions).toEqual([]);
+			mkdirSync(join(remoteCwd, ".pi", "prompts"), { recursive: true });
+			writeFileSync(join(remoteCwd, ".pi", "prompts", "after-reload.md"), "Reloaded remote prompt.");
+			await loader.reload();
+			expect(loader.getPrompts().prompts).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({ name: "after-reload", content: "Reloaded remote prompt." }),
+				]),
 			);
 		});
 

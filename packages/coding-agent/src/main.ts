@@ -27,6 +27,7 @@ import {
 import { AuthStorage } from "./core/auth-storage.ts";
 import { exportFromFile } from "./core/export-html/index.ts";
 import type { ExtensionFactory } from "./core/extensions/types.ts";
+import { configureHttpDispatcher } from "./core/http-dispatcher.ts";
 import { KeybindingsManager } from "./core/keybindings.ts";
 import type { LspConfigurationInput } from "./core/lsp/index.ts";
 import type { ModelRegistry } from "./core/model-registry.ts";
@@ -54,6 +55,8 @@ import {
 	DeferredRemoteToolOperations,
 	type ToolOperations,
 } from "./core/tools/index.ts";
+import { runDaemonCommand } from "./daemon/command.ts";
+import { isDaemonCommand } from "./daemon/config.ts";
 import { runMigrations, showDeprecationWarnings } from "./migrations.ts";
 import { ExtensionSelectorComponent } from "./modes/interactive/components/extension-selector.ts";
 import { initTheme, stopThemeWatcher } from "./modes/interactive/theme/theme.ts";
@@ -489,9 +492,15 @@ async function promptForMissingSessionCwd(
 
 export interface MainOptions {
 	extensionFactories?: ExtensionFactory[];
+	daemonRunner?: (args: readonly string[]) => Promise<void>;
 }
 
 export async function main(args: string[], options?: MainOptions) {
+	if (isDaemonCommand(args)) {
+		await (options?.daemonRunner ?? runDaemonCommand)(args);
+		return;
+	}
+	configureHttpDispatcher();
 	resetTimings();
 	const offlineMode = args.includes("--offline") || isTruthyEnvFlag(process.env.PI_OFFLINE);
 	if (offlineMode) {
@@ -647,6 +656,7 @@ export async function main(args: string[], options?: MainOptions) {
 		cliLspInputs.push({ type: "disabled", source: "--no-lsp", scope: "cli" });
 	}
 	const piAgent = await PiAgent.create({
+		ownsToolOperations: toolOperations !== undefined,
 		mode: appMode,
 		cwd: initialSession.getCwd(),
 		agentDir,

@@ -632,6 +632,7 @@ export class LspClient {
 						deadline,
 						`Sending exit to LSP server ${this.serverId}`,
 					);
+					await new Promise((resolve) => setTimeout(resolve, 50));
 				} catch (error) {
 					this.recordTransportError(error instanceof Error ? error : new Error(String(error)));
 				}

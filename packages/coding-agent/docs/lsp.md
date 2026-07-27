@@ -287,6 +287,14 @@ For example, Pi's SSH/container tool backend may expose `/workspace`, while a da
 
 Mappings must be reversible. If roots overlap, the agent and server sides must have the same parent/child relationship and relative suffix. Pi uses the longest matching root. A remote tool backend is rejected before server startup when its cwd is not covered by an explicit mapping; Pi will not guess that local and remote filesystems are identical.
 
+### Colocated `pi --daemon` LSP
+
+A daemon workspace uses an operator-owned LSP runtime in the daemon process. The orchestrating Pi does not start a second local manager for those files and cannot reconfigure daemon LSP through `ctx.configureLsp()`. It consumes the daemon's negotiated `lsp_*` tools and sanitized status instead.
+
+Configure an operator-reviewed layer with `pi --daemon --daemon-lsp-config <file>`. Optionally add the workspace's `.pi/settings.json` layer with `--daemon-trust-project-lsp`; project configuration cannot grant this trust to itself. Managed `spawn` transports also require `--daemon-allow-process-exec`. Host-provided `connection` factories are not available in daemon mode; configure a spawned or attached endpoint in the daemon namespace.
+
+Daemon LSP paths, marker boundaries, Unix sockets, fixed roots, and path-mapping agent roots must remain in the configured workspace. Managed children receive the daemon's filtered environment and stop on daemon reload or shutdown. Every authenticated client observes the same daemon-global status and runtime; disconnecting one orchestrator does not stop it.
+
 ## Initialization, settings, features, priority, and timeouts
 
 A server can customize initialization and workspace settings:

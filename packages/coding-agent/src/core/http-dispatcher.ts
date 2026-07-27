@@ -66,6 +66,10 @@ function createUndiciOriginDispatcher(origin: string | URL, options: object): un
 	);
 }
 
+function isMockedFetch(fetchImplementation: typeof globalThis.fetch | undefined): boolean {
+	return (fetchImplementation as { _isMockFunction?: unknown } | undefined)?._isMockFunction === true;
+}
+
 export function configureHttpDispatcher(timeoutMs: number = DEFAULT_HTTP_IDLE_TIMEOUT_MS): void {
 	const normalizedTimeoutMs = parseHttpIdleTimeoutMs(timeoutMs);
 	if (normalizedTimeoutMs === undefined) {
@@ -84,5 +88,9 @@ export function configureHttpDispatcher(timeoutMs: number = DEFAULT_HTTP_IDLE_TI
 	// Keep fetch and the dispatcher on the same undici implementation. Node 26.0's
 	// bundled fetch can otherwise consume compressed responses through npm undici's
 	// dispatcher without decompressing them, causing response.json() failures.
+	const existingFetch = globalThis.fetch;
 	undici.install?.();
+	if (isMockedFetch(existingFetch)) {
+		globalThis.fetch = existingFetch;
+	}
 }

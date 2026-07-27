@@ -132,6 +132,8 @@ export type {
 	TurnStartEvent,
 	UserBashEvent,
 	UserBashEventResult,
+	WebsearchToolCallEvent,
+	WebsearchToolResultEvent,
 	WidgetPlacement,
 	WorkingIndicatorOptions,
 	WriteToolCallEvent,
@@ -149,6 +151,7 @@ export {
 	isReadToolResult,
 	isSubagentToolResult,
 	isToolCallEventType,
+	isWebsearchToolResult,
 	isWriteToolResult,
 	wrapRegisteredTool,
 	wrapRegisteredTools,
@@ -187,7 +190,12 @@ export {
 	type ResolvePiAgentSessionOptionsResult,
 } from "./core/pi-agent.ts";
 export type { PromptTemplate } from "./core/prompt-templates.ts";
-export type { ResourceCollision, ResourceDiagnostic, ResourceLoader } from "./core/resource-loader.ts";
+export type {
+	ProjectContextFile,
+	ResourceCollision,
+	ResourceDiagnostic,
+	ResourceLoader,
+} from "./core/resource-loader.ts";
 export { DefaultResourceLoader, loadProjectContextFiles } from "./core/resource-loader.ts";
 // Rules
 export {
@@ -234,6 +242,7 @@ export {
 	type PackageSource,
 	type RetrySettings,
 	SettingsManager,
+	type ToolSettings,
 } from "./core/settings-manager.ts";
 // Skills
 export {
@@ -275,6 +284,8 @@ export {
 	createSshToolOperations,
 	createSubagentTool,
 	createSubagentToolDefinition,
+	createWebsearchTool,
+	createWebsearchToolDefinition,
 	createWriteTool,
 	createWriteToolDefinition,
 	DEFAULT_MAX_BYTES,
@@ -297,6 +308,10 @@ export {
 	type LsToolInput,
 	type LsToolOptions,
 	type ParsedSshTarget,
+	parseBraveSearchResponse,
+	parseDuckDuckGoResponse,
+	parseFirecrawlSearchResponse,
+	parseWebsearchToolOptions,
 	type ReadToolDetails,
 	type ReadToolInput,
 	type ReadToolOptions,
@@ -305,9 +320,12 @@ export {
 	type SshToolOperationsOptions,
 	type SubagentDetails,
 	type SubagentResult,
+	type SubagentRunInfo,
 	type SubagentRunner,
 	type SubagentRunOutcome,
+	type SubagentRunRegistry,
 	type SubagentRunRequest,
+	type SubagentRunsToolInput,
 	type SubagentStatus,
 	type SubagentToolInput,
 	type SubagentToolOptions,
@@ -327,10 +345,24 @@ export {
 	truncateHead,
 	truncateLine,
 	truncateTail,
+	type WebsearchProvider,
+	type WebsearchResultItem,
+	type WebsearchToolDetails,
+	type WebsearchToolInput,
+	type WebsearchToolOptions,
+	WORKSPACE_TOOL_NAMES,
+	type WorkspaceToolCatalogEntry,
+	type WorkspaceToolDefinition,
+	WorkspaceToolHost,
+	type WorkspaceToolHostOptions,
+	type WorkspaceToolInvocation,
+	type WorkspaceToolName,
+	type WorkspaceToolOptions,
 	type WriteToolInput,
 	type WriteToolOptions,
 	withFileMutationQueue,
 } from "./core/tools/index.ts";
+export type { WorkspaceIdentity } from "./core/workspace-identity.ts";
 // Main entry point
 export { type MainOptions, main } from "./main.ts";
 // Run modes for programmatic SDK usage

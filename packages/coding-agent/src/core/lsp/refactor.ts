@@ -2,6 +2,7 @@ import { Text } from "@fleetagent/pi-tui";
 import { type Static, Type } from "typebox";
 import type { CodeAction, Command, Diagnostic, TextEdit, WorkspaceEdit } from "vscode-languageserver-protocol";
 import type { ToolDefinition } from "../extensions/types.ts";
+import type { ToolOperations } from "../tools/operations.ts";
 import { throwIfAborted } from "./abort.ts";
 import type { LspRuntimeState } from "./integration.ts";
 import type { LspClientRoute, LspClientRouteCollection, LspClientRouteFailure, LspToolFeature } from "./manager.ts";
@@ -288,14 +289,14 @@ function failureText(failures: readonly LspClientRouteFailure[]): string {
 async function getClientsAndSync(
 	state: LspRuntimeState,
 	input: { path: string },
-	ctx: Parameters<ToolDefinition["execute"]>[4],
+	operations: ToolOperations,
 	feature: LspToolFeature,
 	signal?: AbortSignal,
 ): Promise<LspClientRouteCollection> {
-	await state.manager.setToolOperations(ctx.toolOperations, signal);
+	await state.manager.setToolOperations(operations, signal);
 	const collection = await state.manager.getClientRoutesForFeature(input.path, feature, signal);
 	if (collection.routes.length > 0) {
-		const result = await state.fileSync.synchronizeFileRead(input.path, ctx.toolOperations, signal);
+		const result = await state.fileSync.synchronizeFileRead(input.path, operations, signal);
 		if (result.lifecycleCancelled) {
 			return {
 				...collection,
@@ -354,6 +355,7 @@ function actionKey(item: CodeAction | Command, preview: WorkspaceEditPreview): s
 
 export function createLspRenameTool(
 	getState: () => LspRuntimeState,
+	getOperations?: () => ToolOperations,
 ): ToolDefinition<typeof renameSchema, LspRenameDetails> {
 	return {
 		name: "lsp_rename",
@@ -365,7 +367,13 @@ export function createLspRenameTool(
 		parameters: renameSchema,
 		async execute(_toolCallId, input: RenameInput, signal, _onUpdate, ctx) {
 			const state = getState();
-			const collection = await getClientsAndSync(state, input, ctx, "rename", signal);
+			const collection = await getClientsAndSync(
+				state,
+				input,
+				getOperations?.() ?? ctx.toolOperations,
+				"rename",
+				signal,
+			);
 			if (collection.routes.length === 0) {
 				return {
 					content: [
@@ -512,6 +520,7 @@ export function createLspRenameTool(
 
 export function createLspCodeActionsTool(
 	getState: () => LspRuntimeState,
+	getOperations?: () => ToolOperations,
 ): ToolDefinition<typeof codeActionsSchema, LspCodeActionsDetails> {
 	return {
 		name: "lsp_code_actions",
@@ -525,7 +534,13 @@ export function createLspCodeActionsTool(
 		parameters: codeActionsSchema,
 		async execute(_toolCallId, input: CodeActionsInput, signal, _onUpdate, ctx) {
 			const state = getState();
-			const collection = await getClientsAndSync(state, input, ctx, "codeActions", signal);
+			const collection = await getClientsAndSync(
+				state,
+				input,
+				getOperations?.() ?? ctx.toolOperations,
+				"codeActions",
+				signal,
+			);
 			if (collection.routes.length === 0) {
 				return {
 					content: [

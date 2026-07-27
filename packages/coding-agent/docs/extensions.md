@@ -2012,7 +2012,9 @@ const bashTool = createBashTool(cwd, {
   }),
 });
 ```
+Remote execution is built in. Use `pi --remote ws://host:port` for a streaming remote commander backend, `pi --ssh user@host:/path` to run built-in tools over SSH, or `pi --remote-deferred --remote-cwd /path` and configure the target later via RPC, `/remote ssh <user@host[:/path]> [path]`, or `/remote daemon <ws://url>`. Connecting a deferred backend reloads project instruction resources from that backend.
 
+Extensions always load in the orchestrating Pi process. `pi --daemon` does not discover or execute user, package, or project Pi extensions and does not provide a reduced or fake `ExtensionContext`. Local extension hooks still wrap remote tool calls once, and backend-aware extension code can use `ctx.toolOperations` or `ctx.execToolBackend()` against the borrowed daemon connection. Direct Node filesystem or process APIs remain local.
 Remote execution is built in. Use `pi --remote ws://host:port` for a streaming remote commander backend, `pi --ssh user@host:/path` to run built-in tools over SSH, or `pi --remote-deferred --remote-cwd /path` and configure the target later via RPC, `/remote ssh <user@host[:/path]> [path]`, or `/remote daemon <ws://url>`. Connecting a deferred backend reloads project instruction resources from that backend.
 
 ### Output Truncation

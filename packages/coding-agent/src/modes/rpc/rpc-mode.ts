@@ -27,6 +27,7 @@ import {
 	writeRawStdout,
 } from "../../core/output-guard.ts";
 import type { PiAgentRuntimeHost } from "../../core/pi-agent.ts";
+import { HIDDEN_BUILTIN_SLASH_COMMAND_NAMES } from "../../core/slash-commands.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import { type Theme, theme } from "../interactive/theme/theme.ts";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
@@ -616,15 +617,13 @@ export async function runRpcMode(runtimeHost: PiAgentRuntimeHost): Promise<never
 				const info = await session.configureRemoteSandbox(
 					command.backend === "ssh"
 						? { type: "ssh", remote: command.remote, cwd: command.cwd }
-						: { type: "daemon", url: command.url },
+						: { type: "daemon", url: command.url, token: command.token },
 				);
-				await session.reload();
 				return success(id, "set_remote_sandbox", info);
 			}
 
 			case "clear_remote_sandbox": {
 				await session.clearRemoteSandbox();
-				await session.reload();
 				return success(id, "clear_remote_sandbox", session.getToolBackendInfo());
 			}
 
@@ -740,6 +739,7 @@ export async function runRpcMode(runtimeHost: PiAgentRuntimeHost): Promise<never
 				const commands: RpcSlashCommand[] = [];
 
 				for (const command of session.extensionRunner.getRegisteredCommands()) {
+					if (HIDDEN_BUILTIN_SLASH_COMMAND_NAMES.has(command.name)) continue;
 					commands.push({
 						name: command.invocationName,
 						description: command.description,

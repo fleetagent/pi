@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionContext, ToolResultEvent, ToolResultEventResult } from "../extensions/types.ts";
 import { isEditToolResult, isReadToolResult, isWriteToolResult } from "../extensions/types.ts";
-import type { ToolBackendInfo } from "../tools/operations.ts";
+import type { ToolBackendInfo, ToolOperations } from "../tools/operations.ts";
 import type { ResolvedLspConfiguration } from "./config.ts";
 import { createLspDiagnosticsTool, formatAutoDiagnosticsForChangedFile } from "./diagnostics.ts";
 import { LspFileSync } from "./file-sync.ts";
@@ -8,13 +8,22 @@ import { LspManager, type LspManagerOptions, type LspServerStatus } from "./mana
 import { createLspDefinitionTool, createLspHoverTool, createLspReferencesTool } from "./navigation.ts";
 import { createLspCodeActionsTool, createLspRenameTool } from "./refactor.ts";
 
+export const LSP_TOOL_NAMES = Object.freeze([
+	"lsp_diagnostics",
+	"lsp_hover",
+	"lsp_definition",
+	"lsp_references",
+	"lsp_rename",
+	"lsp_code_actions",
+] as const);
+export type LspToolName = (typeof LSP_TOOL_NAMES)[number];
 export interface LspRuntimeState {
 	manager: LspManager;
 	fileSync: LspFileSync;
 }
 
 export interface LspSessionStatus {
-	owner: "agent-session" | "standalone";
+	owner: "agent-session" | "standalone" | "daemon";
 	enabled: boolean;
 	configuration: ResolvedLspConfiguration;
 	servers: LspServerStatus[];
@@ -22,6 +31,17 @@ export interface LspSessionStatus {
 
 export interface LspLifecycleOptions extends LspManagerOptions {
 	maxTrackedDocuments?: number;
+}
+
+export function createLspToolDefinitions(getState: () => LspRuntimeState, getOperations?: () => ToolOperations) {
+	return [
+		createLspDiagnosticsTool(getState, getOperations),
+		createLspHoverTool(getState, getOperations),
+		createLspDefinitionTool(getState, getOperations),
+		createLspReferencesTool(getState, getOperations),
+		createLspRenameTool(getState, getOperations),
+		createLspCodeActionsTool(getState, getOperations),
+	] as const;
 }
 
 export function createLspRuntimeState(cwd: string, options: LspLifecycleOptions = {}): LspRuntimeState {
@@ -68,25 +88,21 @@ export function registerStandaloneLspLifecycleHandlers(
 		if (toolsRegistered) return;
 		toolsRegistered = true;
 		toolsAvailable = true;
-		pi.registerTool(createLspDiagnosticsTool(() => getState()));
-		pi.registerTool(createLspHoverTool(() => getState()));
-		pi.registerTool(createLspDefinitionTool(() => getState()));
-		pi.registerTool(createLspReferencesTool(() => getState()));
-		pi.registerTool(createLspRenameTool(() => getState()));
-		pi.registerTool(createLspCodeActionsTool(() => getState()));
+		const [diagnostics, hover, definition, references, rename, codeActions] = createLspToolDefinitions(() =>
+			getState(),
+		);
+		pi.registerTool(diagnostics);
+		pi.registerTool(hover);
+		pi.registerTool(definition);
+		pi.registerTool(references);
+		pi.registerTool(rename);
+		pi.registerTool(codeActions);
 	};
 
 	const unregisterTools = (): void => {
 		if (!toolsAvailable) return;
 		toolsAvailable = false;
-		for (const name of [
-			"lsp_diagnostics",
-			"lsp_hover",
-			"lsp_definition",
-			"lsp_references",
-			"lsp_rename",
-			"lsp_code_actions",
-		]) {
+		for (const name of LSP_TOOL_NAMES) {
 			pi.unregisterTool(name);
 		}
 	};

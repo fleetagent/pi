@@ -8,6 +8,7 @@ import {
 	StreamMessageReader,
 	StreamMessageWriter,
 } from "vscode-languageserver-protocol/node.js";
+import { killProcessTree } from "../../utils/shell.ts";
 import type { LspTransport } from "./config.ts";
 
 export type LspConnectionDisposalMode = "terminate-process" | "disconnect";
@@ -122,14 +123,37 @@ async function waitForConnection(
 	});
 }
 
-function mergeEnvironment(extra: Record<string, string> | undefined): NodeJS.ProcessEnv {
-	return extra ? { ...process.env, ...extra } : process.env;
+function mergeEnvironment(extra: Record<string, string> | undefined, inheritEnvironment: boolean): NodeJS.ProcessEnv {
+	return inheritEnvironment ? (extra ? { ...process.env, ...extra } : process.env) : { ...extra };
+}
+
+function processGroupIsAlive(pid: number): boolean {
+	if (process.platform === "win32") return false;
+	try {
+		process.kill(-pid, 0);
+		return true;
+	} catch {
+		return false;
+	}
 }
 
 async function terminateChild(child: ChildProcessWithoutNullStreams): Promise<void> {
-	if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) return;
+	if (child.pid === undefined) return;
+	if (child.exitCode !== null || child.signalCode !== null) {
+		if (processGroupIsAlive(child.pid)) killProcessTree(child.pid);
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		return;
+	}
 	const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
-	child.kill("SIGTERM");
+	if (child.pid !== undefined && process.platform !== "win32") {
+		try {
+			process.kill(-child.pid, "SIGTERM");
+		} catch {
+			child.kill("SIGTERM");
+		}
+	} else {
+		child.kill("SIGTERM");
+	}
 	let timer: NodeJS.Timeout | undefined;
 	const exitedGracefully = await Promise.race([
 		exited.then(() => true),
@@ -139,8 +163,11 @@ async function terminateChild(child: ChildProcessWithoutNullStreams): Promise<vo
 		}),
 	]);
 	if (timer) clearTimeout(timer);
-	if (exitedGracefully) return;
-	if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+	if (exitedGracefully) {
+		if (processGroupIsAlive(child.pid)) killProcessTree(child.pid);
+		return;
+	}
+	if (child.exitCode === null && child.signalCode === null && child.pid !== undefined) killProcessTree(child.pid);
 	let killTimer: NodeJS.Timeout | undefined;
 	await Promise.race([
 		exited,
@@ -157,13 +184,15 @@ export function createManagedStdioConnectionFactory(options: {
 	args?: string[];
 	env?: Record<string, string>;
 	cwd?: string;
+	inheritEnvironment?: boolean;
 }): LspConnectionFactory {
 	return async (context) => {
 		const cwd = options.cwd ?? context.workspaceRoot;
 		const description = `managed LSP process ${JSON.stringify(options.command)}`;
 		const child = spawn(options.command, options.args ?? [], {
 			cwd,
-			env: mergeEnvironment(options.env),
+			detached: process.platform !== "win32",
+			env: mergeEnvironment(options.env, options.inheritEnvironment !== false),
 			stdio: "pipe",
 		});
 		try {

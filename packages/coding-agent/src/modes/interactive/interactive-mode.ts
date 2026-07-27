@@ -83,9 +83,16 @@ import {
 } from "../../core/pi-agent.ts";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-names.ts";
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
+import {
+	formatSandboxList,
+	formatSandboxStartResult,
+	formatSandboxStopResult,
+	parseSandboxUserCommand,
+} from "../../core/sandbox/command.ts";
+import { DockerSandboxService, redactSecrets } from "../../core/sandbox/docker.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
 import { LocalSessionManager, type SessionContext } from "../../core/session-manager.ts";
-import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
+import { BUILTIN_SLASH_COMMANDS, HIDDEN_BUILTIN_SLASH_COMMAND_NAMES } from "../../core/slash-commands.ts";
 import { getSourceBackendIcon, type SourceInfo } from "../../core/source-info.ts";
 import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
 import type { ToolBackendInfo } from "../../core/tools/index.ts";
@@ -287,6 +294,8 @@ export class InteractiveMode {
 
 	// Tool output expansion state
 	private toolOutputExpanded = false;
+	private activeSandboxContainerId: string | undefined;
+	private activeSandboxBackendConnected = false;
 
 	// Thinking block visibility state
 	private hideThinkingBlock = false;
@@ -439,7 +448,10 @@ export class InteractiveMode {
 	}
 
 	private getBuiltInCommandConflictDiagnostics(extensionRunner: ExtensionRunner): ResourceDiagnostic[] {
-		const builtinNames = new Set(BUILTIN_SLASH_COMMANDS.map((command) => command.name));
+		const builtinNames = new Set([
+			...BUILTIN_SLASH_COMMANDS.map((command) => command.name),
+			...HIDDEN_BUILTIN_SLASH_COMMAND_NAMES,
+		]);
 		return extensionRunner
 			.getRegisteredCommands()
 			.filter((command) => builtinNames.has(command.name))
@@ -498,8 +510,10 @@ export class InteractiveMode {
 			...(cmd.argumentHint && { argumentHint: cmd.argumentHint }),
 		}));
 
-		// Convert extension commands to SlashCommand format
-		const builtinCommandNames = new Set(slashCommands.map((c) => c.name));
+		const builtinCommandNames = new Set([
+			...slashCommands.map((command) => command.name),
+			...HIDDEN_BUILTIN_SLASH_COMMAND_NAMES,
+		]);
 		const extensionCommands: SlashCommand[] = this.session.extensionRunner
 			.getRegisteredCommands()
 			.filter((cmd) => !builtinCommandNames.has(cmd.name))
@@ -2619,6 +2633,11 @@ export class InteractiveMode {
 			if (text === "/session") {
 				this.handleSessionCommand();
 				this.editor.setText("");
+				return;
+			}
+			if (text === "/sandbox" || /^\/sandbox\s/.test(text)) {
+				this.editor.setText("");
+				await this.handleSandboxCommand(text);
 				return;
 			}
 			if (text === "/remote" || text.startsWith("/remote ")) {
@@ -5332,12 +5351,121 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
-	private async reloadResourcesAfterBackendChange(): Promise<void> {
-		await this.session.reload();
+	private refreshUiAfterBackendChange(): void {
 		this.rebuildChatFromMessages();
 		this.showRuntimeDiagnostics();
 		this.setupAutocompleteProvider();
 		this.showLoadedResources({ force: true, showDiagnosticsWhenQuiet: true });
+	}
+	private createDockerSandboxService(): DockerSandboxService {
+		return new DockerSandboxService({ settingsManager: this.settingsManager });
+	}
+
+	private async handleSandboxCommand(text: string): Promise<void> {
+		let command: ReturnType<typeof parseSandboxUserCommand>;
+		try {
+			command = parseSandboxUserCommand(text);
+		} catch (error) {
+			this.showWarning(error instanceof Error ? error.message : String(error));
+			return;
+		}
+
+		const service = this.createDockerSandboxService();
+		const workspaceRoot = this.activeSession.getCwd();
+		try {
+			if (command.subcommand === "start") {
+				let sandboxLoader: Loader | undefined;
+				if (this.statusContainer && this.ui) {
+					sandboxLoader = new Loader(
+						this.ui,
+						(spinner) => theme.fg("accent", spinner),
+						(text) => theme.fg("muted", text),
+						"Starting sandbox...",
+					);
+					this.statusContainer.clear();
+					this.statusContainer.addChild(sandboxLoader);
+					if (this.settingsManager.getShowTerminalProgress()) this.ui.terminal.setProgress(true);
+					this.ui.requestRender();
+				}
+				try {
+					const result = await service.start({ workspaceRoot, image: command.image });
+					this.activeSandboxContainerId = result.containerId;
+					let info: Awaited<ReturnType<typeof this.session.activateSandboxDaemon>> | undefined;
+					let lastActivationError: unknown;
+					for (let attempt = 0; attempt < 10; attempt++) {
+						try {
+							info = await this.session.activateSandboxDaemon({
+								url: result.daemonUrl,
+								token: result.token,
+								expectedCwd: result.workspaceMountPath,
+							});
+							break;
+						} catch (error) {
+							lastActivationError = error;
+							if (attempt < 9) await new Promise((resolve) => setTimeout(resolve, 500));
+						}
+					}
+					if (!info) {
+						const activationError =
+							lastActivationError instanceof Error
+								? lastActivationError
+								: new Error(String(lastActivationError));
+						try {
+							await service.stop({ workspaceRoot, currentContainerId: result.containerId });
+							this.activeSandboxContainerId = undefined;
+							this.activeSandboxBackendConnected = false;
+						} catch (cleanupError) {
+							this.activeSandboxContainerId = result.containerId;
+							this.activeSandboxBackendConnected = false;
+							const cleanupMessage = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+							throw new Error(`${activationError.message}; failed to stop started sandbox: ${cleanupMessage}`);
+						}
+						throw activationError;
+					}
+					this.activeSandboxBackendConnected = true;
+					this.refreshUiAfterBackendChange();
+					this.updateToolBackendStatus();
+					this.showStatus([formatSandboxStartResult(result), this.formatToolBackendStatus(info)].join("\n"));
+					return;
+				} finally {
+					sandboxLoader?.stop();
+					if (sandboxLoader) {
+						this.statusContainer.clear();
+						if (this.settingsManager.getShowTerminalProgress()) this.ui.terminal.setProgress(false);
+						this.ui.requestRender();
+					}
+				}
+			}
+			if (command.subcommand === "list") {
+				this.showStatus(formatSandboxList(await service.list({ workspaceRoot })));
+				return;
+			}
+			const result = await service.stop({
+				workspaceRoot,
+				target: command.target,
+				currentContainerId: this.activeSandboxContainerId,
+			});
+			if (result.status !== "not-found") {
+				const activeContainerId = this.activeSandboxContainerId;
+				const stoppedActiveSandbox =
+					activeContainerId !== undefined &&
+					(result.container.id === activeContainerId ||
+						result.container.id.startsWith(activeContainerId) ||
+						activeContainerId.startsWith(result.container.id));
+				if (stoppedActiveSandbox && this.activeSandboxBackendConnected) {
+					await this.session.clearRemoteSandbox();
+					this.refreshUiAfterBackendChange();
+					this.updateToolBackendStatus();
+				}
+				if (stoppedActiveSandbox) {
+					this.activeSandboxContainerId = undefined;
+					this.activeSandboxBackendConnected = false;
+				}
+			}
+			this.showStatus(formatSandboxStopResult(result));
+		} catch (error) {
+			this.showError(redactSecrets(error instanceof Error ? error.message : String(error)));
+		}
 	}
 
 	private async handleRemoteCommand(text: string): Promise<void> {
@@ -5349,7 +5477,7 @@ export class InteractiveMode {
 		if (args === "clear") {
 			try {
 				await this.session.clearRemoteSandbox();
-				await this.reloadResourcesAfterBackendChange();
+				this.refreshUiAfterBackendChange();
 				this.updateToolBackendStatus();
 				this.showStatus("Remote backend cleared");
 			} catch (error) {
@@ -5378,7 +5506,7 @@ export class InteractiveMode {
 							...this.parseSshRemoteTarget(targetArg, cwdArg),
 						})
 					: await this.session.configureRemoteSandbox({ type: "daemon", url: targetArg });
-			await this.reloadResourcesAfterBackendChange();
+			this.refreshUiAfterBackendChange();
 			this.updateToolBackendStatus();
 			this.showStatus(this.formatToolBackendStatus(info));
 		} catch (error) {

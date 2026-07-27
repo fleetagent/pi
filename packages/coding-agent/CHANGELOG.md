@@ -25,6 +25,7 @@
 * Remove `getLspLanguageId`, `LSP_LANGUAGE_BY_EXTENSION`, the built-in TypeScript LSP server, and implicit extension mappings; LSP now requires explicit selectors and external configuration.
 * Replace the language-keyed `LspServerConfig` manager API with validated server-ID configuration, document selectors, workspace roots, and transport factories.
 * Require direct `LspClient` users to provide a server ID and `LspConnectionFactory` instead of process command options.
+* Replace the separate `@fleetagent/pi-daemon` package and `pi-daemon` binary with the integrated `pi --daemon` command; the old unversioned daemon protocol, query-token authentication, and `HOST`/`PORT` aliases are not supported.
 
 ### Added
 
@@ -38,6 +39,12 @@
 * Add AgentSession and extension APIs for inspecting and reconfiguring the single built-in LSP runtime across reloads and session replacement.
 * Add a complete external LSP guide covering configuration, trust, transports, remote mapping, SDK/extension APIs, migration, and troubleshooting.
 * Export the authoritative public LSP type and runtime-value surface through the LSP, core, and package-root barrels.
+* Add a reusable canonical workspace tool host for session-independent tool cataloging, validation, execution, cancellation, and disposal.
+* Add an early-dispatched, import-safe `pi --daemon` workspace server command with validated network policy and bounded lifecycle handles.
+* Add negotiated canonical workspace-tool routing between orchestrating Pi sessions and `pi --daemon`, including catalog refresh, cancellation, streaming updates, confinement, and single-owner remote runtime disposal.
+* Add authenticated remote project-resource provenance, remote subagent preset discovery, and operator-owned colocated LSP tools/status for daemon workspaces.
+* Add integrated `pi --daemon` documentation and a Docker example that runs the packaged Pi CLI.
+* Add hidden user-only `/sandbox start|list|stop` documentation, settings references, and a Docker base-image guide for `pi --daemon` sandbox containers.
 
 ### Changed
 
@@ -45,7 +52,7 @@
 * Aggregate capability-aware results from overlapping language servers deterministically and isolate ordinary provider failures.
 * Disconnect attached LSP endpoints without terminating shared service processes by default; protocol shutdown is explicit.
 * Deprecate `registerLspLifecycleHandlers` in favor of the AgentSession-owned runtime or `registerStandaloneLspLifecycleHandlers` for standalone hosts.
-
+* Retire daemon file-transfer and resource-limit work from the separate package into the integrated, bounded `pi --daemon` protocol.
 ### Fixed
 
 * Block untrusted project-origin LSP endpoints, commands, and positive activation of inherited transports; preserve safe disable/removal controls.
@@ -64,6 +71,7 @@
 ### Removed
 
 * Remove built-in easter-egg components and their hidden triggers.
+* Remove the retired `@fleetagent/pi-daemon` workspace, package, release component, local-release shim, and standalone `pi-daemon` executable.
 
 ## [0.1.7](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.1.6...@fleetagent/pi-coding-agent-v0.1.7) (2026-07-13)
 

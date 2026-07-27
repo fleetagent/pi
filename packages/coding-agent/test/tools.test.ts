@@ -13,9 +13,15 @@ import {
 	createGrepTool,
 	createLsTool,
 	createReadTool,
+	createWebsearchTool,
 	createWriteTool,
+	parseBraveSearchResponse,
+	parseDuckDuckGoResponse,
+	parseFirecrawlSearchResponse,
+	parseWebsearchToolOptions,
 } from "../src/index.ts";
 import * as shellModule from "../src/utils/shell.ts";
+import { createHarness } from "./test-harness.ts";
 
 const operations = new LocalToolOperations(process.cwd());
 const readTool = createReadTool(operations);
@@ -25,6 +31,7 @@ const bashTool = createBashTool(operations);
 const grepTool = createGrepTool(operations);
 const findTool = createFindTool(operations);
 const lsTool = createLsTool(operations);
+const websearchTool = createWebsearchTool();
 
 // Helper to extract text from content blocks
 function getTextOutput(result: any): string {
@@ -817,6 +824,222 @@ describe("Coding Agent Tools", () => {
 
 			expect(output).toContain(".hidden-file");
 			expect(output).toContain(".hidden-dir/");
+		});
+	});
+
+	describe("websearch tool", () => {
+		it("parses DuckDuckGo abstract and related topic links", () => {
+			const results = parseDuckDuckGoResponse(
+				{
+					Heading: "Pi",
+					AbstractURL: "https://example.com/pi",
+					AbstractText: "Pi is a number.",
+					RelatedTopics: [
+						{ FirstURL: "https://example.com/one", Text: "One - first result" },
+						{
+							Topics: [{ FirstURL: "https://example.com/two", Text: "Two - second result" }],
+						},
+					],
+				},
+				3,
+			);
+
+			expect(results).toEqual([
+				{ title: "Pi", url: "https://example.com/pi", snippet: "Pi is a number." },
+				{ title: "One", url: "https://example.com/one", snippet: "One - first result" },
+				{ title: "Two", url: "https://example.com/two", snippet: "Two - second result" },
+			]);
+		});
+		it("parses Brave Search web results", () => {
+			const results = parseBraveSearchResponse(
+				{
+					web: {
+						results: [
+							{ title: "Pi Agent", url: "https://example.com/pi-agent", description: "Coding agent" },
+							{ title: "Duplicate", url: "https://example.com/pi-agent", description: "Duplicate" },
+							{ title: "Other", url: "https://example.com/other", description: "Other result" },
+						],
+					},
+				},
+				2,
+			);
+
+			expect(results).toEqual([
+				{ title: "Pi Agent", url: "https://example.com/pi-agent", snippet: "Coding agent" },
+				{ title: "Other", url: "https://example.com/other", snippet: "Other result" },
+			]);
+		});
+
+		it("parses Firecrawl Search web results", () => {
+			const results = parseFirecrawlSearchResponse(
+				{
+					success: true,
+					data: {
+						web: [
+							{ title: "Pi Agent", url: "https://example.com/pi-agent", description: "Coding agent" },
+							{ title: "Duplicate", url: "https://example.com/pi-agent", description: "Duplicate" },
+							{ title: "Markdown", url: "https://example.com/markdown", markdown: "Markdown snippet" },
+						],
+					},
+				},
+				2,
+			);
+
+			expect(results).toEqual([
+				{ title: "Pi Agent", url: "https://example.com/pi-agent", snippet: "Coding agent" },
+				{ title: "Markdown", url: "https://example.com/markdown", snippet: "Markdown snippet" },
+			]);
+		});
+
+		it("parses websearch tool config", () => {
+			expect(
+				parseWebsearchToolOptions({
+					provider: "brave",
+					apiKey: " key ",
+					baseUrl: " https://search.example.test ",
+				}),
+			).toEqual({ provider: "brave", apiKey: "key", baseUrl: "https://search.example.test" });
+			expect(parseWebsearchToolOptions({ provider: "firecrawl-search" })).toEqual({ provider: "firecrawl-search" });
+			expect(() => parseWebsearchToolOptions({ provider: "invalid" })).toThrow("Invalid tools.websearch.provider");
+		});
+
+		it("executes a DuckDuckGo search request", async () => {
+			const originalFetch = globalThis.fetch;
+			const fetchMock = vi.fn(async (url: URL | RequestInfo) => {
+				expect(String(url)).toContain("api.duckduckgo.com");
+				expect(String(url)).toContain("q=pi+agent");
+				return new Response(
+					JSON.stringify({
+						RelatedTopics: [{ FirstURL: "https://example.com/pi-agent", Text: "Pi Agent - coding agent" }],
+					}),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				);
+			});
+			globalThis.fetch = fetchMock as typeof fetch;
+			try {
+				const result = await websearchTool.execute("test-websearch", { query: "pi agent", limit: 1 });
+				const output = getTextOutput(result);
+				expect(output).toContain("Pi Agent");
+				expect(output).toContain("https://example.com/pi-agent");
+				expect(result.details?.results).toHaveLength(1);
+				expect(result.details?.source).toBe("duckduckgo-instant-answer");
+			} finally {
+				globalThis.fetch = originalFetch;
+			}
+		});
+
+		it("executes a Brave Search request from tool config", async () => {
+			const originalFetch = globalThis.fetch;
+			const braveTool = createWebsearchTool({
+				provider: "brave",
+				apiKey: "test-key",
+				baseUrl: "https://search.example.test/web/search",
+			});
+			const fetchMock = vi.fn(async (url: URL | RequestInfo, init?: RequestInit) => {
+				expect(String(url)).toContain("search.example.test/web/search");
+				expect(String(url)).toContain("q=pi+agent");
+				expect(init?.headers).toMatchObject({ "x-subscription-token": "test-key" });
+				return new Response(
+					JSON.stringify({
+						web: {
+							results: [{ title: "Pi Agent", url: "https://example.com/pi-agent", description: "Coding agent" }],
+						},
+					}),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				);
+			});
+			globalThis.fetch = fetchMock as typeof fetch;
+			try {
+				const result = await braveTool.execute("test-websearch-brave", { query: "pi agent", limit: 1 });
+				const output = getTextOutput(result);
+				expect(output).toContain("Pi Agent");
+				expect(output).toContain("https://example.com/pi-agent");
+				expect(result.details?.source).toBe("brave-search");
+			} finally {
+				globalThis.fetch = originalFetch;
+			}
+		});
+		it("uses websearch options from session settings tools block", async () => {
+			const originalFetch = globalThis.fetch;
+			const harness = createHarness({
+				settings: {
+					tools: {
+						websearch: {
+							provider: "brave",
+							apiKey: "settings-key",
+							baseUrl: "https://settings-search.example.test/web/search",
+						},
+					},
+				},
+			});
+			const fetchMock = vi.fn(async (url: URL | RequestInfo, init?: RequestInit) => {
+				expect(String(url)).toContain("settings-search.example.test/web/search");
+				expect(init?.headers).toMatchObject({ "x-subscription-token": "settings-key" });
+				return new Response(
+					JSON.stringify({
+						web: {
+							results: [{ title: "Configured", url: "https://example.com/configured" }],
+						},
+					}),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				);
+			});
+			globalThis.fetch = fetchMock as typeof fetch;
+			try {
+				const definition = harness.session.getToolDefinition("websearch");
+				expect(definition).toBeDefined();
+				const result = await definition!.execute(
+					"test-websearch-settings",
+					{ query: "configured" },
+					undefined,
+					undefined,
+					undefined as never,
+				);
+				const details = result.details as { source?: string } | undefined;
+				expect(getTextOutput(result)).toContain("https://example.com/configured");
+				expect(details?.source).toBe("brave-search");
+			} finally {
+				globalThis.fetch = originalFetch;
+				harness.cleanup();
+			}
+		});
+
+		it("executes a Firecrawl Search request from tool config", async () => {
+			const originalFetch = globalThis.fetch;
+			const firecrawlTool = createWebsearchTool({
+				provider: "firecrawl",
+				apiKey: "firecrawl-key",
+				baseUrl: "https://firecrawl.example.test/v2/search",
+			});
+			const fetchMock = vi.fn(async (url: URL | RequestInfo, init?: RequestInit) => {
+				expect(String(url)).toBe("https://firecrawl.example.test/v2/search");
+				expect(init?.method).toBe("POST");
+				expect(init?.headers).toMatchObject({ authorization: "Bearer firecrawl-key" });
+				expect(JSON.parse(String(init?.body))).toEqual({
+					query: "pi agent",
+					limit: 1,
+					sources: [{ type: "web" }],
+				});
+				return new Response(
+					JSON.stringify({
+						success: true,
+						data: {
+							web: [{ title: "Pi Agent", url: "https://example.com/pi-agent", description: "Coding agent" }],
+						},
+					}),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				);
+			});
+			globalThis.fetch = fetchMock as typeof fetch;
+			try {
+				const result = await firecrawlTool.execute("test-websearch-firecrawl", { query: "pi agent", limit: 1 });
+				const output = getTextOutput(result);
+				expect(output).toContain("Pi Agent");
+				expect(output).toContain("https://example.com/pi-agent");
+				expect(result.details?.source).toBe("firecrawl-search");
+			} finally {
+				globalThis.fetch = originalFetch;
+			}
 		});
 	});
 });

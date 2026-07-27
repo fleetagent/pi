@@ -2,6 +2,7 @@ import { Text } from "@fleetagent/pi-tui";
 import { type Static, Type } from "typebox";
 import { type Diagnostic, DiagnosticSeverity } from "vscode-languageserver-protocol";
 import type { ToolDefinition } from "../extensions/types.ts";
+import type { ToolOperations } from "../tools/operations.ts";
 import { throwIfAborted } from "./abort.ts";
 import type { LspRuntimeState } from "./integration.ts";
 import type { LspClientRoute, LspClientRouteFailure } from "./manager.ts";
@@ -173,6 +174,7 @@ async function delay(ms: number, signal?: AbortSignal): Promise<void> {
 
 export function createLspDiagnosticsTool(
 	getState: () => LspRuntimeState,
+	getOperations?: () => ToolOperations,
 ): ToolDefinition<typeof diagnosticsSchema, LspDiagnosticsDetails> {
 	return {
 		name: "lsp_diagnostics",
@@ -188,7 +190,8 @@ export function createLspDiagnosticsTool(
 		async execute(_toolCallId, params: DiagnosticsInput, signal, _onUpdate, ctx) {
 			throwIfAborted(signal);
 			const state = getState();
-			await state.manager.setToolOperations(ctx.toolOperations, signal);
+			const operations = getOperations?.() ?? ctx.toolOperations;
+			await state.manager.setToolOperations(operations, signal);
 			if (params.path === "*") {
 				const routes = state.manager
 					.getRunningClients()
@@ -215,7 +218,7 @@ export function createLspDiagnosticsTool(
 					details: { count: 0, errors: 0, warnings: 0, files: 0, unavailable: true },
 				};
 			}
-			const synchronization = await state.fileSync.synchronizeFileRead(params.path, ctx.toolOperations, signal);
+			const synchronization = await state.fileSync.synchronizeFileRead(params.path, operations, signal);
 			if (synchronization.lifecycleCancelled) {
 				collection = {
 					...collection,

@@ -209,68 +209,36 @@ This document records static-analysis findings for incremental review. Each item
 
 ### PERF-009: Daemon receive buffering copies the complete partial frame per TCP chunk
 
-- Status: `open`
+- Status: `retired`
 - Files:
-  - `packages/pi-daemon/src/index.ts`
-- Current behavior:
-  - Each incoming fragment executes `Buffer.concat([connection.buffer, next])`.
-- Risk:
-  - Highly fragmented frames can cause quadratic copying up to the configured frame limit.
-- Candidate remediation:
-  - Parse the header from a small fixed buffer.
-  - Once payload length is known and validated, allocate one exact-size frame buffer.
-  - Copy each subsequent fragment directly into the allocated destination.
-  - Alternatively, retain chunks and consume them through offsets without concatenating.
-- Preallocation assessment:
-  - This is the strongest preallocation candidate in the audit.
-  - Exact allocation after validating the declared payload length avoids both over-allocation and repeated copying.
-- Validation:
-  - Deliver equal-size frames as one chunk, 1 KiB chunks, and single-byte fragments.
-  - Measure bytes copied, allocations, CPU time, and peak heap.
+  - historical `packages/pi-daemon/src/index.ts` implementation removed
+  - replacement: `packages/coding-agent/src/core/remote-workspace-protocol/session.ts`
+- Resolution:
+  - The separate daemon package and raw TCP frame parser were retired in favor of the integrated `pi --daemon` WebSocket protocol session.
+  - Inbound messages are bounded by negotiated size, pending-message, and pending-byte limits before serialized parsing.
+  - The old partial-frame concatenation path no longer ships.
 
 ### PERF-010: Daemon outbound responses lack connection-wide buffering control
 
-- Status: `open`
+- Status: `retired`
 - Files:
-  - `packages/pi-daemon/src/index.ts`
-- Current behavior:
-  - Many `sendFrame()` callers ignore a `false` return from `socket.write()`.
-  - Each concurrent exec coordinates backpressure independently.
-  - Frame creation serializes JSON and copies payload data into another combined buffer.
-- Risk:
-  - Slow clients can accumulate queued frames.
-  - Concurrent producers resume together and refill the socket queue in bursts.
-  - Streaming frames incur avoidable full payload copies.
-- Candidate remediation:
-  - Introduce one serialized outbound queue per connection with byte high/low watermarks.
-  - Pause all producers when the connection queue is full.
-  - Write frame headers and payload buffers separately with socket corking or vectored writes.
-  - Close clients that exceed a strict queued-byte limit.
-- Preallocation assessment:
-  - Reusable small header buffers may help but are secondary.
-  - Do not preallocate unbounded outbound payload storage; enforce a bounded queue instead.
-- Validation:
-  - Use a client that stops reading while multiple exec and file operations produce output.
+  - historical `packages/pi-daemon/src/index.ts` implementation removed
+  - replacement: `packages/coding-agent/src/core/remote-workspace-protocol/session.ts` and `packages/coding-agent/src/daemon/server.ts`
+- Resolution:
+  - The integrated daemon uses one serialized outbound protocol queue with negotiated pending-message and pending-byte limits.
+  - WebSocket transport send checks daemon buffered bytes and rejects clients that exceed configured backpressure limits.
+  - Tool updates, ordinary responses, and transfer chunks share protocol accounting instead of independent unbounded producers.
 
 ### PERF-011: Whole-file RPCs create multiple complete representations
 
-- Status: `open`
+- Status: `retired`
 - Files:
-  - `packages/pi-daemon/src/index.ts`
-- Current behavior:
-  - `readFile` can retain the file buffer, base64 string, JSON string, encoded JSON buffer, and framed copy simultaneously.
-  - `writeFile` similarly retains encoded and decoded forms.
-- Risk:
-  - Large files multiplied by concurrent requests can create severe transient heap spikes.
-- Candidate remediation:
-  - Apply strict whole-file RPC limits.
-  - Route larger files through existing streamed upload/download methods.
-  - Avoid concatenating frame header and payload into another complete buffer.
-- Preallocation assessment:
-  - Preallocation does not remove base64 and JSON amplification.
-  - Protocol-level streaming is the correct solution.
-- Validation:
-  - Measure peak RSS for concurrent file reads near the configured limit.
+  - historical `packages/pi-daemon/src/index.ts` implementation removed
+  - replacement: `packages/coding-agent/src/core/remote-workspace-protocol/session.ts` and `packages/coding-agent/src/daemon/workspace-runtime.ts`
+- Resolution:
+  - The old whole-file RPC implementation no longer ships.
+  - Integrated daemon reads, writes, artifact reads, uploads, downloads, and transfer chunks are bounded by negotiated protocol and daemon runtime limits.
+  - Larger binary payloads use streamed transfer messages with byte, chunk, pending-byte, and hash validation.
 
 ## P2: Parsing and Persistence
 

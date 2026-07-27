@@ -17,6 +17,7 @@ import { ModelRegistry } from "../../src/core/model-registry.ts";
 import { InMemorySessionManager, type Session } from "../../src/core/session-manager.ts";
 import type { Settings } from "../../src/core/settings-manager.ts";
 import { SettingsManager } from "../../src/core/settings-manager.ts";
+import type { ToolOperations } from "../../src/core/tools/operations.ts";
 import type { ExtensionFactory, ResourceLoader } from "../../src/index.ts";
 import {
 	type CreateTestExtensionsResultInput,
@@ -63,6 +64,7 @@ export interface HarnessOptions {
 	resourceLoader?: ResourceLoader;
 	extensionFactories?: Array<ExtensionFactory | CreateTestExtensionsResultInput>;
 	withConfiguredAuth?: boolean;
+	toolOperations?: ToolOperations;
 }
 
 export interface Harness {
@@ -90,7 +92,7 @@ function createTempDir(): string {
 }
 
 export async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
-	const tempDir = createTempDir();
+	const tempDir = options.toolOperations?.cwd ?? createTempDir();
 	const fauxProvider: FauxProviderRegistration = registerFauxProvider({
 		models: options.models,
 	});
@@ -172,6 +174,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		cwd: tempDir,
 		modelRegistry,
 		resourceLoader,
+		toolOperations: options.toolOperations,
 		baseToolsOverride: toolMap,
 		extensionRunnerRef,
 	});

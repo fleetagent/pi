@@ -58,6 +58,18 @@ export interface WarningSettings {
 	anthropicExtraUsage?: boolean; // default: true
 }
 
+export type ToolSettings = Record<string, Record<string, unknown> | undefined>;
+
+export interface SandboxSettings {
+	image?: string; // default sandbox image used by /sandbox start
+	dockerBinary?: string; // default: docker
+	workspaceMountPath?: string; // default: /workspace
+	containerNamePrefix?: string; // default: pi-sandbox
+	daemonPort?: number; // container daemon port, default: 8787
+	daemonHostBind?: string; // host bind address for published daemon port, default: 127.0.0.1
+	cleanup?: "stop" | "remove"; // default: stop
+}
+
 export type TransportSetting = Transport;
 
 /**
@@ -118,8 +130,10 @@ export interface Settings {
 	sessionDir?: string; // Custom session storage directory (same format as --session-dir CLI flag)
 	/** LSP configuration layer for this settings scope. Global and project layers resolve separately. */
 	lsp?: LspConfigurationLayer;
+	tools?: ToolSettings; // Per-tool configuration keyed by tool name (for example tools.websearch)
 	httpIdleTimeoutMs?: number; // HTTP header/body idle timeout in milliseconds; 0 disables it
 	websocketConnectTimeoutMs?: number; // WebSocket connect/open handshake timeout in milliseconds; 0 disables it
+	sandbox?: SandboxSettings;
 }
 
 function parseTimeoutSetting(value: unknown, settingName: string): number | undefined {
@@ -143,6 +157,19 @@ function deepMergeSettings(base: Settings, overrides: Settings): Settings {
 
 		if (key === "lsp") {
 			(result as Record<string, unknown>)[key] = overrideValue;
+			continue;
+		}
+
+		if (key === "tools" && overrideValue && typeof overrideValue === "object" && !Array.isArray(overrideValue)) {
+			const mergedTools: ToolSettings = { ...((baseValue as ToolSettings | undefined) ?? {}) };
+			for (const [toolName, toolOverride] of Object.entries(overrideValue as ToolSettings)) {
+				const baseTool = mergedTools[toolName];
+				mergedTools[toolName] =
+					baseTool && toolOverride && typeof baseTool === "object" && typeof toolOverride === "object"
+						? { ...baseTool, ...toolOverride }
+						: toolOverride;
+			}
+			result.tools = mergedTools;
 			continue;
 		}
 
@@ -601,6 +628,19 @@ export class SettingsManager {
 		const drained = [...this.errors];
 		this.errors = [];
 		return drained;
+	}
+
+	getSandboxSettings(): SandboxSettings | undefined {
+		return this.settings.sandbox ? structuredClone(this.settings.sandbox) : undefined;
+	}
+
+	getToolsSettings(): ToolSettings | undefined {
+		return this.settings.tools ? structuredClone(this.settings.tools) : undefined;
+	}
+
+	getToolSettings(toolName: string): Record<string, unknown> | undefined {
+		const value = this.settings.tools?.[toolName];
+		return value ? structuredClone(value) : undefined;
 	}
 
 	getLastChangelogVersion(): string | undefined {

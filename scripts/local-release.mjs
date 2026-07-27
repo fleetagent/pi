@@ -10,7 +10,6 @@ const packages = [
 	{ directory: "packages/tui", name: "@fleetagent/pi-tui" },
 	{ directory: "packages/agent", name: "@fleetagent/pi-agent-core" },
 	{ directory: "packages/coding-agent", name: "@fleetagent/pi-coding-agent" },
-	{ directory: "packages/pi-daemon", name: "@fleetagent/pi-daemon" },
 ];
 
 function printUsage() {
@@ -173,10 +172,6 @@ function createPiShim(installDirectory) {
 	createBinShim(installDirectory, "pi");
 }
 
-function createPiDaemonShim(installDirectory) {
-	createBinShim(installDirectory, "pi-daemon");
-}
-
 function packPackage(pkg, tarballDirectory) {
 	const packageJson = readPackageJson(pkg.directory);
 	if (packageJson.name !== pkg.name) {
@@ -234,7 +229,6 @@ if (!options.skipInstall) {
 
 	run("npm", ["install", "--omit=dev", "--ignore-scripts"], { cwd: nodeInstallDirectory });
 	createPiShim(nodeInstallDirectory);
-	createPiDaemonShim(nodeInstallDirectory);
 
 	if (!options.skipBunInstall) {
 		if (!commandExists("bun")) {
@@ -247,7 +241,6 @@ if (!options.skipInstall) {
 		writeFileSync(join(bunInstallDirectory, "package.json"), `${JSON.stringify({ private: true, dependencies: bunDependencies, overrides: bunDependencies }, undefined, "\t")}\n`);
 		run("bun", ["install", "--production", "--ignore-scripts"], { cwd: bunInstallDirectory });
 		createPiShim(bunInstallDirectory);
-		createPiDaemonShim(bunInstallDirectory);
 	}
 }
 
@@ -269,13 +262,15 @@ if (!options.skipInstall) {
 	console.log(`  ${nodeInstallDirectory}`);
 	console.log("\nRun the locally packed npm CLI from outside the repository:");
 	console.log(`  ${join(nodeInstallDirectory, process.platform === "win32" ? "pi.cmd" : "pi")} --help`);
-	console.log(`  PI_DAEMON_PORT=18787 ${join(nodeInstallDirectory, process.platform === "win32" ? "pi-daemon.cmd" : "pi-daemon")}`);
+	console.log(`  PI_DAEMON_PORT=18787 ${join(nodeInstallDirectory, process.platform === "win32" ? "pi.cmd" : "pi")} --daemon`);
+	console.log("\nBuild the local Docker sandbox base image:");
+	console.log(`  docker build -f ${join(repoRoot, "packages/coding-agent/examples/sandbox-docker/Dockerfile")} -t pi-sandbox:local ${outDir}`);
 
 	if (!options.skipBunInstall) {
 		console.log("\nIsolated Bun package install:");
 		console.log(`  ${bunInstallDirectory}`);
 		console.log("\nRun the locally packed Bun package CLI from outside the repository:");
 		console.log(`  ${join(bunInstallDirectory, process.platform === "win32" ? "pi.cmd" : "pi")} --help`);
-		console.log(`  PI_DAEMON_PORT=18787 ${join(bunInstallDirectory, process.platform === "win32" ? "pi-daemon.cmd" : "pi-daemon")}`);
+		console.log(`  PI_DAEMON_PORT=18787 ${join(bunInstallDirectory, process.platform === "win32" ? "pi.cmd" : "pi")} --daemon`);
 	}
 }

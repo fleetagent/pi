@@ -79,9 +79,11 @@ import type {
 	ReadToolInput,
 	SubagentDetails,
 	SubagentToolInput,
+	WebsearchToolDetails,
+	WebsearchToolInput,
 	WriteToolInput,
 } from "../tools/index.ts";
-import type { ToolBackendInfo, ToolOperations } from "../tools/operations.ts";
+import type { BorrowedToolOperations, ToolBackendInfo, ToolOperations } from "../tools/operations.ts";
 
 export type { BashResult } from "../bash-executor.ts";
 export type { ExecOptions, ExecResult } from "../exec.ts";
@@ -318,7 +320,7 @@ export interface ExtensionContext {
 	/** Current working directory */
 	cwd: string;
 	/** Active file/tool backend used by built-in tools (local or SSH). */
-	toolOperations: ToolOperations;
+	toolOperations: BorrowedToolOperations;
 	/** Get active file/tool backend metadata. */
 	getToolBackendInfo(): ToolBackendInfo;
 	/** Inspect the AgentSession-owned LSP runtime without creating another manager. */
@@ -857,6 +859,11 @@ export interface SubagentToolCallEvent extends ToolCallEventBase {
 	input: SubagentToolInput;
 }
 
+export interface WebsearchToolCallEvent extends ToolCallEventBase {
+	toolName: "websearch";
+	input: WebsearchToolInput;
+}
+
 export interface CustomToolCallEvent extends ToolCallEventBase {
 	toolName: string;
 	input: Record<string, unknown>;
@@ -877,6 +884,7 @@ export type ToolCallEvent =
 	| FindToolCallEvent
 	| LsToolCallEvent
 	| SubagentToolCallEvent
+	| WebsearchToolCallEvent
 	| CustomToolCallEvent;
 
 interface ToolResultEventBase {
@@ -927,6 +935,11 @@ export interface SubagentToolResultEvent extends ToolResultEventBase {
 	details: SubagentDetails | undefined;
 }
 
+export interface WebsearchToolResultEvent extends ToolResultEventBase {
+	toolName: "websearch";
+	details: WebsearchToolDetails | undefined;
+}
+
 export interface CustomToolResultEvent extends ToolResultEventBase {
 	toolName: string;
 	details: unknown;
@@ -942,6 +955,7 @@ export type ToolResultEvent =
 	| FindToolResultEvent
 	| LsToolResultEvent
 	| SubagentToolResultEvent
+	| WebsearchToolResultEvent
 	| CustomToolResultEvent;
 
 // Type guards for ToolResultEvent
@@ -968,6 +982,10 @@ export function isLsToolResult(e: ToolResultEvent): e is LsToolResultEvent {
 }
 export function isSubagentToolResult(e: ToolResultEvent): e is SubagentToolResultEvent {
 	return e.toolName === "subagent";
+}
+
+export function isWebsearchToolResult(e: ToolResultEvent): e is WebsearchToolResultEvent {
+	return e.toolName === "websearch";
 }
 
 /**
@@ -998,6 +1016,7 @@ export function isToolCallEventType(toolName: "grep", event: ToolCallEvent): eve
 export function isToolCallEventType(toolName: "find", event: ToolCallEvent): event is FindToolCallEvent;
 export function isToolCallEventType(toolName: "ls", event: ToolCallEvent): event is LsToolCallEvent;
 export function isToolCallEventType(toolName: "subagent", event: ToolCallEvent): event is SubagentToolCallEvent;
+export function isToolCallEventType(toolName: "websearch", event: ToolCallEvent): event is WebsearchToolCallEvent;
 export function isToolCallEventType<TName extends string, TInput extends Record<string, unknown>>(
 	toolName: TName,
 	event: ToolCallEvent,

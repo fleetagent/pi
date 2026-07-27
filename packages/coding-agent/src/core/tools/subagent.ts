@@ -17,7 +17,12 @@ import { Container, Markdown, Spacer, Text } from "@fleetagent/pi-tui";
 import { type Static, Type } from "typebox";
 import { getMarkdownTheme, type ThemeColor } from "../../modes/interactive/theme/theme.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
-import { type AgentConfig, type AgentScope, type AgentSource, discoverAgents } from "./subagent-agents.ts";
+import {
+	type AgentConfig,
+	type AgentScope,
+	type AgentSource,
+	discoverAgentsWithOperations,
+} from "./subagent-agents.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 const GENERIC_SYSTEM_PROMPT =
@@ -65,26 +70,19 @@ function formatUsageStats(
 	return parts.join(" ");
 }
 
-function getModelFamily(modelId: string): string {
-	return modelId.match(/^(.*?\d+(?:\.\d+)+)/)?.[1] ?? modelId;
-}
-
 export function formatSubagentModelCatalog(
 	currentModel: Model<Api> | undefined,
 	availableModels: Model<Api>[],
 ): string | undefined {
 	if (!currentModel) return undefined;
-	const family = getModelFamily(currentModel.id);
-	const familyModels = availableModels.filter(
-		(model) => model.provider === currentModel.provider && (model.id === family || model.id.startsWith(`${family}-`)),
-	);
-	if (familyModels.length === 0) return undefined;
+	const providerModels = availableModels.filter((model) => model.provider === currentModel.provider);
+	if (providerModels.length === 0) return undefined;
 
 	const lines = [
-		`Authenticated subagent models in the current ${currentModel.provider}/${family} family:`,
+		`Authenticated subagent models for the current ${currentModel.provider} provider:`,
 		"Omit model to inherit the current model.",
 	];
-	for (const model of familyModels) {
+	for (const model of providerModels) {
 		const capabilities = [
 			model.reasoning ? "reasoning" : "non-reasoning",
 			`context ${formatTokens(model.contextWindow)}`,
@@ -181,6 +179,8 @@ export type SubagentStatus = "queued" | "running" | "completed" | "failed";
 
 export interface SubagentResult {
 	status: SubagentStatus;
+	runId?: string;
+	sessionReference?: string;
 	agent: string;
 	agentSource: AgentSource | "ad-hoc" | "unknown";
 	task: string;
@@ -194,12 +194,28 @@ export interface SubagentResult {
 	responseFormat?: string;
 	step?: number;
 }
-
 export interface SubagentDetails {
 	mode: "single" | "parallel" | "chain";
 	agentScope: AgentScope;
 	projectAgentsDir: string | null;
 	results: SubagentResult[];
+}
+
+export interface SubagentRunInfo {
+	runId: string;
+	sessionReference?: string;
+	status: "running" | "completed" | "failed";
+	agent: string;
+	task: string;
+	cwd: string;
+	model?: string;
+	createdAt: string;
+	updatedAt: string;
+	lastOutput?: string;
+}
+
+export interface SubagentRunRegistry {
+	list(): SubagentRunInfo[];
 }
 
 interface PresentationSegment {
@@ -348,9 +364,14 @@ type OnUpdateCallback = (partial: AgentToolResult<SubagentDetails>) => void;
 export interface SubagentRunRequest {
 	cwd: string;
 	prompt: string;
+	/** Human-readable delegated task, without wrapper markup. */
+	task: string;
+	agent: string;
+	agentSource: AgentSource | "ad-hoc" | "unknown";
 	systemPrompt: string;
 	model?: string;
 	tools?: string[];
+	continueSession?: string;
 	signal?: AbortSignal;
 	onMessage: (message: Message) => void;
 }
@@ -358,6 +379,8 @@ export interface SubagentRunRequest {
 export interface SubagentRunOutcome {
 	exitCode: number;
 	stderr: string;
+	runId?: string;
+	sessionReference?: string;
 }
 
 export type SubagentRunner = (request: SubagentRunRequest) => Promise<SubagentRunOutcome>;
@@ -370,6 +393,7 @@ interface SubagentTaskSpec {
 	model?: string;
 	tools?: string[];
 	cwd?: string;
+	continueSession?: string;
 }
 
 export function formatSubagentTaskPrompt(task: string, responseFormat?: string): string {
@@ -483,9 +507,13 @@ async function runSingleAgent(
 		outcome = await runner({
 			cwd: spec.cwd ?? defaultCwd,
 			prompt: formatSubagentTaskPrompt(spec.task, spec.responseFormat),
+			task: spec.task,
+			agent: agentName,
+			agentSource: preset?.source ?? "ad-hoc",
 			systemPrompt: effectiveSystemPrompt,
 			model: effectiveModel,
 			tools: effectiveTools,
+			continueSession: spec.continueSession,
 			signal,
 			onMessage,
 		});
@@ -493,6 +521,8 @@ async function runSingleAgent(
 		if (!signal?.aborted) throw error;
 		outcome = { exitCode: 1, stderr: error instanceof Error ? error.message : String(error) };
 	}
+	currentResult.runId = outcome.runId;
+	currentResult.sessionReference = outcome.sessionReference;
 	currentResult.exitCode = outcome.exitCode;
 	currentResult.stderr = outcome.stderr;
 	if (signal?.aborted) {
@@ -547,7 +577,9 @@ function createSubagentParamsSchema(modelCatalog?: string) {
 
 	return Type.Object({
 		agent: Type.Optional(Type.String({ description: "Optional named agent preset (single mode)" })),
-		task: Type.Optional(Type.String({ description: "Task to delegate (single mode)" })),
+		task: Type.Optional(
+			Type.String({ description: "Task to delegate (single mode) or follow-up prompt when continuing a subagent" }),
+		),
 		responseFormat: Type.Optional(Type.String({ description: "Requested response content and structure" })),
 		systemPrompt: Type.Optional(
 			Type.String({ description: "Persona/instructions overriding the preset system prompt" }),
@@ -559,6 +591,7 @@ function createSubagentParamsSchema(modelCatalog?: string) {
 			Type.Array(ChainItem, { description: "Tasks for sequential execution", maxItems: MAX_CHAIN_STEPS }),
 		),
 		agentScope: Type.Optional(AgentScopeSchema),
+		continueSession: Type.Optional(Type.String({ description: "Run id of a previous subagent run to continue" })),
 		cwd: Type.Optional(Type.String({ description: "Working directory for the subagent session (single mode)" })),
 	});
 }
@@ -572,7 +605,72 @@ export interface SubagentToolOptions {
 	modelCatalog?: string;
 	/** Host-controlled trust grant for project-local agent presets. */
 	trustProjectAgents?: boolean;
+	runRegistry?: SubagentRunRegistry;
 }
+const subagentRunsParamsSchema = Type.Object({
+	status: Type.Optional(
+		StringEnum(["running", "completed", "failed"] as const, { description: "Filter runs by status" }),
+	),
+});
+
+export type SubagentRunsToolInput = Static<typeof subagentRunsParamsSchema>;
+
+function truncateRunPreview(text: string | undefined): string {
+	if (!text) return "";
+	const trimmed = text.trim();
+	return trimmed.length > 240 ? `${trimmed.slice(0, 240)}...` : trimmed;
+}
+
+export function createSubagentRunsToolDefinition(
+	registry?: SubagentRunRegistry,
+): ToolDefinition<typeof subagentRunsParamsSchema, { runs: SubagentRunInfo[] }> {
+	return {
+		name: "subagent_runs",
+		label: "Subagent Runs",
+		description: "List subagent runs in the current session so one can be selected and continued by run id.",
+		promptSnippet: "List subagent runs from the current session for continuation",
+		parameters: subagentRunsParamsSchema,
+		async execute(_toolCallId, params) {
+			if (!registry) {
+				return {
+					content: [{ type: "text", text: "Subagent run registry is not configured for this session." }],
+					details: { runs: [] },
+					isError: true,
+				};
+			}
+			const runs = registry.list().filter((run) => !params.status || run.status === params.status);
+			if (runs.length === 0) {
+				return { content: [{ type: "text", text: "No subagent runs found." }], details: { runs } };
+			}
+			const text = runs
+				.map((run, index) => {
+					const lines = [
+						`${index + 1}. ${run.runId} [${run.status}] ${run.agent}${run.model ? ` (${run.model})` : ""}`,
+						`   Task: ${run.task.replace(/\s+/g, " ")}`,
+						`   CWD: ${run.cwd}`,
+					];
+					if (run.sessionReference) lines.push(`   Session: ${run.sessionReference}`);
+					const preview = truncateRunPreview(run.lastOutput);
+					if (preview) lines.push(`   Output: ${preview}`);
+					return lines.join("\n");
+				})
+				.join("\n\n");
+			return { content: [{ type: "text", text }], details: { runs } };
+		},
+		renderCall(_args, theme) {
+			return new Text(theme.fg("toolTitle", theme.bold("subagent_runs")), 0, 0);
+		},
+		renderResult(result, _options, theme) {
+			const text = result.content
+				.filter((part): part is { type: "text"; text: string } => part.type === "text")
+				.map((part) => part.text)
+				.join("\n")
+				.trim();
+			return new Text(theme.fg("toolOutput", text), 0, 0);
+		},
+	};
+}
+
 export function createSubagentToolDefinition(
 	options: SubagentToolOptions = {},
 ): ToolDefinition<typeof subagentParamsSchema, SubagentDetails> {
@@ -597,7 +695,8 @@ export function createSubagentToolDefinition(
 
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const agentScope: AgentScope = params.agentScope ?? "user";
-			const discovery = discoverAgents(ctx.cwd, agentScope);
+			const workspaceCwd = ctx.toolOperations?.cwd ?? ctx.cwd;
+			const discovery = await discoverAgentsWithOperations(workspaceCwd, agentScope, ctx.toolOperations);
 			const agents = discovery.agents;
 			const inheritedModel = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
 			const hasChain = (params.chain?.length ?? 0) > 0;
@@ -624,6 +723,16 @@ export function createSubagentToolDefinition(
 						},
 					],
 					details: makeDetails("single")([]),
+				};
+			}
+
+			if (params.continueSession && !hasSingle) {
+				return {
+					content: [
+						{ type: "text", text: "Invalid parameters. continueSession requires a single follow-up task." },
+					],
+					details: makeDetails("single")([]),
+					isError: true,
 				};
 			}
 
@@ -707,7 +816,7 @@ export function createSubagentToolDefinition(
 						: undefined;
 
 					const result = await runSingleAgent(
-						ctx.cwd,
+						workspaceCwd,
 						agents,
 						{ ...step, task: taskWithContext },
 						inheritedModel,
@@ -735,7 +844,6 @@ export function createSubagentToolDefinition(
 					details: makeDetails("chain")(results),
 				};
 			}
-
 			if (params.tasks && params.tasks.length > 0) {
 				if (params.tasks.length > MAX_PARALLEL_TASKS)
 					return {
@@ -783,7 +891,7 @@ export function createSubagentToolDefinition(
 
 				const results = await mapWithConcurrencyLimit(params.tasks, MAX_CONCURRENCY, async (t, index) => {
 					const result = await runSingleAgent(
-						ctx.cwd,
+						workspaceCwd,
 						agents,
 						t,
 						inheritedModel,
@@ -802,7 +910,6 @@ export function createSubagentToolDefinition(
 					emitParallelUpdate();
 					return result;
 				});
-
 				const successCount = results.filter((r) => !isFailedResult(r)).length;
 				const summaries = results.map((r) => {
 					const output = truncateParallelOutput(getResultOutput(r));
@@ -824,7 +931,7 @@ export function createSubagentToolDefinition(
 
 			if (params.task) {
 				const result = await runSingleAgent(
-					ctx.cwd,
+					workspaceCwd,
 					agents,
 					{
 						agent: params.agent,
@@ -834,6 +941,7 @@ export function createSubagentToolDefinition(
 						model: params.model,
 						tools: params.tools,
 						cwd: params.cwd,
+						continueSession: params.continueSession,
 					},
 					inheritedModel,
 					runner,
@@ -1212,6 +1320,11 @@ export function createSubagentToolDefinition(
 			return new Text(text?.type === "text" ? text.text : "(no output)", 0, 0);
 		},
 	};
+}
+export function createSubagentRunsTool(
+	registry?: SubagentRunRegistry,
+): AgentTool<typeof subagentRunsParamsSchema, { runs: SubagentRunInfo[] }> {
+	return wrapToolDefinition(createSubagentRunsToolDefinition(registry));
 }
 
 export function createSubagentTool(

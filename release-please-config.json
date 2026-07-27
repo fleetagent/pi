@@ -16,8 +16,7 @@
 				"@fleetagent/pi-ai",
 				"@fleetagent/pi-agent-core",
 				"@fleetagent/pi-tui",
-				"@fleetagent/pi-coding-agent",
-				"@fleetagent/pi-daemon"
+				"@fleetagent/pi-coding-agent"
 			]
 		}
 	],
@@ -46,13 +45,6 @@
 		"packages/coding-agent": {
 			"component": "@fleetagent/pi-coding-agent",
 			"package-name": "@fleetagent/pi-coding-agent",
-			"release-type": "node",
-			"initial-version": "0.0.1",
-			"changelog-path": "CHANGELOG.md"
-		},
-		"packages/pi-daemon": {
-			"component": "@fleetagent/pi-daemon",
-			"package-name": "@fleetagent/pi-daemon",
 			"release-type": "node",
 			"initial-version": "0.0.1",
 			"changelog-path": "CHANGELOG.md"

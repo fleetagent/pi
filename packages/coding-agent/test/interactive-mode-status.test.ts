@@ -115,7 +115,7 @@ describe("InteractiveMode.showRuntimeDiagnostics", () => {
 			showLoadedResources: vi.fn(),
 		};
 
-		await (InteractiveMode as any).prototype.reloadResourcesAfterBackendChange.call(fakeThis);
+		(InteractiveMode as any).prototype.refreshUiAfterBackendChange.call(fakeThis);
 
 		expect(renderedDiagnostics).toEqual(["current diagnostic"]);
 		expect(fakeThis.rebuildChatFromMessages).toHaveBeenCalledOnce();

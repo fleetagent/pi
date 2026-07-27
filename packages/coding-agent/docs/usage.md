@@ -55,6 +55,8 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/changelog` | Display version history |
 | `/quit` | Quit pi |
 
+`/sandbox start|list|stop` is a user-only operator command shown in interactive completion, but not exposed through model-visible command catalogs. It manages local Docker containers and switches workspace tool execution to a container daemon; see [Docker Sandbox](sandbox.md).
+
 ## Message Queue
 
 You can submit messages while the agent is still working:

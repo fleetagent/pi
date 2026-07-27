@@ -69,6 +69,7 @@ describe("read tool backend routing", () => {
 			url: "ws://127.0.0.1:8787",
 			protocol: "ws",
 			configured: true,
+			workspace: { id: "test-workspace-id", root: "/workspace", pathFlavor: "posix" },
 		});
 		const localOps = new ReadOnlyOperations(tempDir, { type: "local", cwd: tempDir });
 		const definition = createReadToolDefinition(remoteOps, {

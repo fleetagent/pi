@@ -10,6 +10,7 @@ import {
 	getModels,
 	getProviders,
 	type KnownProvider,
+	loadCachedModelCatalog,
 	type Model,
 	type OAuthProviderInterface,
 	type OpenAICompletionsCompat,
@@ -411,6 +412,7 @@ export class ModelRegistry {
 	private constructor(authStorage: AuthStorage, modelsJsonPath: string | undefined) {
 		this.authStorage = authStorage;
 		this.modelsJsonPath = modelsJsonPath ? normalizePath(modelsJsonPath) : undefined;
+		loadCachedModelCatalog();
 		this.loadModels();
 	}
 

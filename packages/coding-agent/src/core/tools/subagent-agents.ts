@@ -2,6 +2,8 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { getAgentDir } from "../../config.ts";
 import { parseFrontmatter } from "../../utils/frontmatter.ts";
+import { dirnamePortablePath, joinPortablePath, pathComparisonValue } from "../lsp/portable-path.ts";
+import type { ToolOperations } from "./operations.ts";
 
 export type AgentScope = "user" | "project" | "both";
 export type AgentSource = "bundled" | "user" | "project";
@@ -68,6 +70,28 @@ Report files reviewed, critical issues, warnings, suggestions, and a concise sum
 	},
 ];
 
+function parseAgentConfig(
+	content: string,
+	filePath: string,
+	source: Exclude<AgentSource, "bundled">,
+): AgentConfig | undefined {
+	const { frontmatter, body } = parseFrontmatter<Record<string, string>>(content);
+	if (!frontmatter.name || !frontmatter.description) return undefined;
+	const tools = frontmatter.tools
+		?.split(",")
+		.map((tool) => tool.trim())
+		.filter(Boolean);
+	return {
+		name: frontmatter.name,
+		description: frontmatter.description,
+		tools: tools && tools.length > 0 ? tools : undefined,
+		model: frontmatter.model,
+		systemPrompt: body,
+		source,
+		filePath,
+	};
+}
+
 function loadAgentsFromDir(dir: string, source: Exclude<AgentSource, "bundled">): AgentConfig[] {
 	const agents: AgentConfig[] = [];
 	if (!fs.existsSync(dir)) return agents;
@@ -89,21 +113,8 @@ function loadAgentsFromDir(dir: string, source: Exclude<AgentSource, "bundled">)
 			continue;
 		}
 
-		const { frontmatter, body } = parseFrontmatter<Record<string, string>>(content);
-		if (!frontmatter.name || !frontmatter.description) continue;
-		const tools = frontmatter.tools
-			?.split(",")
-			.map((tool) => tool.trim())
-			.filter(Boolean);
-		agents.push({
-			name: frontmatter.name,
-			description: frontmatter.description,
-			tools: tools && tools.length > 0 ? tools : undefined,
-			model: frontmatter.model,
-			systemPrompt: body,
-			source,
-			filePath,
-		});
+		const agent = parseAgentConfig(content, filePath, source);
+		if (agent) agents.push(agent);
 	}
 	return agents;
 }
@@ -133,6 +144,75 @@ export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryRe
 	for (const agent of userAgents) agentMap.set(agent.name, agent);
 	for (const agent of projectAgents) agentMap.set(agent.name, agent);
 
+	return { agents: Array.from(agentMap.values()), projectAgentsDir };
+}
+
+async function loadAgentsFromDirWithOperations(dir: string, operations: ToolOperations): Promise<AgentConfig[]> {
+	const agents: AgentConfig[] = [];
+	let entries: string[];
+	try {
+		entries = await operations.readdir(dir);
+	} catch {
+		return agents;
+	}
+	for (const name of entries.sort()) {
+		if (!name.endsWith(".md")) continue;
+		const filePath = joinPortablePath(dir, name);
+		try {
+			const stat = await operations.stat(filePath);
+			if (!stat.isFile()) continue;
+			const agent = parseAgentConfig((await operations.readFile(filePath)).toString("utf8"), filePath, "project");
+			if (agent) agents.push(agent);
+		} catch {}
+	}
+	return agents;
+}
+
+async function findNearestProjectAgentsDirWithOperations(
+	cwd: string,
+	operations: ToolOperations,
+	root: string,
+	pathFlavor: "posix" | "windows",
+): Promise<string | null> {
+	let currentDir = cwd;
+	while (true) {
+		const candidate = joinPortablePath(currentDir, ".pi", "agents");
+		try {
+			if ((await operations.stat(candidate)).isDirectory()) return candidate;
+		} catch {}
+		if (pathComparisonValue(currentDir, pathFlavor) === pathComparisonValue(root, pathFlavor)) return null;
+		const parentDir = dirnamePortablePath(currentDir, pathFlavor);
+		if (parentDir === currentDir) return null;
+		currentDir = parentDir;
+	}
+}
+
+export async function discoverAgentsWithOperations(
+	cwd: string,
+	scope: AgentScope,
+	operations?: ToolOperations,
+): Promise<AgentDiscoveryResult> {
+	if (!operations) return discoverAgents(cwd, scope);
+	const backend = operations.getBackendInfo?.();
+	if (backend?.type !== "remote" || !backend.configured) return discoverAgents(cwd, scope);
+	const remoteCwd = backend.workspace.root;
+	const userDir = path.join(getAgentDir(), "agents");
+	const projectAgentsDir =
+		scope === "user"
+			? null
+			: await findNearestProjectAgentsDirWithOperations(
+					remoteCwd,
+					operations,
+					backend.workspace.root,
+					backend.workspace.pathFlavor,
+				);
+	const bundledAgents = scope === "project" ? [] : BUNDLED_AGENTS;
+	const userAgents = scope === "project" ? [] : loadAgentsFromDir(userDir, "user");
+	const projectAgents = projectAgentsDir ? await loadAgentsFromDirWithOperations(projectAgentsDir, operations) : [];
+	const agentMap = new Map<string, AgentConfig>();
+	for (const agent of bundledAgents) agentMap.set(agent.name, agent);
+	for (const agent of userAgents) agentMap.set(agent.name, agent);
+	for (const agent of projectAgents) agentMap.set(agent.name, agent);
 	return { agents: Array.from(agentMap.values()), projectAgentsDir };
 }
 

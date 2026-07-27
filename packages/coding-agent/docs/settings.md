@@ -157,6 +157,51 @@ Keep `retry.provider.maxRetries` at `0` unless provider-level retries are explic
 
 `npmCommand` is used for all npm package-manager operations, including installs, uninstalls, and dependency installs inside git packages. User-scoped npm packages install under `~/.pi/agent/npm/`; project-scoped npm packages install under `.pi/npm/`. Use argv-style entries exactly as the process should be launched. When `npmCommand` is configured, git package dependency installs use plain `install` to avoid npm-specific flags in wrappers or alternate package managers.
 
+### Tool Configuration
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `tools` | object | `{}` | Per-tool configuration keyed by tool name |
+| `tools.websearch.provider` | string | `"duckduckgo"` | Web search provider: `"duckduckgo"`, `"brave"`, or `"firecrawl"` |
+| `tools.websearch.apiKey` | string | - | Provider API key. Brave env fallback: `PI_WEBSEARCH_BRAVE_API_KEY` or `BRAVE_SEARCH_API_KEY`. Firecrawl env fallback: `PI_WEBSEARCH_FIRECRAWL_API_KEY` or `FIRECRAWL_API_KEY` |
+| `tools.websearch.baseUrl` | string | Provider default API URL | Override the Brave or Firecrawl endpoint for compatible/proxy APIs |
+
+```json
+{
+  "tools": {
+    "websearch": {
+      "provider": "firecrawl",
+      "apiKey": "YOUR_FIRECRAWL_API_KEY"
+    }
+  }
+}
+```
+
+Global and project `tools` settings merge per tool name, so a project can override `tools.websearch.baseUrl` while keeping a global `tools.websearch.apiKey`. Environment variables remain supported for `websearch`; explicit settings take precedence. Firecrawl uses `POST /v2/search` with web results only.
+
+### Docker Sandbox
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `sandbox.image` | string | `"ghcr.io/fleetagent/pi-sandbox:latest"` | Docker image used by `/sandbox start` |
+| `sandbox.dockerBinary` | string | `"docker"` | Docker executable |
+| `sandbox.workspaceMountPath` | string | `"/workspace"` | Container path for the mounted current workspace |
+| `sandbox.containerNamePrefix` | string | `"pi-sandbox"` | Prefix for generated container names |
+| `sandbox.daemonPort` | number | `8787` | Container daemon port |
+| `sandbox.daemonHostBind` | string | `"127.0.0.1"` | Host bind address for the published daemon port |
+| `sandbox.cleanup` | string | `"stop"` | Stop behavior: `"stop"` or `"remove"` |
+
+```json
+{
+  "sandbox": {
+    "image": "pi-sandbox:local",
+    "cleanup": "remove"
+  }
+}
+```
+
+Precedence for sandbox starts is command flag, then `PI_SANDBOX_*` environment variables, then project settings, then global settings, then defaults. See [Docker Sandbox](sandbox.md) for command syntax, environment variable names, and security notes.
+
 ### Sessions
 
 | Setting | Type | Default | Description |

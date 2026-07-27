@@ -73,3 +73,14 @@ export {
 	type ResolvePiAgentSessionOptionsResult,
 } from "./pi-agent.ts";
 export { createSyntheticSourceInfo } from "./source-info.ts";
+export {
+	WORKSPACE_TOOL_NAMES,
+	type WorkspaceToolCatalogEntry,
+	type WorkspaceToolDefinition,
+	WorkspaceToolHost,
+	type WorkspaceToolHostOptions,
+	type WorkspaceToolInvocation,
+	type WorkspaceToolName,
+	type WorkspaceToolOptions,
+} from "./tools/workspace-tool-host.ts";
+export type { WorkspaceIdentity } from "./workspace-identity.ts";

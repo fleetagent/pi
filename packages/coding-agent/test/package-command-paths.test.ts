@@ -10,11 +10,13 @@ describe("package commands", () => {
 	let agentDir: string;
 	let projectDir: string;
 	let packageDir: string;
-	let originalCwd: string;
 	let originalAgentDir: string | undefined;
 	let originalPiPackageDir: string | undefined;
+	let originalPiOffline: string | undefined;
+	let originalPiSkipVersionCheck: string | undefined;
 	let originalExitCode: typeof process.exitCode;
 	let originalExecPath: string;
+	let cwdSpy: ReturnType<typeof vi.spyOn>;
 
 	function getNewerPatchVersion(): string {
 		const [major = "0", minor = "0", patch = "0"] = VERSION.split(".");
@@ -30,19 +32,22 @@ describe("package commands", () => {
 		mkdirSync(projectDir, { recursive: true });
 		mkdirSync(packageDir, { recursive: true });
 
-		originalCwd = process.cwd();
+		cwdSpy = vi.spyOn(process, "cwd").mockReturnValue(projectDir);
 		originalAgentDir = process.env[ENV_AGENT_DIR];
 		originalPiPackageDir = process.env.PI_PACKAGE_DIR;
+		originalPiOffline = process.env.PI_OFFLINE;
+		originalPiSkipVersionCheck = process.env.PI_SKIP_VERSION_CHECK;
 		originalExitCode = process.exitCode;
 		originalExecPath = process.execPath;
 		process.exitCode = undefined;
 		process.env[ENV_AGENT_DIR] = agentDir;
-		process.chdir(projectDir);
+		delete process.env.PI_OFFLINE;
+		delete process.env.PI_SKIP_VERSION_CHECK;
 	});
 
 	afterEach(() => {
 		vi.unstubAllGlobals();
-		process.chdir(originalCwd);
+		cwdSpy.mockRestore();
 		process.exitCode = originalExitCode;
 		if (originalAgentDir === undefined) {
 			delete process.env[ENV_AGENT_DIR];
@@ -53,6 +58,16 @@ describe("package commands", () => {
 			delete process.env.PI_PACKAGE_DIR;
 		} else {
 			process.env.PI_PACKAGE_DIR = originalPiPackageDir;
+		}
+		if (originalPiOffline === undefined) {
+			delete process.env.PI_OFFLINE;
+		} else {
+			process.env.PI_OFFLINE = originalPiOffline;
+		}
+		if (originalPiSkipVersionCheck === undefined) {
+			delete process.env.PI_SKIP_VERSION_CHECK;
+		} else {
+			process.env.PI_SKIP_VERSION_CHECK = originalPiSkipVersionCheck;
 		}
 		Object.defineProperty(process, "execPath", { value: originalExecPath, configurable: true });
 		rmSync(tempDir, { recursive: true, force: true });

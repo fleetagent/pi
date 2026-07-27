@@ -38,6 +38,8 @@ export {
 	type LsToolOptions,
 } from "./ls.ts";
 export {
+	type BorrowedToolOperations,
+	borrowToolOperations,
 	createRemoteToolOperations,
 	createSshToolOperations,
 	DeferredRemoteToolOperations,
@@ -46,6 +48,7 @@ export {
 	type LocalToolOperationsOptions,
 	type ParsedSshTarget,
 	RemoteToolOperations,
+	type RemoteToolOperationsConnectOptions,
 	SshToolOperations,
 	type SshToolOperationsOptions,
 	type ToolAccessMode,
@@ -57,6 +60,7 @@ export {
 	type ToolGrepOptions,
 	type ToolGrepResult,
 	type ToolOperations,
+	type WorkspaceToolRemoteInvocation,
 } from "./operations.ts";
 export {
 	createReadTool,
@@ -66,13 +70,18 @@ export {
 	type ReadToolOptions,
 } from "./read.ts";
 export {
+	createSubagentRunsTool,
+	createSubagentRunsToolDefinition,
 	createSubagentTool,
 	createSubagentToolDefinition,
 	type SubagentDetails,
 	type SubagentResult,
+	type SubagentRunInfo,
 	type SubagentRunner,
 	type SubagentRunOutcome,
+	type SubagentRunRegistry,
 	type SubagentRunRequest,
+	type SubagentRunsToolInput,
 	type SubagentStatus,
 	type SubagentToolInput,
 	type SubagentToolOptions,
@@ -89,6 +98,29 @@ export {
 	truncateTail,
 } from "./truncate.ts";
 export {
+	createWebsearchTool,
+	createWebsearchToolDefinition,
+	parseBraveSearchResponse,
+	parseDuckDuckGoResponse,
+	parseFirecrawlSearchResponse,
+	parseWebsearchToolOptions,
+	type WebsearchProvider,
+	type WebsearchResultItem,
+	type WebsearchToolDetails,
+	type WebsearchToolInput,
+	type WebsearchToolOptions,
+} from "./websearch.ts";
+export {
+	WORKSPACE_TOOL_NAMES,
+	type WorkspaceToolCatalogEntry,
+	type WorkspaceToolDefinition,
+	WorkspaceToolHost,
+	type WorkspaceToolHostOptions,
+	type WorkspaceToolInvocation,
+	type WorkspaceToolName,
+	type WorkspaceToolOptions,
+} from "./workspace-tool-host.ts";
+export {
 	createWriteTool,
 	createWriteToolDefinition,
 	type WriteToolInput,
@@ -104,13 +136,41 @@ import { createGrepTool, createGrepToolDefinition, type GrepToolOptions } from "
 import { createLsTool, createLsToolDefinition, type LsToolOptions } from "./ls.ts";
 import type { ToolOperations } from "./operations.ts";
 import { createReadTool, createReadToolDefinition, type ReadToolOptions } from "./read.ts";
-import { createSubagentTool, createSubagentToolDefinition, type SubagentToolOptions } from "./subagent.ts";
+import {
+	createSubagentRunsTool,
+	createSubagentRunsToolDefinition,
+	createSubagentTool,
+	createSubagentToolDefinition,
+	type SubagentToolOptions,
+} from "./subagent.ts";
+import { createWebsearchTool, createWebsearchToolDefinition, type WebsearchToolOptions } from "./websearch.ts";
 import { createWriteTool, createWriteToolDefinition, type WriteToolOptions } from "./write.ts";
 
 export type Tool = AgentTool<any>;
 export type ToolDef = ToolDefinition<any, any>;
-export type ToolName = "read" | "bash" | "edit" | "write" | "grep" | "find" | "ls" | "subagent";
-export const allToolNames: Set<ToolName> = new Set(["read", "bash", "edit", "write", "grep", "find", "ls", "subagent"]);
+export type ToolName =
+	| "read"
+	| "bash"
+	| "edit"
+	| "write"
+	| "grep"
+	| "find"
+	| "ls"
+	| "subagent"
+	| "subagent_runs"
+	| "websearch";
+export const allToolNames: Set<ToolName> = new Set([
+	"read",
+	"bash",
+	"edit",
+	"write",
+	"grep",
+	"find",
+	"ls",
+	"subagent",
+	"subagent_runs",
+	"websearch",
+]);
 
 export interface ToolsOptions {
 	read?: ReadToolOptions;
@@ -121,6 +181,7 @@ export interface ToolsOptions {
 	find?: FindToolOptions;
 	ls?: LsToolOptions;
 	subagent?: SubagentToolOptions;
+	websearch?: WebsearchToolOptions;
 }
 
 export function createToolDefinition(toolName: ToolName, operations: ToolOperations, options?: ToolsOptions): ToolDef {
@@ -141,6 +202,10 @@ export function createToolDefinition(toolName: ToolName, operations: ToolOperati
 			return createLsToolDefinition(operations, options?.ls);
 		case "subagent":
 			return createSubagentToolDefinition(options?.subagent);
+		case "subagent_runs":
+			return createSubagentRunsToolDefinition(options?.subagent?.runRegistry);
+		case "websearch":
+			return createWebsearchToolDefinition(options?.websearch);
 		default:
 			throw new Error(`Unknown tool name: ${toolName}`);
 	}
@@ -164,6 +229,10 @@ export function createTool(toolName: ToolName, operations: ToolOperations, optio
 			return createLsTool(operations, options?.ls);
 		case "subagent":
 			return createSubagentTool(options?.subagent);
+		case "subagent_runs":
+			return createSubagentRunsTool(options?.subagent?.runRegistry);
+		case "websearch":
+			return createWebsearchTool(options?.websearch);
 		default:
 			throw new Error(`Unknown tool name: ${toolName}`);
 	}
@@ -200,6 +269,8 @@ export function createAllToolDefinitions(
 		find: createFindToolDefinition(operations, options?.find),
 		ls: createLsToolDefinition(operations, options?.ls),
 		subagent: createSubagentToolDefinition(options?.subagent),
+		subagent_runs: createSubagentRunsToolDefinition(options?.subagent?.runRegistry),
+		websearch: createWebsearchToolDefinition(options?.websearch),
 	};
 }
 
@@ -231,5 +302,7 @@ export function createAllTools(operations: ToolOperations, options?: ToolsOption
 		find: createFindTool(operations, options?.find),
 		ls: createLsTool(operations, options?.ls),
 		subagent: createSubagentTool(options?.subagent),
+		subagent_runs: createSubagentRunsTool(options?.subagent?.runRegistry),
+		websearch: createWebsearchTool(options?.websearch),
 	};
 }

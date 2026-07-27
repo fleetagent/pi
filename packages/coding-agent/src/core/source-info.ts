@@ -1,4 +1,5 @@
 import type { PathMetadata } from "./package-manager.ts";
+import type { WorkspaceIdentity } from "./workspace-identity.ts";
 
 export type SourceScope = "user" | "project" | "temporary";
 export type SourceOrigin = "package" | "top-level";
@@ -9,6 +10,7 @@ export interface SourceInfo {
 	scope: SourceScope;
 	origin: SourceOrigin;
 	baseDir?: string;
+	workspace?: WorkspaceIdentity;
 }
 
 export function createSourceInfo(path: string, metadata: PathMetadata): SourceInfo {
@@ -18,6 +20,7 @@ export function createSourceInfo(path: string, metadata: PathMetadata): SourceIn
 		scope: metadata.scope,
 		origin: metadata.origin,
 		baseDir: metadata.baseDir,
+		workspace: metadata.workspace,
 	};
 }
 
@@ -28,6 +31,7 @@ export function createSyntheticSourceInfo(
 		scope?: SourceScope;
 		origin?: SourceOrigin;
 		baseDir?: string;
+		workspace?: WorkspaceIdentity;
 	},
 ): SourceInfo {
 	return {
@@ -36,6 +40,7 @@ export function createSyntheticSourceInfo(
 		scope: options.scope ?? "temporary",
 		origin: options.origin ?? "top-level",
 		baseDir: options.baseDir,
+		workspace: options.workspace,
 	};
 }
 

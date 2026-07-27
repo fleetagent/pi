@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { constants, createReadStream, createWriteStream, type Stats, type WriteStream } from "node:fs";
 import {
 	access as fsAccess,
@@ -8,7 +9,10 @@ import {
 	stat as fsStat,
 	writeFile as fsWriteFile,
 } from "node:fs/promises";
+import { posix, win32 } from "node:path";
 import { pipeline } from "node:stream/promises";
+import type { AgentToolResult, AgentToolUpdateCallback } from "@fleetagent/pi-agent-core";
+import WebSocket, { type RawData } from "ws";
 import { waitForChildProcess } from "../../utils/child-process.ts";
 import { detectSupportedImageMimeTypeFromFile } from "../../utils/mime.ts";
 import {
@@ -18,6 +22,18 @@ import {
 	trackDetachedChildPid,
 	untrackDetachedChildPid,
 } from "../../utils/shell.ts";
+import {
+	DEFAULT_REMOTE_WORKSPACE_PROTOCOL_LIMITS,
+	decodeCanonicalBase64,
+	hashRemoteWorkspaceJson,
+	parseRemoteWorkspaceToolResult,
+	type RemoteLspStatus,
+	type RemoteWorkspaceClientMessage,
+	RemoteWorkspaceClientProtocol,
+	type RemoteWorkspaceProtocolCloseReason,
+	RemoteWorkspaceRequestError,
+} from "../remote-workspace-protocol/index.ts";
+import type { WorkspaceIdentity } from "../workspace-identity.ts";
 
 export type ToolAccessMode = "exists" | "read" | "write" | "readwrite";
 
@@ -63,7 +79,44 @@ export type ToolBackendInfo =
 	| { type: "local"; cwd: string }
 	| { type: "ssh"; cwd: string; remote: string; configured: true }
 	| { type: "remote"; cwd: string; configured: false }
-	| { type: "remote"; cwd: string; url: string; protocol: "ws"; configured: true };
+	| {
+			type: "remote";
+			cwd: string;
+			url: string;
+			protocol: "ws";
+			configured: true;
+			workspace: WorkspaceIdentity;
+	  };
+
+export interface WorkspaceToolRemoteInvocation {
+	toolCallId: string;
+	arguments: unknown;
+	signal?: AbortSignal;
+	onUpdate?: AgentToolUpdateCallback<unknown>;
+	executionOptions: { imageAutoResize?: boolean; shellCommandPrefix?: string };
+}
+
+export type BorrowedToolOperations = Omit<ToolOperations, "dispose">;
+
+export function borrowToolOperations(operations: ToolOperations): BorrowedToolOperations {
+	const boundMethods = new Map<PropertyKey, unknown>();
+	return new Proxy(operations, {
+		get(target, property, receiver) {
+			if (property === "dispose") return undefined;
+			const value = Reflect.get(target, property, receiver) as unknown;
+			if (typeof value !== "function") return value;
+			let bound = boundMethods.get(property);
+			if (!bound) {
+				bound = value.bind(target);
+				boundMethods.set(property, bound);
+			}
+			return bound;
+		},
+		has(target, property) {
+			return property === "dispose" ? false : Reflect.has(target, property);
+		},
+	}) as BorrowedToolOperations;
+}
 
 export interface ToolOperations {
 	cwd: string;
@@ -71,6 +124,7 @@ export interface ToolOperations {
 	access(path: string, mode?: ToolAccessMode): Promise<void>;
 	readFile(path: string): Promise<Buffer>;
 	writeFile(path: string, content: string | Buffer): Promise<void>;
+	readResource?(path: string): Promise<Buffer>;
 	uploadFile?(sourcePath: string, destinationPath: string): Promise<void>;
 	downloadFile?(sourcePath: string, destinationPath: string): Promise<void>;
 	mkdir(path: string, options?: { recursive?: boolean }): Promise<void>;
@@ -80,6 +134,10 @@ export interface ToolOperations {
 	grep?(options: ToolGrepOptions): Promise<ToolGrepResult>;
 	detectImageMimeType?(path: string): Promise<string | null | undefined>;
 	getBackendInfo?(): ToolBackendInfo;
+	resolveWorkspaceToolExecution?(name: string, parameterSchema: unknown): "local" | "remote" | "unavailable";
+	executeWorkspaceTool?(name: string, invocation: WorkspaceToolRemoteInvocation): Promise<AgentToolResult<unknown>>;
+	onWorkspaceToolCatalogChanged?(listener: () => void | Promise<void>): () => void;
+	getRemoteLspStatus?(): RemoteLspStatus;
 	dispose?(): Promise<void>;
 }
 
@@ -100,6 +158,11 @@ export interface DeferredRemoteToolOperationsConfigureSshOptions {
 export interface ParsedSshTarget {
 	remote: string;
 	cwd?: string;
+}
+
+function workspaceRootsEqual(left: string, right: string, pathFlavor: "posix" | "windows"): boolean {
+	if (pathFlavor === "windows") return win32.normalize(left).toLowerCase() === win32.normalize(right).toLowerCase();
+	return posix.normalize(left) === posix.normalize(right);
 }
 
 function accessModeToFsMode(mode: ToolAccessMode | undefined): number {
@@ -347,6 +410,12 @@ export class LocalToolOperations implements ToolOperations {
 			}
 			waitForChildProcess(child)
 				.then((code) => {
+					if (child.pid && process.platform !== "win32") {
+						try {
+							process.kill(-child.pid, 0);
+							killProcessTree(child.pid);
+						} catch {}
+					}
 					if (child.pid) untrackDetachedChildPid(child.pid);
 					if (timeoutHandle) clearTimeout(timeoutHandle);
 					if (options.signal) options.signal.removeEventListener("abort", onAbort);
@@ -584,39 +653,54 @@ export class SshToolOperations implements ToolOperations {
 
 export class DeferredRemoteToolOperations implements ToolOperations {
 	cwd: string;
+	private readonly expectedCwd: string;
 	private operations: SshToolOperations | RemoteToolOperations | undefined;
+	private remoteCatalogUnsubscribe: (() => void) | undefined;
+	private readonly catalogListeners = new Set<() => void | Promise<void>>();
+	private disposePromise: Promise<void> | undefined;
 
 	constructor(cwd: string) {
 		this.cwd = cwd;
+		this.expectedCwd = cwd;
 	}
 
 	async configure(options: DeferredRemoteToolOperationsConfigureSshOptions): Promise<ToolBackendInfo> {
 		const next = new SshToolOperations({ remote: options.remote, cwd: options.cwd ?? this.cwd });
 		const stat = await next.stat(next.cwd);
 		if (!stat.isDirectory()) {
+			await next.dispose();
 			throw new Error(`SSH backend cwd is not a directory: ${next.cwd}`);
 		}
-		await this.operations?.dispose?.();
-		this.cwd = next.cwd;
-		this.operations = next;
+		await this.replaceOperations(next);
 		return this.getBackendInfo();
 	}
 
-	async configureRemote(url: string): Promise<ToolBackendInfo> {
-		const next = await createRemoteToolOperations(url);
-		const stat = await next.stat(next.cwd);
-		if (!stat.isDirectory()) {
-			throw new Error(`Remote daemon cwd is not a directory: ${next.cwd}`);
+	async configureRemote(
+		url: string,
+		options: RemoteToolOperationsConnectOptions & { expectedCwd?: string } = {},
+	): Promise<ToolBackendInfo> {
+		const next = await createRemoteToolOperations(url, options);
+		try {
+			const stat = await next.stat(next.cwd);
+			if (!stat.isDirectory()) throw new Error(`Remote daemon cwd is not a directory: ${next.cwd}`);
+			const expectedCwd = options.expectedCwd ?? this.expectedCwd;
+			if (!workspaceRootsEqual(next.cwd, expectedCwd, next.workspacePathFlavor)) {
+				throw new Error(`Remote daemon workspace root mismatch: expected ${expectedCwd}, received ${next.cwd}`);
+			}
+		} catch (error) {
+			await next.dispose();
+			throw error;
 		}
-		await this.operations?.dispose?.();
-		this.cwd = next.cwd;
-		this.operations = next;
+		await this.replaceOperations(next);
 		return this.getBackendInfo();
 	}
 
-	clear(): void {
-		void this.operations?.dispose?.();
+	async clear(): Promise<void> {
+		const previous = this.operations;
+		this.remoteCatalogUnsubscribe?.();
+		this.remoteCatalogUnsubscribe = undefined;
 		this.operations = undefined;
+		await previous?.dispose?.();
 	}
 
 	private requireOperations(): SshToolOperations | RemoteToolOperations {
@@ -681,450 +765,455 @@ export class DeferredRemoteToolOperations implements ToolOperations {
 	getBackendInfo(): ToolBackendInfo {
 		return this.operations?.getBackendInfo() ?? { type: "remote", cwd: this.cwd, configured: false };
 	}
+
+	resolveWorkspaceToolExecution(name: string, parameterSchema: unknown): "local" | "remote" | "unavailable" {
+		return this.operations instanceof RemoteToolOperations
+			? this.operations.resolveWorkspaceToolExecution(name, parameterSchema)
+			: "local";
+	}
+
+	executeWorkspaceTool(name: string, invocation: WorkspaceToolRemoteInvocation): Promise<AgentToolResult<unknown>> {
+		if (!(this.operations instanceof RemoteToolOperations)) {
+			return Promise.reject(new Error(`Remote workspace tool is not configured: ${name}`));
+		}
+		return this.operations.executeWorkspaceTool(name, invocation);
+	}
+
+	getRemoteLspStatus(): RemoteLspStatus {
+		return this.operations instanceof RemoteToolOperations
+			? this.operations.getRemoteLspStatus()
+			: { enabled: false, servers: [] };
+	}
+
+	onWorkspaceToolCatalogChanged(listener: () => void | Promise<void>): () => void {
+		this.catalogListeners.add(listener);
+		return () => this.catalogListeners.delete(listener);
+	}
+
+	dispose(): Promise<void> {
+		this.disposePromise ??= (async () => {
+			this.remoteCatalogUnsubscribe?.();
+			this.remoteCatalogUnsubscribe = undefined;
+			const previous = this.operations;
+			this.operations = undefined;
+			await previous?.dispose?.();
+		})();
+		return this.disposePromise;
+	}
+
+	private async replaceOperations(next: SshToolOperations | RemoteToolOperations): Promise<void> {
+		if (this.disposePromise) {
+			await next.dispose?.();
+			throw new Error("Deferred remote backend is disposed");
+		}
+		const previous = this.operations;
+		this.remoteCatalogUnsubscribe?.();
+		this.remoteCatalogUnsubscribe = undefined;
+		this.operations = next;
+		this.cwd = next.cwd;
+		if (next instanceof RemoteToolOperations) {
+			this.remoteCatalogUnsubscribe = next.onWorkspaceToolCatalogChanged(() =>
+				Promise.all([...this.catalogListeners].map((listener) => listener())).then(() => undefined),
+			);
+		}
+		await previous?.dispose?.();
+	}
 }
-
-type RemoteResponse = { id: string; result: unknown } | { id: string; error: { message?: unknown } | string };
-
-type RemoteExecEvent =
-	| { id: string; event: "data"; dataBase64?: unknown; data?: unknown; stream?: unknown }
-	| { id: string; event: "exit"; exitCode?: unknown; cancelled?: unknown }
-	| { id: string; event: "error"; error?: { message?: unknown } | string };
-
-type RemoteFileEvent =
-	| { id: string; event: "fileData"; dataBase64?: unknown }
-	| { id: string; event: "fileEnd" }
-	| { id: string; event: "fileError"; error?: { message?: unknown } | string };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null;
 }
 
-function remoteErrorMessage(error: unknown): string {
-	if (typeof error === "string") return error;
-	if (isRecord(error) && typeof error.message === "string") return error.message;
-	return "remote operation failed";
-}
-
-function requireString(value: unknown, name: string): string {
-	if (typeof value !== "string") throw new Error(`Remote response missing string ${name}`);
+function requireRecord(value: unknown, label: string): Record<string, unknown> {
+	if (!isRecord(value)) throw new Error(`Invalid remote workspace ${label}`);
 	return value;
 }
 
-function optionalString(value: unknown): string | undefined {
-	return typeof value === "string" ? value : undefined;
-}
-
-function optionalNumber(value: unknown): number | undefined {
-	return typeof value === "number" ? value : undefined;
+function requireString(value: unknown, label: string): string {
+	if (typeof value !== "string") throw new Error(`Invalid remote workspace ${label}`);
+	return value;
 }
 
 function normalizeRemoteUrl(url: string): { url: string; protocol: "ws" } {
 	const parsed = new URL(url);
 	if (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") {
-		throw new Error(`--remote currently supports ws:// and wss:// URLs, got ${parsed.protocol}`);
+		throw new Error(`--remote supports ws:// and wss:// URLs, got ${parsed.protocol}`);
 	}
-	return { url, protocol: "ws" };
+	if (parsed.username || parsed.password) throw new Error("Remote workspace URLs must not contain credentials");
+	if (parsed.hash) throw new Error("Remote workspace URLs must not contain fragments");
+	return { url: parsed.toString(), protocol: "ws" };
+}
+
+function websocketPayload(data: RawData): Uint8Array {
+	if (Buffer.isBuffer(data)) return Uint8Array.from(data);
+	if (Array.isArray(data)) return Uint8Array.from(Buffer.concat(data));
+	return Uint8Array.from(new Uint8Array(data));
+}
+
+function websocketCloseCode(reason: RemoteWorkspaceProtocolCloseReason): number {
+	switch (reason.code) {
+		case "normal":
+			return 1000;
+		case "protocol_error":
+			return 1002;
+		case "invalid_payload":
+			return 1007;
+		case "policy_violation":
+			return 1008;
+		case "message_too_large":
+			return 1009;
+	}
+}
+
+export interface RemoteToolOperationsConnectOptions {
+	token?: string;
+	handshakeTimeoutMs?: number;
 }
 
 export class RemoteToolOperations implements ToolOperations {
 	readonly url: string;
 	readonly protocol: "ws";
 	cwd: string;
-	private socket: WebSocket;
-	private nextId = 1;
-	private pending = new Map<
-		string,
-		{
-			resolve: (value: unknown) => void;
-			reject: (error: Error) => void;
-		}
-	>();
-	private execPending = new Map<
-		string,
-		{
-			onData: (data: Buffer) => void;
-			resolve: (value: { exitCode: number | null }) => void;
-			reject: (error: Error) => void;
-		}
-	>();
-	private fileDownloadPending = new Map<
-		string,
-		{
-			stream: WriteStream;
-			writePromise: Promise<void>;
-			resolve: () => void;
-			reject: (error: Error) => void;
-		}
-	>();
-	private keepAliveInterval: NodeJS.Timeout | undefined;
-	private lastPongAt = Date.now();
+	workspacePathFlavor: "posix" | "windows" = "posix";
+	private workspaceId = "";
+	private readonly socket: WebSocket;
+	private readonly client: RemoteWorkspaceClientProtocol;
+	private readonly localToolSchemas = new Map<string, string>();
+	private readonly catalogListeners = new Set<() => void | Promise<void>>();
+	private remoteLspStatus: RemoteLspStatus = { enabled: false, servers: [] };
+	private disposePromise: Promise<void> | undefined;
 
-	private constructor(url: string, protocol: "ws", socket: WebSocket, cwd: string) {
+	private constructor(url: string, protocol: "ws", socket: WebSocket, options: RemoteToolOperationsConnectOptions) {
 		this.url = url;
 		this.protocol = protocol;
 		this.socket = socket;
-		this.cwd = cwd;
-		this.socket.addEventListener("message", (event) => this.handleMessage(event.data));
-		this.socket.addEventListener("close", () => {
-			this.stopKeepAlive();
-			this.rejectAll(new Error("remote connection closed"));
+		this.cwd = "/";
+		const transport = {
+			send: (message: RemoteWorkspaceClientMessage): Promise<void> =>
+				new Promise((resolve, reject) => {
+					if (socket.readyState !== WebSocket.OPEN) {
+						reject(new Error("Remote workspace connection is not open"));
+						return;
+					}
+					socket.send(JSON.stringify(message), { binary: false, compress: false }, (error) => {
+						if (error) reject(error);
+						else resolve();
+					});
+				}),
+			close: (reason: RemoteWorkspaceProtocolCloseReason): Promise<void> => {
+				if (socket.readyState === WebSocket.CLOSED) return Promise.resolve();
+				return new Promise((resolve) => {
+					socket.once("close", () => resolve());
+					socket.close(websocketCloseCode(reason), reason.message);
+				});
+			},
+		};
+		this.client = new RemoteWorkspaceClientProtocol(transport, {
+			requiredCapabilities: ["primitive_operations", "tool_updates"],
+			optionalCapabilities: ["catalog_refresh", "file_transfer", "artifacts", "lsp_status"],
+			receiveLimits: DEFAULT_REMOTE_WORKSPACE_PROTOCOL_LIMITS,
+			localToolSchemas: this.localToolSchemas,
+			handshakeTimeoutMs: options.handshakeTimeoutMs,
+			onCatalogRefreshed: async () => {
+				await this.refreshRemoteLspStatus();
+				await Promise.all([...this.catalogListeners].map((listener) => listener()));
+			},
 		});
-		this.socket.addEventListener("error", () => {
-			this.stopKeepAlive();
-			this.rejectAll(new Error("remote connection error"));
+		socket.on("message", (data, isBinary) => {
+			if (isBinary) {
+				void this.client.disconnect("Remote workspace sent an unexpected binary frame");
+				return;
+			}
+			void this.client.receive(websocketPayload(data)).catch(() => undefined);
 		});
-		this.startKeepAlive();
+		socket.on("close", () => void this.client.disconnect("Remote workspace connection closed"));
+		socket.on("error", () => void this.client.disconnect("Remote workspace connection failed"));
 	}
 
-	static async connect(url: string): Promise<RemoteToolOperations> {
+	static async connect(url: string, options: RemoteToolOperationsConnectOptions = {}): Promise<RemoteToolOperations> {
 		const normalized = normalizeRemoteUrl(url);
-		const socket = await new Promise<WebSocket>((resolveSocket, rejectSocket) => {
-			const ws = new WebSocket(normalized.url);
+		const token = options.token ?? process.env.PI_REMOTE_TOKEN;
+		const socket = await new Promise<WebSocket>((resolve, reject) => {
+			const websocket = new WebSocket(normalized.url, "pi.workspace.v1", {
+				perMessageDeflate: false,
+				...(token ? { headers: { authorization: `Bearer ${token}` } } : {}),
+			});
 			const cleanup = () => {
-				ws.removeEventListener("open", onOpen);
-				ws.removeEventListener("error", onError);
+				websocket.off("open", onOpen);
+				websocket.off("error", onError);
 			};
 			const onOpen = () => {
 				cleanup();
-				resolveSocket(ws);
+				resolve(websocket);
 			};
 			const onError = () => {
 				cleanup();
-				rejectSocket(new Error(`failed to connect remote commander: ${normalized.url}`));
+				websocket.terminate();
+				reject(new Error(`Failed to connect remote workspace: ${normalized.url}`));
 			};
-			ws.addEventListener("open", onOpen, { once: true });
-			ws.addEventListener("error", onError, { once: true });
+			websocket.once("open", onOpen);
+			websocket.once("error", onError);
 		});
-		const operations = new RemoteToolOperations(normalized.url, normalized.protocol, socket, "/");
-		const capabilities = await operations.request("capabilities", {});
-		if (isRecord(capabilities) && typeof capabilities.cwd === "string") {
-			operations.cwd = capabilities.cwd;
-		}
-		return operations;
-	}
-
-	private startKeepAlive(): void {
-		this.keepAliveInterval = setInterval(() => {
-			if (Date.now() - this.lastPongAt > 90_000) {
-				this.stopKeepAlive();
-				this.rejectAll(new Error("remote connection heartbeat timed out"));
-				this.socket.close();
-				return;
-			}
-			try {
-				this.send({ type: "ping", timestamp: Date.now() });
-			} catch (error) {
-				this.stopKeepAlive();
-				this.rejectAll(error instanceof Error ? error : new Error(String(error)));
-			}
-		}, 30_000);
-		this.keepAliveInterval.unref?.();
-	}
-
-	private stopKeepAlive(): void {
-		if (this.keepAliveInterval) {
-			clearInterval(this.keepAliveInterval);
-			this.keepAliveInterval = undefined;
-		}
-	}
-
-	private rejectAll(error: Error): void {
-		for (const pending of this.pending.values()) pending.reject(error);
-		this.pending.clear();
-		for (const pending of this.execPending.values()) pending.reject(error);
-		this.execPending.clear();
-		for (const pending of this.fileDownloadPending.values()) {
-			pending.stream.destroy(error);
-			pending.reject(error);
-		}
-		this.fileDownloadPending.clear();
-	}
-
-	private send(message: Record<string, unknown>): void {
-		if (this.socket.readyState !== WebSocket.OPEN) {
-			throw new Error("remote connection is not open");
-		}
-		this.socket.send(JSON.stringify(message));
-	}
-
-	private request(method: string, params: Record<string, unknown>): Promise<unknown> {
-		const id = `remote-${this.nextId++}`;
-		return new Promise((resolve, reject) => {
-			this.pending.set(id, { resolve, reject });
-			try {
-				this.send({ id, method, params });
-			} catch (error) {
-				this.pending.delete(id);
-				reject(error instanceof Error ? error : new Error(String(error)));
-			}
-		});
-	}
-
-	private handleMessage(data: unknown): void {
-		if (typeof data !== "string") return;
-		let parsed: unknown;
+		const operations = new RemoteToolOperations(normalized.url, normalized.protocol, socket, options);
 		try {
-			parsed = JSON.parse(data);
-		} catch {
-			return;
-		}
-		if (!isRecord(parsed)) return;
-		if (parsed.type === "pong") {
-			this.lastPongAt = Date.now();
-			return;
-		}
-		if (typeof parsed.id !== "string") return;
-		if (typeof parsed.event === "string") {
-			if (parsed.event === "fileData" || parsed.event === "fileEnd" || parsed.event === "fileError") {
-				this.handleFileEvent(parsed as RemoteFileEvent);
-			} else {
-				this.handleExecEvent(parsed as RemoteExecEvent);
-			}
-			return;
-		}
-		const pending = this.pending.get(parsed.id);
-		if (!pending) return;
-		this.pending.delete(parsed.id);
-		const response = parsed as RemoteResponse;
-		if ("error" in response) {
-			pending.reject(new Error(remoteErrorMessage(response.error)));
-			return;
-		}
-		pending.resolve(response.result);
-	}
-
-	private handleExecEvent(event: RemoteExecEvent): void {
-		const pending = this.execPending.get(event.id);
-		if (!pending) return;
-		if (event.event === "data") {
-			const encoded = optionalString(event.dataBase64);
-			const text = optionalString(event.data);
-			if (encoded !== undefined) pending.onData(Buffer.from(encoded, "base64"));
-			else if (text !== undefined) pending.onData(Buffer.from(text));
-			return;
-		}
-		this.execPending.delete(event.id);
-		if (event.event === "error") {
-			pending.reject(new Error(remoteErrorMessage(event.error)));
-			return;
-		}
-		const exitCode = optionalNumber(event.exitCode) ?? null;
-		pending.resolve({ exitCode });
-	}
-
-	private handleFileEvent(event: RemoteFileEvent): void {
-		const pending = this.fileDownloadPending.get(event.id);
-		if (!pending) return;
-		if (event.event === "fileData") {
-			const encoded = optionalString(event.dataBase64);
-			if (encoded === undefined) return;
-			pending.writePromise = pending.writePromise.then(() =>
-				writeStreamChunk(pending.stream, Buffer.from(encoded, "base64")),
-			);
-			return;
-		}
-		this.fileDownloadPending.delete(event.id);
-		if (event.event === "fileError") {
-			const error = new Error(remoteErrorMessage(event.error));
-			pending.reject(error);
-			pending.stream.destroy(error);
-			return;
-		}
-		pending.writePromise.then(() => endWriteStream(pending.stream)).then(pending.resolve, pending.reject);
-	}
-
-	async exec(command: string, options: ToolExecOptions): Promise<{ exitCode: number | null }> {
-		const timeoutMs = resolveTimeoutMs(options.timeout);
-		const id = `remote-${this.nextId++}`;
-		let timeoutHandle: NodeJS.Timeout | undefined;
-		return new Promise((resolve, reject) => {
-			const cleanup = () => {
-				if (timeoutHandle) clearTimeout(timeoutHandle);
-				options.signal?.removeEventListener("abort", onAbort);
-			};
-			const onAbort = () => {
-				try {
-					this.send({ id, method: "cancel" });
-				} catch {}
-				const pending = this.execPending.get(id);
-				if (pending) {
-					this.execPending.delete(id);
-					cleanup();
-					pending.reject(new Error("aborted"));
-				}
-			};
-			this.execPending.set(id, {
-				onData: options.onData,
-				resolve: (value) => {
-					cleanup();
-					resolve(value);
-				},
-				reject: (error) => {
-					cleanup();
-					reject(error);
-				},
-			});
-			options.signal?.addEventListener("abort", onAbort, { once: true });
-			if (timeoutMs !== undefined) {
-				timeoutHandle = setTimeout(() => {
-					try {
-						this.send({ id, method: "cancel" });
-					} catch {}
-					const pending = this.execPending.get(id);
-					if (pending) {
-						this.execPending.delete(id);
-						cleanup();
-						pending.reject(new Error(`timeout:${options.timeout}`));
-					}
-				}, timeoutMs);
-			}
-			try {
-				this.send({
-					id,
-					method: "exec",
-					params: { command, cwd: options.cwd ?? this.cwd, env: options.env, timeout: options.timeout },
-				});
-			} catch (error) {
-				this.execPending.delete(id);
-				cleanup();
-				reject(error instanceof Error ? error : new Error(String(error)));
-			}
-		});
-	}
-
-	async access(path: string, mode?: ToolAccessMode): Promise<void> {
-		await this.request("access", { path, mode });
-	}
-
-	async readFile(path: string): Promise<Buffer> {
-		const result = await this.request("readFile", { path });
-		if (!isRecord(result)) throw new Error("Invalid remote readFile response");
-		return Buffer.from(requireString(result.contentBase64, "contentBase64"), "base64");
-	}
-
-	async writeFile(path: string, content: string | Buffer): Promise<void> {
-		await this.request("writeFile", { path, contentBase64: Buffer.from(content).toString("base64") });
-	}
-
-	async uploadFile(sourcePath: string, destinationPath: string): Promise<void> {
-		const uploadId = `remote-${this.nextId++}`;
-		await new Promise<void>((resolve, reject) => {
-			this.pending.set(uploadId, { resolve: () => resolve(), reject });
-			try {
-				this.send({ id: uploadId, method: "uploadFileStart", params: { path: destinationPath } });
-			} catch (error) {
-				this.pending.delete(uploadId);
-				reject(error instanceof Error ? error : new Error(String(error)));
-			}
-		});
-		try {
-			for await (const chunk of createReadStream(sourcePath, { highWaterMark: 64 * 1024 })) {
-				const buffer = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
-				await this.request("uploadFileChunk", { uploadId, dataBase64: buffer.toString("base64") });
-			}
-			await this.request("uploadFileEnd", { uploadId });
+			const handshake = await operations.client.start();
+			operations.cwd = handshake.workspace.root;
+			operations.workspacePathFlavor = handshake.workspace.pathFlavor;
+			operations.workspaceId = handshake.workspace.id;
+			await operations.refreshRemoteLspStatus();
+			return operations;
 		} catch (error) {
-			await this.request("uploadFileCancel", { uploadId }).catch(() => undefined);
+			socket.terminate();
 			throw error;
 		}
 	}
 
-	async downloadFile(sourcePath: string, destinationPath: string): Promise<void> {
-		const id = `remote-${this.nextId++}`;
-		const stream = createWriteStream(destinationPath);
-		await new Promise<void>((resolve, reject) => {
-			const cleanup = () => stream.off("error", onStreamError);
-			const onStreamError = (error: Error) => {
-				cleanup();
-				this.fileDownloadPending.delete(id);
-				reject(error);
-			};
-			stream.once("error", onStreamError);
-			this.fileDownloadPending.set(id, {
-				stream,
-				writePromise: Promise.resolve(),
-				resolve: () => {
-					cleanup();
-					resolve();
-				},
-				reject: (error) => {
-					cleanup();
-					reject(error);
-				},
-			});
-			try {
-				this.send({ id, method: "downloadFile", params: { path: sourcePath } });
-			} catch (error) {
-				cleanup();
-				this.fileDownloadPending.delete(id);
-				stream.destroy();
-				reject(error instanceof Error ? error : new Error(String(error)));
+	resolveWorkspaceToolExecution(name: string, parameterSchema: unknown): "remote" | "unavailable" {
+		const schemaHash = hashRemoteWorkspaceJson(parameterSchema);
+		const catalogTool = this.client.handshake?.catalog.tools.find((tool) => tool.name === name);
+		if (!catalogTool) return "unavailable";
+		if (catalogTool.schemaHash !== schemaHash) {
+			throw new Error(`Remote tool schema does not match the local canonical definition: ${name}`);
+		}
+		this.localToolSchemas.set(name, schemaHash);
+		this.client.setLocalToolSchemas(this.localToolSchemas);
+		return "remote";
+	}
+
+	async executeWorkspaceTool(
+		name: string,
+		invocation: WorkspaceToolRemoteInvocation,
+	): Promise<AgentToolResult<unknown>> {
+		const invoke = async () => {
+			await this.client.waitForCatalogRefresh();
+			const handshake = this.client.handshake;
+			if (!handshake) throw new Error("Remote workspace protocol handshake is unavailable");
+			const catalogTool = handshake.catalog.tools.find((tool) => tool.name === name);
+			const schemaHash = this.localToolSchemas.get(name);
+			if (!catalogTool || !schemaHash || catalogTool.schemaHash !== schemaHash) {
+				throw new Error(`Remote tool is unavailable or has schema drift: ${name}`);
 			}
+			const result = requireRecord(
+				await this.client.request(
+					"tool.invoke",
+					{
+						generation: handshake.catalog.generation,
+						catalogHash: handshake.catalogHash,
+						toolName: name,
+						schemaHash,
+						argumentsPrepared: true,
+						arguments: invocation.arguments,
+						executionOptions: invocation.executionOptions,
+					},
+					{
+						signal: invocation.signal,
+						onUpdate: invocation.onUpdate
+							? (update) =>
+									invocation.onUpdate!(parseRemoteWorkspaceToolResult(update) as AgentToolResult<unknown>)
+							: undefined,
+					},
+				),
+				"tool result",
+			);
+			const toolResult = result;
+			if (!Array.isArray(toolResult.content)) throw new Error("Invalid remote workspace tool result content");
+			if (name.startsWith("lsp_")) await this.refreshRemoteLspStatus().catch(() => undefined);
+			return {
+				content: toolResult.content as AgentToolResult<unknown>["content"],
+				details: toolResult.details,
+				...(typeof toolResult.terminate === "boolean" ? { terminate: toolResult.terminate } : {}),
+			};
+		};
+		try {
+			return await invoke();
+		} catch (error) {
+			if (
+				error instanceof RemoteWorkspaceRequestError &&
+				error.code === "stale_generation" &&
+				error.executionState === "not_started"
+			) {
+				return invoke();
+			}
+			throw error;
+		}
+	}
+
+	getRemoteLspStatus(): RemoteLspStatus {
+		return structuredClone(this.remoteLspStatus);
+	}
+
+	onWorkspaceToolCatalogChanged(listener: () => void | Promise<void>): () => void {
+		this.catalogListeners.add(listener);
+		return () => this.catalogListeners.delete(listener);
+	}
+
+	private async refreshRemoteLspStatus(): Promise<void> {
+		if (!this.client.handshake?.catalog.operations.includes("lsp.status")) {
+			this.remoteLspStatus = { enabled: false, servers: [] };
+			return;
+		}
+		this.remoteLspStatus = (await this.client.request("lsp.status", {})) as RemoteLspStatus;
+	}
+
+	private request(method: Parameters<RemoteWorkspaceClientProtocol["request"]>[0], params: unknown) {
+		return this.client.request(method, params);
+	}
+
+	async exec(command: string, options: ToolExecOptions): Promise<{ exitCode: number | null }> {
+		const result = requireRecord(
+			await this.client.request(
+				"workspace.exec",
+				{ command, cwd: options.cwd ?? this.cwd },
+				{
+					signal: options.signal,
+					timeoutMs: options.timeout === undefined ? undefined : Math.round(options.timeout * 1000),
+					onUpdate: (update) => {
+						const record = requireRecord(update, "exec update");
+						options.onData(
+							decodeCanonicalBase64(requireString(record.dataBase64, "exec update data"), 1024 * 1024),
+						);
+					},
+				},
+			),
+			"exec result",
+		);
+		return { exitCode: typeof result.exitCode === "number" ? result.exitCode : null };
+	}
+
+	async access(path: string, mode?: ToolAccessMode): Promise<void> {
+		await this.request("workspace.access", { path, ...(mode ? { mode } : {}) });
+	}
+
+	async readFile(path: string): Promise<Buffer> {
+		const result = requireRecord(await this.request("workspace.read", { path }), "read result");
+		return decodeCanonicalBase64(requireString(result.contentBase64, "read content"), Number.MAX_SAFE_INTEGER);
+	}
+
+	async writeFile(path: string, content: string | Buffer): Promise<void> {
+		await this.request("workspace.write", { path, contentBase64: Buffer.from(content).toString("base64") });
+	}
+
+	async readResource(path: string): Promise<Buffer> {
+		if (!this.client.handshake?.catalog.operations.includes("resource.read")) {
+			throw new Error("Remote workspace does not expose resource reads");
+		}
+		const result = requireRecord(await this.request("resource.read", { path }), "resource read result");
+		return decodeCanonicalBase64(
+			requireString(result.contentBase64, "resource read content"),
+			Number.MAX_SAFE_INTEGER,
+		);
+	}
+
+	async uploadFile(sourcePath: string, destinationPath: string): Promise<void> {
+		const content = await fsReadFile(sourcePath);
+		const sha256 = createHash("sha256").update(content).digest("hex");
+		const handle = this.client.beginRequest("transfer.upload", {
+			path: destinationPath,
+			length: content.byteLength,
+			sha256,
+			overwrite: true,
 		});
+		const chunkBytes = this.client.handshake?.limits.maxTransferChunkBytes ?? 64 * 1024;
+		for (let offset = 0; offset < content.byteLength; offset += chunkBytes) {
+			await handle.sendTransferChunk(content.subarray(offset, Math.min(offset + chunkBytes, content.byteLength)));
+		}
+		await handle.finishTransfer(content.byteLength, sha256);
+		await handle.result;
+	}
+
+	async downloadFile(sourcePath: string, destinationPath: string): Promise<void> {
+		const stream = createWriteStream(destinationPath);
+		try {
+			await this.client.request(
+				"transfer.download",
+				{ path: sourcePath },
+				{
+					onTransferChunk: (chunk) => writeStreamChunk(stream, chunk),
+				},
+			);
+			await endWriteStream(stream);
+		} catch (error) {
+			stream.destroy();
+			throw error;
+		}
 	}
 
 	async mkdir(path: string, options: { recursive?: boolean } = {}): Promise<void> {
-		await this.request("mkdir", { path, recursive: options.recursive ?? false });
+		await this.request("workspace.mkdir", { path, recursive: options.recursive ?? false });
 	}
 
 	async stat(path: string): Promise<ToolFileStat> {
-		const result = await this.request("stat", { path });
-		if (!isRecord(result)) throw new Error("Invalid remote stat response");
-		const kind = optionalString(result.kind) ?? optionalString(result.type);
-		const isDirectory = result.isDirectory === true || kind === "directory" || kind === "dir";
-		const isFile = result.isFile === true || kind === "file";
-		return { isDirectory: () => isDirectory, isFile: () => isFile };
+		const result = requireRecord(await this.request("workspace.stat", { path }), "stat result");
+		return {
+			isDirectory: () => result.kind === "directory",
+			isFile: () => result.kind === "file",
+		};
 	}
 
 	async readdir(path: string): Promise<string[]> {
-		const result = await this.request("readdir", { path });
-		if (Array.isArray(result)) return result.filter((entry): entry is string => typeof entry === "string");
-		if (!isRecord(result) || !Array.isArray(result.entries)) throw new Error("Invalid remote readdir response");
-		return result.entries.filter((entry): entry is string => typeof entry === "string");
+		const result = requireRecord(await this.request("workspace.readdir", { path }), "readdir result");
+		if (!Array.isArray(result.entries) || !result.entries.every((entry) => typeof entry === "string")) {
+			throw new Error("Invalid remote workspace readdir entries");
+		}
+		return result.entries;
 	}
 
 	async glob(pattern: string, cwd: string, options: ToolGlobOptions): Promise<string[]> {
-		const result = await this.request("glob", { pattern, cwd, ignore: options.ignore, limit: options.limit });
-		if (Array.isArray(result)) return result.filter((entry): entry is string => typeof entry === "string");
-		if (!isRecord(result) || !Array.isArray(result.matches)) throw new Error("Invalid remote glob response");
-		return result.matches.filter((entry): entry is string => typeof entry === "string");
+		const result = requireRecord(
+			await this.request("workspace.glob", { pattern, cwd, ignore: options.ignore, limit: options.limit }),
+			"glob result",
+		);
+		if (!Array.isArray(result.matches) || !result.matches.every((entry) => typeof entry === "string")) {
+			throw new Error("Invalid remote workspace glob matches");
+		}
+		return result.matches;
 	}
 
 	async grep(options: ToolGrepOptions): Promise<ToolGrepResult> {
-		const result = await this.request("grep", options as unknown as Record<string, unknown>);
-		if (!isRecord(result)) throw new Error("Invalid remote grep response");
-		const matches = Array.isArray(result.matches) ? result.matches : [];
+		const result = requireRecord(await this.request("workspace.grep", options), "grep result");
+		if (!Array.isArray(result.matches)) throw new Error("Invalid remote workspace grep matches");
 		return {
 			isDirectory: result.isDirectory === true,
-			matches: matches.flatMap((entry): ToolGrepMatch[] => {
-				if (!isRecord(entry)) return [];
-				const filePath = optionalString(entry.filePath);
-				const lineNumber = optionalNumber(entry.lineNumber);
-				if (!filePath || lineNumber === undefined) return [];
-				return [{ filePath, lineNumber, lineText: optionalString(entry.lineText) }];
+			matches: result.matches.map((entry) => {
+				const match = requireRecord(entry, "grep match");
+				return {
+					filePath: requireString(match.filePath, "grep file path"),
+					lineNumber: typeof match.lineNumber === "number" ? match.lineNumber : 0,
+					...(typeof match.lineText === "string" ? { lineText: match.lineText } : {}),
+				};
 			}),
 		};
 	}
 
 	async detectImageMimeType(path: string): Promise<string | null | undefined> {
-		const result = await this.request("detectImageMimeType", { path });
-		if (!isRecord(result)) return undefined;
-		const mimeType = optionalString(result.mimeType);
-		return mimeType && ["image/jpeg", "image/png", "image/gif", "image/webp"].includes(mimeType) ? mimeType : null;
+		const result = requireRecord(await this.request("workspace.detect_image_mime", { path }), "image MIME result");
+		return typeof result.mimeType === "string" ? result.mimeType : null;
 	}
 
 	getBackendInfo(): ToolBackendInfo {
-		return { type: "remote", cwd: this.cwd, url: this.url, protocol: this.protocol, configured: true };
+		return {
+			type: "remote",
+			cwd: this.cwd,
+			url: this.url,
+			protocol: this.protocol,
+			configured: true,
+			workspace: { id: this.workspaceId, root: this.cwd, pathFlavor: this.workspacePathFlavor },
+		};
 	}
 
-	async dispose(): Promise<void> {
-		this.stopKeepAlive();
-		this.socket.close();
+	dispose(): Promise<void> {
+		this.disposePromise ??= this.client.close().catch(() => {
+			this.socket.terminate();
+		});
+		return this.disposePromise;
 	}
 }
 
-export function createRemoteToolOperations(url: string): Promise<RemoteToolOperations> {
-	return RemoteToolOperations.connect(url);
+export function createRemoteToolOperations(
+	url: string,
+	options?: RemoteToolOperationsConnectOptions,
+): Promise<RemoteToolOperations> {
+	return RemoteToolOperations.connect(url, options);
 }
 
 export function createSshToolOperations(target: string): Promise<SshToolOperations> {

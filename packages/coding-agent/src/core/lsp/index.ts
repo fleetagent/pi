@@ -54,9 +54,12 @@ export {
 } from "./file-sync.ts";
 export {
 	createLspRuntimeState,
+	createLspToolDefinitions,
+	LSP_TOOL_NAMES,
 	type LspLifecycleOptions,
 	type LspRuntimeState,
 	type LspSessionStatus,
+	type LspToolName,
 	registerLspLifecycleHandlers,
 	registerStandaloneLspLifecycleHandlers,
 } from "./integration.ts";

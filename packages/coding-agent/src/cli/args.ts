@@ -265,9 +265,11 @@ ${chalk.bold("Commands:")}
   ${APP_NAME} update [source|self|pi]   Update pi and installed extensions
   ${APP_NAME} list                      List installed extensions from settings
   ${APP_NAME} config                    Open TUI to enable/disable package resources
+  ${APP_NAME} --daemon [options]        Start the remote workspace runtime
   ${APP_NAME} <command> --help          Show help for install/remove/uninstall/update/list
 
 ${chalk.bold("Options:")}
+  --daemon                       Start daemon mode; use --daemon --help for daemon options
   --provider <name>              Provider name (default: google)
   --model <pattern>              Model pattern or ID (supports "provider/id" and optional ":<thinking>")
   --api-key <key>                API key (defaults to env vars)
@@ -424,6 +426,7 @@ ${chalk.bold("Built-in Tool Names:")}
   grep   - Search file contents (read-only, off by default)
   find   - Find files by glob pattern (read-only, off by default)
   ls     - List directory contents (read-only, off by default)
+  websearch - Search the web for relevant links using DuckDuckGo, Brave Search, or Firecrawl
 
 ${chalk.bold("Conditional LSP Tool Names:")}
   Requires a valid LSP configuration; unavailable when LSP is disabled or unconfigured.

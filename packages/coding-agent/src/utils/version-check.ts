@@ -17,6 +17,11 @@ interface ParsedVersion {
 	prerelease?: string;
 }
 
+function isTruthyEnvFlag(value: string | undefined): boolean {
+	if (value === undefined) return false;
+	return ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
+}
+
 function parsePackageVersion(version: string): ParsedVersion | undefined {
 	const match = version.trim().match(/^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+.*)?$/);
 	if (!match) {
@@ -58,7 +63,7 @@ export async function getLatestPiRelease(
 	currentVersion: string,
 	options: { timeoutMs?: number } = {},
 ): Promise<LatestPiRelease | undefined> {
-	if (process.env.PI_SKIP_VERSION_CHECK || process.env.PI_OFFLINE) return undefined;
+	if (isTruthyEnvFlag(process.env.PI_SKIP_VERSION_CHECK) || isTruthyEnvFlag(process.env.PI_OFFLINE)) return undefined;
 
 	const response = await fetch(LATEST_VERSION_URL, {
 		headers: {

@@ -37,6 +37,7 @@ export interface LspManagerOptions extends LspRouterOptions {
 	configuration?: ResolvedLspConfiguration;
 	createClient?: (options: LspClientOptions) => LspClient;
 	connectionFactories?: LspConnectionFactoryRegistry;
+	resolveConnectionFactory?: (transport: LspRouteTarget["server"]["transport"]) => LspConnectionFactory;
 	getToolBackendInfo?: () => ToolBackendInfo;
 	getToolOperations?: () => ToolOperations;
 }
@@ -83,6 +84,9 @@ export class LspManager {
 	private rootDir: string;
 	private readonly createClient: (options: LspClientOptions) => LspClient;
 	private readonly connectionFactories: LspConnectionFactoryRegistry;
+	private readonly resolveConnectionFactory: (
+		transport: LspRouteTarget["server"]["transport"],
+	) => LspConnectionFactory;
 	private readonly getToolBackendInfo: (() => ToolBackendInfo) | undefined;
 	private readonly getToolOperations: (() => ToolOperations) | undefined;
 	private toolBackendInfo: ToolBackendInfo | undefined;
@@ -115,6 +119,9 @@ export class LspManager {
 		this.router = new LspRouter(this.rootDir, this.configuration, { pathExists: options.pathExists });
 		this.createClient = options.createClient ?? ((clientOptions) => new LspClient(clientOptions));
 		this.connectionFactories = options.connectionFactories ?? {};
+		this.resolveConnectionFactory =
+			options.resolveConnectionFactory ??
+			((transport) => resolveLspConnectionFactory(transport, this.connectionFactories));
 		this.getToolBackendInfo = options.getToolBackendInfo;
 		this.getToolOperations = options.getToolOperations;
 	}
@@ -488,7 +495,7 @@ export class LspManager {
 			};
 		});
 		const instantiated = new Set(runningStatuses.map((status) => status.serverId));
-		return [
+		const statuses = [
 			...runningStatuses,
 			...this.configuration.servers
 				.filter((server) => !instantiated.has(server.id))
@@ -510,6 +517,13 @@ export class LspManager {
 					}),
 				),
 		];
+		const serverOrder = new Map(this.configuration.servers.map((server, index) => [server.id, index]));
+		return statuses.sort(
+			(left, right) =>
+				(serverOrder.get(left.serverId) ?? Number.MAX_SAFE_INTEGER) -
+					(serverOrder.get(right.serverId) ?? Number.MAX_SAFE_INTEGER) ||
+				(left.instanceKey ?? "").localeCompare(right.instanceKey ?? ""),
+		);
 	}
 	private async notifyClientStarted(
 		route: LspClientRoute,
@@ -647,7 +661,7 @@ export class LspManager {
 		this.transportStatuses.set(target.instanceKey, transportStatus);
 		let connectionFactory: LspConnectionFactory;
 		try {
-			connectionFactory = resolveLspConnectionFactory(target.server.transport, this.connectionFactories);
+			connectionFactory = this.resolveConnectionFactory(target.server.transport);
 		} catch (error) {
 			transportStatus.lastError = error instanceof Error ? error.message : String(error);
 			transportStatus.state = "failed";

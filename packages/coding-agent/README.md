@@ -53,7 +53,8 @@ I regularly publish my own `pi-mono` work sessions here:
   - [Compaction](#compaction)
 - [Settings](#settings)
 - [Language Servers](#language-servers)
-- [Context Files](#context-files)
+- [Remote Daemon](#remote-daemon)
+- [Docker Sandbox](#docker-sandbox)
 - [Customization](#customization)
   - [Prompt Templates](#prompt-templates)
   - [Skills](#skills)
@@ -298,6 +299,32 @@ Use `--offline` or `PI_OFFLINE=1` to disable all startup network operations desc
 ## Language Servers
 
 Pi supports explicitly configured managed stdio servers, attached TCP/Unix socket/named-pipe endpoints, and host-provided connections with managed or attached semantics. It does not bundle or automatically select a language server. Untrusted project settings cannot add or positively activate transports; malformed or unreadable LSP sources fail closed without terminating Pi, and `--no-lsp` is the per-invocation recovery path. See [docs/lsp.md](docs/lsp.md) for copyable configurations, remote path mapping, project trust, workspace roots, lifecycle ownership, SDK/extension APIs, migration, and troubleshooting.
+
+---
+
+## Remote Daemon
+
+`pi --daemon` starts an integrated remote workspace daemon from the `@fleetagent/pi-coding-agent` package. The local Pi process remains the orchestrator for model calls, credentials, sessions, prompts, extensions, subagents, RPC, and UI; the daemon owns one confined workspace for canonical tools, project resources, file transfer, optional process execution, and optional colocated LSP.
+
+Start a daemon:
+
+```bash
+PI_DAEMON_TOKEN='long-random-token' pi --daemon --daemon-cwd /workspace --daemon-port 8787
+```
+
+Connect from a local Pi process:
+
+```bash
+PI_REMOTE_TOKEN='long-random-token' pi --remote ws://127.0.0.1:8787/pi/workspace
+```
+
+The retired `@fleetagent/pi-daemon` package and `pi-daemon` binary are not supported. See [docs/daemon.md](docs/daemon.md) for topology, security, configuration, Docker, LSP/resources/extensions behavior, troubleshooting, and migration.
+
+---
+
+## Docker Sandbox
+
+Interactive `/sandbox start|list|stop` manages a Pi-owned Docker container for the current workspace. The command is user-only and appears in slash-command completion, but is hidden from model-visible command catalogs, tools, prompts, skills, and rules. On start, local Pi keeps model/session/UI orchestration and routes workspace tools/resources through the container's `pi --daemon` at `/workspace`. See [docs/sandbox.md](docs/sandbox.md) for command syntax, image configuration, local base-image builds, troubleshooting, and Docker security limits.
 
 ---
 
@@ -585,7 +612,10 @@ cat README.md | pi -p "Summarize this text"
 | `--ssh <target>` | Run built-in tools over SSH (`user@host` or `user@host:/path`) |
 | `--ssh-deferred` | Start in SSH sandbox mode and configure the target later |
 | `--ssh-cwd <path>` | Stable remote cwd for `--ssh-deferred` |
-
+| `--remote <url>` | Run built-in workspace tools through a `pi --daemon` WebSocket backend |
+| `--remote-deferred` | Start with a deferred daemon backend and connect later with `/remote daemon <ws://url>` |
+| `--remote-cwd <path>` | Stable daemon workspace cwd for deferred remote mode |
+| `--daemon` | Start the integrated remote workspace daemon instead of a normal Pi session |
 Available built-in tools: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`, `subagent`, and—when externally configured—`lsp_diagnostics`, `lsp_hover`, `lsp_definition`, `lsp_references`, `lsp_rename`, and `lsp_code_actions`.
 
 ### Resource Options
@@ -656,6 +686,11 @@ pi --tools read,grep,find,ls -p "Review the code"
 # Run tools over SSH
 pi --ssh user@host:/workspace "Review the code"
 
+# Start an integrated remote workspace daemon
+PI_DAEMON_TOKEN='long-random-token' pi --daemon --daemon-cwd /workspace --daemon-port 8787
+
+# Connect to that daemon from the orchestrating Pi
+PI_REMOTE_TOKEN='long-random-token' pi --remote ws://127.0.0.1:8787/pi/workspace
 # Start in deferred SSH sandbox mode
 pi --ssh-deferred --ssh-cwd /workspace --mode rpc
 
@@ -669,6 +704,7 @@ pi --thinking high "Solve this complex problem"
 |----------|-------------|
 | `PI_CODING_AGENT_DIR` | Override config directory (default: `~/.pi/agent`) |
 | `PI_CODING_AGENT_SESSION_DIR` | Override session storage directory (overridden by `--session-dir`) |
+| `PI_REMOTE_TOKEN` | Bearer token sent by the Pi remote-workspace client to `pi --daemon` |
 | `PI_REMOTE_SESSION_BASE_URL` | Remote session service URL (overridden by `--remote-session-base-url`) |
 | `PI_REMOTE_SESSION_TOKEN` | Bearer token for remote session service (overridden by `--remote-session-token`) |
 | `PI_REMOTE_PROJECT_ID` | Project id sent to remote session service (overridden by `--remote-project-id`) |
@@ -678,7 +714,7 @@ pi --thinking high "Solve this complex problem"
 | `PI_TELEMETRY` | Override install/update telemetry. Use `1`/`true`/`yes` to enable or `0`/`false`/`no` to disable. This does not disable update checks |
 | `PI_CACHE_RETENTION` | Set to `long` for extended prompt cache (Anthropic: 1h, OpenAI: 24h) |
 | `VISUAL`, `EDITOR` | External editor for Ctrl+G |
-
+| `PI_DAEMON_HOST`, `PI_DAEMON_PORT`, `PI_DAEMON_CWD`, `PI_DAEMON_TOKEN` | Integrated daemon bind address, port, workspace root, and bearer token |
 ---
 
 ## Contributing & Development

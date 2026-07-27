@@ -43,6 +43,8 @@ For the full first-run flow, see [Quickstart](quickstart.md).
 - [Providers](providers.md) - subscription and API-key setup for built-in providers.
 - [Settings](settings.md) - global and project settings.
 - [Language Server Protocol](lsp.md) - configure spawned servers, attached endpoints, host connections, and remote-backend path mappings.
+- [Remote Daemon](daemon.md) - run `pi --daemon` as a confined remote workspace runtime.
+- [Docker Sandbox](sandbox.md) - hidden user-only `/sandbox` command for Docker-backed workspace execution.
 - [Keybindings](keybindings.md) - default shortcuts and custom keybindings.
 - [Sessions](sessions.md) - session management, branching, and tree navigation.
 - [Compaction](compaction.md) - context compaction and branch summarization.

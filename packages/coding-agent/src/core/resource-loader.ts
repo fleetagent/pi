@@ -11,6 +11,7 @@ import { canonicalizePath, isLocalPath, resolvePath } from "../utils/paths.ts";
 import { createEventBus, type EventBus } from "./event-bus.ts";
 import { createExtensionRuntime, loadExtensionFromFactory, loadExtensions } from "./extensions/loader.ts";
 import type { Extension, ExtensionFactory, ExtensionRuntime, LoadExtensionsResult } from "./extensions/types.ts";
+import { dirnamePortablePath, joinPortablePath, pathComparisonValue, relativeWithin } from "./lsp/portable-path.ts";
 import { DefaultPackageManager, type PathMetadata } from "./package-manager.ts";
 import type { PromptTemplate } from "./prompt-templates.ts";
 import { loadPromptTemplates, loadPromptTemplatesWithOperations } from "./prompt-templates.ts";
@@ -19,10 +20,44 @@ import { loadRules, loadRulesWithOperations } from "./rules.ts";
 import { SettingsManager } from "./settings-manager.ts";
 import type { Skill } from "./skills.ts";
 import { loadSkills, loadSkillsWithOperations } from "./skills.ts";
-import { createSourceInfo, type SourceInfo } from "./source-info.ts";
+import { createSourceInfo, createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 import { resetTimings } from "./timings.ts";
-import type { ToolOperations } from "./tools/operations.ts";
+import type { ToolBackendInfo, ToolOperations } from "./tools/operations.ts";
+import type { WorkspaceIdentity } from "./workspace-identity.ts";
 
+export interface ProjectContextFile {
+	path: string;
+	content: string;
+	sourceInfo?: SourceInfo;
+}
+
+function mergeNamedResources<T extends { name: string; filePath: string }>(
+	primary: readonly T[],
+	secondary: readonly T[],
+	resourceType: "skill" | "rule",
+): { resources: T[]; diagnostics: ResourceDiagnostic[] } {
+	const resources = new Map(primary.map((resource) => [resource.name, resource]));
+	const diagnostics: ResourceDiagnostic[] = [];
+	for (const resource of secondary) {
+		const winner = resources.get(resource.name);
+		if (!winner) {
+			resources.set(resource.name, resource);
+			continue;
+		}
+		diagnostics.push({
+			type: "collision",
+			message: `name ${JSON.stringify(resource.name)} collision`,
+			path: resource.filePath,
+			collision: {
+				resourceType,
+				name: resource.name,
+				winnerPath: winner.filePath,
+				loserPath: resource.filePath,
+			},
+		});
+	}
+	return { resources: [...resources.values()], diagnostics };
+}
 export interface ResourceExtensionPaths {
 	skillPaths?: Array<{ path: string; metadata: PathMetadata }>;
 	rulePaths?: Array<{ path: string; metadata: PathMetadata }>;
@@ -36,9 +71,10 @@ export interface ResourceLoader {
 	getRules(): { rules: Rule[]; diagnostics: ResourceDiagnostic[] };
 	getPrompts(): { prompts: PromptTemplate[]; diagnostics: ResourceDiagnostic[] };
 	getThemes(): { themes: Theme[]; diagnostics: ResourceDiagnostic[] };
-	getAgentsFiles(): { agentsFiles: Array<{ path: string; content: string }> };
+	getAgentsFiles(): { agentsFiles: ProjectContextFile[] };
 	getSystemPrompt(): string | undefined;
 	getAppendSystemPrompt(): string[];
+	setToolOperations?(operations: ToolOperations | undefined): void;
 	extendResources(paths: ResourceExtensionPaths): void;
 	reload(): Promise<void>;
 }
@@ -89,14 +125,11 @@ function loadContextFileFromDir(dir: string): { path: string; content: string } 
 	return null;
 }
 
-export function loadProjectContextFiles(options: {
-	cwd: string;
-	agentDir: string;
-}): Array<{ path: string; content: string }> {
+export function loadProjectContextFiles(options: { cwd: string; agentDir: string }): ProjectContextFile[] {
 	const resolvedCwd = resolvePath(options.cwd);
 	const resolvedAgentDir = resolvePath(options.agentDir);
 
-	const contextFiles: Array<{ path: string; content: string }> = [];
+	const contextFiles: ProjectContextFile[] = [];
 	const seenPaths = new Set<string>();
 
 	const globalContext = loadContextFileFromDir(resolvedAgentDir);
@@ -105,7 +138,7 @@ export function loadProjectContextFiles(options: {
 		seenPaths.add(globalContext.path);
 	}
 
-	const ancestorContextFiles: Array<{ path: string; content: string }> = [];
+	const ancestorContextFiles: ProjectContextFile[] = [];
 
 	let currentDir = resolvedCwd;
 	const root = resolve("/");
@@ -132,13 +165,25 @@ export function loadProjectContextFiles(options: {
 async function loadContextFileFromDirWithOperations(
 	operations: ToolOperations,
 	dir: string,
-): Promise<{ path: string; content: string } | null> {
+	workspace?: WorkspaceIdentity,
+): Promise<ProjectContextFile | null> {
 	const candidates = ["AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"];
 	for (const filename of candidates) {
-		const filePath = join(dir, filename);
+		const filePath = joinPortablePath(dir, filename);
 		try {
 			await operations.access(filePath, "read");
-			return { path: filePath, content: (await operations.readFile(filePath)).toString("utf-8") };
+			return {
+				path: filePath,
+				content: (await operations.readFile(filePath)).toString("utf-8"),
+				sourceInfo: {
+					path: filePath,
+					source: workspace ? "remote" : "ssh",
+					scope: "project",
+					origin: "top-level",
+					baseDir: dir,
+					...(workspace ? { workspace } : {}),
+				},
+			};
 		} catch {}
 	}
 	return null;
@@ -148,8 +193,9 @@ async function loadProjectContextFilesWithOperations(options: {
 	cwd: string;
 	agentDir: string;
 	operations: ToolOperations;
-}): Promise<Array<{ path: string; content: string }>> {
-	const contextFiles: Array<{ path: string; content: string }> = [];
+	workspace?: WorkspaceIdentity;
+}): Promise<ProjectContextFile[]> {
+	const contextFiles: ProjectContextFile[] = [];
 	const seenPaths = new Set<string>();
 	const globalContext = loadContextFileFromDir(resolvePath(options.agentDir));
 	if (globalContext) {
@@ -157,22 +203,51 @@ async function loadProjectContextFilesWithOperations(options: {
 		seenPaths.add(globalContext.path);
 	}
 
-	const ancestorContextFiles: Array<{ path: string; content: string }> = [];
-	let currentDir = resolvePath(options.cwd);
-	const root = resolve("/");
+	const ancestorContextFiles: ProjectContextFile[] = [];
+	let currentDir = options.cwd;
 	while (true) {
-		const contextFile = await loadContextFileFromDirWithOperations(options.operations, currentDir);
+		const contextFile = await loadContextFileFromDirWithOperations(options.operations, currentDir, options.workspace);
 		if (contextFile && !seenPaths.has(contextFile.path)) {
 			ancestorContextFiles.unshift(contextFile);
 			seenPaths.add(contextFile.path);
 		}
-		if (currentDir === root) break;
-		const parentDir = resolve(currentDir, "..");
+		if (
+			options.workspace &&
+			pathComparisonValue(currentDir, options.workspace.pathFlavor) ===
+				pathComparisonValue(options.workspace.root, options.workspace.pathFlavor)
+		)
+			break;
+		const parentDir = dirnamePortablePath(currentDir, options.workspace?.pathFlavor);
 		if (parentDir === currentDir) break;
 		currentDir = parentDir;
 	}
 	contextFiles.push(...ancestorContextFiles);
+	const sandboxContext = await loadSandboxContextFileWithOperations(options.operations, options.workspace);
+	if (sandboxContext && !seenPaths.has(sandboxContext.path)) contextFiles.push(sandboxContext);
 	return contextFiles;
+}
+
+async function loadSandboxContextFileWithOperations(
+	operations: ToolOperations,
+	workspace?: WorkspaceIdentity,
+): Promise<ProjectContextFile | null> {
+	if (!workspace || !operations.readResource) return null;
+	try {
+		const content = (await operations.readResource("SANDBOX.md")).toString("utf-8");
+		return {
+			path: "SANDBOX.md",
+			content,
+			sourceInfo: createSyntheticSourceInfo("SANDBOX.md", {
+				source: "remote",
+				scope: "project",
+				origin: "top-level",
+				baseDir: workspace.root,
+				workspace,
+			}),
+		};
+	} catch {
+		return null;
+	}
 }
 
 export interface DefaultResourceLoaderOptions {
@@ -212,8 +287,8 @@ export interface DefaultResourceLoaderOptions {
 		themes: Theme[];
 		diagnostics: ResourceDiagnostic[];
 	};
-	agentsFilesOverride?: (base: { agentsFiles: Array<{ path: string; content: string }> }) => {
-		agentsFiles: Array<{ path: string; content: string }>;
+	agentsFilesOverride?: (base: { agentsFiles: ProjectContextFile[] }) => {
+		agentsFiles: ProjectContextFile[];
 	};
 	systemPromptOverride?: (base: string | undefined) => string | undefined;
 	appendSystemPromptOverride?: (base: string[]) => string[];
@@ -257,8 +332,8 @@ export class DefaultResourceLoader implements ResourceLoader {
 		themes: Theme[];
 		diagnostics: ResourceDiagnostic[];
 	};
-	private agentsFilesOverride?: (base: { agentsFiles: Array<{ path: string; content: string }> }) => {
-		agentsFiles: Array<{ path: string; content: string }>;
+	private agentsFilesOverride?: (base: { agentsFiles: ProjectContextFile[] }) => {
+		agentsFiles: ProjectContextFile[];
 	};
 	private systemPromptOverride?: (base: string | undefined) => string | undefined;
 	private appendSystemPromptOverride?: (base: string[]) => string[];
@@ -272,7 +347,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 	private promptDiagnostics: ResourceDiagnostic[];
 	private themes: Theme[];
 	private themeDiagnostics: ResourceDiagnostic[];
-	private agentsFiles: Array<{ path: string; content: string }>;
+	private agentsFiles: ProjectContextFile[];
 	private systemPrompt?: string;
 	private appendSystemPrompt: string[];
 	private lastSkillPaths: string[];
@@ -359,7 +434,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 		return { themes: this.themes, diagnostics: this.themeDiagnostics };
 	}
 
-	getAgentsFiles(): { agentsFiles: Array<{ path: string; content: string }> } {
+	getAgentsFiles(): { agentsFiles: ProjectContextFile[] } {
 		return { agentsFiles: this.agentsFiles };
 	}
 
@@ -371,6 +446,10 @@ export class DefaultResourceLoader implements ResourceLoader {
 		return this.appendSystemPrompt;
 	}
 
+	setToolOperations(operations: ToolOperations | undefined): void {
+		this.toolOperations = operations;
+	}
+
 	private getInstructionOperations(): ToolOperations | undefined {
 		const backend = this.toolOperations?.getBackendInfo?.();
 		return (backend?.type === "ssh" || backend?.type === "remote") && backend.configured
@@ -380,43 +459,55 @@ export class DefaultResourceLoader implements ResourceLoader {
 
 	private getRemoteProjectInstructionResourcePaths(
 		cwd: string,
-		source: "ssh" | "remote",
+		backend:
+			| Extract<ToolBackendInfo, { type: "remote"; configured: true }>
+			| Extract<ToolBackendInfo, { type: "ssh" }>,
 	): {
 		skills: Array<{ path: string; metadata: PathMetadata }>;
 		rules: Array<{ path: string; metadata: PathMetadata }>;
 		prompts: Array<{ path: string; metadata: PathMetadata }>;
 	} {
-		const projectBaseDir = join(cwd, CONFIG_DIR_NAME);
+		const projectBaseDir = joinPortablePath(cwd, CONFIG_DIR_NAME);
 		const projectMetadata: PathMetadata = {
-			source,
+			source: backend.type,
 			scope: "project",
 			origin: "top-level",
 			baseDir: projectBaseDir,
+			...(backend.type === "remote" ? { workspace: backend.workspace } : {}),
 		};
 		const skills: Array<{ path: string; metadata: PathMetadata }> = [
-			{ path: join(projectBaseDir, "skills"), metadata: projectMetadata },
+			{ path: joinPortablePath(projectBaseDir, "skills"), metadata: projectMetadata },
 		];
 		const rules: Array<{ path: string; metadata: PathMetadata }> = [
-			{ path: join(projectBaseDir, "rules"), metadata: projectMetadata },
+			{ path: joinPortablePath(projectBaseDir, "rules"), metadata: projectMetadata },
 		];
 		const prompts: Array<{ path: string; metadata: PathMetadata }> = [
-			{ path: join(projectBaseDir, "prompts"), metadata: projectMetadata },
+			{ path: joinPortablePath(projectBaseDir, "prompts"), metadata: projectMetadata },
 		];
 
-		let currentDir = resolve(cwd);
-		const root = resolve("/");
+		let currentDir = cwd;
+		const boundary = backend.type === "remote" ? backend.workspace.root : undefined;
 		while (true) {
-			const agentsBaseDir = join(currentDir, ".agents");
+			const agentsBaseDir = joinPortablePath(currentDir, ".agents");
 			const agentsMetadata: PathMetadata = {
-				source,
+				source: backend.type,
 				scope: "project",
 				origin: "top-level",
 				baseDir: agentsBaseDir,
+				...(backend.type === "remote" ? { workspace: backend.workspace } : {}),
 			};
-			skills.push({ path: join(agentsBaseDir, "skills"), metadata: agentsMetadata });
-			rules.push({ path: join(agentsBaseDir, "rules"), metadata: agentsMetadata });
-			if (currentDir === root) break;
-			const parentDir = resolve(currentDir, "..");
+			skills.push({ path: joinPortablePath(agentsBaseDir, "skills"), metadata: agentsMetadata });
+			rules.push({ path: joinPortablePath(agentsBaseDir, "rules"), metadata: agentsMetadata });
+			if (
+				boundary &&
+				pathComparisonValue(currentDir, backend.type === "remote" ? backend.workspace.pathFlavor : undefined) ===
+					pathComparisonValue(boundary, backend.type === "remote" ? backend.workspace.pathFlavor : undefined)
+			)
+				break;
+			const parentDir = dirnamePortablePath(
+				currentDir,
+				backend.type === "remote" ? backend.workspace.pathFlavor : undefined,
+			);
 			if (parentDir === currentDir) break;
 			currentDir = parentDir;
 		}
@@ -547,13 +638,14 @@ export class DefaultResourceLoader implements ResourceLoader {
 			return resource.path;
 		};
 
-		const instructionBackendType = instructionOperations?.getBackendInfo?.()?.type;
-		const discoveredRemoteInstructionResourcePaths = instructionOperations
-			? this.getRemoteProjectInstructionResourcePaths(
-					instructionOperations.cwd,
-					instructionBackendType === "remote" ? "remote" : "ssh",
-				)
-			: { skills: [], rules: [], prompts: [] };
+		const instructionBackend = instructionOperations?.getBackendInfo?.();
+		const discoveredRemoteInstructionResourcePaths =
+			instructionOperations &&
+			instructionBackend &&
+			(instructionBackend.type === "ssh" || instructionBackend.type === "remote") &&
+			instructionBackend.configured
+				? this.getRemoteProjectInstructionResourcePaths(instructionOperations.cwd, instructionBackend)
+				: { skills: [], rules: [], prompts: [] };
 		const filterExistingRemoteInstructionPaths = async (
 			entries: Array<{ path: string; metadata: PathMetadata }>,
 		): Promise<Array<{ path: string; metadata: PathMetadata }>> => {
@@ -736,6 +828,15 @@ export class DefaultResourceLoader implements ResourceLoader {
 							cwd: instructionOperations.cwd,
 							agentDir: this.agentDir,
 							operations: instructionOperations,
+							workspace:
+								instructionOperations.getBackendInfo?.().type === "remote"
+									? (
+											instructionOperations.getBackendInfo?.() as Extract<
+												ToolBackendInfo,
+												{ type: "remote"; configured: true }
+											>
+										).workspace
+									: undefined,
 						})
 					: loadProjectContextFiles({ cwd: this.cwd, agentDir: this.agentDir }),
 		};
@@ -829,6 +930,10 @@ export class DefaultResourceLoader implements ResourceLoader {
 		if (!operations) return false;
 		const sourceInfo = this.findSourceInfoForPath(path, undefined, metadataByPath);
 		if (sourceInfo?.source === "ssh" || sourceInfo?.source === "remote") return true;
+		const backend = operations.getBackendInfo?.();
+		if (backend?.type === "remote" && backend.configured) {
+			return relativeWithin(backend.workspace.root, path) !== undefined;
+		}
 		const cwd = operations.cwd.endsWith(sep) ? operations.cwd : `${operations.cwd}${sep}`;
 		return path === operations.cwd || path.startsWith(cwd);
 	}
@@ -861,15 +966,10 @@ export class DefaultResourceLoader implements ResourceLoader {
 				skillPaths: localPaths,
 				includeDefaults: false,
 			});
-			const skillsByName = new Map<string, Skill>();
-			for (const skill of [...remoteResult.skills, ...localResult.skills]) {
-				if (!skillsByName.has(skill.name)) {
-					skillsByName.set(skill.name, skill);
-				}
-			}
+			const merged = mergeNamedResources(remoteResult.skills, localResult.skills, "skill");
 			skillsResult = {
-				skills: Array.from(skillsByName.values()),
-				diagnostics: [...remoteResult.diagnostics, ...localResult.diagnostics],
+				skills: merged.resources,
+				diagnostics: [...remoteResult.diagnostics, ...localResult.diagnostics, ...merged.diagnostics],
 			};
 		} else {
 			skillsResult = loadSkills({
@@ -946,15 +1046,10 @@ export class DefaultResourceLoader implements ResourceLoader {
 				rulePaths: localPaths,
 				includeDefaults: false,
 			});
-			const rulesByName = new Map<string, Rule>();
-			for (const rule of [...remoteResult.rules, ...localResult.rules]) {
-				if (!rulesByName.has(rule.name)) {
-					rulesByName.set(rule.name, rule);
-				}
-			}
+			const merged = mergeNamedResources(remoteResult.rules, localResult.rules, "rule");
 			rulesResult = {
-				rules: Array.from(rulesByName.values()),
-				diagnostics: [...remoteResult.diagnostics, ...localResult.diagnostics],
+				rules: merged.resources,
+				diagnostics: [...remoteResult.diagnostics, ...localResult.diagnostics, ...merged.diagnostics],
 			};
 		} else {
 			rulesResult = loadRules({
@@ -1120,6 +1215,12 @@ export class DefaultResourceLoader implements ResourceLoader {
 			}
 
 			for (const [sourcePath, metadata] of metadataByPath.entries()) {
+				if (metadata.workspace) {
+					if (relativeWithin(sourcePath, resourcePath) !== undefined) {
+						return createSourceInfo(resourcePath, metadata);
+					}
+					continue;
+				}
 				const normalizedSourcePath = resolve(sourcePath);
 				if (
 					normalizedResourcePath === normalizedSourcePath ||

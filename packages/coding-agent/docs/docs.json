@@ -32,6 +32,14 @@
           "path": "lsp.md"
         },
         {
+          "title": "Remote Daemon",
+          "path": "daemon.md"
+        },
+        {
+          "title": "Docker Sandbox",
+          "path": "sandbox.md"
+        },
+        {
           "title": "Sessions",
           "path": "sessions.md"
         },

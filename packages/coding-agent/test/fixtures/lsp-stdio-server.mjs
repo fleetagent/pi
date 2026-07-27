@@ -1,4 +1,9 @@
+import { writeFileSync } from "node:fs";
+
 let buffer = Buffer.alloc(0);
+let documentText = "";
+const exitMarkerArgument = process.argv.find((argument) => argument.startsWith("--exit-marker="));
+const exitMarker = exitMarkerArgument?.slice("--exit-marker=".length);
 
 function send(message) {
 	const body = Buffer.from(JSON.stringify(message));
@@ -20,10 +25,26 @@ function consume() {
 		buffer = buffer.subarray(bodyStart + length);
 		if (message.method === "initialize" && !process.argv.includes("--no-initialize")) {
 			process.stderr.write("faux server ready\n");
-			send({ jsonrpc: "2.0", id: message.id, result: { capabilities: { hoverProvider: true } } });
+			send({
+				jsonrpc: "2.0",
+				id: message.id,
+				result: {
+					capabilities: {
+						hoverProvider: true,
+						textDocumentSync: { openClose: true, change: 1, save: { includeText: true } },
+					},
+				},
+			});
+		} else if (message.method === "textDocument/didOpen") {
+			documentText = message.params?.textDocument?.text ?? "";
+		} else if (message.method === "textDocument/didChange") {
+			documentText = message.params?.contentChanges?.at(-1)?.text ?? documentText;
+		} else if (message.method === "textDocument/hover" && !process.argv.includes("--hang-hover")) {
+			send({ jsonrpc: "2.0", id: message.id, result: { contents: `fixture hover: ${documentText}` } });
 		} else if (message.method === "shutdown") {
 			send({ jsonrpc: "2.0", id: message.id, result: null });
 		} else if (message.method === "exit") {
+			if (exitMarker) writeFileSync(exitMarker, "exited");
 			process.exit(0);
 		}
 	}

@@ -15,6 +15,7 @@ type SubmitContext = {
 	};
 	flushPendingBashComponents: () => void;
 	onInputCallback?: (text: string) => void;
+	handleSandboxCommand: (text: string) => Promise<void>;
 	pendingUserInputs: string[];
 };
 
@@ -44,6 +45,7 @@ function createSubmitContext(): SubmitContext {
 			prompt: vi.fn(async () => {}),
 		},
 		flushPendingBashComponents: vi.fn(),
+		handleSandboxCommand: vi.fn(async () => {}),
 		pendingUserInputs: [],
 	};
 }

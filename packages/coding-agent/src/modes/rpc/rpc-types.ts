@@ -90,7 +90,7 @@ export type RpcCommand =
 
 	// Remote sandbox
 	| { id?: string; type: "set_remote_sandbox"; backend: "ssh"; remote: string; cwd?: string }
-	| { id?: string; type: "set_remote_sandbox"; backend: "daemon"; url: string }
+	| { id?: string; type: "set_remote_sandbox"; backend: "daemon"; url: string; token?: string }
 	| { id?: string; type: "clear_remote_sandbox" }
 	| { id?: string; type: "upload_file"; sourcePath: string; destinationPath: string }
 	| { id?: string; type: "download_file"; sourcePath: string; destinationPath: string }
