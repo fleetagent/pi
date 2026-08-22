@@ -17,6 +17,7 @@ import { Container, Markdown, Spacer, Text } from "@fleetagent/pi-tui";
 import { type Static, Type } from "typebox";
 import { getMarkdownTheme, type ThemeColor } from "../../modes/interactive/theme/theme.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
+import type { ToolOperations } from "./operations.ts";
 import {
 	type AgentConfig,
 	type AgentScope,
@@ -214,8 +215,36 @@ export interface SubagentRunInfo {
 	lastOutput?: string;
 }
 
+export type SubagentModelHint =
+	| "cheapest"
+	| "fastest"
+	| "strongest"
+	| "best-reasoning"
+	| "large-context"
+	| "same-as-parent"
+	| "balanced";
+
+export interface SessionSubagentConfig {
+	name: string;
+	description: string;
+	systemPrompt: string;
+	tools?: string[];
+	model?: string;
+	modelHint?: SubagentModelHint;
+	skills?: string[];
+	cwd?: string;
+	createdAt: string;
+	updatedAt: string;
+}
+
 export interface SubagentRunRegistry {
 	list(): SubagentRunInfo[];
+}
+
+export interface SubagentConfigRegistry {
+	list(): SessionSubagentConfig[];
+	upsert(config: SessionSubagentConfig): void;
+	get(name: string): SessionSubagentConfig | undefined;
 }
 
 interface PresentationSegment {
@@ -363,6 +392,7 @@ type OnUpdateCallback = (partial: AgentToolResult<SubagentDetails>) => void;
 
 export interface SubagentRunRequest {
 	cwd: string;
+	toolOperations?: ToolOperations;
 	prompt: string;
 	/** Human-readable delegated task, without wrapper markup. */
 	task: string;
@@ -371,6 +401,7 @@ export interface SubagentRunRequest {
 	systemPrompt: string;
 	model?: string;
 	tools?: string[];
+	skills?: string[];
 	continueSession?: string;
 	signal?: AbortSignal;
 	onMessage: (message: Message) => void;
@@ -391,8 +422,11 @@ interface SubagentTaskSpec {
 	responseFormat?: string;
 	systemPrompt?: string;
 	model?: string;
+	modelHint?: SubagentModelHint;
 	tools?: string[];
+	skills?: string[];
 	cwd?: string;
+	toolOperations?: ToolOperations;
 	continueSession?: string;
 }
 
@@ -414,6 +448,7 @@ async function runSingleAgent(
 	signal: AbortSignal | undefined,
 	onUpdate: OnUpdateCallback | undefined,
 	makeDetails: (results: SubagentResult[]) => SubagentDetails,
+	resolveModelHintOption: ((hint: SubagentModelHint) => string | undefined) | undefined,
 ): Promise<SubagentResult> {
 	const preset = spec.agent ? agents.find((agent) => agent.name === spec.agent) : undefined;
 	const agentName = spec.agent ?? "ad-hoc";
@@ -433,9 +468,6 @@ async function runSingleAgent(
 		};
 	}
 
-	const effectiveModel = spec.model ?? preset?.model ?? inheritedModel;
-	const effectiveTools = spec.tools ?? preset?.tools;
-	const effectiveSystemPrompt = spec.systemPrompt ?? preset?.systemPrompt ?? GENERIC_SYSTEM_PROMPT;
 	const currentResult: SubagentResult = {
 		status: "running",
 		agent: agentName,
@@ -446,9 +478,29 @@ async function runSingleAgent(
 		messages: [],
 		stderr: "",
 		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
-		model: effectiveModel,
 		step,
 	};
+	const effectiveModel =
+		spec.model ??
+		(spec.modelHint
+			? resolveModelHint(spec.modelHint, resolveModelHintOption, `task "${agentName}"`, currentResult)
+			: undefined) ??
+		preset?.model ??
+		(preset?.modelHint
+			? resolveModelHint(
+					preset.modelHint as SubagentModelHint,
+					resolveModelHintOption,
+					`agent "${agentName}"`,
+					currentResult,
+				)
+			: undefined) ??
+		inheritedModel;
+	const effectiveTools = spec.tools ?? preset?.tools;
+	const effectiveSkills = spec.skills ?? preset?.skills;
+	const effectiveCwd = spec.cwd ?? preset?.cwd ?? defaultCwd;
+	const effectiveSystemPrompt = spec.systemPrompt ?? preset?.systemPrompt ?? GENERIC_SYSTEM_PROMPT;
+	currentResult.model = effectiveModel;
+	if (currentResult.status === "failed") return currentResult;
 	if (signal?.aborted) {
 		currentResult.status = "failed";
 		currentResult.exitCode = 1;
@@ -505,7 +557,8 @@ async function runSingleAgent(
 	let outcome: SubagentRunOutcome;
 	try {
 		outcome = await runner({
-			cwd: spec.cwd ?? defaultCwd,
+			cwd: effectiveCwd,
+			toolOperations: spec.toolOperations,
 			prompt: formatSubagentTaskPrompt(spec.task, spec.responseFormat),
 			task: spec.task,
 			agent: agentName,
@@ -513,6 +566,7 @@ async function runSingleAgent(
 			systemPrompt: effectiveSystemPrompt,
 			model: effectiveModel,
 			tools: effectiveTools,
+			skills: effectiveSkills,
 			continueSession: spec.continueSession,
 			signal,
 			onMessage,
@@ -540,9 +594,63 @@ async function runSingleAgent(
 
 const MODEL_DESCRIPTION = "Model for this task. Omit to inherit the parent model";
 const STEP_MODEL_DESCRIPTION = "Model for this step. Omit to inherit the parent model";
+const MODEL_HINT_VALUES = [
+	"cheapest",
+	"fastest",
+	"strongest",
+	"best-reasoning",
+	"large-context",
+	"same-as-parent",
+	"balanced",
+] as const;
+const MODEL_HINT_DESCRIPTION =
+	"Advisory model selection hint. Exact model overrides this. Supported: cheapest, fastest, strongest, best-reasoning, large-context, same-as-parent, balanced.";
 
 function appendModelCatalog(description: string, modelCatalog?: string): string {
 	return modelCatalog ? `${description}.\n\n${modelCatalog}` : description;
+}
+
+function createModelHintSchema() {
+	return StringEnum(MODEL_HINT_VALUES, { description: MODEL_HINT_DESCRIPTION });
+}
+
+function mergeSessionAgents(agents: AgentConfig[], configs: SessionSubagentConfig[]): AgentConfig[] {
+	const agentMap = new Map<string, AgentConfig>();
+	for (const agent of agents) agentMap.set(agent.name, agent);
+	for (const config of configs) {
+		agentMap.set(config.name, {
+			name: config.name,
+			description: config.description,
+			systemPrompt: config.systemPrompt,
+			tools: config.tools,
+			model: config.model,
+			modelHint: config.modelHint,
+			skills: config.skills,
+			cwd: config.cwd,
+			source: "session",
+			filePath: `<session-subagent:${config.name}>`,
+		});
+	}
+	return Array.from(agentMap.values());
+}
+
+function resolveModelHint(
+	hint: SubagentModelHint | undefined,
+	resolveModelHintOption: ((hint: SubagentModelHint) => string | undefined) | undefined,
+	context: string,
+	result: SubagentResult,
+): string | undefined {
+	if (!hint) return undefined;
+	const resolved = resolveModelHintOption?.(hint);
+	if (!resolved) {
+		result.status = "failed";
+		result.exitCode = 1;
+		result.stderr = `Could not resolve modelHint "${hint}" for ${context}.`;
+		result.errorMessage = result.stderr;
+		result.stopReason = "error";
+		return undefined;
+	}
+	return resolved;
 }
 
 function createSubagentParamsSchema(modelCatalog?: string) {
@@ -554,7 +662,11 @@ function createSubagentParamsSchema(modelCatalog?: string) {
 			Type.String({ description: "Persona/instructions overriding the preset system prompt" }),
 		),
 		model: Type.Optional(Type.String({ description: appendModelCatalog(MODEL_DESCRIPTION, modelCatalog) })),
+		modelHint: Type.Optional(createModelHintSchema()),
 		tools: Type.Optional(Type.Array(Type.String(), { description: "Tool allowlist overriding preset defaults" })),
+		skills: Type.Optional(
+			Type.Array(Type.String(), { description: "Skills to preload before the first subagent turn" }),
+		),
 		cwd: Type.Optional(Type.String({ description: "Working directory for the agent session" })),
 	});
 
@@ -566,7 +678,11 @@ function createSubagentParamsSchema(modelCatalog?: string) {
 			Type.String({ description: "Persona/instructions overriding the preset system prompt" }),
 		),
 		model: Type.Optional(Type.String({ description: appendModelCatalog(STEP_MODEL_DESCRIPTION, modelCatalog) })),
+		modelHint: Type.Optional(createModelHintSchema()),
 		tools: Type.Optional(Type.Array(Type.String(), { description: "Tool allowlist overriding preset defaults" })),
+		skills: Type.Optional(
+			Type.Array(Type.String(), { description: "Skills to preload before the first subagent turn" }),
+		),
 		cwd: Type.Optional(Type.String({ description: "Working directory for the agent session" })),
 	});
 
@@ -585,7 +701,11 @@ function createSubagentParamsSchema(modelCatalog?: string) {
 			Type.String({ description: "Persona/instructions overriding the preset system prompt" }),
 		),
 		model: Type.Optional(Type.String({ description: appendModelCatalog(MODEL_DESCRIPTION, modelCatalog) })),
+		modelHint: Type.Optional(createModelHintSchema()),
 		tools: Type.Optional(Type.Array(Type.String(), { description: "Tool allowlist overriding preset defaults" })),
+		skills: Type.Optional(
+			Type.Array(Type.String(), { description: "Skills to preload before the first subagent turn" }),
+		),
 		tasks: Type.Optional(Type.Array(TaskItem, { description: "Tasks for parallel execution" })),
 		chain: Type.Optional(
 			Type.Array(ChainItem, { description: "Tasks for sequential execution", maxItems: MAX_CHAIN_STEPS }),
@@ -603,9 +723,11 @@ export type SubagentToolInput = Static<typeof subagentParamsSchema>;
 export interface SubagentToolOptions {
 	runner?: SubagentRunner;
 	modelCatalog?: string;
+	resolveModelHint?: (hint: SubagentModelHint) => string | undefined;
 	/** Host-controlled trust grant for project-local agent presets. */
 	trustProjectAgents?: boolean;
 	runRegistry?: SubagentRunRegistry;
+	configRegistry?: SubagentConfigRegistry;
 }
 const subagentRunsParamsSchema = Type.Object({
 	status: Type.Optional(
@@ -670,6 +792,89 @@ export function createSubagentRunsToolDefinition(
 		},
 	};
 }
+const createSubagentConfigParamsSchema = Type.Object({
+	name: Type.String({ description: "Session-scoped subagent preset name" }),
+	description: Type.String({ description: "Short description shown when this preset is available" }),
+	systemPrompt: Type.String({ description: "System prompt/persona for this subagent preset" }),
+	model: Type.Optional(Type.String({ description: "Exact model for this preset. Overrides modelHint." })),
+	modelHint: Type.Optional(createModelHintSchema()),
+	tools: Type.Optional(Type.Array(Type.String(), { description: "Default tool allowlist for this preset" })),
+	skills: Type.Optional(
+		Type.Array(Type.String(), { description: "Skill names to preload before the first subagent turn" }),
+	),
+	cwd: Type.Optional(Type.String({ description: "Default working directory for this preset" })),
+});
+
+export type CreateSubagentToolInput = Static<typeof createSubagentConfigParamsSchema>;
+
+export interface CreateSubagentDetails {
+	config?: SessionSubagentConfig;
+	configs: SessionSubagentConfig[];
+}
+
+export function createCreateSubagentToolDefinition(
+	registry?: SubagentConfigRegistry,
+): ToolDefinition<typeof createSubagentConfigParamsSchema, CreateSubagentDetails> {
+	return {
+		name: "create_subagent",
+		label: "Create Subagent",
+		description: "Create or replace a session-scoped named subagent preset for later subagent calls.",
+		promptSnippet: "Create session-scoped subagent presets with tools, skills, cwd, and model hints",
+		promptGuidelines: [
+			"Use create_subagent when a reusable temporary role would reduce repeated subagent configuration.",
+			"Prefer modelHint for cost/performance intent unless an exact model is required.",
+		],
+		parameters: createSubagentConfigParamsSchema,
+		async execute(_toolCallId, params) {
+			if (!registry) {
+				return {
+					content: [{ type: "text", text: "Subagent config registry is not configured for this session." }],
+					details: { configs: [] },
+					isError: true,
+				};
+			}
+			const trimmedName = params.name.trim();
+			if (!/^[A-Za-z0-9_-]{1,64}$/.test(trimmedName)) {
+				return {
+					content: [
+						{ type: "text", text: "Invalid subagent name. Use 1-64 letters, numbers, underscores, or hyphens." },
+					],
+					details: { configs: registry.list() },
+					isError: true,
+				};
+			}
+			const now = new Date().toISOString();
+			const existing = registry.get(trimmedName);
+			const config: SessionSubagentConfig = {
+				name: trimmedName,
+				description: params.description.trim(),
+				systemPrompt: params.systemPrompt,
+				model: params.model?.trim() || undefined,
+				modelHint: params.modelHint,
+				tools: params.tools?.map((tool) => tool.trim()).filter(Boolean),
+				skills: params.skills?.map((skill) => skill.trim()).filter(Boolean),
+				cwd: params.cwd?.trim() || undefined,
+				createdAt: existing?.createdAt ?? now,
+				updatedAt: now,
+			};
+			registry.upsert(config);
+			return {
+				content: [{ type: "text", text: `Created subagent preset "${config.name}".` }],
+				details: { config, configs: registry.list() },
+			};
+		},
+		renderCall(args, theme) {
+			return new Text(theme.fg("toolTitle", theme.bold("create_subagent ")) + theme.fg("accent", args.name), 0, 0);
+		},
+		renderResult(result, _options, theme) {
+			const text = result.content
+				.filter((part): part is { type: "text"; text: string } => part.type === "text")
+				.map((part) => part.text)
+				.join("\n");
+			return new Text(theme.fg("toolOutput", text), 0, 0);
+		},
+	};
+}
 
 export function createSubagentToolDefinition(
 	options: SubagentToolOptions = {},
@@ -695,9 +900,10 @@ export function createSubagentToolDefinition(
 
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const agentScope: AgentScope = params.agentScope ?? "user";
-			const workspaceCwd = ctx.toolOperations?.cwd ?? ctx.cwd;
-			const discovery = await discoverAgentsWithOperations(workspaceCwd, agentScope, ctx.toolOperations);
-			const agents = discovery.agents;
+			const workspaceOperations = ctx.toolOperations;
+			const workspaceCwd = workspaceOperations?.cwd ?? ctx.cwd;
+			const discovery = await discoverAgentsWithOperations(workspaceCwd, agentScope, workspaceOperations);
+			const agents = mergeSessionAgents(discovery.agents, options.configRegistry?.list() ?? []);
 			const inheritedModel = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
 			const hasChain = (params.chain?.length ?? 0) > 0;
 			const hasTasks = (params.tasks?.length ?? 0) > 0;
@@ -818,13 +1024,14 @@ export function createSubagentToolDefinition(
 					const result = await runSingleAgent(
 						workspaceCwd,
 						agents,
-						{ ...step, task: taskWithContext },
+						{ ...step, task: taskWithContext, toolOperations: workspaceOperations },
 						inheritedModel,
 						runner,
 						i + 1,
 						signal,
 						chainUpdate,
 						makeDetails("chain"),
+						options.resolveModelHint,
 					);
 					results.push(result);
 
@@ -872,7 +1079,11 @@ export function createSubagentToolDefinition(
 						messages: [],
 						stderr: "",
 						usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
-						model: task.model ?? agents.find((agent) => agent.name === task.agent)?.model ?? inheritedModel,
+						model:
+							task.model ??
+							(task.modelHint ? `hint:${task.modelHint}` : undefined) ??
+							agents.find((agent) => agent.name === task.agent)?.model ??
+							inheritedModel,
 					};
 				}
 
@@ -893,7 +1104,7 @@ export function createSubagentToolDefinition(
 					const result = await runSingleAgent(
 						workspaceCwd,
 						agents,
-						t,
+						{ ...t, toolOperations: workspaceOperations },
 						inheritedModel,
 						runner,
 						undefined,
@@ -905,6 +1116,7 @@ export function createSubagentToolDefinition(
 							}
 						},
 						makeDetails("parallel"),
+						options.resolveModelHint,
 					);
 					allResults[index] = result;
 					emitParallelUpdate();
@@ -939,8 +1151,11 @@ export function createSubagentToolDefinition(
 						responseFormat: params.responseFormat,
 						systemPrompt: params.systemPrompt,
 						model: params.model,
+						modelHint: params.modelHint,
 						tools: params.tools,
+						skills: params.skills,
 						cwd: params.cwd,
+						toolOperations: workspaceOperations,
 						continueSession: params.continueSession,
 					},
 					inheritedModel,
@@ -949,6 +1164,7 @@ export function createSubagentToolDefinition(
 					signal,
 					onUpdate,
 					makeDetails("single"),
+					options.resolveModelHint,
 				);
 				const isError = isFailedResult(result);
 				if (isError) {
@@ -1325,6 +1541,12 @@ export function createSubagentRunsTool(
 	registry?: SubagentRunRegistry,
 ): AgentTool<typeof subagentRunsParamsSchema, { runs: SubagentRunInfo[] }> {
 	return wrapToolDefinition(createSubagentRunsToolDefinition(registry));
+}
+
+export function createCreateSubagentTool(
+	registry?: SubagentConfigRegistry,
+): AgentTool<typeof createSubagentConfigParamsSchema, CreateSubagentDetails> {
+	return wrapToolDefinition(createCreateSubagentToolDefinition(registry));
 }
 
 export function createSubagentTool(

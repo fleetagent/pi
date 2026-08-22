@@ -158,7 +158,7 @@ describe("InteractiveMode.createExtensionUIContext setTheme", () => {
 		const fakeThis: any = {
 			session: { settingsManager },
 			settingsManager,
-			ui: { requestRender: vi.fn() },
+			ui: { invalidate: vi.fn(), requestRender: vi.fn() },
 		};
 
 		const uiContext = (InteractiveMode as any).prototype.createExtensionUIContext.call(fakeThis);
@@ -167,6 +167,7 @@ describe("InteractiveMode.createExtensionUIContext setTheme", () => {
 		expect(result.success).toBe(true);
 		expect(settingsManager.setTheme).toHaveBeenCalledWith("light");
 		expect(currentTheme).toBe("light");
+		expect(fakeThis.ui.invalidate).toHaveBeenCalledTimes(1);
 		expect(fakeThis.ui.requestRender).toHaveBeenCalledTimes(1);
 	});
 

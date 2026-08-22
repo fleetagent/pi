@@ -9,6 +9,7 @@ import type {
 	Context,
 	Model,
 	OpenAIResponsesCompat,
+	ProviderHeaders,
 	SimpleStreamOptions,
 	StreamFunction,
 	StreamOptions,
@@ -17,6 +18,7 @@ import type {
 import { formatProviderError, normalizeProviderError } from "../utils/error-body.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
+import { retryProviderRequest } from "../utils/provider-retry.ts";
 import { isCloudflareProvider, resolveCloudflareBaseUrl } from "./cloudflare.ts";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
@@ -24,7 +26,7 @@ import { convertResponsesMessages, convertResponsesTools, processResponsesStream
 import { buildBaseOptions } from "./simple-options.ts";
 
 const OPENAI_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);
-// OpenAI Responses rejects max_output_tokens below 16: https://github.com/earendil-works/pi/issues/6265
+// OpenAI Responses rejects max_output_tokens below 16: https://github.com/fleetagent/pi/issues/6265
 const OPENAI_RESPONSES_MIN_OUTPUT_TOKENS = 16;
 
 /**
@@ -43,6 +45,7 @@ function resolveCacheRetention(cacheRetention?: CacheRetention): CacheRetention 
 
 function getCompat(model: Model<"openai-responses">): Required<OpenAIResponsesCompat> {
 	return {
+		supportsReasoningEffort: model.compat?.supportsReasoningEffort ?? true,
 		sendSessionIdHeader: model.compat?.sendSessionIdHeader ?? true,
 		supportsLongCacheRetention: model.compat?.supportsLongCacheRetention ?? true,
 	};
@@ -92,7 +95,7 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 				totalTokens: 0,
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 			},
-			stopReason: "stop",
+			stopReason: "pending",
 			timestamp: Date.now(),
 		};
 
@@ -110,9 +113,16 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 			const requestOptions = {
 				...(options?.signal ? { signal: options.signal } : {}),
 				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
-				maxRetries: options?.maxRetries ?? 0,
+				maxRetries: 0,
 			};
-			const { data: openaiStream, response } = await client.responses.create(params, requestOptions).withResponse();
+			const { data: openaiStream, response } = await retryProviderRequest(
+				() => client.responses.create(params, requestOptions).withResponse(),
+				{
+					maxRetries: options?.maxRetries,
+					maxRetryDelayMs: options?.maxRetryDelayMs,
+					signal: options?.signal,
+				},
+			);
 			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
 			stream.push({ type: "start", partial: output });
 
@@ -125,6 +135,9 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 				throw new Error("Request was aborted");
 			}
 
+			if (output.stopReason === "pending") {
+				throw new Error("OpenAI Responses stream ended without a stop reason");
+			}
 			if (output.stopReason === "aborted" || output.stopReason === "error") {
 				throw new Error("An unknown error occurred");
 			}
@@ -171,7 +184,7 @@ function createClient(
 	model: Model<"openai-responses">,
 	context: Context,
 	apiKey?: string,
-	optionsHeaders?: Record<string, string>,
+	optionsHeaders?: ProviderHeaders,
 	sessionId?: string,
 ) {
 	if (!apiKey) {
@@ -184,7 +197,7 @@ function createClient(
 	}
 
 	const compat = getCompat(model);
-	const headers = { ...model.headers };
+	const headers: ProviderHeaders = { ...model.headers };
 	if (model.provider === "github-copilot") {
 		const hasImages = hasCopilotVisionInput(context.messages);
 		const copilotHeaders = buildCopilotDynamicHeaders({
@@ -201,25 +214,21 @@ function createClient(
 		headers["x-client-request-id"] = sessionId;
 	}
 
-	// Merge options headers last so they can override defaults
+	if (model.provider === "cloudflare-ai-gateway") {
+		if (!("Authorization" in headers)) headers.Authorization = null;
+		if (!("cf-aig-authorization" in headers)) headers["cf-aig-authorization"] = `Bearer ${apiKey}`;
+	}
+
+	// Merge options headers last so they can override or suppress defaults.
 	if (optionsHeaders) {
 		Object.assign(headers, optionsHeaders);
 	}
-
-	const defaultHeaders =
-		model.provider === "cloudflare-ai-gateway"
-			? {
-					...headers,
-					Authorization: headers.Authorization ?? null,
-					"cf-aig-authorization": `Bearer ${apiKey}`,
-				}
-			: headers;
 
 	return new OpenAI({
 		apiKey,
 		baseURL: isCloudflareProvider(model.provider) ? resolveCloudflareBaseUrl(model) : model.baseUrl,
 		dangerouslyAllowBrowser: true,
-		defaultHeaders,
+		defaultHeaders: headers,
 	});
 }
 
@@ -253,7 +262,7 @@ function buildParams(model: Model<"openai-responses">, context: Context, options
 		params.tools = convertResponsesTools(context.tools);
 	}
 
-	if (model.reasoning) {
+	if (model.reasoning && compat.supportsReasoningEffort) {
 		if (options?.reasoningEffort || options?.reasoningSummary) {
 			const effort = options?.reasoningEffort
 				? (model.thinkingLevelMap?.[options.reasoningEffort] ?? options.reasoningEffort)

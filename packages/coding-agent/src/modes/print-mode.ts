@@ -7,9 +7,10 @@
  */
 
 import type { AssistantMessage, ImageContent } from "@fleetagent/pi-ai";
-import { flushRawStdout, writeRawStdout } from "../core/output-guard.ts";
+import { flushRawStdout, waitForRawStdoutBackpressure, writeRawStdout } from "../core/output-guard.ts";
 import type { PiAgentRuntimeHost } from "../core/pi-agent.ts";
 import { killTrackedDetachedChildren } from "../utils/shell.ts";
+import { toJsonEvent } from "./json-event.ts";
 
 /**
  * Options for print mode.
@@ -34,6 +35,7 @@ export async function runPrintMode(runtimeHost: PiAgentRuntimeHost, options: Pri
 	let exitCode = 0;
 	let session = runtimeHost.session;
 	let unsubscribe: (() => void) | undefined;
+	let unsubscribeBackpressure: (() => void) | undefined;
 	let disposed = false;
 	const signalCleanupHandlers: Array<() => void> = [];
 
@@ -41,6 +43,7 @@ export async function runPrintMode(runtimeHost: PiAgentRuntimeHost, options: Pri
 		if (disposed) return;
 		disposed = true;
 		unsubscribe?.();
+		unsubscribeBackpressure?.();
 		await runtimeHost.dispose();
 	};
 
@@ -72,7 +75,7 @@ export async function runPrintMode(runtimeHost: PiAgentRuntimeHost, options: Pri
 		session = runtimeHost.session;
 		await session.bindExtensions({
 			commandContextActions: {
-				waitForIdle: () => session.agent.waitForIdle(),
+				waitForIdle: () => session.waitForIdle(),
 				newSession: async (newSessionOptions) => runtimeHost.newSession(newSessionOptions),
 				fork: async (entryId, forkOptions) => {
 					const result = await runtimeHost.fork(entryId, forkOptions);
@@ -100,11 +103,18 @@ export async function runPrintMode(runtimeHost: PiAgentRuntimeHost, options: Pri
 		});
 
 		unsubscribe?.();
+		unsubscribeBackpressure?.();
 		unsubscribe = session.subscribe((event) => {
 			if (mode === "json") {
-				writeRawStdout(`${JSON.stringify(event)}\n`);
+				writeRawStdout(`${JSON.stringify(toJsonEvent(event))}\n`);
 			}
 		});
+		unsubscribeBackpressure =
+			mode === "json"
+				? session.agent.subscribe(async () => {
+						await waitForRawStdoutBackpressure();
+					})
+				: undefined;
 	};
 
 	try {
@@ -124,6 +134,7 @@ export async function runPrintMode(runtimeHost: PiAgentRuntimeHost, options: Pri
 		for (const message of messages) {
 			await session.prompt(message);
 		}
+		await session.waitForIdle();
 
 		if (mode === "text") {
 			const state = session.state;

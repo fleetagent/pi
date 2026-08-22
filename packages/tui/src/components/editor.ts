@@ -4,7 +4,7 @@ import { decodePrintableKey, matchesKey } from "../keys.ts";
 import { KillRing } from "../kill-ring.ts";
 import { type Component, CURSOR_MARKER, type Focusable, type TUI } from "../tui.ts";
 import { UndoStack } from "../undo-stack.ts";
-import { getGraphemeSegmenter, getWordSegmenter, isWhitespaceChar, truncateToWidth, visibleWidth } from "../utils.ts";
+import { getGraphemeSegmenter, getWordSegmenter, isWhitespaceChar, sliceByColumn, visibleWidth } from "../utils.ts";
 import { findWordBackward, findWordForward } from "../word-navigation.ts";
 import { SelectList, type SelectListLayoutOptions, type SelectListTheme } from "./select-list.ts";
 
@@ -197,6 +197,13 @@ interface EditorState {
 	cursorCol: number;
 }
 
+/** Undo snapshot: editor text state plus the paste registry. */
+interface EditorSnapshot {
+	state: EditorState;
+	pastes: Map<number, string>;
+	pasteCounter: number;
+}
+
 interface LayoutLine {
 	text: string;
 	hasCursor: boolean;
@@ -219,6 +226,17 @@ const SLASH_COMMAND_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 };
 
 const ATTACHMENT_AUTOCOMPLETE_DEBOUNCE_MS = 20;
+
+function createScrollBorder(direction: "↑" | "↓", hiddenLineCount: number, width: number): string {
+	const availableWidth = Math.max(0, width);
+	const indicator = `─── ${direction} ${hiddenLineCount} more `;
+	const remaining = availableWidth - visibleWidth(indicator);
+	if (remaining >= 0) return indicator + "─".repeat(remaining);
+
+	const ellipsis = "...".slice(0, availableWidth);
+	const indicatorWidth = availableWidth - visibleWidth(ellipsis);
+	return sliceByColumn(indicator, 0, indicatorWidth, true) + ellipsis;
+}
 
 export class Editor implements Component, Focusable {
 	private state: EditorState = {
@@ -285,8 +303,7 @@ export class Editor implements Component, Focusable {
 	private snappedFromCursorCol: number | null = null;
 
 	// Undo support
-	private undoStack = new UndoStack<EditorState>();
-
+	private undoStack = new UndoStack<EditorSnapshot>();
 	public onSubmit?: (text: string) => void;
 	public onChange?: (text: string) => void;
 	public disableSubmit: boolean = false;
@@ -457,13 +474,8 @@ export class Editor implements Component, Focusable {
 
 		// Render top border (with scroll indicator if scrolled down)
 		if (this.scrollOffset > 0) {
-			const indicator = `─── ↑ ${this.scrollOffset} more `;
-			const remaining = width - visibleWidth(indicator);
-			if (remaining >= 0) {
-				result.push(this.borderColor(indicator + "─".repeat(remaining)));
-			} else {
-				result.push(this.borderColor(truncateToWidth(indicator, width)));
-			}
+			const border = createScrollBorder("↑", this.scrollOffset, width);
+			result.push(this.borderColor(border));
 		} else {
 			result.push(horizontal.repeat(width));
 		}
@@ -517,9 +529,8 @@ export class Editor implements Component, Focusable {
 		// Render bottom border (with scroll indicator if more content below)
 		const linesBelow = layoutLines.length - (this.scrollOffset + visibleLines.length);
 		if (linesBelow > 0) {
-			const indicator = `─── ↓ ${linesBelow} more `;
-			const remaining = width - visibleWidth(indicator);
-			result.push(this.borderColor(indicator + "─".repeat(Math.max(0, remaining))));
+			const border = createScrollBorder("↓", linesBelow, width);
+			result.push(this.borderColor(border));
 		} else {
 			result.push(horizontal.repeat(width));
 		}
@@ -698,6 +709,18 @@ export class Editor implements Component, Focusable {
 		}
 		if (kb.matches(data, "tui.editor.yankPop")) {
 			this.yankPop();
+			return;
+		}
+
+		// Dedicated history actions always browse entries instead of moving the cursor.
+		if (kb.matches(data, "tui.editor.historyPrevious")) {
+			this.cancelAutocomplete();
+			this.navigateHistory(-1);
+			return;
+		}
+		if (kb.matches(data, "tui.editor.historyNext")) {
+			this.cancelAutocomplete();
+			this.navigateHistory(1);
 			return;
 		}
 
@@ -952,6 +975,8 @@ export class Editor implements Component, Focusable {
 		if (this.getText() !== normalized) {
 			this.pushUndoSnapshot();
 		}
+		this.pastes.clear();
+		this.pasteCounter = 0;
 		this.setTextInternal(normalized);
 	}
 
@@ -1222,12 +1247,48 @@ export class Editor implements Component, Focusable {
 			const graphemes = [...this.segment(beforeCursor, "grapheme")];
 			const lastGrapheme = graphemes[graphemes.length - 1];
 			const graphemeLength = lastGrapheme ? lastGrapheme.segment.length : 1;
+			const pastedSegment = PASTE_MARKER_SINGLE.exec(lastGrapheme.segment);
 
-			const before = line.slice(0, this.state.cursorCol - graphemeLength);
-			const after = line.slice(this.state.cursorCol);
+			if (pastedSegment) {
+				const targetId = Number(pastedSegment[1]);
+				const markerStart = this.state.cursorCol - graphemeLength;
+				const beforeMarker = line.slice(0, markerStart);
+				const afterMarker = line.slice(this.state.cursorCol);
 
-			this.state.lines[this.state.cursorLine] = before + after;
-			this.setCursorCol(this.state.cursorCol - graphemeLength);
+				this.pastes.delete(targetId);
+				this.pasteCounter--;
+
+				// Shift registry entries down in ascending id order, independent
+				// of marker order in the text ([paste #3] becomes [paste #2] when
+				// [paste #1] is removed).
+				const higherIds = [...this.pastes.keys()].filter((id) => id > targetId).sort((a, b) => a - b);
+				for (const id of higherIds) {
+					this.pastes.set(id - 1, this.pastes.get(id)!);
+					this.pastes.delete(id);
+				}
+
+				const renumberMarkers = (text: string): string =>
+					text.replace(PASTE_MARKER_REGEX, (fullMatch, idGroup, suffixGroup) => {
+						const id = Number(idGroup);
+						if (id <= targetId) return fullMatch;
+						return `[paste #${id - 1}${suffixGroup}]`;
+					});
+
+				// Delete the target before renumbering. Renumber the text on each side
+				// separately so an earlier #10 -> #9 change cannot stale cursorCol.
+				const before = renumberMarkers(beforeMarker);
+				const after = renumberMarkers(afterMarker);
+				this.state.lines = this.state.lines.map((line, index) =>
+					index === this.state.cursorLine ? before + after : renumberMarkers(line),
+				);
+				this.setCursorCol(before.length);
+			} else {
+				const before = line.slice(0, this.state.cursorCol - graphemeLength);
+				const after = line.slice(this.state.cursorCol);
+
+				this.state.lines[this.state.cursorLine] = before + after;
+				this.setCursorCol(this.state.cursorCol - graphemeLength);
+			}
 		} else if (this.state.cursorLine > 0) {
 			this.pushUndoSnapshot();
 
@@ -1904,14 +1965,16 @@ export class Editor implements Component, Focusable {
 	}
 
 	private pushUndoSnapshot(): void {
-		this.undoStack.push(this.state);
+		this.undoStack.push({ state: this.state, pastes: this.pastes, pasteCounter: this.pasteCounter });
 	}
 
 	private undo(): void {
 		this.historyIndex = -1; // Exit history browsing mode
 		const snapshot = this.undoStack.pop();
 		if (!snapshot) return;
-		Object.assign(this.state, snapshot);
+		Object.assign(this.state, snapshot.state);
+		this.pastes = snapshot.pastes;
+		this.pasteCounter = snapshot.pasteCounter;
 		this.lastAction = null;
 		this.preferredVisualCol = null;
 		if (this.onChange) {

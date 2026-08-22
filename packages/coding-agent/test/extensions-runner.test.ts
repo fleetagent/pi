@@ -9,10 +9,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { createExtensionRuntime, discoverAndLoadExtensions } from "../src/core/extensions/loader.ts";
 import { ExtensionRunner } from "../src/core/extensions/runner.ts";
-import type { ExtensionActions, ExtensionContextActions, ProviderConfig } from "../src/core/extensions/types.ts";
+import type {
+	BeforeProviderHeadersEvent,
+	Extension,
+	ExtensionActions,
+	ExtensionContextActions,
+	ProviderConfig,
+} from "../src/core/extensions/types.ts";
 import { KeybindingsManager, type KeyId } from "../src/core/keybindings.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
 import { InMemorySessionManager, type Session } from "../src/core/session-manager.ts";
+import { createSyntheticSourceInfo } from "../src/core/source-info.ts";
 import { LocalToolOperations } from "../src/core/tools/index.ts";
 
 describe("ExtensionRunner", () => {
@@ -51,6 +58,23 @@ describe("ExtensionRunner", () => {
 			},
 		],
 	};
+
+	function extensionWithHandlers(path: string, handlers: Extension["handlers"]): Extension {
+		return {
+			path,
+			resolvedPath: path,
+			sourceInfo: createSyntheticSourceInfo(path, { source: "test" }),
+			handlers,
+			tools: new Map(),
+			messageRenderers: new Map(),
+			commands: new Map(),
+			skills: new Map(),
+			rules: new Map(),
+			prompts: new Map(),
+			flags: new Map(),
+			shortcuts: new Map(),
+		};
+	}
 
 	const extensionActions: ExtensionActions = {
 		sendMessage: () => {},
@@ -798,6 +822,93 @@ describe("ExtensionRunner", () => {
 
 			await commandContext.fork("entry-2", { position: "at" });
 			expect(fork).toHaveBeenLastCalledWith("entry-2", { position: "at" });
+		});
+	});
+	describe("before_provider_headers", () => {
+		it("chains in-place mutations, preserves null deletion markers, and ignores returns", async () => {
+			const first = extensionWithHandlers(
+				"a-headers.ts",
+				new Map([
+					[
+						"before_provider_headers",
+						[
+							async (...args: unknown[]) => {
+								const event = args[0] as BeforeProviderHeadersEvent;
+								event.headers["X-Turn-Index"] = "3";
+								event.headers["X-Remove"] = null;
+								return { dropped: "replacement" };
+							},
+						],
+					],
+				]),
+			);
+			const second = extensionWithHandlers(
+				"b-headers.ts",
+				new Map([
+					[
+						"before_provider_headers",
+						[
+							async (...args: unknown[]) => {
+								const event = args[0] as BeforeProviderHeadersEvent;
+								event.headers["X-Chained"] = `${event.headers["X-Turn-Index"]}:${event.headers["X-Remove"]}`;
+							},
+						],
+					],
+				]),
+			);
+			const runner = new ExtensionRunner(
+				[first, second],
+				createExtensionRuntime(),
+				tempDir,
+				sessionManager,
+				modelRegistry,
+			);
+			const headers = await runner.emitBeforeProviderHeaders({ "User-Agent": "kimchi/1.0" });
+
+			expect(runner.hasHandlers("before_provider_headers")).toBe(true);
+			expect(headers).toEqual({
+				"User-Agent": "kimchi/1.0",
+				"X-Turn-Index": "3",
+				"X-Remove": null,
+				"X-Chained": "3:null",
+			});
+			expect(headers).not.toHaveProperty("dropped");
+		});
+
+		it("isolates a throwing handler and still applies later mutations", async () => {
+			const throwing = extensionWithHandlers(
+				"a-throwing.ts",
+				new Map([["before_provider_headers", [async () => Promise.reject(new Error("header handler boom"))]]]),
+			);
+			const good = extensionWithHandlers(
+				"b-good.ts",
+				new Map([
+					[
+						"before_provider_headers",
+						[
+							async (...args: unknown[]) => {
+								const event = args[0] as BeforeProviderHeadersEvent;
+								event.headers["X-Good"] = "yes";
+							},
+						],
+					],
+				]),
+			);
+			const runner = new ExtensionRunner(
+				[throwing, good],
+				createExtensionRuntime(),
+				tempDir,
+				sessionManager,
+				modelRegistry,
+			);
+			const errors: Array<{ event: string; error: string }> = [];
+			runner.onError((error) => errors.push(error));
+
+			const headers = await runner.emitBeforeProviderHeaders({ "User-Agent": "x" });
+
+			expect(headers).toEqual({ "User-Agent": "x", "X-Good": "yes" });
+			expect(errors).toHaveLength(1);
+			expect(errors[0]).toMatchObject({ event: "before_provider_headers", error: "header handler boom" });
 		});
 	});
 

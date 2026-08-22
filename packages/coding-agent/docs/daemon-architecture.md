@@ -157,7 +157,7 @@ The WebSocket upgrade endpoint is exactly `/pi/workspace` with no URL user infor
 - Authentication is performed before allocating a full connection runtime.
 - Authentication failures use generic responses and never reveal whether a token prefix was correct.
 
-Server and client credentials are separate inputs. `PI_DAEMON_TOKEN` configures the server's expected token. `PI_REMOTE_TOKEN` supplies the orchestrator client's default token and is never forwarded into daemon child environments. The shared client constructor changes to `createRemoteToolOperations({ url, token })`; string-only construction is removed. Direct `--remote`, deferred `/remote daemon`, and the default RPC/SDK paths resolve `PI_REMOTE_TOKEN` unless their typed API supplies a token explicitly. RPC `set_remote_sandbox` gains an optional write-only `token` field; SDK/deferred configuration gains an optional `token`; neither value is returned by status APIs. Interactive commands do not accept a token argument, avoiding editor/session history leakage. A missing token against an authenticated daemon fails with an actionable message naming `PI_REMOTE_TOKEN` or the typed host API, never the token value.
+Server and client credentials are separate inputs. `PI_DAEMON_TOKEN` configures the server's expected token. `PI_REMOTE_TOKEN` supplies the orchestrator client's default token and is never forwarded into daemon child environments. The shared client constructor changes to `createRemoteToolOperations({ url, token })`; string-only construction is removed. Direct `--remote`, interactive `/sandbox --attach`, and the default RPC/SDK paths resolve `PI_REMOTE_TOKEN` unless their typed API supplies a token explicitly. RPC `set_remote_sandbox` gains an optional write-only `token` field; SDK/deferred configuration gains an optional `token`; neither value is returned by status APIs. Interactive commands do not accept a token argument, avoiding editor/session history leakage. A missing token against an authenticated daemon fails with an actionable message naming `PI_REMOTE_TOKEN` or the typed host API, never the token value.
 
 Tokens and URLs containing user information or sensitive query keys are redacted in all logs, thrown errors, diagnostics, interactive status, RPC state, and snapshots. The client API stores credentials separately from the display URL. Protocol tracing is off by default and redacts authorization material when enabled.
 
@@ -269,7 +269,7 @@ The current unversioned primitive pi-daemon protocol is not supported by `pi --d
 The following orchestrator entry points remain supported, but use the new protocol:
 
 - `pi --remote <url>`, with an optional client token from `PI_REMOTE_TOKEN` or the typed SDK host option;
-- `pi --remote-deferred --remote-cwd <path>` followed by `/remote daemon ...`, using `PI_REMOTE_TOKEN` unless configured through the SDK;
+- `pi --remote-deferred --remote-cwd <path>` followed by `/sandbox --attach ...`, using `PI_REMOTE_TOKEN` unless configured through the SDK;
 - RPC `set_remote_sandbox` (including its write-only optional token), `upload_file`, and `download_file`;
 - session replacement and subagents borrowing the PiAgent-owned remote workspace client.
 

@@ -1,6 +1,10 @@
 import type { SandboxContainer, SandboxStartResult, SandboxStopResult } from "./docker.ts";
 
 export type SandboxUserCommand =
+	| { subcommand: "status" }
+	| { subcommand: "clear" }
+	| { subcommand: "attach"; url: string }
+	| { subcommand: "ssh"; target: string; cwd?: string }
 	| { subcommand: "start"; image?: string }
 	| { subcommand: "list" }
 	| { subcommand: "stop"; target?: string };
@@ -21,8 +25,25 @@ export function parseSandboxUserCommand(input: string): SandboxUserCommand {
 		throw new Error("Sandbox command must start with /sandbox");
 	}
 	const subcommand = tokens[1];
-	if (!subcommand) {
-		throw new Error("Usage: /sandbox start [--image <image>] | /sandbox list | /sandbox stop [container]");
+	if (!subcommand || subcommand === "status") {
+		if (tokens.length > 2) throw new Error("Usage: /sandbox status");
+		return { subcommand: "status" };
+	}
+	if (subcommand === "clear") {
+		if (tokens.length > 2) throw new Error("Usage: /sandbox clear");
+		return { subcommand: "clear" };
+	}
+	if (subcommand === "--attach") {
+		if (tokens.length !== 3) throw new Error("Usage: /sandbox --attach <ws://url>");
+		return { subcommand: "attach", url: tokens[2]! };
+	}
+	if (subcommand === "ssh") {
+		if (tokens.length < 3 || tokens.length > 4) {
+			throw new Error("Usage: /sandbox ssh <user@host[:/path]> [path]");
+		}
+		return tokens[3]
+			? { subcommand: "ssh", target: tokens[2]!, cwd: tokens[3] }
+			: { subcommand: "ssh", target: tokens[2]! };
 	}
 	if (subcommand === "start") {
 		let image: string | undefined;
@@ -46,7 +67,9 @@ export function parseSandboxUserCommand(input: string): SandboxUserCommand {
 		if (tokens.length > 3) throw new Error("Usage: /sandbox stop [container]");
 		return tokens[2] ? { subcommand: "stop", target: tokens[2] } : { subcommand: "stop" };
 	}
-	throw new Error(`Unsupported /sandbox subcommand: ${subcommand}`);
+	throw new Error(
+		`Unsupported /sandbox subcommand: ${subcommand}. Use status, clear, ssh, --attach, start, list, or stop.`,
+	);
 }
 
 export function formatSandboxStartResult(result: SandboxStartResult): string {

@@ -6,7 +6,7 @@ import { createFindToolDefinition } from "../../../src/core/tools/find.ts";
 import { LocalToolOperations } from "../../../src/core/tools/index.ts";
 
 /**
- * Regression test for https://github.com/earendil-works/pi-mono/issues/3302
+ * Regression test for https://github.com/fleetagent/pi/issues/3302
  *
  * The `find` tool advertises glob patterns like `src/**\/*.spec.ts`, but the
  * default fd-backed implementation used `fd --glob <pattern>` without

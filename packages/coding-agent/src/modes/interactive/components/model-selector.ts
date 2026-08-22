@@ -223,7 +223,9 @@ export class ModelSelectorComponent extends Container implements Focusable {
 					({ id, provider }) => `${id} ${provider} ${provider}/${id} ${provider} ${id}`,
 				)
 			: this.activeModels;
-		this.selectedIndex = Math.min(this.selectedIndex, Math.max(0, this.filteredModels.length - 1));
+		// A query changes fuzzy-match ranking, so select the best match. When the query
+		// is cleared, preserve the current position and only clamp it to the restored list.
+		this.selectedIndex = query ? 0 : Math.min(this.selectedIndex, Math.max(0, this.filteredModels.length - 1));
 		this.updateList();
 	}
 

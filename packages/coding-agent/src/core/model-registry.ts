@@ -15,6 +15,7 @@ import {
 	type OAuthProviderInterface,
 	type OpenAICompletionsCompat,
 	type OpenAIResponsesCompat,
+	type ProviderHeaders,
 	registerApiProvider,
 	resetApiProviders,
 	type SimpleStreamOptions,
@@ -230,7 +231,7 @@ interface ProviderOverride {
 
 interface ProviderRequestConfig {
 	apiKey?: string;
-	headers?: Record<string, string>;
+	headers?: ProviderHeaders;
 	authHeader?: boolean;
 }
 
@@ -245,11 +246,12 @@ function migrateLegacyRegisterProviderConfigValue(providerName: string, field: s
 function migrateLegacyRegisterProviderHeaders(
 	providerName: string,
 	field: string,
-	headers: Record<string, string> | undefined,
-): Record<string, string> | undefined {
+	headers: ProviderHeaders | undefined,
+): ProviderHeaders | undefined {
 	if (!headers) return undefined;
-	let migratedHeaders: Record<string, string> | undefined;
+	let migratedHeaders: ProviderHeaders | undefined;
 	for (const [key, value] of Object.entries(headers)) {
+		if (value === null) continue;
 		const migratedValue = migrateLegacyRegisterProviderConfigValue(providerName, `${field} header "${key}"`, value);
 		if (migratedValue === value) continue;
 		migratedHeaders ??= { ...headers };
@@ -309,7 +311,7 @@ export type ResolvedRequestAuth =
 	| {
 			ok: true;
 			apiKey?: string;
-			headers?: Record<string, string>;
+			headers?: ProviderHeaders;
 	  }
 	| {
 			ok: false;
@@ -403,7 +405,7 @@ export const clearApiKeyCache = clearConfigValueCache;
 export class ModelRegistry {
 	private models: Model<Api>[] = [];
 	private providerRequestConfigs: Map<string, ProviderRequestConfig> = new Map();
-	private modelRequestHeaders: Map<string, Record<string, string>> = new Map();
+	private modelRequestHeaders: Map<string, ProviderHeaders> = new Map();
 	private registeredProviders: Map<string, ProviderConfigInput> = new Map();
 	private loadError: string | undefined = undefined;
 	readonly authStorage: AuthStorage;
@@ -725,7 +727,7 @@ export class ModelRegistry {
 		providerName: string,
 		config: {
 			apiKey?: string;
-			headers?: Record<string, string>;
+			headers?: ProviderHeaders;
 			authHeader?: boolean;
 		},
 	): void {
@@ -740,7 +742,7 @@ export class ModelRegistry {
 		});
 	}
 
-	private storeModelHeaders(providerName: string, modelId: string, headers?: Record<string, string>): void {
+	private storeModelHeaders(providerName: string, modelId: string, headers?: ProviderHeaders): void {
 		const key = this.getModelRequestKey(providerName, modelId);
 		if (!headers || Object.keys(headers).length === 0) {
 			this.modelRequestHeaders.delete(key);
@@ -778,6 +780,13 @@ export class ModelRegistry {
 					return { ok: false, error: `No API key found for "${model.provider}"` };
 				}
 				headers = { ...headers, Authorization: `Bearer ${apiKey}` };
+			}
+			if (model.provider === "cloudflare-ai-gateway" && apiKey) {
+				headers = {
+					Authorization: null,
+					"cf-aig-authorization": `Bearer ${apiKey}`,
+					...headers,
+				};
 			}
 
 			return {
@@ -1011,7 +1020,7 @@ export interface ProviderConfigInput {
 	apiKey?: string;
 	api?: Api;
 	streamSimple?: (model: Model<Api>, context: Context, options?: SimpleStreamOptions) => AssistantMessageEventStream;
-	headers?: Record<string, string>;
+	headers?: ProviderHeaders;
 	authHeader?: boolean;
 	/** OAuth provider for /login support */
 	oauth?: Omit<OAuthProviderInterface, "id">;
@@ -1026,7 +1035,7 @@ export interface ProviderConfigInput {
 		cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
 		contextWindow: number;
 		maxTokens: number;
-		headers?: Record<string, string>;
+		headers?: ProviderHeaders;
 		compat?: Model<Api>["compat"];
 	}>;
 }

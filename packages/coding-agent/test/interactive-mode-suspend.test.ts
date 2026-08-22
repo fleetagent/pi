@@ -3,7 +3,7 @@ import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 
 type FakeUi = {
 	start: () => void;
-	stop: () => void;
+	stop: (options?: { preserveScreen?: boolean }) => void;
 	requestRender: (force?: boolean) => void;
 };
 
@@ -99,8 +99,9 @@ describe("InteractiveMode.handleCtrlZ", () => {
 		expect(setIntervalSpy).toHaveBeenCalledWith(expect.any(Function), 2 ** 30);
 		expect(processOnSpy).toHaveBeenCalledWith("SIGINT", expect.any(Function));
 		expect(processOnceSpy).toHaveBeenCalledWith("SIGCONT", expect.any(Function));
-		expect(ui.stop).toHaveBeenCalledTimes(1);
 		expect(processKillSpy).toHaveBeenCalledWith(0, "SIGTSTP");
+		expect(ui.stop).toHaveBeenCalledTimes(1);
+		expect(ui.stop).toHaveBeenCalledWith({ preserveScreen: true });
 		expect(sigintHandler).toBeDefined();
 		expect(sigcontHandler).toBeDefined();
 
@@ -139,7 +140,7 @@ describe("InteractiveMode.handleCtrlZ", () => {
 		});
 
 		expect(() => callHandleCtrlZ(context)).toThrow(suspendError);
-		expect(ui.stop).toHaveBeenCalledTimes(1);
+		expect(ui.stop).toHaveBeenCalledWith({ preserveScreen: true });
 		expect(setIntervalSpy).toHaveBeenCalledTimes(1);
 		expect(clearIntervalSpy).toHaveBeenCalledWith(keepAliveHandle);
 		expect(removeListenerSpy).toHaveBeenCalledWith("SIGINT", expect.any(Function));

@@ -31,6 +31,7 @@ import type {
 	AssistantMessage,
 	Context,
 	Model,
+	ProviderHeaders,
 	SimpleStreamOptions,
 	StreamFunction,
 	StreamOptions,
@@ -61,6 +62,7 @@ const DEFAULT_SSE_HEADER_TIMEOUT_MS = 10_000;
 const DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS = 15_000;
 const CODEX_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);
 const WEBSOCKET_MESSAGE_TOO_BIG_CLOSE_CODE = 1009;
+const PREVIOUS_RESPONSE_NOT_FOUND_CODE = "previous_response_not_found";
 
 const CODEX_RESPONSE_STATUSES = new Set<CodexResponseStatus>([
 	"completed",
@@ -101,6 +103,17 @@ interface RequestBody {
 	include?: string[];
 	prompt_cache_key?: string;
 	[key: string]: unknown;
+}
+
+type SuccessfulAssistantMessage = AssistantMessage & { stopReason: "stop" | "length" | "toolUse" };
+
+function assertSuccessfulOutput(output: AssistantMessage): asserts output is SuccessfulAssistantMessage {
+	if (output.stopReason === "pending") {
+		throw new Error("Codex stream ended without a stop reason");
+	}
+	if (output.stopReason === "error" || output.stopReason === "aborted") {
+		throw new Error(output.errorMessage || "An unknown error occurred");
+	}
 }
 
 // ============================================================================
@@ -150,9 +163,16 @@ function getRetryAfterDelayMs(headers: Headers): number | undefined {
 	return undefined;
 }
 
-function capRetryDelayMs(delayMs: number, options?: StreamOptions): number {
+class RetryDelayExceededError extends Error {}
+
+function validateRetryDelayMs(delayMs: number, options?: StreamOptions): number {
 	const maxRetryDelayMs = options?.maxRetryDelayMs ?? DEFAULT_MAX_RETRY_DELAY_MS;
-	return maxRetryDelayMs > 0 ? Math.min(delayMs, maxRetryDelayMs) : delayMs;
+	if (maxRetryDelayMs > 0 && delayMs > maxRetryDelayMs) {
+		throw new RetryDelayExceededError(
+			`Server requested ${Math.ceil(delayMs / 1000)}s retry delay (max: ${Math.ceil(maxRetryDelayMs / 1000)}s)`,
+		);
+	}
+	return delayMs;
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -222,7 +242,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 				totalTokens: 0,
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 			},
-			stopReason: "stop",
+			stopReason: "pending",
 			timestamp: Date.now(),
 		};
 
@@ -257,53 +277,67 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			}
 
 			if (transport !== "sse" && !websocketDisabledForSession) {
-				let websocketStarted = false;
-				try {
-					await processWebSocketStream(
-						resolveCodexWebSocketUrl(model.baseUrl),
-						body,
-						websocketHeaders,
-						output,
-						stream,
-						model,
-						() => {
-							websocketStarted = true;
-						},
-						idleTimeoutMs,
-						websocketConnectTimeoutMs,
-						options,
-					);
+				let retriedMissingWebSocketContinuation = false;
+				while (true) {
+					let websocketStarted = false;
+					try {
+						await processWebSocketStream(
+							resolveCodexWebSocketUrl(model.baseUrl),
+							body,
+							websocketHeaders,
+							output,
+							stream,
+							model,
+							() => {
+								websocketStarted = true;
+							},
+							idleTimeoutMs,
+							websocketConnectTimeoutMs,
+							options,
+						);
 
-					if (options?.signal?.aborted) {
-						throw new Error("Request was aborted");
+						if (options?.signal?.aborted) {
+							throw new Error("Request was aborted");
+						}
+						assertSuccessfulOutput(output);
+						stream.push({
+							type: "done",
+							reason: output.stopReason,
+							message: output,
+						});
+						stream.end();
+						return;
+					} catch (error) {
+						const aborted = options?.signal?.aborted;
+						if (
+							!aborted &&
+							!websocketStarted &&
+							isPreviousResponseNotFoundError(error) &&
+							!retriedMissingWebSocketContinuation
+						) {
+							retriedMissingWebSocketContinuation = true;
+							continue;
+						}
+						if (aborted || isCodexNonTransportError(error)) {
+							throw error;
+						}
+						appendAssistantMessageDiagnostic(
+							output,
+							createAssistantMessageDiagnostic("provider_transport_failure", error, {
+								configuredTransport: transport,
+								fallbackTransport: websocketStarted ? undefined : "sse",
+								eventsEmitted: websocketStarted,
+								phase: websocketStarted ? "after_message_stream_start" : "before_message_stream_start",
+								requestBytes: new TextEncoder().encode(bodyJson).byteLength,
+							}),
+						);
+						recordWebSocketFailure(options?.sessionId, error);
+						if (websocketStarted) {
+							throw error;
+						}
+						recordWebSocketSseFallback(options?.sessionId);
+						break;
 					}
-					stream.push({
-						type: "done",
-						reason: output.stopReason as "stop" | "length" | "toolUse",
-						message: output,
-					});
-					stream.end();
-					return;
-				} catch (error) {
-					const aborted = options?.signal?.aborted;
-					if (aborted || isCodexNonTransportError(error)) {
-						throw error;
-					}
-					appendAssistantMessageDiagnostic(
-						output,
-						createAssistantMessageDiagnostic("provider_transport_failure", error, {
-							configuredTransport: transport,
-							fallbackTransport: websocketStarted ? undefined : "sse",
-							eventsEmitted: websocketStarted,
-							phase: websocketStarted ? "after_message_stream_start" : "before_message_stream_start",
-							requestBytes: new TextEncoder().encode(bodyJson).byteLength,
-						}),
-					);
-					recordWebSocketFailure(options?.sessionId, error);
-					if (websocketStarted) {
-						throw error;
-					}
-					recordWebSocketSseFallback(options?.sessionId);
 				}
 			}
 
@@ -349,9 +383,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 						const delayMs =
 							retryAfterDelayMs === undefined
 								? BASE_DELAY_MS * 2 ** attempt
-								: response.status === 429
-									? capRetryDelayMs(retryAfterDelayMs, options)
-									: retryAfterDelayMs;
+								: validateRetryDelayMs(retryAfterDelayMs, options);
 
 						await sleep(delayMs, options?.signal);
 						continue;
@@ -372,7 +404,11 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 					}
 					lastError = error instanceof Error ? error : new Error(String(error));
 					// Network errors are retryable
-					if (attempt < maxRetries && !lastError.message.includes("usage limit")) {
+					if (
+						attempt < maxRetries &&
+						!(lastError instanceof RetryDelayExceededError) &&
+						!lastError.message.includes("usage limit")
+					) {
 						const delayMs = BASE_DELAY_MS * 2 ** attempt;
 						await sleep(delayMs, options?.signal);
 						continue;
@@ -396,7 +432,8 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 				throw new Error("Request was aborted");
 			}
 
-			stream.push({ type: "done", reason: output.stopReason as "stop" | "length" | "toolUse", message: output });
+			assertSuccessfulOutput(output);
+			stream.push({ type: "done", reason: output.stopReason, message: output });
 			stream.end();
 		} catch (error) {
 			for (const block of output.content) {
@@ -587,16 +624,32 @@ function isCodexNonTransportError(error: unknown): boolean {
 	return error instanceof CodexApiError || error instanceof CodexProtocolError;
 }
 
+function isPreviousResponseNotFoundError(error: unknown): boolean {
+	return error instanceof CodexApiError && error.code === PREVIOUS_RESPONSE_NOT_FOUND_CODE;
+}
+
+function extractCodexEventError(event: Record<string, unknown>): { code?: string; message?: string } {
+	const nested = event.error && typeof event.error === "object" ? (event.error as Record<string, unknown>) : undefined;
+	return {
+		code: typeof event.code === "string" ? event.code : typeof nested?.code === "string" ? nested.code : undefined,
+		message:
+			typeof event.message === "string"
+				? event.message
+				: typeof nested?.message === "string"
+					? nested.message
+					: undefined,
+	};
+}
+
 async function* mapCodexEvents(events: AsyncIterable<Record<string, unknown>>): AsyncGenerator<ResponseStreamEvent> {
 	for await (const event of events) {
 		const type = typeof event.type === "string" ? event.type : undefined;
 		if (!type) continue;
 
 		if (type === "error") {
-			const code = (event as { code?: string }).code || "";
-			const message = (event as { message?: string }).message || "";
+			const { code, message } = extractCodexEventError(event);
 			throw new CodexApiError(`Codex error: ${message || code || JSON.stringify(event)}`, {
-				code: code || undefined,
+				code,
 				payload: event,
 			});
 		}
@@ -1477,13 +1530,14 @@ function createCodexRequestId(): string {
 
 function buildBaseCodexHeaders(
 	initHeaders: Record<string, string> | undefined,
-	additionalHeaders: Record<string, string> | undefined,
+	additionalHeaders: ProviderHeaders | undefined,
 	accountId: string,
 	token: string,
 ): Headers {
 	const headers = new Headers(initHeaders);
 	for (const [key, value] of Object.entries(additionalHeaders || {})) {
-		headers.set(key, value);
+		if (value === null) headers.delete(key);
+		else headers.set(key, value);
 	}
 	headers.set("Authorization", `Bearer ${token}`);
 	headers.set("chatgpt-account-id", accountId);
@@ -1495,7 +1549,7 @@ function buildBaseCodexHeaders(
 
 function buildSSEHeaders(
 	initHeaders: Record<string, string> | undefined,
-	additionalHeaders: Record<string, string> | undefined,
+	additionalHeaders: ProviderHeaders | undefined,
 	accountId: string,
 	token: string,
 	sessionId?: string,
@@ -1515,7 +1569,7 @@ function buildSSEHeaders(
 
 function buildWebSocketHeaders(
 	initHeaders: Record<string, string> | undefined,
-	additionalHeaders: Record<string, string> | undefined,
+	additionalHeaders: ProviderHeaders | undefined,
 	accountId: string,
 	token: string,
 	requestId: string,

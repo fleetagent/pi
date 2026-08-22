@@ -4,7 +4,9 @@ import type { Terminal as XtermTerminalType } from "@xterm/headless";
 import { Chalk } from "chalk";
 import { Markdown } from "../src/components/markdown.ts";
 import { resetCapabilitiesCache, setCapabilities } from "../src/terminal-image.ts";
-import { type Component, TUI } from "../src/tui.ts";
+import type { Component } from "../src/tui.ts";
+import { TuiMainScreen } from "../src/tui-main-screen.ts";
+import { visibleWidth } from "../src/utils.ts";
 import { defaultMarkdownTheme } from "./test-themes.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
 
@@ -693,7 +695,7 @@ describe("Markdown component", () => {
 			});
 
 			const terminal = new VirtualTerminal(80, 6);
-			const tui = new TUI(terminal);
+			const tui = new TuiMainScreen(terminal);
 			const component = new MarkdownWithInput(markdown);
 			tui.addChild(component);
 			tui.start();
@@ -1134,7 +1136,7 @@ bar`,
 		it("should not leak h1 underline into padding when inline code is the last token", async () => {
 			const markdown = new Markdown("# Important distinction from `open()`", 0, 0, defaultMarkdownTheme);
 			const terminal = new VirtualTerminal(80, 4);
-			const tui = new TUI(terminal);
+			const tui = new TuiMainScreen(terminal);
 			tui.addChild(markdown);
 			tui.start();
 			await terminal.waitForRender();
@@ -1367,6 +1369,262 @@ bar`,
 				joinedPlain.includes("<div>") && joinedPlain.includes("</div>"),
 				"Should render HTML in code blocks",
 			);
+		});
+	});
+
+	describe("LaTeX math", () => {
+		it("renders all supported inline delimiters", () => {
+			const markdown = new Markdown(
+				String.raw`A $\mathbb{C}^3$, $$x-y$$, \(s \to \infty\), and \[x^2\].`,
+				0,
+				0,
+				defaultMarkdownTheme,
+			);
+			assert.deepStrictEqual(
+				markdown.render(80).map((line) => stripAnsi(line).trimEnd()),
+				["A ℂ³, x-y, s → ∞, and x²."],
+			);
+		});
+
+		it("renders display dollar delimiters without Markdown escape corruption", () => {
+			const markdown = new Markdown(
+				String.raw`Before
+
+$$\{3x+2y,\; x \in \{0, \pm 1\}\}$$
+
+after`,
+				0,
+				0,
+				defaultMarkdownTheme,
+			);
+			assert.deepStrictEqual(
+				markdown.render(80).map((line) => stripAnsi(line).trimEnd()),
+				["Before", "", "{3x+2y, x ∈ {0, ± 1}}", "", "after"],
+			);
+		});
+
+		it("renders display bracket delimiters", () => {
+			const markdown = new Markdown(
+				String.raw`Before
+
+\[
+E \approx \frac{0.1\ \text{lux}}{100\ \text{lm/W}}
+\]
+
+after`,
+				0,
+				0,
+				defaultMarkdownTheme,
+			);
+			assert.deepStrictEqual(
+				markdown.render(80).map((line) => stripAnsi(line).trimEnd()),
+				["Before", "", "    0.1 lux", "E ≈ ────────", "    100 lm/W", "", "after"],
+			);
+		});
+
+		it("aligns matrix rows with the opening delimiter", () => {
+			const source = String.raw`Consider the matrix
+
+\[
+A=
+\begin{pmatrix}
+\pi & 0\\
+0 & \frac{1}{\pi}
+\end{pmatrix}.
+\]`;
+			const lines = new Markdown(source, 0, 0, defaultMarkdownTheme)
+				.render(80)
+				.map((line) => stripAnsi(line).trimEnd());
+			assert.deepStrictEqual(lines, ["Consider the matrix", "", "A = ⎛ π │ 0   ⎞", "    ⎝ 0 │ 1/π ⎠."]);
+		});
+
+		it("renders lower limits beneath display operators", () => {
+			const source = String.raw`\[
+\lim_{x\to 0}\frac{\frac{\sin x}{x}-1}{\frac{e^x-1}{x}-1}=0
+\]`;
+			const lines = new Markdown(source, 0, 0, defaultMarkdownTheme)
+				.render(80)
+				.map((line) => stripAnsi(line).trimEnd());
+			assert.deepStrictEqual(lines, ["     (sin x)/x-1", "lim  ─────────── = 0", "x→0  (eˣ-1)/x-1"]);
+		});
+
+		it("renders math inside lists and tables", () => {
+			const markdown = new Markdown(
+				String.raw`- Formula: $F_1 = u^2$
+
+| Value |
+| --- |
+| $\mathbb{C}^3$ |`,
+				0,
+				0,
+				defaultMarkdownTheme,
+			);
+			const output = markdown
+				.render(80)
+				.map((line) => stripAnsi(line).trimEnd())
+				.join("\n");
+			assert.ok(output.includes("- Formula: F₁ = u²"));
+			assert.ok(output.includes("│ ℂ³"));
+		});
+
+		it("does not treat currency, shell variables, or code spans as math", () => {
+			const source = "Costs $5 and $10 or $8k–$12k; use `$x$`, $HOME, and $" + "{PATH}.";
+			const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
+			assert.deepStrictEqual(
+				markdown.render(80).map((line) => stripAnsi(line).trimEnd()),
+				["Costs $5 and $10 or $8k–$12k; use $x$, $HOME, and $" + "{PATH}."],
+			);
+
+			const shellVariables = "Paths: $HOME/$USER and $XDG_CONFIG_HOME/$APP_CONFIG";
+			assert.deepStrictEqual(
+				new Markdown(shellVariables, 0, 0, defaultMarkdownTheme)
+					.render(80)
+					.map((line) => stripAnsi(line).trimEnd()),
+				[shellVariables],
+			);
+
+			const pathAssignment = "export PATH=$HOME/bin:$PATH";
+			assert.deepStrictEqual(
+				new Markdown(pathAssignment, 0, 0, defaultMarkdownTheme)
+					.render(80)
+					.map((line) => stripAnsi(line).trimEnd()),
+				[pathAssignment],
+			);
+		});
+
+		it("preserves incomplete backslash delimiters while streaming", () => {
+			const inline = new Markdown(String.raw`Map \(\mathbb{C}^3`, 0, 0, defaultMarkdownTheme);
+			assert.deepStrictEqual(
+				inline.render(80).map((line) => stripAnsi(line).trimEnd()),
+				[String.raw`Map \(\mathbb{C}^3`],
+			);
+
+			const display = new Markdown("\\[\nx^2", 0, 0, defaultMarkdownTheme);
+			assert.deepStrictEqual(
+				display.render(80).map((line) => stripAnsi(line).trimEnd()),
+				["\\[", "x^2"],
+			);
+		});
+
+		it("preserves unsupported, incomplete, escaped, and fenced LaTeX", () => {
+			const cases = [String.raw`Unknown $x + \unknown{y}$ after`, String.raw`Streaming $\mathbb{C}^3`];
+			for (const source of cases) {
+				const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
+				assert.deepStrictEqual(
+					markdown.render(80).map((line) => stripAnsi(line).trimEnd()),
+					[source],
+				);
+			}
+
+			const fencedSource = [String.raw`Escaped \$x-y\$.`, "", "```text", String.raw`$\mathbb{C}^3$`, "```"].join(
+				"\n",
+			);
+			const fenced = new Markdown(fencedSource, 0, 0, defaultMarkdownTheme);
+			assert.deepStrictEqual(
+				fenced.render(80).map((line) => stripAnsi(line).trimEnd()),
+				["Escaped $x-y$.", "", "```text", "  $\\mathbb{C}^3$", "```"],
+			);
+		});
+
+		it("allows LaTeX rendering to be disabled", () => {
+			const markdown = new Markdown(
+				String.raw`Map $\mathbb{C}^3 \to \mathbb{C}^3$`,
+				0,
+				0,
+				defaultMarkdownTheme,
+				undefined,
+				{ renderLatex: false },
+			);
+			assert.deepStrictEqual(
+				markdown.render(80).map((line) => stripAnsi(line).trimEnd()),
+				[String.raw`Map $\mathbb{C}^3 \to \mathbb{C}^3$`],
+			);
+		});
+
+		it("switches from raw to rendered math when a streamed delimiter closes", () => {
+			const markdown = new Markdown(String.raw`Map $\mathbb{C}^3`, 0, 0, defaultMarkdownTheme);
+			assert.deepStrictEqual(
+				markdown.render(80).map((line) => stripAnsi(line).trimEnd()),
+				[String.raw`Map $\mathbb{C}^3`],
+			);
+			markdown.setText(String.raw`Map $\mathbb{C}^3$`);
+			assert.deepStrictEqual(
+				markdown.render(80).map((line) => stripAnsi(line).trimEnd()),
+				["Map ℂ³"],
+			);
+		});
+
+		it("falls back atomically when display math is wider than its local width", () => {
+			const source = String.raw`$$\frac{x^2+1}{x-1}$$`;
+			for (const width of [1, 2]) {
+				const lines = new Markdown(source, 0, 0, defaultMarkdownTheme).render(width);
+				assert.ok(lines.every((line) => visibleWidth(line) <= width));
+				assert.strictEqual(lines.map((line) => stripAnsi(line).trimEnd()).join(""), source);
+			}
+			assert.deepStrictEqual(
+				new Markdown(source, 0, 0, defaultMarkdownTheme).render(10).map((line) => stripAnsi(line).trimEnd()),
+				["x²+1", "────", "x-1"],
+			);
+		});
+
+		it("falls back atomically when corrected matrix layouts are narrow", () => {
+			const source = String.raw`$$A=\begin{pmatrix}\pi&0\\0&\frac{1}{\pi}\end{pmatrix}.$$`;
+			for (const width of [1, 2, 10]) {
+				const lines = new Markdown(source, 0, 0, defaultMarkdownTheme).render(width);
+				assert.ok(lines.every((line) => visibleWidth(line) <= width));
+				assert.ok(!lines.map(stripAnsi).join("\n").includes("⎛"));
+				assert.strictEqual(lines.map((line) => stripAnsi(line).trimEnd()).join(""), source);
+			}
+			for (const width of [20, 40, 80, 160]) {
+				const lines = new Markdown(source, 0, 0, defaultMarkdownTheme).render(width);
+				assert.ok(lines.every((line) => visibleWidth(line) <= width));
+				assert.deepStrictEqual(
+					lines.map((line) => stripAnsi(line).trimEnd()),
+					["A = ⎛ π │ 0   ⎞", "    ⎝ 0 │ 1/π ⎠."],
+				);
+			}
+
+			const matrixFamilies: ReadonlyArray<readonly [environment: string, preamble: string]> = [
+				["matrix", ""],
+				["smallmatrix", ""],
+				["array", "{cc}"],
+				["pmatrix", ""],
+				["bmatrix", ""],
+				["Bmatrix", ""],
+				["vmatrix", ""],
+				["Vmatrix", ""],
+			];
+			for (const [environment, preamble] of matrixFamilies) {
+				const familySource = String.raw`$$A=\begin{${environment}}${preamble}123456&0\\0&123456\end{${environment}}.$$`;
+				const narrow = new Markdown(familySource, 0, 0, defaultMarkdownTheme).render(10);
+				assert.ok(narrow.every((line) => visibleWidth(line) <= 10));
+				assert.strictEqual(narrow.map((line) => stripAnsi(line).trimEnd()).join(""), familySource);
+
+				const wide = new Markdown(familySource, 0, 0, defaultMarkdownTheme).render(40);
+				assert.ok(wide.every((line) => visibleWidth(line) <= 40));
+				assert.ok(!wide.map(stripAnsi).join("\n").includes("$$"));
+			}
+		});
+
+		it("uses list- and blockquote-local widths for display fallback", () => {
+			for (const source of [`- item\n  ${String.raw`$$\frac{x^2+1}{x-1}$$`}`, String.raw`> $$\frac{x^2+1}{x-1}$$`]) {
+				const narrow = new Markdown(source, 0, 0, defaultMarkdownTheme).render(5);
+				assert.ok(narrow.every((line) => visibleWidth(line) <= 5));
+				assert.ok(narrow.map(stripAnsi).join("\n").includes("$$"));
+				assert.ok(!narrow.map(stripAnsi).join("\n").includes("────"));
+
+				const wide = new Markdown(source, 0, 0, defaultMarkdownTheme).render(10);
+				assert.ok(wide.every((line) => visibleWidth(line) <= 10));
+				assert.ok(wide.map(stripAnsi).join("\n").includes("────"));
+			}
+		});
+
+		it("clamps Markdown padding at one- and two-column widths", () => {
+			for (const width of [1, 2]) {
+				const lines = new Markdown("x", 1, 0, defaultMarkdownTheme).render(width);
+				assert.ok(lines.every((line) => visibleWidth(line) <= width));
+			}
+			assert.deepStrictEqual(new Markdown("x", 1, 0, defaultMarkdownTheme).render(3), [" x "]);
 		});
 	});
 });

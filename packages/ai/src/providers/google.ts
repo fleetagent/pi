@@ -11,6 +11,7 @@ import type {
 	AssistantMessage,
 	Context,
 	Model,
+	ProviderHeaders,
 	SimpleStreamOptions,
 	StreamFunction,
 	StreamOptions,
@@ -21,6 +22,7 @@ import type {
 	ToolCall,
 } from "../types.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
+import { providerHeadersToRecord } from "../utils/headers.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import type { GoogleThinkingLevel } from "./google-shared.ts";
 import {
@@ -30,6 +32,7 @@ import {
 	mapStopReason,
 	mapToolChoice,
 	retainThoughtSignature,
+	retryGoogleRequest,
 } from "./google-shared.ts";
 import { buildBaseOptions } from "./simple-options.ts";
 
@@ -79,7 +82,7 @@ export const streamGoogle: StreamFunction<"google-generative-ai", GoogleOptions>
 			if (nextParams !== undefined) {
 				params = nextParams as GenerateContentParameters;
 			}
-			const googleStream = await client.models.generateContentStream(params);
+			const googleStream = await retryGoogleRequest(() => client.models.generateContentStream(params), options);
 
 			stream.push({ type: "start", partial: output });
 			let currentBlock: TextContent | ThinkingContent | null = null;
@@ -252,6 +255,9 @@ export const streamGoogle: StreamFunction<"google-generative-ai", GoogleOptions>
 				throw new Error("Request was aborted");
 			}
 
+			if (output.stopReason === "pending") {
+				throw new Error("Google stream ended without a finish reason");
+			}
 			if (output.stopReason === "aborted" || output.stopReason === "error") {
 				throw new Error("An unknown error occurred");
 			}
@@ -316,15 +322,16 @@ export const streamSimpleGoogle: StreamFunction<"google-generative-ai", SimpleSt
 function createClient(
 	model: Model<"google-generative-ai">,
 	apiKey?: string,
-	optionsHeaders?: Record<string, string>,
+	optionsHeaders?: ProviderHeaders,
 ): GoogleGenAI {
 	const httpOptions: { baseUrl?: string; apiVersion?: string; headers?: Record<string, string> } = {};
 	if (model.baseUrl) {
 		httpOptions.baseUrl = model.baseUrl;
 		httpOptions.apiVersion = ""; // baseUrl already includes version path, don't append
 	}
-	if (model.headers || optionsHeaders) {
-		httpOptions.headers = { ...model.headers, ...optionsHeaders };
+	const headers = providerHeadersToRecord({ ...model.headers, ...optionsHeaders });
+	if (headers) {
+		httpOptions.headers = headers;
 	}
 
 	return new GoogleGenAI({

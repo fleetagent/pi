@@ -35,7 +35,7 @@ interface CompactReadClassification {
 	label: string;
 }
 
-const COMPACT_RESOURCE_FILE_NAMES = new Set(["AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"]);
+const COMPACT_RESOURCE_FILE_NAMES = new Set(["AGENTS.override.md", "AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"]);
 
 export interface ReadToolOptions {
 	/** Whether to auto-resize images to 2000x2000 max. Default: true */

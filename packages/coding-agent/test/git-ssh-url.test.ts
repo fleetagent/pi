@@ -62,6 +62,59 @@ describe("Git URL Parsing", () => {
 		});
 	});
 
+	it("should reject unsafe Git install path inputs before URL normalization", () => {
+		for (const source of [
+			"git:git@evil.example:../../victim/repo",
+			"git:git@evil.example:user/./repo",
+			"git:git@evil.example:user//repo",
+			"https://evil.example/a/../victim/repo",
+			"https://evil.example//absolute/repo",
+			"https://evil.example/..%2F..%2Fvictim/repo",
+			"https://evil.example/%2e%2e%5cvictim/repo",
+			"https://evil.example/user%2Frepo/name",
+			"https://evil.example/%252e%252e/repo",
+			"https://evil.example/%252e./repo",
+			"https://evil.example/.%252e/repo",
+			"https://evil.example/user/%252f/repo",
+			"https://evil.example/user/repo%",
+			"https://user%2Fname@evil.example/user/repo",
+			"https://evil%0d.example/user/repo",
+			"https://evil.example/C:%2Frepo/name",
+			"git:git@evil.example:/absolute/repo",
+			"git:git@evil.example:C:/absolute/repo",
+			"git:git@evil.example:team/C:/repo",
+			"git:git@evil.example:user\\repo/name",
+			"git:git@evil.example:user/repo\0name",
+			"git:git@evil.example:user/repo\rname",
+			"git:git@evil.example:user/repo\nname",
+			"git:git@evil.example:user/repo\u007fname",
+			"git:evil%2fhost.example:user/repo",
+		]) {
+			expect(parseGitUrl(source), source).toBeNull();
+		}
+	});
+
+	it("should preserve valid protocol casing, SSH syntax, nested paths, refs, and host identity", () => {
+		expect(parseGitUrl("https://Git.Example.com/team/nested/repo.git@v1")).toMatchObject({
+			host: "git.example.com",
+			path: "team/nested/repo",
+			ref: "v1",
+		});
+		expect(parseGitUrl("git:git@Git.Example.com:team/nested/repo.git@v1")).toMatchObject({
+			host: "Git.Example.com",
+			path: "team/nested/repo",
+			ref: "v1",
+		});
+		expect(parseGitUrl("HTTPS://Git.Example.com/team/nested/repo")).toMatchObject({
+			host: "git.example.com",
+			path: "team/nested/repo",
+		});
+		expect(parseGitUrl("Git:git@Git.Example.com:team/nested/repo")).toMatchObject({
+			host: "Git.Example.com",
+			path: "team/nested/repo",
+		});
+	});
+
 	describe("unsupported without git: prefix", () => {
 		it("should reject git@host:path without git: prefix", () => {
 			expect(parseGitUrl("git@github.com:user/repo")).toBeNull();

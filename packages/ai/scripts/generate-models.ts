@@ -283,7 +283,7 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 	if (isGoogleThinkingApi(model) && isGemma4Model(model.id)) {
 		mergeThinkingLevelMap(model, { off: null, minimal: "MINIMAL", low: null, medium: null, high: "HIGH" });
 	}
-	if (model.provider === "groq" && model.id === "qwen/qwen3-32b") {
+	if (model.provider === "groq" && model.id === "qwen/qwen3.6-27b") {
 		mergeThinkingLevelMap(model, { minimal: null, low: null, medium: null, high: "default" });
 	}
 	if (model.provider === "openai-codex" && supportsOpenAiXhigh(model.id)) {
@@ -745,6 +745,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 						cacheWrite: m.cost?.cache_write || 0,
 					},
 					compat: {
+						maxTokensField: "max_tokens",
 						supportsDeveloperRole: false,
 						thinkingFormat: "zai",
 						...(!ZAI_TOOL_STREAM_UNSUPPORTED_MODELS.has(modelId) ? { zaiToolStream: true } : {}),
@@ -1493,6 +1494,10 @@ async function generateModels() {
 		requiresReasoningContentOnAssistantMessages: true,
 		thinkingFormat: "deepseek",
 	};
+	const deepseekApiCompat: OpenAICompletionsCompat = {
+		...deepseekCompat,
+		maxTokensField: "max_tokens",
+	};
 	const deepseekV4Models: Model<"openai-completions">[] = [
 		{
 			id: "deepseek-v4-flash",
@@ -1510,7 +1515,7 @@ async function generateModels() {
 			},
 			contextWindow: 1000000,
 			maxTokens: 384000,
-			compat: deepseekCompat,
+			compat: deepseekApiCompat,
 		},
 		{
 			id: "deepseek-v4-pro",
@@ -1528,7 +1533,7 @@ async function generateModels() {
 			},
 			contextWindow: 1000000,
 			maxTokens: 384000,
-			compat: deepseekCompat,
+			compat: deepseekApiCompat,
 		},
 	];
 	allModels.push(...deepseekV4Models);

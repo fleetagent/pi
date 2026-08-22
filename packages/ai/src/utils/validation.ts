@@ -25,7 +25,10 @@ function isJsonSchemaObject(value: unknown): value is JsonSchemaObject {
 }
 
 function hasTypeBoxMetadata(schema: unknown): boolean {
-	return isRecord(schema) && Object.getOwnPropertySymbols(schema).includes(TYPEBOX_KIND);
+	return (
+		isRecord(schema) &&
+		(typeof schema["~kind"] === "string" || Object.getOwnPropertySymbols(schema).includes(TYPEBOX_KIND))
+	);
 }
 
 function getSchemaTypes(schema: JsonSchemaObject): string[] {
@@ -192,6 +195,13 @@ function applySchemaArrayCoercion(value: unknown[], schema: JsonSchemaObject): v
 
 function coerceWithUnionSchema(value: unknown, schemas: JsonSchemaObject[]): unknown {
 	for (const schema of schemas) {
+		const validator = getSubSchemaValidator(schema);
+		if (validator?.Check(value)) {
+			return value;
+		}
+	}
+
+	for (const schema of schemas) {
 		const candidate = structuredClone(value);
 		const coerced = coerceWithJsonSchema(candidate, schema);
 		const validator = getSubSchemaValidator(schema);
@@ -291,9 +301,10 @@ export function validateToolCall(tools: Tool[], toolCall: ToolCall): any {
  */
 export function validateToolArguments(tool: Tool, toolCall: ToolCall): any {
 	const args = structuredClone(toolCall.arguments);
-	Value.Convert(tool.parameters, args);
-
 	const validator = getValidator(tool.parameters);
+
+	// Serialized schemas use the compatibility coercer first so valid union arms are not changed
+	// by TypeBox conversion before the schema-specific checks can preserve them.
 	if (!hasTypeBoxMetadata(tool.parameters) && isJsonSchemaObject(tool.parameters)) {
 		const coerced = coerceWithJsonSchema(args, tool.parameters);
 		if (coerced !== args) {
@@ -302,12 +313,16 @@ export function validateToolArguments(tool: Tool, toolCall: ToolCall): any {
 					delete args[key];
 				}
 				Object.assign(args, coerced);
-			} else {
-				return validator.Check(coerced) ? coerced : args;
+			} else if (validator.Check(coerced)) {
+				return coerced;
 			}
+		}
+		if (validator.Check(args)) {
+			return args;
 		}
 	}
 
+	Value.Convert(tool.parameters, args);
 	if (validator.Check(args)) {
 		return args;
 	}

@@ -18,8 +18,11 @@ export function getDefaultSessionDir(cwd: string, agentDir?: string): string {
 }
 
 /** Exported for testing. */
-export function loadEntriesFromFile(filePath: string): FileEntry[] {
-	return load(filePath);
+export function loadEntriesFromFile(
+	filePath: string,
+	options: { repair?: boolean; phase?: "fork" | "open" | "import" | "migrate" } = {},
+): FileEntry[] {
+	return load(filePath, {}, options.repair ?? true, options.phase ?? "open");
 }
 
 export function getDefaultSessionDirPath(cwd: string, agentDir?: string): string {

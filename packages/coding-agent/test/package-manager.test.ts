@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { PassThrough } from "node:stream";
@@ -33,6 +33,12 @@ interface PackageManagerInternals {
 		options?: { cwd?: string; timeoutMs?: number; env?: Record<string, string> },
 	): Promise<string>;
 	getLocalGitUpdateTarget(installedPath: string): Promise<{ ref: string; head: string; fetchArgs: string[] }>;
+	getGitInstallPath(
+		source: { type: "git"; repo: string; host: string; path: string; pinned: boolean; ref?: string },
+		scope: "user" | "project" | "temporary",
+	): string;
+	getTemporaryDir(prefix: string, suffix?: string): string;
+	parseSource(source: string): unknown;
 }
 
 // Helper to check if a resource is enabled
@@ -83,6 +89,7 @@ describe("DefaultPackageManager", () => {
 		}
 		vi.restoreAllMocks();
 		vi.unstubAllGlobals();
+		vi.unstubAllEnvs();
 		rmSync(tempDir, { recursive: true, force: true });
 	});
 
@@ -674,6 +681,272 @@ Content`,
 
 			expect(output).toBe(valueWithSpace);
 		});
+	});
+
+	describe("Git package path confinement", () => {
+		function gitSource(host: string, path: string, ref?: string) {
+			return {
+				type: "git" as const,
+				repo: `git@${host}:${path}`,
+				host,
+				path,
+				ref,
+				pinned: Boolean(ref),
+			};
+		}
+
+		it("rejects forged paths in user, project, and temporary scopes", () => {
+			const internals = packageManager as unknown as PackageManagerInternals;
+			const unsafeSources = [
+				gitSource("evil.example", "../../victim/repo"),
+				gitSource("../evil.example", "user/repo"),
+				gitSource("evil.example", "/absolute/repo"),
+				gitSource("evil.example", "C:/absolute/repo"),
+				gitSource("evil.example", "team/C:/repo"),
+				gitSource("evil.example", "\\\\server\\share\\repo"),
+				gitSource("evil.example", "user%2Frepo/name"),
+			];
+
+			for (const source of unsafeSources) {
+				for (const scope of ["user", "project", "temporary"] as const) {
+					expect(() => internals.getGitInstallPath(source, scope)).toThrow(/Refusing/);
+				}
+			}
+		});
+
+		it("keeps normal nested paths confined and refs out of destination paths", () => {
+			const internals = packageManager as unknown as PackageManagerInternals;
+			const source = gitSource("Git.Example.com", "team/nested/repo", "../../not-a-path");
+			expect(internals.getGitInstallPath(source, "user")).toBe(
+				join(agentDir, "git", "Git.Example.com", "team", "nested", "repo"),
+			);
+			expect(internals.getGitInstallPath(source, "project")).toBe(
+				join(tempDir, ".pi", "git", "Git.Example.com", "team", "nested", "repo"),
+			);
+			expect(internals.getGitInstallPath(source, "temporary")).not.toContain("not-a-path");
+		});
+
+		it("rejects Git-intended parse failures instead of treating them as local paths", async () => {
+			const unsafeSource = "https://evil.example/a/../victim/repo";
+			const internals = packageManager as unknown as PackageManagerInternals;
+			const runCommandSpy = vi.spyOn(internals, "runCommand");
+
+			expect(() => internals.parseSource(unsafeSource)).toThrow("Unsafe or invalid Git package source");
+			expect(() => internals.parseSource("HTTPS://evil.example/a/../victim/repo")).toThrow(
+				"Unsafe or invalid Git package source",
+			);
+			expect(() => packageManager.getInstalledPath(unsafeSource, "user")).toThrow(
+				"Unsafe or invalid Git package source",
+			);
+			expect(() => packageManager.addSourceToSettings(unsafeSource)).toThrow("Unsafe or invalid Git package source");
+			await expect(packageManager.install(unsafeSource)).rejects.toThrow("Unsafe or invalid Git package source");
+			await expect(packageManager.remove(unsafeSource)).rejects.toThrow("Unsafe or invalid Git package source");
+			await expect(packageManager.update(unsafeSource)).rejects.toThrow("Unsafe or invalid Git package source");
+			settingsManager.setPackages([unsafeSource]);
+			await expect(packageManager.resolve()).rejects.toThrow("Unsafe or invalid Git package source");
+			expect(runCommandSpy).not.toHaveBeenCalled();
+		});
+
+		it("preserves temporary npm path derivation under the shared cache root", () => {
+			const internals = packageManager as unknown as PackageManagerInternals;
+			const npmRoot = internals.getTemporaryDir("npm");
+			expect(pathEndsWith(npmRoot, "pi-extensions/npm/f35b2129")).toBe(true);
+		});
+
+		it.skipIf(process.platform === "win32")("allows an in-anchor managed-root alias", () => {
+			const internals = packageManager as unknown as PackageManagerInternals;
+			const aliasedRoot = join(agentDir, "managed", "git");
+			mkdirSync(aliasedRoot, { recursive: true });
+			symlinkSync(aliasedRoot, join(agentDir, "git"), "dir");
+			expect(internals.getGitInstallPath(gitSource("example.com", "user/repo"), "user")).toBe(
+				join(agentDir, "git", "example.com", "user", "repo"),
+			);
+		});
+
+		it.skipIf(process.platform === "win32")("rejects project and temporary managed-root escapes", () => {
+			const internals = packageManager as unknown as PackageManagerInternals;
+			const source = gitSource("example.com", "user/repo");
+			symlinkSync(tmpdir(), join(tempDir, ".pi"), "dir");
+			expect(() => internals.getGitInstallPath(source, "project")).toThrow("outside its trusted anchor");
+
+			const isolatedTmp = join(tempDir, "isolated-tmp");
+			mkdirSync(isolatedTmp, { recursive: true });
+			vi.stubEnv("TMPDIR", isolatedTmp);
+			symlinkSync(tempDir, join(isolatedTmp, "pi-extensions"), "dir");
+			expect(() => internals.getGitInstallPath(source, "temporary")).toThrow("outside its trusted anchor");
+		});
+
+		it.skipIf(process.platform === "win32")("rejects broken managed Git metadata links before writing", async () => {
+			const internals = packageManager as unknown as PackageManagerInternals;
+			const gitRoot = join(agentDir, "git");
+			const outsideFile = join(tempDir, "outside-gitignore");
+			mkdirSync(gitRoot, { recursive: true });
+			symlinkSync(outsideFile, join(gitRoot, ".gitignore"));
+			const runCommandSpy = vi.spyOn(internals, "runCommand");
+
+			await expect(packageManager.install("git:example.com/user/repo")).rejects.toThrow(
+				"Refusing symbolic link in managed Git metadata path",
+			);
+			expect(runCommandSpy).not.toHaveBeenCalled();
+			expect(existsSync(outsideFile)).toBe(false);
+		});
+
+		it.skipIf(process.platform === "win32")(
+			"rejects escaping roots and checkout aliases before mutation",
+			async () => {
+				const internals = packageManager as unknown as PackageManagerInternals;
+				const outside = join(tempDir, "outside");
+				const outsideRepo = join(outside, "user", "repo");
+				mkdirSync(outsideRepo, { recursive: true });
+				writeFileSync(join(outsideRepo, "keep.txt"), "keep");
+				symlinkSync(outside, join(agentDir, "git"), "dir");
+
+				const source = gitSource("evil.example", "user/repo");
+				expect(() => internals.getGitInstallPath(source, "user")).toThrow("outside its trusted anchor");
+				await expect(packageManager.remove("git:evil.example/user/repo")).rejects.toThrow(/Refusing/);
+				expect(existsSync(join(outsideRepo, "keep.txt"))).toBe(true);
+			},
+		);
+
+		it.skipIf(process.platform === "win32")(
+			"rejects managed host symlinks even when they stay inside the root",
+			() => {
+				const internals = packageManager as unknown as PackageManagerInternals;
+				const gitRoot = join(agentDir, "git");
+				const aliasTarget = join(gitRoot, "aliases", "example.com");
+				mkdirSync(aliasTarget, { recursive: true });
+				symlinkSync(aliasTarget, join(gitRoot, "example.com"), "dir");
+				expect(() => internals.getGitInstallPath(gitSource("example.com", "user/repo"), "user")).toThrow(
+					"Refusing symbolic link",
+				);
+			},
+		);
+
+		it.skipIf(process.platform === "win32")(
+			"rechecks the checkout after asynchronous update target discovery",
+			async () => {
+				const internals = packageManager as unknown as PackageManagerInternals;
+				const source = "git:example.com/user/repo";
+				const parsed = internals.parseSource(source) as Parameters<PackageManagerInternals["getGitInstallPath"]>[0];
+				const installedPath = internals.getGitInstallPath(parsed, "user");
+				const outside = join(tempDir, "update-race-outside");
+				mkdirSync(installedPath, { recursive: true });
+				mkdirSync(outside, { recursive: true });
+				writeFileSync(join(outside, "keep.txt"), "keep");
+				vi.spyOn(internals, "getLocalGitUpdateTarget").mockImplementation(async () => {
+					rmSync(installedPath, { recursive: true, force: true });
+					symlinkSync(outside, installedPath, "dir");
+					return { ref: "origin/HEAD", head: "new-head", fetchArgs: ["fetch", "origin"] };
+				});
+				const runCommandSpy = vi.spyOn(internals, "runCommand");
+
+				await expect(packageManager.install(source)).rejects.toThrow("Refusing symbolic link");
+				expect(runCommandSpy).not.toHaveBeenCalled();
+				expect(existsSync(join(outside, "keep.txt"))).toBe(true);
+			},
+		);
+
+		it.skipIf(process.platform === "win32")(
+			"rechecks the checkout after git clean before dependency work",
+			async () => {
+				const internals = packageManager as unknown as PackageManagerInternals;
+				const source = "git:example.com/user/repo@v2";
+				const parsed = internals.parseSource(source) as Parameters<PackageManagerInternals["getGitInstallPath"]>[0];
+				const installedPath = internals.getGitInstallPath(parsed, "user");
+				const outside = join(tempDir, "clean-race-outside");
+				mkdirSync(installedPath, { recursive: true });
+				mkdirSync(outside, { recursive: true });
+				writeFileSync(join(outside, "package.json"), "{}");
+				vi.spyOn(internals, "runCommandCapture").mockImplementation(async (_command, args) => {
+					if (args[1] === "HEAD") return "old-head";
+					return "new-head";
+				});
+				const runCommandSpy = vi.spyOn(internals, "runCommand").mockImplementation(async (_command, args) => {
+					if (args[0] !== "clean") return;
+					rmSync(installedPath, { recursive: true, force: true });
+					symlinkSync(outside, installedPath, "dir");
+				});
+
+				await expect(packageManager.install(source)).rejects.toThrow("Refusing symbolic link");
+				expect(runCommandSpy.mock.calls.some(([command]) => command === "npm")).toBe(false);
+			},
+		);
+
+		it.skipIf(process.platform === "win32")(
+			"rejects nested empty and broken resource escapes and terminates internal cycles",
+			async () => {
+				process.env.PI_OFFLINE = "1";
+				const internals = packageManager as unknown as PackageManagerInternals;
+				const source = "git:example.com/user/repo";
+				const parsed = internals.parseSource(source) as Parameters<PackageManagerInternals["getGitInstallPath"]>[0];
+				const installedPath = internals.getGitInstallPath(parsed, "user");
+				const extensions = join(installedPath, "extensions");
+				const outside = join(tempDir, "empty-outside-resources");
+				mkdirSync(join(extensions, "nested"), { recursive: true });
+				mkdirSync(outside, { recursive: true });
+				symlinkSync(outside, join(extensions, "nested", "escape"), "dir");
+				settingsManager.setPackages([source]);
+
+				await expect(packageManager.resolve()).rejects.toThrow("outside checkout");
+
+				rmSync(join(extensions, "nested", "escape"));
+				symlinkSync(join(tempDir, "missing-resource"), join(extensions, "nested", "broken"), "dir");
+				await expect(packageManager.resolve()).rejects.toThrow("unreadable or broken");
+
+				rmSync(join(extensions, "nested", "broken"));
+				const ignorePath = join(extensions, "nested", ".gitignore");
+				symlinkSync(join(tempDir, "missing-ignore"), ignorePath);
+				await expect(packageManager.resolve()).rejects.toThrow("unreadable or broken");
+				rmSync(ignorePath);
+				const nodeModules = join(installedPath, "node_modules");
+				mkdirSync(nodeModules, { recursive: true });
+				symlinkSync(outside, join(nodeModules, "a"), "dir");
+				writeFileSync(
+					join(installedPath, "package.json"),
+					JSON.stringify({ name: "repo", pi: { extensions: ["*/?"] } }),
+				);
+				await expect(packageManager.resolve()).rejects.toThrow("outside checkout");
+				rmSync(join(installedPath, "package.json"));
+				rmSync(nodeModules, { recursive: true, force: true });
+				writeFileSync(join(extensions, "index.ts"), "export default function() {};");
+				const themes = join(installedPath, "themes");
+				mkdirSync(join(themes, "nested"), { recursive: true });
+				writeFileSync(join(themes, "dark.json"), "{}");
+				symlinkSync(themes, join(themes, "nested", "cycle"), "dir");
+				const result = await packageManager.resolve();
+				expect(result.extensions.some((entry) => entry.path === join(extensions, "index.ts"))).toBe(true);
+				expect(result.themes.some((entry) => entry.path === join(themes, "dark.json"))).toBe(true);
+			},
+		);
+
+		it.skipIf(process.platform === "win32")(
+			"rejects escaping managed Git resources and preserves internal links",
+			async () => {
+				process.env.PI_OFFLINE = "1";
+				const internals = packageManager as unknown as PackageManagerInternals;
+				const source = "git:example.com/user/repo";
+				const parsed = internals.parseSource(source) as Parameters<PackageManagerInternals["getGitInstallPath"]>[0];
+				const installedPath = internals.getGitInstallPath(parsed, "user");
+				const outside = join(tempDir, "outside-resources");
+				mkdirSync(outside, { recursive: true });
+				writeFileSync(join(outside, "index.ts"), "export default function() {};");
+				mkdirSync(installedPath, { recursive: true });
+				symlinkSync(outside, join(installedPath, "extensions"), "dir");
+				settingsManager.setPackages([source]);
+
+				await expect(packageManager.resolve()).rejects.toThrow("outside checkout");
+
+				rmSync(join(installedPath, "extensions"));
+				const internal = join(installedPath, "internal-extensions");
+				mkdirSync(internal, { recursive: true });
+				writeFileSync(join(internal, "index.ts"), "export default function() {};");
+				symlinkSync(internal, join(installedPath, "extensions"), "dir");
+				const result = await packageManager.resolve();
+				expect(
+					result.extensions.some((entry) => entry.path === join(installedPath, "extensions", "index.ts")),
+				).toBe(true);
+			},
+		);
 	});
 
 	describe("npmCommand", () => {

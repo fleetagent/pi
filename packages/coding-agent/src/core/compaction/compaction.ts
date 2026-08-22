@@ -5,16 +5,25 @@
  * and after compaction the session is reloaded.
  */
 
-import type { AgentMessage, StreamFn, ThinkingLevel } from "@fleetagent/pi-agent-core";
-import type { AssistantMessage, Context, Model, SimpleStreamOptions, Usage } from "@fleetagent/pi-ai";
-import { completeSimple } from "@fleetagent/pi-ai";
+import { type AgentMessage, type StreamFn, type ThinkingLevel, uuidv7 } from "@fleetagent/pi-agent-core";
+import type {
+	AssistantMessage,
+	Context,
+	Model,
+	ProviderHeaders,
+	RetryCallbacks,
+	RetryPolicy,
+	SimpleStreamOptions,
+	Usage,
+} from "@fleetagent/pi-ai";
+import { completeSimple, retryAssistantCall } from "@fleetagent/pi-ai";
+import { convertToLlm } from "../messages.ts";
 import {
-	convertToLlm,
-	createBranchSummaryMessage,
-	createCompactionSummaryMessage,
-	createCustomMessage,
-} from "../messages.ts";
-import { buildSessionContext, type CompactionEntry, type SessionEntry } from "../session-manager.ts";
+	buildSessionContext,
+	type CompactionEntry,
+	type SessionEntry,
+	sessionEntryToContextMessages,
+} from "../session-manager.ts";
 import {
 	computeFileLists,
 	createFileOps,
@@ -72,31 +81,16 @@ function extractFileOperations(
 // Message Extraction
 // ============================================================================
 
-/**
- * Extract AgentMessage from an entry if it produces one.
- * Returns undefined for entries that don't contribute to LLM context.
- */
-function getMessageFromEntry(entry: SessionEntry): AgentMessage | undefined {
-	if (entry.type === "message") {
-		return entry.message;
-	}
-	if (entry.type === "custom_message") {
-		return createCustomMessage(entry.customType, entry.content, entry.display, entry.details, entry.timestamp);
-	}
-	if (entry.type === "branch_summary") {
-		return createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp);
-	}
-	if (entry.type === "compaction") {
-		return createCompactionSummaryMessage(entry.summary, entry.tokensBefore, entry.timestamp);
-	}
-	return undefined;
+/** Project an entry into messages that are visible to the provider context. */
+function getVisibleContextMessages(entry: SessionEntry): AgentMessage[] {
+	return sessionEntryToContextMessages(entry).filter((message) => convertToLlm([message]).length > 0);
 }
 
-function getMessageFromEntryForCompaction(entry: SessionEntry): AgentMessage | undefined {
+function getMessagesFromEntryForCompaction(entry: SessionEntry): AgentMessage[] {
 	if (entry.type === "compaction") {
-		return undefined;
+		return [];
 	}
-	return getMessageFromEntry(entry);
+	return getVisibleContextMessages(entry);
 }
 
 /** Result from compact() - Session adds uuid/parentUuid when saving */
@@ -143,7 +137,12 @@ export function calculateContextTokens(usage: Usage): number {
 function getAssistantUsage(msg: AgentMessage): Usage | undefined {
 	if (msg.role === "assistant" && "usage" in msg) {
 		const assistantMsg = msg as AssistantMessage;
-		if (assistantMsg.stopReason !== "aborted" && assistantMsg.stopReason !== "error" && assistantMsg.usage) {
+		if (
+			assistantMsg.stopReason !== "aborted" &&
+			assistantMsg.stopReason !== "error" &&
+			assistantMsg.usage &&
+			calculateContextTokens(assistantMsg.usage) > 0
+		) {
 			return assistantMsg.usage;
 		}
 	}
@@ -229,26 +228,29 @@ export function shouldCompact(contextTokens: number, contextWindow: number, sett
  * Estimate token count for a message using chars/4 heuristic.
  * This is conservative (overestimates tokens).
  */
-export function estimateTokens(message: AgentMessage): number {
+function estimateContentChars(content: string | Array<{ type: string; text?: string }>): number {
+	if (typeof content === "string") return content.length;
 	let chars = 0;
+	for (const block of content) {
+		if (block.type === "text" && block.text) chars += block.text.length;
+		if (block.type === "image") chars += 4800; // Approximate one image as 1200 tokens.
+	}
+	return chars;
+}
 
+export function estimateTokens(message: AgentMessage): number {
+	// Runtime context can contain audit-only custom messages and excluded bash
+	// executions. Token accounting follows what convertToLlm sends to providers.
+	if (convertToLlm([message]).length === 0) return 0;
+
+	let chars = 0;
 	switch (message.role) {
-		case "user": {
-			const content = (message as { content: string | Array<{ type: string; text?: string }> }).content;
-			if (typeof content === "string") {
-				chars = content.length;
-			} else if (Array.isArray(content)) {
-				for (const block of content) {
-					if (block.type === "text" && block.text) {
-						chars += block.text.length;
-					}
-				}
-			}
-			return Math.ceil(chars / 4);
-		}
-		case "assistant": {
-			const assistant = message as AssistantMessage;
-			for (const block of assistant.content) {
+		case "user":
+		case "custom":
+		case "toolResult":
+			return Math.ceil(estimateContentChars(message.content ?? []) / 4);
+		case "assistant":
+			for (const block of message.content ?? []) {
 				if (block.type === "text") {
 					chars += block.text.length;
 				} else if (block.type === "thinking") {
@@ -258,102 +260,66 @@ export function estimateTokens(message: AgentMessage): number {
 				}
 			}
 			return Math.ceil(chars / 4);
-		}
-		case "custom":
-		case "toolResult": {
-			if (typeof message.content === "string") {
-				chars = message.content.length;
-			} else {
-				for (const block of message.content) {
-					if (block.type === "text" && block.text) {
-						chars += block.text.length;
-					}
-					if (block.type === "image") {
-						chars += 4800; // Estimate images as 4000 chars, or 1200 tokens
-					}
-				}
-			}
-			return Math.ceil(chars / 4);
-		}
-		case "bashExecution": {
-			chars = message.command.length + message.output.length;
-			return Math.ceil(chars / 4);
-		}
+		case "bashExecution":
+			return Math.ceil((message.command.length + message.output.length) / 4);
 		case "branchSummary":
-		case "compactionSummary": {
-			chars = message.summary.length;
-			return Math.ceil(chars / 4);
-		}
+		case "compactionSummary":
+			return Math.ceil(message.summary.length / 4);
 	}
-
 	return 0;
 }
 
-/**
- * Find valid cut points: indices of user, assistant, custom, or bashExecution messages.
- * Never cut at tool results (they must follow their tool call).
- * When we cut at an assistant message with tool calls, its tool results follow it
- * and will be kept.
- * BashExecutionMessage is treated like a user message (user-initiated context).
- */
+function isCutPointMessage(message: AgentMessage): boolean {
+	switch (message.role) {
+		case "user":
+		case "assistant":
+		case "bashExecution":
+		case "custom":
+		case "branchSummary":
+		case "compactionSummary":
+			return true;
+		case "toolResult":
+			return false;
+	}
+	return false;
+}
+
+function isTurnStartMessage(message: AgentMessage): boolean {
+	switch (message.role) {
+		case "user":
+		case "bashExecution":
+		case "custom":
+		case "branchSummary":
+		case "compactionSummary":
+			return true;
+		case "assistant":
+		case "toolResult":
+			return false;
+	}
+	return false;
+}
+
+function isTurnStartEntry(entry: SessionEntry): boolean {
+	if (entry.type === "compaction") return false;
+	return getVisibleContextMessages(entry).some(isTurnStartMessage);
+}
+
+/** Find context-visible cut points without separating a tool result from its call. */
 function findValidCutPoints(entries: SessionEntry[], startIndex: number, endIndex: number): number[] {
 	const cutPoints: number[] = [];
 	for (let i = startIndex; i < endIndex; i++) {
 		const entry = entries[i];
-		switch (entry.type) {
-			case "message": {
-				const role = entry.message.role;
-				switch (role) {
-					case "bashExecution":
-					case "custom":
-					case "branchSummary":
-					case "compactionSummary":
-					case "user":
-					case "assistant":
-						cutPoints.push(i);
-						break;
-					case "toolResult":
-						break;
-				}
-				break;
-			}
-			case "thinking_level_change":
-			case "model_change":
-			case "compaction":
-			case "branch_summary":
-			case "custom":
-			case "custom_message":
-			case "label":
-			case "session_info":
-				break;
-		}
-
-		// branch_summary and custom_message are user-role messages, valid cut points
-		if (entry.type === "branch_summary" || entry.type === "custom_message") {
+		if (entry.type !== "compaction" && getVisibleContextMessages(entry).some(isCutPointMessage)) {
 			cutPoints.push(i);
 		}
 	}
 	return cutPoints;
 }
 
-/**
- * Find the user message (or bashExecution) that starts the turn containing the given entry index.
- * Returns -1 if no turn start found before the index.
- * BashExecutionMessage is treated like a user message for turn boundaries.
- */
+/** Find the context-visible user-like message that starts the containing turn. */
 export function findTurnStartIndex(entries: SessionEntry[], entryIndex: number, startIndex: number): number {
 	for (let i = entryIndex; i >= startIndex; i--) {
-		const entry = entries[i];
-		// branch_summary and custom_message are user-role messages, can start a turn
-		if (entry.type === "branch_summary" || entry.type === "custom_message") {
-			return i;
-		}
-		if (entry.type === "message") {
-			const role = entry.message.role;
-			if (role === "user" || role === "bashExecution") {
-				return i;
-			}
-		}
+		if (isTurnStartEntry(entries[i])) return i;
 	}
 	return -1;
 }
@@ -400,50 +366,53 @@ export function findCutPoint(
 	let cutIndex = cutPoints[0]; // Default: keep from first message (not header)
 
 	for (let i = endIndex - 1; i >= startIndex; i--) {
-		const entry = entries[i];
-		if (entry.type !== "message") continue;
-
-		// Estimate this message's size
-		const messageTokens = estimateTokens(entry.message);
+		const messageTokens = getVisibleContextMessages(entries[i]).reduce(
+			(sum, message) => sum + estimateTokens(message),
+			0,
+		);
+		if (messageTokens === 0) continue;
 		accumulatedTokens += messageTokens;
 
-		// Check if we've exceeded the budget
 		if (accumulatedTokens >= keepRecentTokens) {
-			// Find the closest valid cut point at or after this entry
+			let foundCutPoint = false;
 			for (let c = 0; c < cutPoints.length; c++) {
 				if (cutPoints[c] >= i) {
 					cutIndex = cutPoints[c];
+					foundCutPoint = true;
 					break;
+				}
+			}
+			// A terminal tool result has no later cut point. Retain it together with
+			// the nearest preceding assistant call rather than falling back to the
+			// oldest turn and making compaction ineffective.
+			if (!foundCutPoint) {
+				for (let c = cutPoints.length - 1; c >= 0; c--) {
+					if (cutPoints[c] <= i) {
+						cutIndex = cutPoints[c];
+						break;
+					}
 				}
 			}
 			break;
 		}
 	}
 
-	// Scan backwards from cutIndex to include any non-message entries (bash, settings, etc.)
+	// Include adjacent metadata entries that do not affect provider context.
 	while (cutIndex > startIndex) {
 		const prevEntry = entries[cutIndex - 1];
-		// Stop at session header or compaction boundaries
-		if (prevEntry.type === "compaction") {
-			break;
-		}
-		if (prevEntry.type === "message") {
-			// Stop if we hit any message
-			break;
-		}
-		// Include this non-message entry (bash, settings change, etc.)
+		if (prevEntry.type === "compaction" || getVisibleContextMessages(prevEntry).length > 0) break;
 		cutIndex--;
 	}
 
-	// Determine if this is a split turn
+	// User-like context entries start a turn; assistant cut points split one.
 	const cutEntry = entries[cutIndex];
-	const isUserMessage = cutEntry.type === "message" && cutEntry.message.role === "user";
-	const turnStartIndex = isUserMessage ? -1 : findTurnStartIndex(entries, cutIndex, startIndex);
+	const startsTurn = isTurnStartEntry(cutEntry);
+	const turnStartIndex = startsTurn ? -1 : findTurnStartIndex(entries, cutIndex, startIndex);
 
 	return {
 		firstKeptEntryIndex: cutIndex,
 		turnStartIndex,
-		isSplitTurn: !isUserMessage && turnStartIndex !== -1,
+		isSplitTurn: !startsTurn && turnStartIndex !== -1,
 	};
 }
 
@@ -527,7 +496,7 @@ function createSummarizationOptions(
 	model: Model<any>,
 	maxTokens: number,
 	apiKey: string | undefined,
-	headers: Record<string, string> | undefined,
+	headers: ProviderHeaders | undefined,
 	signal: AbortSignal | undefined,
 	thinkingLevel: ThinkingLevel | undefined,
 ): SimpleStreamOptions {
@@ -538,17 +507,25 @@ function createSummarizationOptions(
 	return options;
 }
 
-async function completeSummarization(
+export async function completeSummarization(
 	model: Model<any>,
 	context: Context,
 	options: SimpleStreamOptions,
 	streamFn?: StreamFn,
+	retry?: RetryPolicy,
+	callbacks?: RetryCallbacks,
 ): Promise<AssistantMessage> {
-	if (!streamFn) {
-		return completeSimple(model, context, options);
-	}
-	const stream = await streamFn(model, context, options);
-	return stream.result();
+	const requestOptions: SimpleStreamOptions = {
+		...options,
+		cacheRetention: "none",
+		sessionId: uuidv7(),
+	};
+	const produce = async (): Promise<AssistantMessage> => {
+		if (!streamFn) return completeSimple(model, context, requestOptions);
+		const stream = await streamFn(model, context, requestOptions);
+		return stream.result();
+	};
+	return retryAssistantCall(produce, retry, requestOptions.signal, callbacks);
 }
 
 /**
@@ -560,12 +537,14 @@ export async function generateSummary(
 	model: Model<any>,
 	reserveTokens: number,
 	apiKey: string | undefined,
-	headers?: Record<string, string>,
+	headers?: ProviderHeaders,
 	signal?: AbortSignal,
 	customInstructions?: string,
 	previousSummary?: string,
 	thinkingLevel?: ThinkingLevel,
 	streamFn?: StreamFn,
+	retry?: RetryPolicy,
+	callbacks?: RetryCallbacks,
 ): Promise<string> {
 	const maxTokens = Math.min(
 		Math.floor(0.8 * reserveTokens),
@@ -605,6 +584,8 @@ export async function generateSummary(
 		{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
 		completionOptions,
 		streamFn,
+		retry,
+		callbacks,
 	);
 
 	if (response.stopReason === "error") {
@@ -683,16 +664,14 @@ export function prepareCompaction(
 	// Messages to summarize (will be discarded after summary)
 	const messagesToSummarize: AgentMessage[] = [];
 	for (let i = boundaryStart; i < historyEnd; i++) {
-		const msg = getMessageFromEntryForCompaction(pathEntries[i]);
-		if (msg) messagesToSummarize.push(msg);
+		messagesToSummarize.push(...getMessagesFromEntryForCompaction(pathEntries[i]));
 	}
 
 	// Messages for turn prefix summary (if splitting a turn)
 	const turnPrefixMessages: AgentMessage[] = [];
 	if (cutPoint.isSplitTurn) {
 		for (let i = cutPoint.turnStartIndex; i < cutPoint.firstKeptEntryIndex; i++) {
-			const msg = getMessageFromEntryForCompaction(pathEntries[i]);
-			if (msg) turnPrefixMessages.push(msg);
+			turnPrefixMessages.push(...getMessagesFromEntryForCompaction(pathEntries[i]));
 		}
 	}
 
@@ -748,11 +727,13 @@ export async function compact(
 	preparation: CompactionPreparation,
 	model: Model<any>,
 	apiKey: string | undefined,
-	headers?: Record<string, string>,
+	headers?: ProviderHeaders,
 	customInstructions?: string,
 	signal?: AbortSignal,
 	thinkingLevel?: ThinkingLevel,
 	streamFn?: StreamFn,
+	retry?: RetryPolicy,
+	callbacks?: RetryCallbacks,
 ): Promise<CompactionResult> {
 	const {
 		firstKeptEntryId,
@@ -782,6 +763,8 @@ export async function compact(
 						previousSummary,
 						thinkingLevel,
 						streamFn,
+						retry,
+						callbacks,
 					)
 				: "No prior history.";
 		const turnPrefixResult = await generateTurnPrefixSummary(
@@ -793,6 +776,8 @@ export async function compact(
 			signal,
 			thinkingLevel,
 			streamFn,
+			retry,
+			callbacks,
 		);
 		// Merge into single summary
 		summary = `${historyResult}\n\n---\n\n**Turn Context (split turn):**\n\n${turnPrefixResult}`;
@@ -809,6 +794,8 @@ export async function compact(
 			previousSummary,
 			thinkingLevel,
 			streamFn,
+			retry,
+			callbacks,
 		);
 	}
 
@@ -836,10 +823,12 @@ async function generateTurnPrefixSummary(
 	model: Model<any>,
 	reserveTokens: number,
 	apiKey: string | undefined,
-	headers?: Record<string, string>,
+	headers?: ProviderHeaders,
 	signal?: AbortSignal,
 	thinkingLevel?: ThinkingLevel,
 	streamFn?: StreamFn,
+	retry?: RetryPolicy,
+	callbacks?: RetryCallbacks,
 ): Promise<string> {
 	const maxTokens = Math.min(
 		Math.floor(0.5 * reserveTokens),
@@ -861,6 +850,8 @@ async function generateTurnPrefixSummary(
 		{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
 		createSummarizationOptions(model, maxTokens, apiKey, headers, signal, thinkingLevel),
 		streamFn,
+		retry,
+		callbacks,
 	);
 
 	if (response.stopReason === "error") {

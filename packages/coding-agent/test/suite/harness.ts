@@ -18,6 +18,7 @@ import { InMemorySessionManager, type Session } from "../../src/core/session-man
 import type { Settings } from "../../src/core/settings-manager.ts";
 import { SettingsManager } from "../../src/core/settings-manager.ts";
 import type { ToolOperations } from "../../src/core/tools/operations.ts";
+import type { SubagentRunner } from "../../src/core/tools/subagent.ts";
 import type { ExtensionFactory, ResourceLoader } from "../../src/index.ts";
 import {
 	type CreateTestExtensionsResultInput,
@@ -65,6 +66,7 @@ export interface HarnessOptions {
 	extensionFactories?: Array<ExtensionFactory | CreateTestExtensionsResultInput>;
 	withConfiguredAuth?: boolean;
 	toolOperations?: ToolOperations;
+	subagentRunner?: SubagentRunner;
 }
 
 export interface Harness {
@@ -175,6 +177,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		modelRegistry,
 		resourceLoader,
 		toolOperations: options.toolOperations,
+		subagentRunner: options.subagentRunner,
 		baseToolsOverride: toolMap,
 		extensionRunnerRef,
 	});

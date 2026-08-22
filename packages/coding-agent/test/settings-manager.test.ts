@@ -196,6 +196,32 @@ describe("SettingsManager", () => {
 
 			expect(manager.getTheme()).toBe("dark");
 		});
+
+		it("keeps cumulative runtime overrides authoritative across global and project saves and reload", async () => {
+			const globalSettingsPath = join(agentDir, "settings.json");
+			const projectSettingsPath = join(projectDir, ".pi", "settings.json");
+			writeFileSync(globalSettingsPath, JSON.stringify({ markdown: { mermaid: false, codeBlockIndent: "    " } }));
+			writeFileSync(projectSettingsPath, JSON.stringify({ packages: ["npm:before"] }));
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+			manager.applyOverrides({ markdown: { mermaid: true } });
+			manager.applyOverrides({ quietStartup: true });
+			manager.setTheme("light");
+			manager.setProjectPackages(["npm:after"]);
+			await manager.flush();
+
+			writeFileSync(
+				globalSettingsPath,
+				JSON.stringify({ theme: "dark", markdown: { mermaid: false, codeBlockIndent: "\t" } }),
+			);
+			await manager.reload();
+
+			expect(manager.getTheme()).toBe("dark");
+			expect(manager.getQuietStartup()).toBe(true);
+			expect(manager.getPackages()).toEqual(["npm:after"]);
+			expect(manager.getMarkdownSettings()).toEqual({ mermaid: true, codeBlockIndent: "\t" });
+			expect(manager.getCodeBlockIndent()).toBe("\t");
+		});
 	});
 
 	describe("error tracking", () => {
@@ -362,6 +388,58 @@ describe("SettingsManager", () => {
 				daemonPort: 9000,
 				cleanup: "remove",
 			});
+		});
+	});
+
+	describe("TUI mode", () => {
+		it("defaults to regular and persists fullscreen mode", async () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getTuiMode()).toBe("regular");
+
+			manager.setTuiMode("fullscreen");
+			await manager.flush();
+
+			expect(manager.getTuiMode()).toBe("fullscreen");
+			const savedSettings = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8"));
+			expect(savedSettings.tuiMode).toBe("fullscreen");
+		});
+
+		it("falls back to regular for unsupported and obsolete values", () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ tuiMode: "other", uiMode: "fullscreen" }));
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getTuiMode()).toBe("regular");
+		});
+	});
+
+	describe("fullscreen exit output", () => {
+		it("defaults to transcript, persists valid modes, and rejects unsupported values", async () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getFullscreenExitOutput()).toBe("transcript");
+
+			manager.setFullscreenExitOutput("resume-hint");
+			await manager.flush();
+			expect(manager.getFullscreenExitOutput()).toBe("resume-hint");
+			expect(JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8")).fullscreenExitOutput).toBe(
+				"resume-hint",
+			);
+
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ fullscreenExitOutput: "nothing" }));
+			expect(SettingsManager.create(projectDir, agentDir).getFullscreenExitOutput()).toBe("transcript");
+		});
+	});
+
+	describe("fullscreen scrollbar", () => {
+		it("defaults to auto, persists valid modes, and rejects unsupported values", async () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getFullscreenScrollbar()).toBe("auto");
+
+			manager.setFullscreenScrollbar("hidden");
+			await manager.flush();
+			expect(manager.getFullscreenScrollbar()).toBe("hidden");
+			expect(JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8")).fullscreenScrollbar).toBe("hidden");
+
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ fullscreenScrollbar: "sometimes" }));
+			expect(SettingsManager.create(projectDir, agentDir).getFullscreenScrollbar()).toBe("auto");
 		});
 	});
 

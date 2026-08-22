@@ -29,15 +29,20 @@ const RETRYABLE_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern([
 	"server.?error",
 	"internal.?error",
 	"provider.?returned.?error",
+	"exceeded request buffer limit while retrying upstream",
 	"network.?error",
 	"connection.?error",
 	"connection.?refused",
 	"connection.?lost",
 	"other side closed",
 	"fetch failed",
+	"getaddrinfo",
+	"ENOTFOUND",
+	"EAI_AGAIN",
 	"upstream.?connect",
 	"reset before headers",
 	"socket hang up",
+	"socket connection was closed",
 	"timed? out",
 	"timeout",
 	"terminated",
@@ -50,8 +55,97 @@ const RETRYABLE_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern([
 	"you can retry your request",
 	"try your request again",
 	"please retry your request",
+
+	// gRPC based providers (e.g. NVIDIA NIM)
+	"ResourceExhausted",
 ]);
 
+export interface RetryPolicy {
+	enabled: boolean;
+	/** Maximum retry attempts; the initial call is not counted. */
+	maxRetries: number;
+	/** Base delay in milliseconds. Delay is doubled for each retry attempt. */
+	baseDelayMs: number;
+}
+
+export interface RetryCallbacks {
+	onRetryScheduled?: (
+		attempt: number,
+		maxAttempts: number,
+		delayMs: number,
+		errorMessage: string,
+	) => void | Promise<void>;
+	onRetryAttemptStart?: () => void | Promise<void>;
+	onRetryFinished?: (success: boolean, attempt: number, finalError?: string) => void | Promise<void>;
+}
+
+class RetrySleepAbortError extends Error {
+	constructor() {
+		super("Aborted");
+	}
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+	return new Promise((resolve, reject) => {
+		if (signal?.aborted) {
+			reject(new RetrySleepAbortError());
+			return;
+		}
+		const onAbort = () => {
+			clearTimeout(timeout);
+			signal?.removeEventListener("abort", onAbort);
+			reject(new RetrySleepAbortError());
+		};
+		const timeout = setTimeout(() => {
+			signal?.removeEventListener("abort", onAbort);
+			resolve();
+		}, ms);
+		signal?.addEventListener("abort", onAbort, { once: true });
+	});
+}
+
+/** Run an assistant-producing call with bounded retries for transient failures. */
+export async function retryAssistantCall(
+	produce: () => Promise<AssistantMessage>,
+	policy: RetryPolicy | undefined,
+	signal: AbortSignal | undefined,
+	callbacks?: RetryCallbacks,
+): Promise<AssistantMessage> {
+	const maxAttempts = policy?.enabled ? policy.maxRetries : 0;
+	let attempt = 0;
+	let lastRetry: { attempt: number; errorMessage: string } | undefined;
+
+	for (;;) {
+		const response = await produce();
+		if (response.stopReason === "aborted") {
+			if (lastRetry) await callbacks?.onRetryFinished?.(false, lastRetry.attempt);
+			return response;
+		}
+		if (response.stopReason !== "error") {
+			if (lastRetry) await callbacks?.onRetryFinished?.(true, lastRetry.attempt);
+			return response;
+		}
+		if (attempt >= maxAttempts || !isRetryableAssistantError(response)) {
+			if (lastRetry) await callbacks?.onRetryFinished?.(false, lastRetry.attempt, response.errorMessage);
+			return response;
+		}
+
+		attempt++;
+		lastRetry = { attempt, errorMessage: response.errorMessage || "Unknown error" };
+		const delayMs = policy!.baseDelayMs * 2 ** (attempt - 1);
+		await callbacks?.onRetryScheduled?.(attempt, maxAttempts, delayMs, lastRetry.errorMessage);
+		try {
+			await sleep(delayMs, signal);
+		} catch (error) {
+			await callbacks?.onRetryFinished?.(false, attempt, lastRetry.errorMessage);
+			if (error instanceof RetrySleepAbortError) {
+				return { ...response, stopReason: "aborted", errorMessage: undefined };
+			}
+			throw error;
+		}
+		await callbacks?.onRetryAttemptStart?.();
+	}
+}
 export function isRetryableAssistantError(message: AssistantMessage): boolean {
 	if (message.stopReason !== "error" || !message.errorMessage) return false;
 	const errorMessage = message.errorMessage;

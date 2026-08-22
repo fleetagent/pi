@@ -9,20 +9,20 @@ Minimal terminal UI framework with differential rendering and synchronized outpu
 - **Bracketed Paste Mode**: Handles large pastes correctly with markers for >10 line pastes
 - **Component-based**: Simple Component interface with render() method
 - **Theme Support**: Components accept theme interfaces for customizable styling
-- **Built-in Components**: Text, TruncatedText, Input, Editor, Markdown, Loader, SelectList, SettingsList, Spacer, Image, Box, Container
+- **Built-in Components**: Text, TruncatedText, Input, Editor, Markdown, Loader, SelectList, SettingsList, Spacer, Image, Box, Container, VStack, HStack, ScrollView
 - **Inline Images**: Renders images in terminals that support Kitty or iTerm2 graphics protocols
 - **Autocomplete Support**: File paths and slash commands
 
 ## Quick Start
 
 ```typescript
-import { TUI, Text, Editor, ProcessTerminal, matchesKey } from "@fleetagent/pi-tui";
+import { TuiMainScreen, Text, Editor, ProcessTerminal, matchesKey } from "@fleetagent/pi-tui";
 
 // Create terminal
 const terminal = new ProcessTerminal();
 
 // Create TUI
-const tui = new TUI(terminal);
+const tui = new TuiMainScreen(terminal);
 
 // Add components
 tui.addChild(new Text("Welcome to my app!"));
@@ -52,12 +52,12 @@ tui.start();
 
 ## Core API
 
-### TUI
+### TuiMainScreen
 
-Main container that manages components and rendering.
+The default regular-screen container that manages components and rendering. `TUI` is the shared renderer interface.
 
 ```typescript
-const tui = new TUI(terminal);
+const tui = new TuiMainScreen(terminal);
 tui.addChild(component);
 tui.removeChild(component);
 tui.start();
@@ -67,6 +67,46 @@ tui.requestRender(); // Request a re-render
 // Global debug key handler (Shift+Ctrl+D)
 tui.onDebug = () => console.log("Debug triggered");
 ```
+
+### Alternate-screen viewport layouts
+
+`TuiAltScreen` can render an explicit terminal-height layout. `VStack` and `HStack` allocate constrained regions, while `ScrollView` owns scrolling for one region. `TuiMainScreen` retains terminal-owned scrollback and ordinary unbounded component rendering.
+
+```typescript
+import { Container, isViewportTUI, ScrollView, Text, VStack } from "@fleetagent/pi-tui";
+
+const transcript = new Container();
+transcript.addChild(new Text("History"));
+
+const editorAndFooter = new VStack([editor, new Text("status")]);
+
+if (isViewportTUI(tui)) {
+  tui.setLayoutRoot(
+    new VStack([
+      {
+        component: new ScrollView(transcript, {
+          follow: "end",
+          primary: true,
+          overscroll: "chain",
+        }),
+        basis: 0,
+        grow: 1,
+        minSize: 1,
+      },
+      {
+        component: editorAndFooter,
+        basis: "auto",
+        shrink: 1,
+        minSize: 1,
+      },
+    ]),
+  );
+}
+```
+
+Stack entries support `basis`, `grow`, `shrink`, `minSize`, `maxSize`, and responsive `visible` callbacks. Mouse-wheel input targets the deepest scroll view under the pointer; unused delta chains to outer views unless `overscroll: "contain"` is set. The primary scroll view receives alternate-screen keyboard navigation and wheel input over non-scrollable regions. It can also jump between OSC 133 semantic prompt markers, matching common terminal prompt-navigation shortcuts.
+
+Layout geometry is rebuilt and clipped to the terminal on each requested frame. Component objects are retained rather than cloned. Calling `render(width)` directly on `VStack`, `HStack`, or `ScrollView` produces an unbounded document, so the primitives remain usable outside fullscreen composition. Call `setLayoutRoot(undefined)` to restore implicit single-document fullscreen scrolling.
 
 ### Overlays
 
@@ -499,7 +539,7 @@ const spacer = new Spacer(2); // 2 empty lines (default: 1)
 
 ### Image
 
-Renders images inline for terminals that support the Kitty graphics protocol (Kitty, Ghostty, WezTerm) or iTerm2 inline images. Falls back to a text placeholder on unsupported terminals.
+Renders images inline for terminals that support the Kitty graphics protocol (Kitty, Ghostty, WezTerm, Warp) or iTerm2 inline images. Falls back to a text placeholder on unsupported terminals.
 
 ```typescript
 interface ImageTheme {

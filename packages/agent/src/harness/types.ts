@@ -186,6 +186,7 @@ export class BranchSummaryError extends Error {
 
 export type SessionErrorCode =
 	| "not_found"
+	| "already_exists"
 	| "invalid_session"
 	| "invalid_entry"
 	| "invalid_fork_target"
@@ -286,6 +287,8 @@ export interface FileSystem {
 	writeFile(path: string, content: string | Uint8Array, abortSignal?: AbortSignal): Promise<Result<void, FileError>>;
 	/** Create or append to a file, creating parent directories when supported. */
 	appendFile(path: string, content: string | Uint8Array, abortSignal?: AbortSignal): Promise<Result<void, FileError>>;
+	/** Rename a file within the same filesystem. Implementations must not fall back to copy or delete-then-rename. */
+	renameFile(source: string, destination: string, abortSignal?: AbortSignal): Promise<Result<void, FileError>>;
 	/** Return metadata for the addressed path without following symlinks. */
 	fileInfo(path: string, abortSignal?: AbortSignal): Promise<Result<FileInfo, FileError>>;
 	/** List direct children of a directory without following symlinks. */

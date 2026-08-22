@@ -7,7 +7,7 @@
  * Protocol:
  * - Commands: JSON objects with `type` field, optional `id` for correlation
  * - Responses: JSON objects with `type: "response"`, `command`, `success`, and optional `data`/`error`
- * - Events: AgentSessionEvent objects streamed as they occur
+ * - Events: JsonAgentSessionEvent objects streamed as they occur
  * - Extension UI: Extension UI requests are emitted, client responds with extension_ui_response
  */
 
@@ -30,6 +30,7 @@ import type { PiAgentRuntimeHost } from "../../core/pi-agent.ts";
 import { HIDDEN_BUILTIN_SLASH_COMMAND_NAMES } from "../../core/slash-commands.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import { type Theme, theme } from "../interactive/theme/theme.ts";
+import { toJsonEvent } from "../json-event.ts";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
 import type {
 	RpcCommand,
@@ -101,7 +102,31 @@ export async function runRpcMode(runtimeHost: PiAgentRuntimeHost): Promise<never
 	// Shutdown request flag
 	let shutdownRequested = false;
 	let shuttingDown = false;
+	let shutdownCheckScheduled = false;
+	let activeInputCommands = 0;
+	const pendingPromptCommands = new Set<Promise<void>>();
 	const signalCleanupHandlers: Array<() => void> = [];
+
+	const scheduleShutdownCheck = (): void => {
+		if (!shutdownRequested || shutdownCheckScheduled) return;
+		shutdownCheckScheduled = true;
+		setTimeout(() => {
+			shutdownCheckScheduled = false;
+			if (!shutdownRequested || activeInputCommands > 0 || pendingPromptCommands.size > 0) return;
+			void session
+				.waitForIdle()
+				.then(() => waitForRawStdoutBackpressure())
+				.then(() => checkShutdownRequested())
+				.catch((error: unknown) => {
+					output({
+						type: "extension_error",
+						extensionPath: "<shutdown>",
+						event: "shutdown",
+						error: String(error),
+					});
+				});
+		}, 0);
+	};
 
 	/** Helper for dialog methods with signal/timeout support */
 	function createDialogPromise<T>(
@@ -335,7 +360,7 @@ export async function runRpcMode(runtimeHost: PiAgentRuntimeHost): Promise<never
 		await session.bindExtensions({
 			uiContext: createExtensionUIContext(),
 			commandContextActions: {
-				waitForIdle: () => session.agent.waitForIdle(),
+				waitForIdle: () => session.waitForIdle(),
 				newSession: async (options) => runtimeHost.newSession(options),
 				fork: async (entryId, forkOptions) => {
 					const result = await runtimeHost.fork(entryId, forkOptions);
@@ -359,6 +384,7 @@ export async function runRpcMode(runtimeHost: PiAgentRuntimeHost): Promise<never
 			},
 			shutdownHandler: () => {
 				shutdownRequested = true;
+				scheduleShutdownCheck();
 			},
 			onError: (err) => {
 				output({ type: "extension_error", extensionPath: err.extensionPath, event: err.event, error: err.error });
@@ -368,7 +394,8 @@ export async function runRpcMode(runtimeHost: PiAgentRuntimeHost): Promise<never
 		unsubscribe?.();
 		unsubscribeBackpressure?.();
 		unsubscribe = session.subscribe((event) => {
-			output(event);
+			output(toJsonEvent(event));
+			if (event.type === "agent_settled" && shutdownRequested) scheduleShutdownCheck();
 		});
 		unsubscribeBackpressure = session.agent.subscribe(async () => {
 			await waitForRawStdoutBackpressure();
@@ -407,23 +434,32 @@ export async function runRpcMode(runtimeHost: PiAgentRuntimeHost): Promise<never
 				// Start prompt handling immediately, but emit the authoritative response only after
 				// prompt preflight succeeds. Queued and immediately handled prompts also count as success.
 				let preflightSucceeded = false;
-				void session
-					.prompt(command.message, {
-						images: command.images,
-						streamingBehavior: command.streamingBehavior,
-						source: "rpc",
-						preflightResult: (didSucceed) => {
-							if (didSucceed) {
-								preflightSucceeded = true;
-								output(success(id, "prompt"));
-							}
-						},
-					})
-					.catch((e) => {
-						if (!preflightSucceeded) {
-							output(error(id, "prompt", e.message));
+				const promptOperation = session.prompt(command.message, {
+					images: command.images,
+					streamingBehavior: command.streamingBehavior,
+					source: "rpc",
+					preflightResult: (didSucceed) => {
+						if (didSucceed) {
+							preflightSucceeded = true;
+							output(success(id, "prompt"));
 						}
-					});
+					},
+				});
+				pendingPromptCommands.add(promptOperation);
+				void promptOperation.then(
+					() => {
+						pendingPromptCommands.delete(promptOperation);
+						scheduleShutdownCheck();
+					},
+					(errorValue: unknown) => {
+						if (!preflightSucceeded) {
+							const message = errorValue instanceof Error ? errorValue.message : String(errorValue);
+							output(error(id, "prompt", message));
+						}
+						pendingPromptCommands.delete(promptOperation);
+						scheduleShutdownCheck();
+					},
+				);
 				return undefined;
 			}
 
@@ -495,6 +531,7 @@ export async function runRpcMode(runtimeHost: PiAgentRuntimeHost): Promise<never
 					model: session.model,
 					thinkingLevel: session.thinkingLevel,
 					isStreaming: session.isStreaming,
+					isIdle: session.isIdle,
 					isCompacting: session.isCompacting,
 					steeringMode: session.steeringMode,
 					followUpMode: session.followUpMode,
@@ -600,7 +637,24 @@ export async function runRpcMode(runtimeHost: PiAgentRuntimeHost): Promise<never
 			// =================================================================
 
 			case "bash": {
+				const eventResult = await session.extensionRunner.emitUserBash({
+					type: "user_bash",
+					command: command.command,
+					excludeFromContext: command.excludeFromContext ?? false,
+					cwd: session.session.getCwd(),
+				});
+
+				if (eventResult?.result) {
+					if (command.record !== false) {
+						session.recordBashResult(command.command, eventResult.result, {
+							excludeFromContext: command.excludeFromContext,
+						});
+					}
+					return success(id, "bash", eventResult.result);
+				}
+
 				const result = await session.executeBash(command.command, undefined, {
+					operations: eventResult?.operations,
 					record: command.record,
 					truncate: command.truncate,
 					excludeFromContext: command.excludeFromContext,
@@ -628,20 +682,13 @@ export async function runRpcMode(runtimeHost: PiAgentRuntimeHost): Promise<never
 			}
 
 			case "upload_file": {
-				const operations = session.getToolOperations();
-				if (!operations.uploadFile)
-					return error(id, "upload_file", "Active sandbox backend does not support file upload");
-				await operations.uploadFile(command.sourcePath, command.destinationPath);
+				await session.uploadFile(command.sourcePath, command.destinationPath);
 				const result = await stat(command.sourcePath);
 				return success(id, "upload_file", { bytes: result.size });
 			}
 
 			case "download_file": {
-				const operations = session.getToolOperations();
-				if (!operations.downloadFile) {
-					return error(id, "download_file", "Active sandbox backend does not support file download");
-				}
-				await operations.downloadFile(command.sourcePath, command.destinationPath);
+				await session.downloadFile(command.sourcePath, command.destinationPath);
 				const result = await stat(command.destinationPath);
 				return success(id, "download_file", { bytes: result.size });
 			}
@@ -936,7 +983,7 @@ export async function runRpcMode(runtimeHost: PiAgentRuntimeHost): Promise<never
 	}
 
 	async function checkShutdownRequested(): Promise<void> {
-		if (!shutdownRequested) return;
+		if (!shutdownRequested || activeInputCommands > 0 || pendingPromptCommands.size > 0) return;
 		await shutdown();
 	}
 
@@ -1008,13 +1055,18 @@ export async function runRpcMode(runtimeHost: PiAgentRuntimeHost): Promise<never
 	};
 
 	const onInputEnd = () => {
-		void shutdown();
+		shutdownRequested = true;
+		scheduleShutdownCheck();
 	};
 	process.stdin.on("end", onInputEnd);
 
 	detachInput = (() => {
 		const detachJsonl = attachJsonlLineReader(process.stdin, (line) => {
-			void handleInputLine(line);
+			activeInputCommands++;
+			void handleInputLine(line).finally(() => {
+				activeInputCommands--;
+				scheduleShutdownCheck();
+			});
 		});
 		return () => {
 			detachJsonl();

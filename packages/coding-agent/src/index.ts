@@ -1,5 +1,6 @@
 // Core session management
 
+export type { TuiMode } from "@fleetagent/pi-tui";
 // Config paths
 export { getAgentDir, VERSION } from "./config.ts";
 export {
@@ -54,6 +55,7 @@ export { createEventBus, type EventBus, type EventBusController } from "./core/e
 // Extension system
 export type {
 	AgentEndEvent,
+	AgentSettledEvent,
 	AgentStartEvent,
 	AgentToolResult,
 	AgentToolUpdateCallback,
@@ -63,6 +65,7 @@ export type {
 	BashToolCallEvent,
 	BeforeAgentStartEvent,
 	BeforeAgentStartEventResult,
+	BeforeProviderHeadersEvent,
 	BeforeProviderRequestEvent,
 	BeforeProviderRequestEventResult,
 	BuildSystemPromptOptions,
@@ -99,6 +102,8 @@ export type {
 	KeybindingsManager,
 	LoadExtensionsResult,
 	LsToolCallEvent,
+	MarkdownTransformContext,
+	MarkdownTransformer,
 	MessageRenderer,
 	MessageRenderOptions,
 	ProviderConfig,
@@ -211,6 +216,15 @@ export {
 	RuleLoader,
 } from "./core/rules.ts";
 export {
+	JsonlDecodeError,
+	type JsonlDecodeKind,
+	type JsonlErrorPhase,
+	JsonlSessionError,
+	type JsonlSessionErrorCode,
+	type JsonlWriteOutcome,
+} from "./core/session/jsonl-errors.ts";
+export { SessionAlreadyExistsError } from "./core/session/stores/jsonl-session-store.ts";
+export {
 	type BranchSummaryEntry,
 	buildSessionContext,
 	type CompactionEntry,
@@ -225,6 +239,12 @@ export {
 	migrateSessionEntries,
 	type NewSessionOptions,
 	parseSessionEntries,
+	RemoteSessionClient,
+	RemoteSessionClientError,
+	type RemoteSessionClientOptions,
+	RemoteSessionManager,
+	type RemoteSessionOperation,
+	RemoteSessionProtocolError,
 	type SessionContext,
 	type SessionEntry,
 	type SessionEntryBase,
@@ -238,7 +258,10 @@ export {
 } from "./core/session-manager.ts";
 export {
 	type CompactionSettings,
+	type FullscreenExitOutput,
 	type ImageSettings,
+	type MarkdownSettings,
+	type MermaidRenderingMode,
 	type PackageSource,
 	type RetrySettings,
 	SettingsManager,
@@ -369,6 +392,7 @@ export { type MainOptions, main } from "./main.ts";
 export {
 	InteractiveMode,
 	type InteractiveModeOptions,
+	type JsonAgentSessionEvent,
 	type ModelInfo,
 	type PrintModeOptions,
 	RpcClient,

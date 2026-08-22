@@ -54,7 +54,7 @@ I regularly publish my own `pi-mono` work sessions here:
 | **[@fleetagent/pi-coding-agent](packages/coding-agent)** | Interactive coding agent CLI |
 | **[@fleetagent/pi-tui](packages/tui)** | Terminal UI library with differential rendering |
 
-For Slack/chat automation and workflows see [earendil-works/pi-chat](https://github.com/earendil-works/pi-chat).
+For Slack/chat automation and workflows see [fleetagent/pi-chat](https://github.com/fleetagent/pi-chat).
 
 ## Contributing
 

@@ -18,12 +18,14 @@ Connect from another Pi process:
 PI_REMOTE_TOKEN='long-random-token' pi --remote ws://127.0.0.1:8787/pi/workspace
 ```
 
-Interactive deferred connection is also supported:
+Attach an interactive Pi session when the daemon is running in a sandbox whose workspace root is `/workspace`:
 
 ```bash
-pi --remote-deferred --remote-cwd /workspace
-/remote daemon ws://127.0.0.1:8787/pi/workspace
+PI_REMOTE_TOKEN='long-random-token' pi
+/sandbox --attach ws://127.0.0.1:8787/pi/workspace
 ```
+
+For a deferred daemon backend, use `pi --remote-deferred --remote-cwd /workspace` followed by `/sandbox --attach <ws://url>`. `/sandbox` is the only interactive backend-management command.
 
 Use `PI_REMOTE_TOKEN` on the client. Do not put tokens in query strings or URLs.
 
@@ -31,7 +33,7 @@ Use `PI_REMOTE_TOKEN` on the client. Do not put tokens in query strings or URLs.
 
 One daemon process serves one workspace root and one trust domain. The daemon is an authenticated remote-code-execution service: anyone with the bearer token can use every advertised daemon capability.
 
-Application-layer confinement prevents protocol paths and symlinks from escaping the configured workspace for file tools, resource reads, file transfers, temporary outputs, subprocess working directories, and LSP paths. It is not an operating-system sandbox. If process execution is enabled, commands can access anything the daemon OS user can access. Run the daemon as a dedicated unprivileged user, in a container, VM, or equivalent sandbox for hostile repositories.
+Application-layer confinement prevents protocol paths and symlinks from escaping the configured workspace and optional temporary root for file tools, resource reads, file transfers, temporary outputs, subprocess working directories, and LSP paths. `PI_DAEMON_TEMP_ROOT` is opt-in and should point only to disposable storage inside an OS sandbox; it is unset by default. This is not an operating-system sandbox. If process execution is enabled, commands can access anything the daemon OS user can access. Run the daemon as a dedicated unprivileged user, in a container, VM, or equivalent sandbox for hostile repositories.
 
 The daemon refuses root and insecure non-loopback deployment by default. Non-loopback HTTP requires explicit override and should only be used behind a trusted TLS terminator. Prefer TLS for direct non-local use.
 
@@ -44,6 +46,7 @@ Common options:
 | `--daemon-host <ip>` | `PI_DAEMON_HOST` | Bind address. Defaults to `127.0.0.1`. |
 | `--daemon-port <port>` | `PI_DAEMON_PORT` | Bind port. Defaults to `8787`. |
 | `--daemon-cwd <dir>` | `PI_DAEMON_CWD` | Canonical confined workspace root. Defaults to current directory. |
+| environment only | `PI_DAEMON_TEMP_ROOT` | Optional additional confined temporary root. Intended for container/VM scratch storage such as `/tmp`. |
 | environment only | `PI_DAEMON_TOKEN` | Server bearer token required by clients. |
 | environment only | `PI_DAEMON_ORIGINS` | Optional comma-separated exact WebSocket Origin allowlist. |
 | `--daemon-tls-cert <file>` / `--daemon-tls-key <file>` | `PI_DAEMON_TLS_CERT` / `PI_DAEMON_TLS_KEY` | Direct TLS listener material. |

@@ -27,6 +27,7 @@ Options:
 
 Environment:
   PI_DAEMON_HOST, PI_DAEMON_PORT, PI_DAEMON_CWD
+  PI_DAEMON_TEMP_ROOT                   Optional additional confined temporary directory
   PI_DAEMON_TOKEN                       Server bearer token (32-1024 UTF-8 bytes)
   PI_DAEMON_ORIGINS                     Comma-separated exact browser origins
   PI_DAEMON_TLS_CERT, PI_DAEMON_TLS_KEY, PI_DAEMON_TLS_PASSPHRASE

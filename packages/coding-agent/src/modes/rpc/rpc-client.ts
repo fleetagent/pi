@@ -5,7 +5,7 @@
  */
 
 import { type ChildProcess, spawn } from "node:child_process";
-import type { AgentEvent, AgentMessage, AgentToolResult, ThinkingLevel } from "@fleetagent/pi-agent-core";
+import type { AgentMessage, AgentToolResult, ThinkingLevel } from "@fleetagent/pi-agent-core";
 import type { ImageContent } from "@fleetagent/pi-ai";
 import type { Static, TSchema } from "typebox";
 import type { SessionStats, StructuredResponse } from "../../core/agent-session.ts";
@@ -14,6 +14,7 @@ import type { CompactionResult } from "../../core/compaction/index.ts";
 import type { ToolInfo } from "../../core/extensions/index.ts";
 import type { SessionEntry, SessionInfo, SessionTreeNode } from "../../core/session/types.ts";
 import type { ToolBackendInfo } from "../../core/tools/index.ts";
+import type { JsonAgentSessionEvent } from "../json-event.ts";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
 import type {
 	RpcClientListSessionsResponse,
@@ -69,7 +70,7 @@ export interface ModelInfo {
 	reasoning: boolean;
 }
 
-export type RpcEventListener = (event: AgentEvent) => void;
+export type RpcEventListener = (event: JsonAgentSessionEvent) => void;
 export type RpcToolHandler = (
 	args: unknown,
 	context: { toolName: string; toolCallId: string; signal: AbortSignal },
@@ -83,6 +84,7 @@ export class RpcClient {
 	private process: ChildProcess | null = null;
 	private stopReadingStdout: (() => void) | null = null;
 	private eventListeners: RpcEventListener[] = [];
+	private terminationListeners = new Set<(error: Error) => void>();
 	private pendingRequests: Map<string, { resolve: (response: RpcResponse) => void; reject: (error: Error) => void }> =
 		new Map();
 	private toolHandlers: Map<string, RpcToolHandler> = new Map();
@@ -605,31 +607,41 @@ export class RpcClient {
 	// Helpers
 	// =========================================================================
 
-	/**
-	 * Wait for agent to become idle (no streaming).
-	 * Resolves when agent_end event is received.
-	 * The timeout is an inactivity timeout that resets each time an event is received.
-	 */
+	/** Wait for the full session lifecycle to settle. */
 	waitForIdle(timeout = 5 * 60 * 1000): Promise<void> {
 		return new Promise((resolve, reject) => {
 			let timer: ReturnType<typeof setTimeout> | undefined;
+			let finished = false;
+			let unsubscribe = () => {};
+			let unsubscribeTermination = () => {};
+			const finish = (error?: Error) => {
+				if (finished) return;
+				finished = true;
+				if (timer) clearTimeout(timer);
+				unsubscribe();
+				unsubscribeTermination();
+				if (error) reject(error);
+				else resolve();
+			};
 			const resetTimer = () => {
 				if (timer) clearTimeout(timer);
-				timer = setTimeout(() => {
-					unsubscribe();
-					reject(new Error(`Timeout waiting for agent to become idle. Stderr: ${this.stderr}`));
-				}, timeout);
+				timer = setTimeout(
+					() => finish(new Error(`Timeout waiting for agent to become idle. Stderr: ${this.stderr}`)),
+					timeout,
+				);
 			};
-
-			const unsubscribe = this.onEvent((event) => {
+			unsubscribe = this.onEvent((event) => {
 				resetTimer();
-				if (event.type === "agent_end") {
-					clearTimeout(timer);
-					unsubscribe();
-					resolve();
-				}
+				if (event.type === "agent_settled") finish();
 			});
+			unsubscribeTermination = this.onTermination((error) => finish(error));
 			resetTimer();
+			void this.getState().then(
+				(state) => {
+					if (state.isIdle) finish();
+				},
+				(error: unknown) => finish(error instanceof Error ? error : new Error(String(error))),
+			);
 		});
 	}
 
@@ -637,27 +649,33 @@ export class RpcClient {
 	 * Collect events until agent becomes idle.
 	 * The timeout is an inactivity timeout that resets each time an event is received.
 	 */
-	collectEvents(timeout = 5 * 60 * 1000): Promise<AgentEvent[]> {
+	collectEvents(timeout = 5 * 60 * 1000): Promise<JsonAgentSessionEvent[]> {
 		return new Promise((resolve, reject) => {
-			const events: AgentEvent[] = [];
+			const events: JsonAgentSessionEvent[] = [];
 			let timer: ReturnType<typeof setTimeout> | undefined;
+			let finished = false;
+			let unsubscribe = () => {};
+			let unsubscribeTermination = () => {};
+			const finish = (error?: Error) => {
+				if (finished) return;
+				finished = true;
+				if (timer) clearTimeout(timer);
+				unsubscribe();
+				unsubscribeTermination();
+				if (error) reject(error);
+				else resolve(events);
+			};
 			const resetTimer = () => {
 				if (timer) clearTimeout(timer);
-				timer = setTimeout(() => {
-					unsubscribe();
-					reject(new Error(`Timeout collecting events. Stderr: ${this.stderr}`));
-				}, timeout);
+				timer = setTimeout(() => finish(new Error(`Timeout collecting events. Stderr: ${this.stderr}`)), timeout);
 			};
 
-			const unsubscribe = this.onEvent((event) => {
+			unsubscribe = this.onEvent((event) => {
 				events.push(event);
 				resetTimer();
-				if (event.type === "agent_end") {
-					clearTimeout(timer);
-					unsubscribe();
-					resolve(events);
-				}
+				if (event.type === "agent_settled") finish();
 			});
+			unsubscribeTermination = this.onTermination((error) => finish(error));
 			resetTimer();
 		});
 	}
@@ -665,10 +683,72 @@ export class RpcClient {
 	/**
 	 * Send prompt and wait for completion, returning all events.
 	 */
-	async promptAndWait(message: string, images?: ImageContent[], timeout = 5 * 60 * 1000): Promise<AgentEvent[]> {
-		const eventsPromise = this.collectEvents(timeout);
-		await this.prompt(message, images);
-		return eventsPromise;
+	async promptAndWait(
+		message: string,
+		images?: ImageContent[],
+		timeout = 5 * 60 * 1000,
+	): Promise<JsonAgentSessionEvent[]> {
+		const events: JsonAgentSessionEvent[] = [];
+		let accepted = false;
+		let sawAgentStart = false;
+		let settledAfterStart = false;
+		let finished = false;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		let unsubscribe = () => {};
+		let unsubscribeTermination = () => {};
+		let resolveCompletion = (_events: JsonAgentSessionEvent[]) => {};
+		let rejectCompletion = (_error: Error) => {};
+		const completion = new Promise<JsonAgentSessionEvent[]>((resolve, reject) => {
+			resolveCompletion = resolve;
+			rejectCompletion = reject;
+		});
+		const finish = (error?: Error) => {
+			if (finished) return;
+			finished = true;
+			if (timer) clearTimeout(timer);
+			unsubscribe();
+			unsubscribeTermination();
+			if (error) rejectCompletion(error);
+			else resolveCompletion(events);
+		};
+		const resetTimer = () => {
+			if (timer) clearTimeout(timer);
+			timer = setTimeout(() => finish(new Error(`Timeout collecting events. Stderr: ${this.stderr}`)), timeout);
+		};
+		unsubscribe = this.onEvent((event) => {
+			resetTimer();
+			if (!sawAgentStart) {
+				if (event.type !== "agent_start") return;
+				sawAgentStart = true;
+			}
+			events.push(event);
+			if (event.type === "agent_settled") {
+				settledAfterStart = true;
+				if (accepted) finish();
+			}
+		});
+		resetTimer();
+
+		try {
+			await this.prompt(message, images);
+		} catch (error) {
+			finished = true;
+			if (timer) clearTimeout(timer);
+			unsubscribe();
+			throw error;
+		}
+		accepted = true;
+		unsubscribeTermination = this.onTermination((error) => finish(error));
+		if (settledAfterStart) finish();
+		else {
+			void this.getState().then(
+				(state) => {
+					if (state.isIdle && !sawAgentStart) finish();
+				},
+				(error: unknown) => finish(error instanceof Error ? error : new Error(String(error))),
+			);
+		}
+		return completion;
 	}
 
 	// =========================================================================
@@ -694,7 +774,7 @@ export class RpcClient {
 
 			// Otherwise it's an event
 			for (const listener of this.eventListeners) {
-				listener(data as AgentEvent);
+				listener(data as JsonAgentSessionEvent);
 			}
 		} catch {
 			// Ignore non-JSON lines
@@ -741,6 +821,16 @@ export class RpcClient {
 			pending.reject(error);
 		}
 		this.pendingRequests.clear();
+		for (const listener of [...this.terminationListeners]) listener(error);
+	}
+
+	private onTermination(listener: (error: Error) => void): () => void {
+		if (this.exitError) {
+			listener(this.exitError);
+			return () => {};
+		}
+		this.terminationListeners.add(listener);
+		return () => this.terminationListeners.delete(listener);
 	}
 
 	private writeFireAndForget(command: RpcCommandBody): void {

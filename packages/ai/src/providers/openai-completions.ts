@@ -20,6 +20,7 @@ import type {
 	Message,
 	Model,
 	OpenAICompletionsCompat,
+	ProviderHeaders,
 	SimpleStreamOptions,
 	StopReason,
 	StreamFunction,
@@ -32,8 +33,10 @@ import type {
 } from "../types.ts";
 import { formatProviderError, normalizeProviderError } from "../utils/error-body.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
+import { shortHash } from "../utils/hash.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { parseStreamingJson } from "../utils/json-parse.ts";
+import { retryProviderRequest } from "../utils/provider-retry.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { isCloudflareProvider, resolveCloudflareBaseUrl } from "./cloudflare.ts";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
@@ -52,7 +55,9 @@ function hasToolHistory(messages: Message[]): boolean {
 			return true;
 		}
 		if (msg.role === "assistant") {
-			if (msg.content.some((block) => block.type === "toolCall")) {
+			// This helper reads the original context after conversion, so retain the
+			// transform boundary's tolerance for untyped null or missing content.
+			if (msg.content?.some((block) => block.type === "toolCall")) {
 				return true;
 			}
 		}
@@ -150,11 +155,16 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 			const requestOptions = {
 				...(options?.signal ? { signal: options.signal } : {}),
 				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
-				maxRetries: options?.maxRetries ?? 0,
+				maxRetries: 0,
 			};
-			const { data: openaiStream, response } = await client.chat.completions
-				.create(params, requestOptions)
-				.withResponse();
+			const { data: openaiStream, response } = await retryProviderRequest(
+				() => client.chat.completions.create(params, requestOptions).withResponse(),
+				{
+					maxRetries: options?.maxRetries,
+					maxRetryDelayMs: options?.maxRetryDelayMs,
+					signal: options?.signal,
+				},
+			);
 			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
 			stream.push({ type: "start", partial: output });
 
@@ -398,7 +408,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 			if (output.stopReason === "error") {
 				throw new Error(output.errorMessage || "Provider returned an error stop reason");
 			}
-			if (!hasFinishReason) {
+			if (!hasFinishReason || output.stopReason === "pending") {
 				throw new Error("Stream ended without finish_reason");
 			}
 
@@ -450,7 +460,7 @@ function createClient(
 	model: Model<"openai-completions">,
 	context: Context,
 	apiKey?: string,
-	optionsHeaders?: Record<string, string>,
+	optionsHeaders?: ProviderHeaders,
 	sessionId?: string,
 	compat: ResolvedOpenAICompletionsCompat = getCompat(model),
 ) {
@@ -463,7 +473,7 @@ function createClient(
 		apiKey = process.env.OPENAI_API_KEY;
 	}
 
-	const headers = { ...model.headers };
+	const headers: ProviderHeaders = { ...model.headers };
 	if (model.provider === "github-copilot") {
 		const hasImages = hasCopilotVisionInput(context.messages);
 		const copilotHeaders = buildCopilotDynamicHeaders({
@@ -479,25 +489,21 @@ function createClient(
 		headers["x-session-affinity"] = sessionId;
 	}
 
-	// Merge options headers last so they can override defaults
+	if (model.provider === "cloudflare-ai-gateway") {
+		if (!("Authorization" in headers)) headers.Authorization = null;
+		if (!("cf-aig-authorization" in headers)) headers["cf-aig-authorization"] = `Bearer ${apiKey}`;
+	}
+
+	// Merge options headers last so they can override or suppress defaults.
 	if (optionsHeaders) {
 		Object.assign(headers, optionsHeaders);
 	}
-
-	const defaultHeaders =
-		model.provider === "cloudflare-ai-gateway"
-			? {
-					...headers,
-					Authorization: headers.Authorization ?? null,
-					"cf-aig-authorization": `Bearer ${apiKey}`,
-				}
-			: headers;
 
 	return new OpenAI({
 		apiKey,
 		baseURL: isCloudflareProvider(model.provider) ? resolveCloudflareBaseUrl(model) : model.baseUrl,
 		dangerouslyAllowBrowser: true,
-		defaultHeaders,
+		defaultHeaders: headers,
 	});
 }
 
@@ -768,11 +774,21 @@ export function convertMessages(
 		// Handle pipe-separated IDs from OpenAI Responses API
 		// Format: {call_id}|{id} where {id} can be 400+ chars with special chars (+, /, =)
 		// These come from providers like github-copilot, openai-codex, opencode
-		// Extract just the call_id part and normalize it
+		// Multiple tool calls in the same turn can share call_id but differ by item_id.
+		// Preserve item-level uniqueness when replaying into Chat Completions, which
+		// requires distinct tool call ids.
 		if (id.includes("|")) {
-			const [callId] = id.split("|");
 			// Sanitize to allowed chars and truncate to 40 chars (OpenAI limit)
-			return callId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 40);
+			const separatorIndex = id.indexOf("|");
+			const callId = id.slice(0, separatorIndex).replace(/[^a-zA-Z0-9_-]/g, "_");
+			const itemId = id.slice(separatorIndex + 1).replace(/[^a-zA-Z0-9_-]/g, "_");
+			const combinedId = itemId.length > 0 ? `${callId}_${itemId}` : callId;
+			if (combinedId.length <= 40) {
+				return combinedId;
+			}
+			const hash = shortHash(id).slice(0, 8);
+			const prefix = callId.slice(0, Math.max(1, 40 - hash.length - 1));
+			return `${prefix}_${hash}`;
 		}
 
 		if (model.provider === "openai") return id.length > 40 ? id.slice(0, 40) : id;
@@ -945,10 +961,11 @@ export function convertMessages(
 
 				// Always send tool result with text (or placeholder if only images)
 				const hasText = textResult.length > 0;
+				const toolResultText = hasText ? textResult : hasImages ? "(see attached image)" : "(no tool output)";
 				// Some providers require the 'name' field in tool results
 				const toolResultMsg: ChatCompletionToolMessageParam = {
 					role: "tool",
-					content: sanitizeSurrogates(hasText ? textResult : "(see attached image)"),
+					content: sanitizeSurrogates(toolResultText),
 					tool_call_id: toolMsg.toolCallId,
 				};
 				if (compat.requiresToolResultName && toolMsg.toolName) {
@@ -1090,7 +1107,11 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 	const provider = model.provider;
 	const baseUrl = model.baseUrl;
 
-	const isZai = provider === "zai" || baseUrl.includes("api.z.ai");
+	const isZai =
+		provider === "zai" ||
+		provider === "zai-coding-cn" ||
+		baseUrl.includes("api.z.ai") ||
+		baseUrl.includes("open.bigmodel.cn");
 	const isTogether =
 		provider === "together" || baseUrl.includes("api.together.ai") || baseUrl.includes("api.together.xyz");
 	const isMoonshot = provider === "moonshotai" || provider === "moonshotai-cn" || baseUrl.includes("api.moonshot.");
@@ -1113,10 +1134,11 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 		isCloudflareWorkersAI ||
 		isCloudflareAiGateway;
 
-	const useMaxTokens = baseUrl.includes("chutes.ai") || isMoonshot || isCloudflareAiGateway || isTogether;
+	const isDeepSeek = provider === "deepseek" || baseUrl.includes("deepseek.com");
+	const useMaxTokens =
+		baseUrl.includes("chutes.ai") || isDeepSeek || isZai || isMoonshot || isCloudflareAiGateway || isTogether;
 
 	const isGrok = provider === "xai" || baseUrl.includes("api.x.ai");
-	const isDeepSeek = provider === "deepseek" || baseUrl.includes("deepseek.com");
 	const cacheControlFormat = provider === "openrouter" && model.id.startsWith("anthropic/") ? "anthropic" : undefined;
 
 	return {

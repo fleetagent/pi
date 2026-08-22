@@ -14,6 +14,7 @@ import type {
 	Context,
 	Model,
 	ThinkingLevel as PiThinkingLevel,
+	ProviderHeaders,
 	SimpleStreamOptions,
 	StreamFunction,
 	StreamOptions,
@@ -23,6 +24,7 @@ import type {
 	ToolCall,
 } from "../types.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
+import { providerHeadersToRecord } from "../utils/headers.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import type { GoogleThinkingLevel } from "./google-shared.ts";
 import {
@@ -32,6 +34,7 @@ import {
 	mapStopReason,
 	mapToolChoice,
 	retainThoughtSignature,
+	retryGoogleRequest,
 } from "./google-shared.ts";
 import { buildBaseOptions } from "./simple-options.ts";
 
@@ -97,7 +100,7 @@ export const streamGoogleVertex: StreamFunction<"google-vertex", GoogleVertexOpt
 			if (nextParams !== undefined) {
 				params = nextParams as GenerateContentParameters;
 			}
-			const googleStream = await client.models.generateContentStream(params);
+			const googleStream = await retryGoogleRequest(() => client.models.generateContentStream(params), options);
 
 			stream.push({ type: "start", partial: output });
 			let currentBlock: TextContent | ThinkingContent | null = null;
@@ -269,6 +272,9 @@ export const streamGoogleVertex: StreamFunction<"google-vertex", GoogleVertexOpt
 				throw new Error("Request was aborted");
 			}
 
+			if (output.stopReason === "pending") {
+				throw new Error("Google Vertex stream ended without a finish reason");
+			}
 			if (output.stopReason === "aborted" || output.stopReason === "error") {
 				throw new Error("An unknown error occurred");
 			}
@@ -332,7 +338,7 @@ function createClient(
 	model: Model<"google-vertex">,
 	project: string,
 	location: string,
-	optionsHeaders?: Record<string, string>,
+	optionsHeaders?: ProviderHeaders,
 ): GoogleGenAI {
 	return new GoogleGenAI({
 		vertexai: true,
@@ -346,7 +352,7 @@ function createClient(
 function createClientWithApiKey(
 	model: Model<"google-vertex">,
 	apiKey: string,
-	optionsHeaders?: Record<string, string>,
+	optionsHeaders?: ProviderHeaders,
 ): GoogleGenAI {
 	return new GoogleGenAI({
 		vertexai: true,
@@ -356,10 +362,7 @@ function createClientWithApiKey(
 	});
 }
 
-function buildHttpOptions(
-	model: Model<"google-vertex">,
-	optionsHeaders?: Record<string, string>,
-): HttpOptions | undefined {
+function buildHttpOptions(model: Model<"google-vertex">, optionsHeaders?: ProviderHeaders): HttpOptions | undefined {
 	const httpOptions: HttpOptions = {};
 	const baseUrl = resolveCustomBaseUrl(model.baseUrl);
 	if (baseUrl) {
@@ -370,8 +373,9 @@ function buildHttpOptions(
 		}
 	}
 
-	if (model.headers || optionsHeaders) {
-		httpOptions.headers = { ...model.headers, ...optionsHeaders };
+	const headers = providerHeadersToRecord({ ...model.headers, ...optionsHeaders });
+	if (headers) {
+		httpOptions.headers = headers;
 	}
 
 	return Object.keys(httpOptions).length > 0 ? httpOptions : undefined;

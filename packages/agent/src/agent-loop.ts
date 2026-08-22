@@ -654,9 +654,13 @@ async function prepareToolCall(
 				};
 			}
 			if (beforeResult?.block) {
+				const result = createErrorToolResult(beforeResult.reason || "Tool execution was blocked");
+				if (beforeResult.terminate === true) {
+					result.terminate = true;
+				}
 				return {
 					kind: "immediate",
-					result: createErrorToolResult(beforeResult.reason || "Tool execution was blocked"),
+					result,
 					isError: true,
 				};
 			}
@@ -785,7 +789,8 @@ function createToolResultMessage(finalized: FinalizedToolCallOutcome): ToolResul
 		role: "toolResult",
 		toolCallId: finalized.toolCall.id,
 		toolName: finalized.toolCall.name,
-		content: finalized.result.content,
+		// Untyped tools can omit content; never let nullish values enter history or provider payloads.
+		content: finalized.result.content ?? [],
 		details: finalized.result.details,
 		isError: finalized.isError,
 		timestamp: Date.now(),

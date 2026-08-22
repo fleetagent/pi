@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
+import type { FullscreenExitOutput } from "../../../src/core/settings-manager.ts";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
 
-// Regression for https://github.com/earendil-works/pi/issues/5080
+// Regression for https://github.com/fleetagent/pi/issues/5080
 //
 // On SIGTERM/SIGHUP the graceful shutdown must emit `session_shutdown`
 // (runtimeHost.dispose) BEFORE touching the terminal. Extension teardown such
@@ -14,11 +15,25 @@ type ShutdownThis = {
 	isShuttingDown: boolean;
 	unregisterSignalHandlers: () => void;
 	runtimeHost: { dispose: () => Promise<void> };
+	settingsManager: { getFullscreenExitOutput: () => FullscreenExitOutput };
 	ui: { terminal: { drainInput: (ms: number) => Promise<void> } };
-	stop: () => void;
+	stop: (fullscreenExitOutput?: FullscreenExitOutput) => void;
 };
 
 type InteractiveModePrototypeWithShutdown = {
+	uncaughtCrash(
+		this: {
+			isShuttingDown: boolean;
+			unregisterSignalHandlers: () => void;
+			stopInteractiveTui: (output: FullscreenExitOutput) => void;
+		},
+		error: Error,
+	): never;
+	handleFatalRuntimeError(
+		this: { showError: (message: string) => void; stop: (output?: FullscreenExitOutput) => void },
+		prefix: string,
+		error: unknown,
+	): Promise<never>;
 	shutdown(this: ShutdownThis, options?: { fromSignal?: boolean }): Promise<void>;
 };
 
@@ -26,7 +41,7 @@ const interactiveModePrototype = InteractiveMode.prototype as unknown;
 
 class ProcessExitError extends Error {}
 
-function createContext(order: string[]): ShutdownThis {
+function createContext(order: string[], fullscreenExitOutput: FullscreenExitOutput = "resume-hint"): ShutdownThis {
 	return {
 		isShuttingDown: false,
 		unregisterSignalHandlers: vi.fn(),
@@ -35,6 +50,7 @@ function createContext(order: string[]): ShutdownThis {
 				order.push("dispose");
 			}),
 		},
+		settingsManager: { getFullscreenExitOutput: () => fullscreenExitOutput },
 		ui: {
 			terminal: {
 				drainInput: vi.fn(async () => {
@@ -42,8 +58,8 @@ function createContext(order: string[]): ShutdownThis {
 				}),
 			},
 		},
-		stop: vi.fn(() => {
-			order.push("stop");
+		stop: vi.fn((output) => {
+			order.push(`stop:${output ?? "default"}`);
 		}),
 	};
 }
@@ -70,7 +86,7 @@ describe("InteractiveMode.shutdown ordering (#5080)", () => {
 
 		await callShutdown(context, { fromSignal: true });
 
-		expect(order).toEqual(["dispose", "drainInput", "stop"]);
+		expect(order).toEqual(["dispose", "drainInput", "stop:resume-hint"]);
 		expect(context.isShuttingDown).toBe(true);
 		expect(context.unregisterSignalHandlers).toHaveBeenCalledTimes(1);
 	});
@@ -84,7 +100,25 @@ describe("InteractiveMode.shutdown ordering (#5080)", () => {
 
 		await callShutdown(context);
 
-		expect(order).toEqual(["drainInput", "stop", "dispose"]);
+		expect(order).toEqual(["drainInput", "stop:resume-hint", "dispose"]);
+	});
+
+	test("fatal runtime errors force transcript output", async () => {
+		vi.spyOn(process, "exit").mockImplementation((() => {
+			throw new ProcessExitError();
+		}) as typeof process.exit);
+		const showError = vi.fn();
+		const stop = vi.fn();
+
+		await expect(
+			(interactiveModePrototype as InteractiveModePrototypeWithShutdown).handleFatalRuntimeError.call(
+				{ showError, stop },
+				"Fatal operation",
+				new Error("failed"),
+			),
+		).rejects.toBeInstanceOf(ProcessExitError);
+		expect(showError).toHaveBeenCalledWith("Fatal operation: failed");
+		expect(stop).toHaveBeenCalledWith("transcript");
 	});
 
 	test("re-entrant shutdown is a no-op", async () => {
@@ -99,5 +133,25 @@ describe("InteractiveMode.shutdown ordering (#5080)", () => {
 
 		expect(order).toEqual([]);
 		expect(context.runtimeHost.dispose).not.toHaveBeenCalled();
+	});
+
+	test("uncaught runtime errors force transcript output while restoring the terminal", () => {
+		vi.spyOn(process, "exit").mockImplementation((() => {
+			throw new ProcessExitError();
+		}) as typeof process.exit);
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		const unregisterSignalHandlers = vi.fn();
+		const stopInteractiveTui = vi.fn();
+		const context = { isShuttingDown: false, unregisterSignalHandlers, stopInteractiveTui };
+
+		expect(() =>
+			(interactiveModePrototype as InteractiveModePrototypeWithShutdown).uncaughtCrash.call(
+				context,
+				new Error("uncaught"),
+			),
+		).toThrow(ProcessExitError);
+		expect(context.isShuttingDown).toBe(true);
+		expect(unregisterSignalHandlers).toHaveBeenCalledTimes(1);
+		expect(stopInteractiveTui).toHaveBeenCalledWith("transcript");
 	});
 });

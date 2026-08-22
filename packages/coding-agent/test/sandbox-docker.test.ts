@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
 	buildDockerRunInvocation,
@@ -44,6 +45,11 @@ function fail(stderr: string): DockerCommandResult {
 }
 
 describe("Docker sandbox core", () => {
+	it("configures container-local temporary storage for daemon workspace tools", () => {
+		const dockerfile = readFileSync(new URL("../examples/sandbox-docker/Dockerfile", import.meta.url), "utf8");
+		expect(dockerfile).toContain("ENV PI_DAEMON_TEMP_ROOT=/tmp");
+		expect(dockerfile).toContain("ENV TMPDIR=/tmp");
+	});
 	it("resolves config with override, environment, settings, and default precedence", () => {
 		const settings: SandboxSettings = {
 			image: "settings-image",
@@ -96,19 +102,22 @@ describe("Docker sandbox core", () => {
 			expect.arrayContaining([
 				"run",
 				"--detach",
+				"--network",
+				"host",
 				"--mount",
 				"type=bind,source=/tmp/My Project,target=/workspace",
-				"--publish",
-				"127.0.0.1::8787",
 				"--env",
 				"PI_DAEMON_TOKEN",
 				"pi-sandbox:test",
 				"pi",
 				"--daemon",
+				"--daemon-host",
+				"127.0.0.1",
 				"--daemon-cwd",
 				"/workspace",
 			]),
 		);
+		expect(invocation.args).not.toContain("--publish");
 		expect(invocation.args.join(" ")).not.toContain("secret-token");
 		expect(invocation.env.PI_DAEMON_TOKEN).toContain("secret-token");
 		expect(invocation.labels[SANDBOX_LABEL_ENABLED]).toBe("true");
@@ -116,8 +125,8 @@ describe("Docker sandbox core", () => {
 		expect(invocation.labels[SANDBOX_LABEL_DAEMON_PORT]).toBe("8787");
 	});
 
-	it("starts a container and parses the loopback daemon endpoint", async () => {
-		const runner = new FakeDockerRunner([ok("29.3.1\n"), ok("container123\n"), ok("127.0.0.1:49153\n")]);
+	it("starts a host-networked container and uses the configured daemon port directly", async () => {
+		const runner = new FakeDockerRunner([ok("29.3.1\n"), ok("container123\n")]);
 		const service = new DockerSandboxService({
 			runner,
 			env: {},
@@ -127,7 +136,8 @@ describe("Docker sandbox core", () => {
 		const result = await service.start({ workspaceRoot: "/tmp/workspace", image: "pi-sandbox:test" });
 
 		expect(result.containerId).toBe("container123");
-		expect(result.daemonUrl).toBe("ws://127.0.0.1:49153/pi/workspace");
+		expect(result.daemonUrl).toBe("ws://127.0.0.1:8787/pi/workspace");
+		expect(runner.calls).toHaveLength(2);
 		expect(runner.calls[1].args).toContain("pi-sandbox:test");
 		expect(runner.calls[1].args.join(" ")).not.toContain("generated-token");
 		expect(runner.calls[1].env?.PI_DAEMON_TOKEN).toBe("generated-token-012345678901234567890123456789");

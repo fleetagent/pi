@@ -49,15 +49,24 @@ function extractBody(error: SdkErrorShape): string | undefined {
 
 function pickBodyText(error: SdkErrorShape): string | undefined {
 	if (typeof error.body === "string") return error.body;
-	if (isNonEmptyObject(error.error)) return safeJsonStringify(error.error);
+	if (isPlainNonEmptyObject(error.error)) return safeJsonStringify(error.error);
 	const responseBody = error.$response?.body;
 	if (typeof responseBody === "string") return responseBody;
-	if (isNonEmptyObject(responseBody)) return safeJsonStringify(responseBody);
+	if (isPlainNonEmptyObject(responseBody)) return safeJsonStringify(responseBody);
 	return undefined;
 }
 
-function isNonEmptyObject(value: unknown): boolean {
-	return typeof value === "object" && value !== null && Object.keys(value).length > 0;
+/**
+ * SDK error fields can contain response/stream wrapper instances rather than
+ * parsed response bodies. Serializing those wrappers replaces the useful SDK
+ * validation message with transport internals. Parsed JSON objects have an
+ * Object or null prototype, so only those are treated as bodies.
+ */
+function isPlainNonEmptyObject(value: unknown): boolean {
+	if (typeof value !== "object" || value === null) return false;
+	const prototype = Object.getPrototypeOf(value);
+	if (prototype !== Object.prototype && prototype !== null) return false;
+	return Object.keys(value).length > 0;
 }
 
 export function formatProviderError(norm: NormalizedProviderError, prefix?: string): string {

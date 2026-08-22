@@ -1,6 +1,6 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer as createHttpServer } from "node:http";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
@@ -172,6 +172,7 @@ describe.sequential("pi --daemon CLI and lifecycle", () => {
 
 	it("validates dedicated CLI and environment configuration without HOST/PORT aliases", async () => {
 		const workspaceRoot = await createTemporaryDirectory();
+		const temporaryRoot = await createTemporaryDirectory();
 		const command = await parseDaemonCommand(
 			[
 				"--daemon",
@@ -185,13 +186,14 @@ describe.sequential("pi --daemon CLI and lifecycle", () => {
 				"https://example.test",
 				...(process.getuid?.() === 0 ? ["--daemon-allow-root"] : []),
 			],
-			{ HOST: "0.0.0.0", PORT: "1", PI_DAEMON_PORT: "8123" },
+			{ HOST: "0.0.0.0", PORT: "1", PI_DAEMON_PORT: "8123", PI_DAEMON_TEMP_ROOT: temporaryRoot },
 			workspaceRoot,
 		);
 		expect(command.configuration).toMatchObject({
 			host: "127.0.0.1",
 			port: 9123,
 			workspaceRoot,
+			temporaryRoot,
 			allowedOrigins: ["https://example.test"],
 		});
 		await expect(parseDaemonCommand(["--daemon", "--provider", "x"], {}, workspaceRoot)).rejects.toThrow(
@@ -418,6 +420,90 @@ describe.sequential("pi --daemon CLI and lifecycle", () => {
 		});
 		await server.close();
 	});
+
+	it("releases CLI-owned remote tool operations when print mode exits", async () => {
+		const workspaceRoot = await createTemporaryDirectory();
+		const isolatedHome = await createTemporaryDirectory();
+		const extensionDirectory = await createTemporaryDirectory();
+		const extensionPath = join(extensionDirectory, "smoke-provider.mjs");
+		await writeFile(
+			extensionPath,
+			`export default function (pi) {
+	pi.registerProvider("smoke", {
+		baseUrl: "http://127.0.0.1:1/v1",
+		apiKey: "$SMOKE_API_KEY",
+		api: "openai-completions",
+		models: [{
+			id: "smoke-1",
+			name: "Smoke",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 32768,
+			maxTokens: 4096
+		}]
+	});
+}`,
+			"utf8",
+		);
+		const server = createDaemonServer(await createConfiguration(workspaceRoot));
+		const address = await server.listen();
+		try {
+			const child = spawn(
+				process.execPath,
+				[
+					"--import",
+					"tsx",
+					"src/cli.ts",
+					"--remote",
+					address.url,
+					"--print",
+					"--no-session",
+					"--offline",
+					"--no-extensions",
+					"--extension",
+					extensionPath,
+					"--no-skills",
+					"--no-rules",
+					"--no-prompt-templates",
+					"--no-themes",
+					"--no-context-files",
+					"--no-lsp",
+					"--provider",
+					"smoke",
+					"--model",
+					"smoke-1",
+				],
+				{
+					cwd: new URL("..", import.meta.url),
+					env: {
+						PATH: process.env.PATH,
+						HOME: isolatedHome,
+						PI_CODING_AGENT_DIR: join(isolatedHome, ".pi-agent"),
+						TMPDIR: process.env.TMPDIR,
+						NODE_NO_WARNINGS: "1",
+						SMOKE_API_KEY: "smoke-key",
+					},
+					stdio: ["ignore", "pipe", "pipe"],
+				},
+			);
+			children.push(child);
+			let timedOut = false;
+			const timeout = setTimeout(() => {
+				timedOut = true;
+				child.kill("SIGKILL");
+			}, 10_000);
+			try {
+				await once(child, "exit");
+			} finally {
+				clearTimeout(timeout);
+			}
+			expect(timedOut).toBe(false);
+			expect(child.exitCode).toBe(0);
+		} finally {
+			await server.forceClose();
+		}
+	}, 20_000);
 
 	it("starts and shuts down the Node source CLI without model, key, session, extension, or endpoint setup", async () => {
 		const workspaceRoot = await createTemporaryDirectory();

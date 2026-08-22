@@ -248,6 +248,91 @@ describe("TreeSelectorComponent", () => {
 		});
 	});
 
+	describe("copy", () => {
+		test("copies the full selected message with ctrl+x", () => {
+			const message = `${"long message ".repeat(30)}\nsecond line`;
+			const tree = buildTree([userMessage("user-1", null, "hello"), assistantMessage("asst-1", "user-1", message)]);
+			const selector = new TreeSelectorComponent(
+				tree,
+				"asst-1",
+				24,
+				() => {},
+				() => {},
+			);
+			let copied: string | undefined;
+			selector.onCopy = (text) => {
+				copied = text;
+			};
+
+			selector.handleInput("\x18");
+
+			expect(copied).toBe(message);
+		});
+
+		test("copies textual custom and summary entries without copying metadata", () => {
+			const entries: Array<{ entry: SessionEntry; expected: string | undefined }> = [
+				{
+					entry: {
+						type: "custom_message",
+						id: "custom-1",
+						parentId: null,
+						timestamp: new Date().toISOString(),
+						customType: "test",
+						content: [
+							{ type: "text", text: "first line" },
+							{ type: "image", data: "AQ==", mimeType: "image/png" },
+							{ type: "text", text: "\nsecond line" },
+						],
+						display: true,
+					},
+					expected: "first line\nsecond line",
+				},
+				{
+					entry: {
+						type: "compaction",
+						id: "compaction-1",
+						parentId: null,
+						timestamp: new Date().toISOString(),
+						summary: "full compaction summary",
+						firstKeptEntryId: "entry-1",
+						tokensBefore: 123,
+					},
+					expected: "full compaction summary",
+				},
+				{ entry: modelChange("model-1", null), expected: undefined },
+			];
+
+			for (const { entry, expected } of entries) {
+				const selector = new TreeSelectorComponent(
+					buildTree([entry]),
+					entry.id,
+					24,
+					() => {},
+					() => {},
+				);
+				let copied: string | undefined = "not called";
+				selector.onCopy = (text) => {
+					copied = text;
+				};
+				selector.getTreeList().copySelected();
+				expect(copied).toBe(expected);
+			}
+		});
+
+		test("shows the configured copy action in tree help", () => {
+			const tree = buildTree([userMessage("user-1", null, "hello")]);
+			const selector = new TreeSelectorComponent(
+				tree,
+				"user-1",
+				24,
+				() => {},
+				() => {},
+			);
+
+			expect(selector.render(240).join("\n")).toContain("copy");
+		});
+	});
+
 	describe("label timestamps", () => {
 		test("toggles label timestamps for labeled nodes", () => {
 			const entries = [userMessage("user-1", null, "hello"), assistantMessage("asst-1", "user-1", "hi")];

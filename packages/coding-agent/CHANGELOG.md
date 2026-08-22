@@ -39,10 +39,13 @@
 
 ### Breaking Changes
 
+* Change JSON and RPC `message_update` wire events to emit only `assistantMessageEvent` deltas, removing the cumulative `message` and `assistantMessageEvent.partial` fields that caused quadratic output growth, and pace JSON print streaming against stdout backpressure. Clients that need partial messages must assemble deltas between `message_start` and `message_end`; the latter remains authoritative ([upstream `a4475344f`](https://github.com/fleetagent/pi/commit/a4475344fb765850ec5321efe3c67e6f364ead5c)).
+
 * Remove `getLspLanguageId`, `LSP_LANGUAGE_BY_EXTENSION`, the built-in TypeScript LSP server, and implicit extension mappings; LSP now requires explicit selectors and external configuration.
 * Replace the language-keyed `LspServerConfig` manager API with validated server-ID configuration, document selectors, workspace roots, and transport factories.
 * Require direct `LspClient` users to provide a server ID and `LspConnectionFactory` instead of process command options.
 * Replace the separate `@fleetagent/pi-daemon` package and `pi-daemon` binary with the integrated `pi --daemon` command; the old unversioned daemon protocol, query-token authentication, and `HOST`/`PORT` aliases are not supported.
+* Upgrade bundled TypeBox aliases to 1.3.7, removing deprecated APIs including `Type.Base`, `Type.Awaited`, `Type.Promise`, `Type.AsyncIterator`, `Type.Iterator`, `Type.Options`, and `Value.Mutate`, while fixing compiled validation of nullable array tool arguments. Extensions using removed APIs must migrate to supported TypeBox APIs. See [Package Dependencies](docs/packages.md#dependencies) ([upstream `f9476a61e`](https://github.com/fleetagent/pi/commit/f9476a61e557bfdce2fbf3ffeaad0988fe47c184)).
 
 ### Added
 
@@ -62,9 +65,27 @@
 * Add authenticated remote project-resource provenance, remote subagent preset discovery, and operator-owned colocated LSP tools/status for daemon workspaces.
 * Add integrated `pi --daemon` documentation and a Docker example that runs the packaged Pi CLI.
 * Add hidden user-only `/sandbox start|list|stop` documentation, settings references, and a Docker base-image guide for `pi --daemon` sandbox containers.
+* Allow extension `tool_call` policies to mark blocked calls as terminating, skipping the follow-up model call when every finalized batch result terminates ([upstream `1eb988cfe`](https://github.com/fleetagent/pi/commit/1eb988cfe88fb0ff740ff62583d2f16359f7b6b0)).
+* Add an authoritative AgentSession `waitForIdle()` boundary and additive extension/RPC `agent_settled` event after retries, compaction, queued continuations, runtime synchronization, remote operations, and child subagent calls settle ([upstream `e9fa5a68a`](https://github.com/fleetagent/pi/commit/e9fa5a68a1967f42a90a1c07f512bc8af63517a9)).
+* Add per-directory `AGENTS.override.md` context files that replace `AGENTS.md` or `CLAUDE.md` only in the same directory across local, SSH, and daemon instruction discovery, while preserving ancestor layering ([upstream `8ecf8a988`](https://github.com/fleetagent/pi/commit/8ecf8a9883d1cb7c78d07c0fd64d32d6a1fd2c4c)).
+* Add a mutable `before_provider_headers` extension hook after model-provider auth/header assembly, with null deletion markers and isolation from SSH/daemon transport credentials ([upstream `244f1deaf`](https://github.com/fleetagent/pi/commit/244f1deaf1ae0fc1a242d9df5cddf457cf3d36a7), follow-up [`a24fb9e96`](https://github.com/fleetagent/pi/commit/a24fb9e96a3fbc7be2a87e81aa1aa5c0ddf95d35)).
+* Export typed local JSONL decode and storage errors with exact references, physical lines, byte offsets, operation phases, decode kinds, original causes, and write outcomes while retaining best-effort listing quarantine and strict explicit-open diagnostics ([upstream `7aca0d7b3`](https://github.com/fleetagent/pi/commit/7aca0d7b3e041a9e2b635e8370b2549f032932d6)).
+* Add opt-in `Ctrl+P`/`Ctrl+N` prompt history navigation, with explicit history bindings taking precedence over application shortcuts while the editor is focused ([upstream `16ad96ae8`](https://github.com/fleetagent/pi/commit/16ad96ae89c028f9058c8de2fad0ab45c20ce233)).
+* Add configurable `Ctrl+X` copying for the last assistant message or the selected `/tree` entry, including full untruncated text and clipboard error reporting ([upstream `3b686ac22`](https://github.com/fleetagent/pi/commit/3b686ac224db0eb24cadb6fd0149db94c6aa1854)).
+* Add a bounded, source-preserving terminal Mermaid renderer adapter with exact `grok-mermaid@0.2.2` packaging, top-level fence isolation, safe code-span encoding, and deterministic warning fallback ahead of interactive Markdown wiring ([upstream `66534fbdc`](https://github.com/fleetagent/pi/commit/66534fbdc7bb09492b40142471bbbb87b4a4d5bc)).
+* Add display-only interactive transcript Markdown transformers for extensions and configurable built-in Mermaid rendering across restored, streaming, and final user/assistant content, with load-order chaining, failure isolation, immutable source messages, and cache invalidation ([upstream `714978bf5`](https://github.com/fleetagent/pi/commit/714978bf51225520a9b1e153115f0c5ff057be9e), [upstream `66534fbdc`](https://github.com/fleetagent/pi/commit/66534fbdc7bb09492b40142471bbbb87b4a4d5bc)).
+* Add configurable regular main-screen and experimental fullscreen TUI startup modes through the persisted `tuiMode` setting, `/settings`, the `--tui-mode` CLI flag, and the SDK `RunPiAgentModeOptions`, while intentionally rejecting obsolete `--alt`, `--ui-mode`, and `uiMode` names ([upstream `f074efd92`](https://github.com/fleetagent/pi/commit/f074efd921848bf5d858154e852d47ea82c60bf2), follow-ups [`c72728bc1`](https://github.com/fleetagent/pi/commit/c72728bc1a5ba08abc7e3c8d791d44995306f4e4) and [`5446cd754`](https://github.com/fleetagent/pi/commit/5446cd7545a07c9b6be00dcfba516b3d82e5a8d1)).
+* Compose fullscreen interaction as a follow-end transcript viewport above a fixed dock while retaining existing component identities for selectors, dialogs, extension widgets, editor/footer replacement, status indicators, and regular-mode rendering ([upstream `ea1e77e2d`](https://github.com/fleetagent/pi/commit/ea1e77e2db5cd07bf83365490bd3f52c881efa77)).
+* Add configurable fullscreen transcript scrollbars with transient `auto`, reserved-column `always`, and `hidden` policies that can be changed at runtime through `/settings` ([upstream `6129a353b`](https://github.com/fleetagent/pi/commit/6129a353b18310eb06085e2f17f58cf501f725f3), rendering prerequisite adapted from [`8ac92f831`](https://github.com/fleetagent/pi/commit/8ac92f831c67c3642fa321a182a6c91044adec9c)).
+* Add mouse-driven fullscreen transcript scrollbar dragging with transient hover visibility and selection-safe drag capture, including narrow terminal layouts ([upstream `8ac92f831`](https://github.com/fleetagent/pi/commit/8ac92f831c67c3642fa321a182a6c91044adec9c)).
+* Add configurable fullscreen transcript page, top/bottom, and marked-message navigation while keeping Ctrl-modified viewport keys and ordinary prompt-history input routed to the editor ([upstream `3c717842e`](https://github.com/fleetagent/pi/commit/3c717842e), editor-routing follow-up [`b0d382e25`](https://github.com/fleetagent/pi/commit/b0d382e25)).
+* Expose unbound half-page fullscreen transcript actions for user-defined faster navigation without replacing the default full-page or editor bindings ([upstream `a3e93ec85`](https://github.com/fleetagent/pi/commit/a3e93ec85)).
+* Add immediate `/settings` switching between regular and fullscreen TUI renderers while preserving the transcript, editor and focus state, extension UI references and terminal-input listeners, progress state, mouse cleanup, and main-screen render history ([upstream `b103937d3`](https://github.com/fleetagent/pi/commit/b103937d3c003a48d32de9763856f2dae55ab605), shutdown follow-up [`3d264e85b`](https://github.com/fleetagent/pi/commit/3d264e85b4f870a93c5b763b95dd988a4f225da4)).
+* Add configurable fullscreen exit output: replay the complete logical transcript or restore the previous main screen without replaying transcript content, while fatal errors always preserve diagnostic output ([upstream `ac4ac9eaf`](https://github.com/fleetagent/pi/commit/ac4ac9eaf69f2b01ca3af984a5c48f3b99b84278)).
 
 ### Changed
 
+* Keep all existing coding-agent TUI construction sites on the explicitly named main-screen renderer while the TUI package adds an alternate-screen implementation ([upstream `c13ffe187`](https://github.com/fleetagent/pi/commit/c13ffe187)).
 * Make LSP startup lazy and configuration-driven, preserve explicit tool allowlists, and keep synchronization independent from model tool exposure.
 * Aggregate capability-aware results from overlapping language servers deterministically and isolate ordinary provider failures.
 * Disconnect attached LSP endpoints without terminating shared service processes by default; protocol shutdown is explicit.
@@ -72,6 +93,58 @@
 * Retire daemon file-transfer and resource-limit work from the separate package into the integrated, bounded `pi --daemon` protocol.
 ### Fixed
 
+* Preserve extension and custom TUI method wrappers without recursive self-calls while routing captured methods to the active renderer after runtime mode switches ([upstream `666d8972f`](https://github.com/fleetagent/pi/commit/666d8972ff0b6da5067e05973249760964194769), [#7731](https://github.com/fleetagent/pi/issues/7731)).
+* Paste Windows clipboard text into the currently focused fullscreen component on unmodified right-click, using bracketed-paste input and dropping asynchronous results after focus changes ([upstream `c96bfaccd`](https://github.com/fleetagent/pi/commit/c96bfaccd)).
+* Show configurable copy-shortcut confirmation as a transient fullscreen flash without adding a transcript status entry, while explicit `/copy` and regular mode retain status output ([upstream `ebf33c0c2`](https://github.com/fleetagent/pi/commit/ebf33c0c2282fb8c027174d3d2b53519d8f564e3)).
+* Keep image-heavy fullscreen sessions responsive by reusing unchanged visible and recently offscreen Kitty payloads while redrawing placements, without changing regular main-screen image cleanup ([upstream `73414d08b`](https://github.com/fleetagent/pi/commit/73414d08b94d7db46d3fa66582c8fe3b02dabf72), follow-up [`a8ee03b81`](https://github.com/fleetagent/pi/commit/a8ee03b8156c2232d67ad2cdb79683b4a5c8fdbe)).
+* Paste clipboard text from the interactive shortcut when no image is available, while retaining image-first attachment behavior ([upstream `d7a48d30a`](https://github.com/fleetagent/pi/commit/d7a48d30a031f9c26eb304ead89a0dd1fb424b8f)).
+* Read text from the active Wayland clipboard with shell-free `wl-paste` MIME selection and bounded execution, avoiding stale X11 text while retaining native fallback when the command fails ([upstream `bfc679d5e`](https://github.com/fleetagent/pi/commit/bfc679d5e4e0a41fc1953456be0e1b223461189b)).
+* Await `wl-copy` process completion on Wayland and report success only for exit code 0, falling back to X11 or OSC 52 after process errors or unsuccessful exits ([upstream `2d3f55542`](https://github.com/fleetagent/pi/commit/2d3f555429935ffccdf23d9adae09ef7e0b85ca7)).
+* Let inherited keyboard input preempt throttled render timers and coalesce rapid keystrokes into one immediate frame, reducing interactive input latency on Windows ([upstream `29d9f087c`](https://github.com/fleetagent/pi/commit/29d9f087cc7b9064998f91e97ab5e89e5b67dff7)).
+* Preserve spaces in active `/settings` searches such as **Quiet startup** without changing configured confirmation keys or the empty-query Space shortcut ([upstream `bf4a90d81`](https://github.com/fleetagent/pi/commit/bf4a90d81985bd45052eeeae59d84fe13e0bd2c8)).
+* Reset `/model` selection to the top-ranked match after each non-empty query change in both All and Scoped tabs, while preserving the current row when the query is cleared ([upstream `f1ea6c0d0`](https://github.com/fleetagent/pi/commit/f1ea6c0d05a5707a483268dbd42f8c60f38377ed)).
+* Close the `/fork` selector before awaiting session creation so rapid repeated confirmation cannot activate the same asynchronous fork twice ([upstream `86afffe01`](https://github.com/fleetagent/pi/commit/86afffe01f6f9c28207a3c712f5cddad10332987)).
+* Recognize inherited legacy terminal Alt+symbol keybindings such as `Alt+,` and `Alt+.` while continuing to require explicit Kitty or xterm modifier sequences when enhanced keyboard reporting is active ([upstream `8479bd847`](https://github.com/fleetagent/pi/commit/8479bd84743e8889f728acb21a62794102db0529)).
+* Keep inherited large-paste registry entries synchronized when Backspace removes a marker or interactive clear actions reset the editor through `setText`, preventing stale IDs and mismatched pasted content after `Ctrl+C` ([upstream `8a2ce5a54`](https://github.com/fleetagent/pi/commit/8a2ce5a54024be2eb2b879288212141741afa65e), corrective follow-up [`3595e080c`](https://github.com/fleetagent/pi/commit/3595e080cb013232c4141cab9976eebcdddcc417)).
+* Restore inherited large-paste content and numbering atomically with prompt text during undo, including after marker deletion and interactive `setText` replacement ([upstream `3595e080c`](https://github.com/fleetagent/pi/commit/3595e080cb013232c4141cab9976eebcdddcc417)).
+* Count inherited terminal-spacing marks and visible consonant continuations inside Indic and Myanmar grapheme clusters without widening ordinary combining marks ([upstream `dfe47d3fb`](https://github.com/fleetagent/pi/commit/dfe47d3fbd8bf27841becaf8ec042dc0e73804a6)).
+* Close inherited active BEL- or ST-terminated OSC 8 hyperlinks before the SGR reset and ellipsis when width truncation cuts through a clickable label ([upstream `b780d20aa`](https://github.com/fleetagent/pi/commit/b780d20aa17c4144ace7bff728150993236b88ee)).
+* Publish first JSONL snapshots, rewrites, and forks through unique sibling files and rename, persist append records before advancing memory, fence ambiguous failures, and build forks without mutating their source while preserving delayed session visibility ([upstream `a838c069e`](https://github.com/fleetagent/pi/commit/a838c069e6318edee8317eff759b74c3934745f0)).
+* Reject delayed create/create, create/fork, and fork/fork publication collisions for one canonical cwd and session ID without overwriting the existing JSONL session, while retaining cross-cwd IDs and detecting already-published IDs across managers/processes ([upstream `9d090bc5d`](https://github.com/fleetagent/pi/commit/9d090bc5dcecf8f35354e09fe57413e57dea8e5b)).
+* Strictly decode local JSONL bytes before open, migration, import, compaction, and fork; atomically repair only unterminated final JSON/UTF-8 fragments or missing final newlines, and reject interior, schema, graph, and state corruption without rewriting the source ([upstream `4a0e2f115`](https://github.com/fleetagent/pi/commit/4a0e2f115ad46d34c19d200c6a71fa79d264092d), follow-up [`7aca0d7b3`](https://github.com/fleetagent/pi/commit/7aca0d7b3e041a9e2b635e8370b2549f032932d6)).
+* Runtime-validate remote session snapshots, listings, and mutation acknowledgements before state changes; fence malformed, conflicting, or outcome-ambiguous synchronization while retaining dirty entries; and flush active remote history before fork handoff, without requiring ETags or changing the existing wire protocol.
+* Dispose CLI-owned SSH, daemon, and deferred workspace tool backends when print, JSON, RPC, or interactive runtime shutdown completes, preventing remote connections from keeping the process alive.
+* Terminate remote SSH command process groups on cancellation and timeout, preventing interrupted commands from continuing to mutate the workspace after the local SSH client exits.
+* Upgrade Undici to 8.10.0 to address published response-desynchronization, cache-directive disclosure/crash, CRLF-injection, and cookie-attribute injection advisories found by the isolated release audit.
+* Load and package the shipped browser Markdown, syntax-highlighting, stylesheet, and renderer assets for Node and Bun HTML exports, preserving source LaTeX and Mermaid syntax outside the terminal renderer.
+
+* Make inherited OpenAI and Anthropic provider retry waits honor caller cancellation and configured delay limits while preserving provider retry counts ([upstream `7af8533c6`](https://github.com/fleetagent/pi/commit/7af8533c6f22ab922fff29f252d2d3657b821d99)).
+* Retry eligible inherited Google Generative AI and Vertex failures before the first token while preserving opt-in retry limits and cancellation ([upstream `b9d360a2c`](https://github.com/fleetagent/pi/commit/b9d360a2c753e058a90dc0a252950631501c10d0)).
+* Reject prompt submissions, including RPC, extension-originated user messages, and extension commands, while compaction is in progress before hooks or session mutation ([upstream `8eda4f5b2`](https://github.com/fleetagent/pi/commit/8eda4f5b256009b8e752651683701b041e1632d3)).
+* Keep agent events connected while manual compaction aborts and settles an active response, preserving message persistence and subscribers without exposing compaction-summary messages ([upstream `e56893f4c`](https://github.com/fleetagent/pi/commit/e56893f4cd6545ab1498b72ae4e1e2241a0926f4)).
+* Settle manual compaction before `compaction_end` subscribers run so interactive, RPC, extension-hosted, and child-session listeners can submit queued prompts ([upstream `3852cb2b8`](https://github.com/fleetagent/pi/commit/3852cb2b813243f3c81a873ed97827798aa7dbeb)).
+* Retry transient manual/automatic compaction and branch-summary stream failures with the configured bounded session policy, abortable backoff, and public retry lifecycle events without starting duplicate compactions ([upstream `8e53e0e49`](https://github.com/fleetagent/pi/commit/8e53e0e49cf3ecec20c840c4cb03e692e96c50f1)).
+* Count context-visible custom messages, branch summaries, tool results, and images consistently when choosing compaction and branch-summary budgets, while excluding audit-only structured responses and context-excluded bash output ([upstream `a6f720e6c`](https://github.com/fleetagent/pi/commit/a6f720e6caf1cf429e382011156c015fa204c512)).
+* Avoid reading and parsing persisted JSONL sessions twice when opening them by using a bounded incremental header scan and reusing the authoritative fallback load for oversized legacy headers or prefixes ([upstream `f1c587dde`](https://github.com/fleetagent/pi/commit/f1c587dde39025c75d7397bc14532d8fa5c001d9)).
+* Reload revision-changed credentials before use, coalesce concurrent reads across auth-storage instances, and retry brief lock contention promptly, so long-running sessions observe external login, logout, and token updates without unnecessary delays ([upstream `57cde8690`](https://github.com/fleetagent/pi/commit/57cde86906679fd0581b277a179ab46fa2a09ab6), [`d2be68dbe`](https://github.com/fleetagent/pi/commit/d2be68dbebaca6361ce83dd7b27a8e45c8cea97d), [`4d68d9355`](https://github.com/fleetagent/pi/commit/4d68d9355131361a831b361b58d89b028bf5d247)).
+* Recursively merge nested global, project, and runtime settings so partial provider retry overrides preserve unmodified values, while retaining atomic LSP layers, per-tool shallow merging, array replacement, and sandbox daemon settings ([upstream `97f0ccdd9`](https://github.com/fleetagent/pi/commit/97f0ccdd96cc207b6ad3630c56eea4d32dbdcf53)).
+
+* Normalize missing or null content from extension replacements, injected custom messages, tool results, and successfully parsed imported sessions before state, persistence, provider conversion, compaction, or branch summarization, without rewriting source JSONL ([upstream `8c0ccd14b`](https://github.com/fleetagent/pi/commit/8c0ccd14b34b6e5c403363518e331094b69ebf6c)).
+
+* Escape quote characters in exported session HTML attribute values ([upstream `b3ed5459`](https://github.com/fleetagent/pi/commit/b3ed545938952944560d47b10789d025364df691)).
+* Sanitize exported Markdown link and image URLs with a scheme allow-list after stripping control characters, while preserving embedded session images ([upstream `6cb23f9b`](https://github.com/fleetagent/pi/commit/6cb23f9b5d5b6d1747672f535b167d0d809ac010)).
+* Launch OAuth browser targets with detached argument vectors instead of shell interpolation, including a shell-free Windows handler ([upstream `ba6e5298`](https://github.com/fleetagent/pi/commit/ba6e5298df7a1b4a9dc58eaec4e2b3a06270ec0c)).
+* Apply mode 0600 when creating every auth-storage and auth-migration write, eliminating the permissions window before post-write correction ([upstream `135fb545`](https://github.com/fleetagent/pi/commit/135fb545f99106a4a249274f129b90bc0a77d347)).
+* Reject unsafe Git package sources, confine managed checkout mutations across persistent and temporary roots, and prevent managed Git resources from escaping through traversal or symlinks ([upstream `a98e087e`](https://github.com/fleetagent/pi/commit/a98e087e5d08ea2a536bf73dbb0aebb87c3ef72e)).
+* Route RPC bash commands through extension `user_bash` policy hooks, including replacement results and custom operations, while preserving recording and context-exclusion options ([upstream `5d548ae969`](https://github.com/fleetagent/pi/commit/5d548ae969454d23ef8fec627c5be896be888d47)).
+* Retire extension-owned event-bus subscriptions when their runtime is invalidated, preventing stale callbacks and listener accumulation across reloads and disposal ([upstream `6ca423447`](https://github.com/fleetagent/pi/commit/6ca423447f55719f24815b34f29ffbb4596c80bd)).
+* Validate every pi package manifest resource field through one shared reader, ignoring malformed arrays without dropping valid fields ([upstream `74caa2649f`](https://github.com/fleetagent/pi/commit/74caa2649f10ed71b4378ce69f5d9fbfd2466ca5)).
+* Retry Bun fetch socket-drop errors reported as `socket connection was closed` so transient provider disconnects do not end agent sessions, while quota and billing failures remain terminal ([upstream `4285712ba`](https://github.com/fleetagent/pi/commit/4285712bae831229eab5d4b6eb676f97a84ad8b1)).
+* Retry transient gRPC `ResourceExhausted` provider errors such as NVIDIA NIM worker-capacity exhaustion without retrying durable quota or billing failures ([upstream `57d96d72e`](https://github.com/fleetagent/pi/commit/57d96d72ed4d8bd167daa57a143b78761d298e8f)).
+* Retry transient DNS lookup failures reported as `getaddrinfo`, `ENOTFOUND`, or `EAI_AGAIN` through the existing bounded, abortable session retry lifecycle ([upstream `33e40c3e1`](https://github.com/fleetagent/pi/commit/33e40c3e155a7f7c1bd67ea7dbdeca258eca7547)).
+* Retry transient upstream request-buffer limit failures through the existing bounded session retry lifecycle ([upstream `fe10558eb`](https://github.com/fleetagent/pi/commit/fe10558eb3fa6d8fc3f6211bf1532e1659b9093d)).
+* Preserve unique inherited OpenAI-compatible tool-call IDs across provider handoffs when multiple calls share a provider call ID, while keeping matching tool results paired ([upstream `d9f7f8147`](https://github.com/fleetagent/pi/commit/d9f7f814730998f191ad6c32bbd178e0834cae18)).
+* Preserve inherited Gemini 3 tool-call IDs in function calls and matching function responses across same-model and provider-handoff history replay ([upstream `cbaca6038`](https://github.com/fleetagent/pi/commit/cbaca60389f5d7097a43c95f56a19d344ecf2195)).
 * Block untrusted project-origin LSP endpoints, commands, and positive activation of inherited transports; preserve safe disable/removal controls.
 * Keep malformed or unreadable LSP configuration nonfatal and fail-closed across initial creation, reload, and replacement, with `--no-lsp` as a reliable recovery path and no stale runtime or diagnostic state.
 * Advertise consumed code-action and workspace-edit protocol capabilities, and replace clients whose synchronization delivery leaves remote document state indeterminate.
@@ -691,7 +764,7 @@
 
 ### Breaking Changes
 
-- Renamed the npm package scope from `@earendil-works` to `@fleetagent`.
+- Renamed the npm package scope from `@fleetagent` to `@fleetagent`.
 
 ### New Features
 
@@ -703,24 +776,24 @@
 
 - Added remote session persistence support for SDK and CLI session managers.
 - Added shared OAuth device-code callback metadata and polling support for GitHub Copilot login flows inherited from `@fleetagent/pi-ai`.
-- Added a standard unified patch to edit tool result details for SDK consumers ([#4821](https://github.com/earendil-works/pi/issues/4821)).
+- Added a standard unified patch to edit tool result details for SDK consumers ([#4821](https://github.com/fleetagent/pi/issues/4821)).
 
 ### Changed
 
 - Refactored SDK session construction around the `PiAgent` composition root and updated SDK examples.
-- Replaced the optional `koffi` dependency for Windows VT input with a tiny vendored native helper inherited from `@fleetagent/pi-tui`, reducing install size while preserving Shift+Tab handling ([#4480](https://github.com/earendil-works/pi/issues/4480)).
-- Changed the root development install documentation to use `npm install --ignore-scripts` ([#4868](https://github.com/earendil-works/pi/issues/4868)).
+- Replaced the optional `koffi` dependency for Windows VT input with a tiny vendored native helper inherited from `@fleetagent/pi-tui`, reducing install size while preserving Shift+Tab handling ([#4480](https://github.com/fleetagent/pi/issues/4480)).
+- Changed the root development install documentation to use `npm install --ignore-scripts` ([#4868](https://github.com/fleetagent/pi/issues/4868)).
 
 ### Fixed
 
-- Fixed package and resource path handling to normalize roots consistently across config, sessions, package loading, prompts, skills, and exports ([#4873](https://github.com/earendil-works/pi/pull/4873) by [@mitsuhiko](https://github.com/mitsuhiko)).
-- Fixed config selector package pattern matching to use the selected package base directory ([#4898](https://github.com/earendil-works/pi/pull/4898) by [@haoqixu](https://github.com/haoqixu)).
-- Fixed theme picker package theme labels to list themes by content name ([#4830](https://github.com/earendil-works/pi/pull/4830) by [@Perlence](https://github.com/Perlence)).
-- Fixed Amazon Bedrock Claude requests inherited from `@fleetagent/pi-ai` to send the model output token cap by default, avoiding Bedrock's 4096-token default truncation ([#4848](https://github.com/earendil-works/pi/issues/4848)).
-- Fixed git package installs to reconcile existing checkouts to the requested ref and update package settings without losing filters ([#4870](https://github.com/earendil-works/pi/issues/4870)).
-- Published a 0.74.2 rescue release that tells Node 20 users to upgrade Node before updating to newer Pi versions ([#4876](https://github.com/earendil-works/pi/issues/4876)).
-- Fixed final bash tool cards to avoid rendering duplicate full-output truncation paths ([#4819](https://github.com/earendil-works/pi/issues/4819)).
-- Fixed bash tool truncation line counts to ignore the trailing newline as an extra output line ([#4818](https://github.com/earendil-works/pi/issues/4818)).
+- Fixed package and resource path handling to normalize roots consistently across config, sessions, package loading, prompts, skills, and exports ([#4873](https://github.com/fleetagent/pi/pull/4873) by [@mitsuhiko](https://github.com/mitsuhiko)).
+- Fixed config selector package pattern matching to use the selected package base directory ([#4898](https://github.com/fleetagent/pi/pull/4898) by [@haoqixu](https://github.com/haoqixu)).
+- Fixed theme picker package theme labels to list themes by content name ([#4830](https://github.com/fleetagent/pi/pull/4830) by [@Perlence](https://github.com/Perlence)).
+- Fixed Amazon Bedrock Claude requests inherited from `@fleetagent/pi-ai` to send the model output token cap by default, avoiding Bedrock's 4096-token default truncation ([#4848](https://github.com/fleetagent/pi/issues/4848)).
+- Fixed git package installs to reconcile existing checkouts to the requested ref and update package settings without losing filters ([#4870](https://github.com/fleetagent/pi/issues/4870)).
+- Published a 0.74.2 rescue release that tells Node 20 users to upgrade Node before updating to newer Pi versions ([#4876](https://github.com/fleetagent/pi/issues/4876)).
+- Fixed final bash tool cards to avoid rendering duplicate full-output truncation paths ([#4819](https://github.com/fleetagent/pi/issues/4819)).
+- Fixed bash tool truncation line counts to ignore the trailing newline as an extra output line ([#4818](https://github.com/fleetagent/pi/issues/4818)).
 
 ## [0.75.4] - 2026-05-20
 
@@ -730,8 +803,8 @@
 
 ### Added
 
-- Added interactive update notes after `pi update` runs, so users can see the installed version's changelog before continuing ([#4724](https://github.com/earendil-works/pi-mono/pull/4724) by [@mitsuhiko](https://github.com/mitsuhiko)).
-- Exported image resize utilities from the package root for SDK consumers ([#4775](https://github.com/earendil-works/pi-mono/pull/4775) by [@xl0](https://github.com/xl0)).
+- Added interactive update notes after `pi update` runs, so users can see the installed version's changelog before continuing ([#4724](https://github.com/fleetagent/pi/pull/4724) by [@mitsuhiko](https://github.com/mitsuhiko)).
+- Exported image resize utilities from the package root for SDK consumers ([#4775](https://github.com/fleetagent/pi/pull/4775) by [@xl0](https://github.com/xl0)).
 
 ### Changed
 
@@ -743,53 +816,53 @@
 
 ### Fixed
 
-- Fixed the system prompt to tell models to resolve pi docs and examples under the absolute package paths before reading topic-specific relative references ([#4752](https://github.com/earendil-works/pi/issues/4752)).
-- Fixed extension `ctx.abort()` during tool-call preflight to stop later confirmations and restore queued interactive input like Escape ([#4276](https://github.com/earendil-works/pi/issues/4276)).
+- Fixed the system prompt to tell models to resolve pi docs and examples under the absolute package paths before reading topic-specific relative references ([#4752](https://github.com/fleetagent/pi/issues/4752)).
+- Fixed extension `ctx.abort()` during tool-call preflight to stop later confirmations and restore queued interactive input like Escape ([#4276](https://github.com/fleetagent/pi/issues/4276)).
 - Fixed AgentSession retry, compaction, and event settlement to use the awaited agent lifecycle instead of a separate event queue, and added `willRetry` to `agent_end` session events.
-- Fixed forked session runtime state to keep the active session id aligned with the fork target ([#4799](https://github.com/earendil-works/pi-mono/pull/4799) by [@Perlence](https://github.com/Perlence)).
-- Fixed the subagent extension's parallel mode to return useful per-task output and failed-task diagnostics to the parent model instead of 100-character previews ([#4710](https://github.com/earendil-works/pi/issues/4710)).
-- Fixed Windows local bash execution to hide helper console windows when launched from background SDK processes ([#4699](https://github.com/earendil-works/pi/issues/4699)).
-- Fixed managed npm extension folders to set cloud-sync ignore metadata where supported ([#4763](https://github.com/earendil-works/pi/issues/4763)).
-- Fixed HTTP idle timeout configuration so long-running provider streams can avoid premature idle disconnects ([#4759](https://github.com/earendil-works/pi-mono/pull/4759) by [@mitsuhiko](https://github.com/mitsuhiko)).
-- Fixed default system prompt boundaries to use explicit XML tags for clearer file separation ([#4709](https://github.com/earendil-works/pi-mono/pull/4709) by [@herrnel](https://github.com/herrnel)).
-- Fixed HTML share/export sidebar clicks for shared tool entries to scroll to the rendered tool call ([#4664](https://github.com/earendil-works/pi-mono/pull/4664) by [@yzhg1983](https://github.com/yzhg1983)).
+- Fixed forked session runtime state to keep the active session id aligned with the fork target ([#4799](https://github.com/fleetagent/pi/pull/4799) by [@Perlence](https://github.com/Perlence)).
+- Fixed the subagent extension's parallel mode to return useful per-task output and failed-task diagnostics to the parent model instead of 100-character previews ([#4710](https://github.com/fleetagent/pi/issues/4710)).
+- Fixed Windows local bash execution to hide helper console windows when launched from background SDK processes ([#4699](https://github.com/fleetagent/pi/issues/4699)).
+- Fixed managed npm extension folders to set cloud-sync ignore metadata where supported ([#4763](https://github.com/fleetagent/pi/issues/4763)).
+- Fixed HTTP idle timeout configuration so long-running provider streams can avoid premature idle disconnects ([#4759](https://github.com/fleetagent/pi/pull/4759) by [@mitsuhiko](https://github.com/mitsuhiko)).
+- Fixed default system prompt boundaries to use explicit XML tags for clearer file separation ([#4709](https://github.com/fleetagent/pi/pull/4709) by [@herrnel](https://github.com/herrnel)).
+- Fixed HTML share/export sidebar clicks for shared tool entries to scroll to the rendered tool call ([#4664](https://github.com/fleetagent/pi/pull/4664) by [@yzhg1983](https://github.com/yzhg1983)).
 - Fixed theme palettes to set explicit text colors and avoid terminal-default color drift.
 - Fixed truecolor detection to align terminal image rendering and interactive theme decisions.
 - Fixed loader indicator startup inherited from `@fleetagent/pi-tui` so initialization cannot run before frames are available.
-- Fixed OpenAI-compatible default output token requests inherited from `@fleetagent/pi-ai` to avoid reserving impossible context windows on servers such as vLLM ([#4675](https://github.com/earendil-works/pi/issues/4675)).
-- Fixed OpenAI prompt cache keys inherited from `@fleetagent/pi-ai` to stay within the 64-character provider limit ([#4720](https://github.com/earendil-works/pi/issues/4720)).
-- Fixed Windows npm-family package commands for fnm-managed Node.js installs that expose both extensionless Unix scripts and `.cmd` shims ([#4793](https://github.com/earendil-works/pi/issues/4793)).
+- Fixed OpenAI-compatible default output token requests inherited from `@fleetagent/pi-ai` to avoid reserving impossible context windows on servers such as vLLM ([#4675](https://github.com/fleetagent/pi/issues/4675)).
+- Fixed OpenAI prompt cache keys inherited from `@fleetagent/pi-ai` to stay within the 64-character provider limit ([#4720](https://github.com/fleetagent/pi/issues/4720)).
+- Fixed Windows npm-family package commands for fnm-managed Node.js installs that expose both extensionless Unix scripts and `.cmd` shims ([#4793](https://github.com/fleetagent/pi/issues/4793)).
 
 ## [0.75.3] - 2026-05-18
 
 ### Fixed
 
-- Fixed undici 8 HTTP/2 destroyed-session races crashing the Node CLI by preserving the previous HTTP/1.1-only fetch dispatcher behavior ([#4681](https://github.com/earendil-works/pi/issues/4681)).
+- Fixed undici 8 HTTP/2 destroyed-session races crashing the Node CLI by preserving the previous HTTP/1.1-only fetch dispatcher behavior ([#4681](https://github.com/fleetagent/pi/issues/4681)).
 
 ## [0.75.2] - 2026-05-18
 
 ### Fixed
 
-- Fixed Bun-compiled release binaries failing to start when Bun's built-in undici shim lacks npm undici's `install` export ([#4661](https://github.com/earendil-works/pi-mono/pull/4661) by [@dmasiero](https://github.com/dmasiero)).
-- Fixed Xiaomi MiMo generated model metadata to replay assistant tool-call messages with `reasoning_content` for thinking-mode multi-turn requests, inherited from `@fleetagent/pi-ai` ([#4678](https://github.com/earendil-works/pi/issues/4678)).
-- Fixed Windows external editor handoff so vim/nvim can receive input after opening from the TUI ([#4612](https://github.com/earendil-works/pi/issues/4612)).
-- Fixed Windows npm self-updates to move loaded native dependency packages out of the active install before reinstalling pi ([#4157](https://github.com/earendil-works/pi/issues/4157)).
-- Fixed `pi update --self` detection for pnpm v11 global installs whose package path resolves through the pnpm store ([#4647](https://github.com/earendil-works/pi/issues/4647)).
-- Fixed Windows pnpm self-updates to resolve pnpm command shims and run through pnpm instead of requiring manual updates ([#4157](https://github.com/earendil-works/pi/issues/4157)).
-- Fixed Windows npm-family command execution to use cross-spawn instead of parsing `.cmd` shim internals ([#4665](https://github.com/earendil-works/pi/issues/4665)).
+- Fixed Bun-compiled release binaries failing to start when Bun's built-in undici shim lacks npm undici's `install` export ([#4661](https://github.com/fleetagent/pi/pull/4661) by [@dmasiero](https://github.com/dmasiero)).
+- Fixed Xiaomi MiMo generated model metadata to replay assistant tool-call messages with `reasoning_content` for thinking-mode multi-turn requests, inherited from `@fleetagent/pi-ai` ([#4678](https://github.com/fleetagent/pi/issues/4678)).
+- Fixed Windows external editor handoff so vim/nvim can receive input after opening from the TUI ([#4612](https://github.com/fleetagent/pi/issues/4612)).
+- Fixed Windows npm self-updates to move loaded native dependency packages out of the active install before reinstalling pi ([#4157](https://github.com/fleetagent/pi/issues/4157)).
+- Fixed `pi update --self` detection for pnpm v11 global installs whose package path resolves through the pnpm store ([#4647](https://github.com/fleetagent/pi/issues/4647)).
+- Fixed Windows pnpm self-updates to resolve pnpm command shims and run through pnpm instead of requiring manual updates ([#4157](https://github.com/fleetagent/pi/issues/4157)).
+- Fixed Windows npm-family command execution to use cross-spawn instead of parsing `.cmd` shim internals ([#4665](https://github.com/fleetagent/pi/issues/4665)).
 
 ## [0.75.1] - 2026-05-18
 
 ### Fixed
 
-- Fixed config selectors to scale their visible row count to terminal height ([#4243](https://github.com/earendil-works/pi-mono/pull/4243) by [@samjonester](https://github.com/samjonester)).
-- Fixed Anthropic-compatible API-key requests to ignore unrelated `ANTHROPIC_AUTH_TOKEN` environment values, avoiding invalid bearer credentials for providers such as Xiaomi MiMo inherited from `@fleetagent/pi-ai` ([#4342](https://github.com/earendil-works/pi/issues/4342)).
-- Fixed Amazon Bedrock message conversion to skip unknown content blocks instead of failing the stream, inherited from `@fleetagent/pi-ai` ([#4223](https://github.com/earendil-works/pi/issues/4223)).
-- Fixed Azure OpenAI Responses and OpenAI Responses error formatting to prefix HTTP status codes onto `errorMessage`, so transient 5xx and 429 errors are correctly matched by the agent-level auto-retry classifier inherited from `@fleetagent/pi-ai` ([#4232](https://github.com/earendil-works/pi/issues/4232)).
-- Fixed OpenCode Go Kimi reasoning replay by normalizing streamed `reasoning` fields back to `reasoning_content` for OpenCode Go only, inherited from `@fleetagent/pi-ai` ([#4251](https://github.com/earendil-works/pi/issues/4251)).
-- Fixed Xiaomi MiMo model metadata to use the OpenAI-compatible endpoints and `openai-completions` API, restoring multi-turn thinking/tool-call sessions inherited from `@fleetagent/pi-ai` ([#4505](https://github.com/earendil-works/pi/issues/4505)).
-- Fixed JSON parse failures for compressed fetch responses under Node 26.0 by installing undici fetch globals alongside pi's global dispatcher ([#4650](https://github.com/earendil-works/pi/issues/4650), [#4652](https://github.com/earendil-works/pi/issues/4652), [#4653](https://github.com/earendil-works/pi/issues/4653)).
-- Fixed npm-family package commands on Windows to avoid shell argument splitting when install prefixes contain spaces ([#4623](https://github.com/earendil-works/pi/issues/4623)).
+- Fixed config selectors to scale their visible row count to terminal height ([#4243](https://github.com/fleetagent/pi/pull/4243) by [@samjonester](https://github.com/samjonester)).
+- Fixed Anthropic-compatible API-key requests to ignore unrelated `ANTHROPIC_AUTH_TOKEN` environment values, avoiding invalid bearer credentials for providers such as Xiaomi MiMo inherited from `@fleetagent/pi-ai` ([#4342](https://github.com/fleetagent/pi/issues/4342)).
+- Fixed Amazon Bedrock message conversion to skip unknown content blocks instead of failing the stream, inherited from `@fleetagent/pi-ai` ([#4223](https://github.com/fleetagent/pi/issues/4223)).
+- Fixed Azure OpenAI Responses and OpenAI Responses error formatting to prefix HTTP status codes onto `errorMessage`, so transient 5xx and 429 errors are correctly matched by the agent-level auto-retry classifier inherited from `@fleetagent/pi-ai` ([#4232](https://github.com/fleetagent/pi/issues/4232)).
+- Fixed OpenCode Go Kimi reasoning replay by normalizing streamed `reasoning` fields back to `reasoning_content` for OpenCode Go only, inherited from `@fleetagent/pi-ai` ([#4251](https://github.com/fleetagent/pi/issues/4251)).
+- Fixed Xiaomi MiMo model metadata to use the OpenAI-compatible endpoints and `openai-completions` API, restoring multi-turn thinking/tool-call sessions inherited from `@fleetagent/pi-ai` ([#4505](https://github.com/fleetagent/pi/issues/4505)).
+- Fixed JSON parse failures for compressed fetch responses under Node 26.0 by installing undici fetch globals alongside pi's global dispatcher ([#4650](https://github.com/fleetagent/pi/issues/4650), [#4652](https://github.com/fleetagent/pi/issues/4652), [#4653](https://github.com/fleetagent/pi/issues/4653)).
+- Fixed npm-family package commands on Windows to avoid shell argument splitting when install prefixes contain spaces ([#4623](https://github.com/fleetagent/pi/issues/4623)).
 
 ### Removed
 
@@ -803,13 +876,13 @@
 
 ### Fixed
 
-- Fixed compaction summary calls to use custom agent stream functions, preserving proxy-backed LLM routing ([#4484](https://github.com/earendil-works/pi/issues/4484)).
-- Fixed system prompt and context file boundaries to use explicit XML tags instead of Markdown headings, reducing inconsistent boundary ingestion by models ([#4541](https://github.com/earendil-works/pi-mono/pull/4541) by [@herrnel](https://github.com/herrnel)).
-- Fixed OpenAI Codex generated model metadata to use the current upstream model list inherited from `@fleetagent/pi-ai` ([#4603](https://github.com/earendil-works/pi-mono/pull/4603) by [@mattiacerutti](https://github.com/mattiacerutti)).
-- Fixed GitHub Copilot GPT model thinking metadata inherited from `@fleetagent/pi-ai` to map unsupported minimal thinking to low ([#4622](https://github.com/earendil-works/pi-mono/pull/4622) by [@mattiacerutti](https://github.com/mattiacerutti)).
-- Fixed user-scoped npm pi packages to install under `~/.pi/agent/npm/` instead of npm's global package root, avoiding permission errors with system-managed Node installs ([#4587](https://github.com/earendil-works/pi/issues/4587)).
-- Fixed Mistral requests failing after the global fetch proxy/timeout workaround by removing the custom fetch override and using undici 8 dispatcher support instead ([#4619](https://github.com/earendil-works/pi/issues/4619)).
-- Fixed default output token requests for models whose advertised output limit is effectively their full context window, avoiding impossible provider requests inherited from `@fleetagent/pi-ai` ([#4614](https://github.com/earendil-works/pi/issues/4614)).
+- Fixed compaction summary calls to use custom agent stream functions, preserving proxy-backed LLM routing ([#4484](https://github.com/fleetagent/pi/issues/4484)).
+- Fixed system prompt and context file boundaries to use explicit XML tags instead of Markdown headings, reducing inconsistent boundary ingestion by models ([#4541](https://github.com/fleetagent/pi/pull/4541) by [@herrnel](https://github.com/herrnel)).
+- Fixed OpenAI Codex generated model metadata to use the current upstream model list inherited from `@fleetagent/pi-ai` ([#4603](https://github.com/fleetagent/pi/pull/4603) by [@mattiacerutti](https://github.com/mattiacerutti)).
+- Fixed GitHub Copilot GPT model thinking metadata inherited from `@fleetagent/pi-ai` to map unsupported minimal thinking to low ([#4622](https://github.com/fleetagent/pi/pull/4622) by [@mattiacerutti](https://github.com/mattiacerutti)).
+- Fixed user-scoped npm pi packages to install under `~/.pi/agent/npm/` instead of npm's global package root, avoiding permission errors with system-managed Node installs ([#4587](https://github.com/fleetagent/pi/issues/4587)).
+- Fixed Mistral requests failing after the global fetch proxy/timeout workaround by removing the custom fetch override and using undici 8 dispatcher support instead ([#4619](https://github.com/fleetagent/pi/issues/4619)).
+- Fixed default output token requests for models whose advertised output limit is effectively their full context window, avoiding impossible provider requests inherited from `@fleetagent/pi-ai` ([#4614](https://github.com/fleetagent/pi/issues/4614)).
 
 ## [0.74.1] - 2026-05-16
 
@@ -822,41 +895,41 @@
 
 ### Added
 
-- Added image generation support from `@fleetagent/pi-ai`, including image generation APIs, image model metadata, and built-in OpenRouter image generation support ([#3887](https://github.com/earendil-works/pi-mono/pull/3887) by [@cristinaponcela](https://github.com/cristinaponcela)).
-- Added Together AI to built-in provider setup, `/login` API-key auth, and default model resolution ([#3624](https://github.com/earendil-works/pi-mono/pull/3624) by [@Nutlope](https://github.com/Nutlope)).
-- Added Windows ARM64 standalone binary release artifacts ([#4458](https://github.com/earendil-works/pi/pull/4458) by [@brianmichel](https://github.com/brianmichel)).
+- Added image generation support from `@fleetagent/pi-ai`, including image generation APIs, image model metadata, and built-in OpenRouter image generation support ([#3887](https://github.com/fleetagent/pi/pull/3887) by [@cristinaponcela](https://github.com/cristinaponcela)).
+- Added Together AI to built-in provider setup, `/login` API-key auth, and default model resolution ([#3624](https://github.com/fleetagent/pi/pull/3624) by [@Nutlope](https://github.com/Nutlope)).
+- Added Windows ARM64 standalone binary release artifacts ([#4458](https://github.com/fleetagent/pi/pull/4458) by [@brianmichel](https://github.com/brianmichel)).
 
 ### Fixed
 
-- Fixed Node 26 OpenAI-compatible streams timing out after five idle minutes by routing global fetch through pi's undici dispatcher ([#4519](https://github.com/earendil-works/pi/issues/4519)).
+- Fixed Node 26 OpenAI-compatible streams timing out after five idle minutes by routing global fetch through pi's undici dispatcher ([#4519](https://github.com/fleetagent/pi/issues/4519)).
 - Fixed pnpm global package installs by resolving the global package root from pnpm's layout.
-- Fixed macOS clipboard access errors under sandboxed pasteboard denial so they do not abort the process ([#4492](https://github.com/earendil-works/pi/issues/4492)).
-- Fixed the scoped model startup hint to show the configured model-cycle keybinding ([#4508](https://github.com/earendil-works/pi/issues/4508)).
+- Fixed macOS clipboard access errors under sandboxed pasteboard denial so they do not abort the process ([#4492](https://github.com/fleetagent/pi/issues/4492)).
+- Fixed the scoped model startup hint to show the configured model-cycle keybinding ([#4508](https://github.com/fleetagent/pi/issues/4508)).
 - Fixed resource path display to disambiguate package/resource names that collide across package locations.
-- Fixed `fd` auto-download on macOS x86_64 by pinning the last release that ships an Intel macOS binary ([#4559](https://github.com/earendil-works/pi/issues/4559)).
-- Fixed skill diagnostics to stop warning when a skill name differs from its parent directory ([#4534](https://github.com/earendil-works/pi/issues/4534)).
-- Fixed prompt template argument parsing to split unquoted multiline input on newlines ([#4553](https://github.com/earendil-works/pi/issues/4553)).
-- Fixed `--resume` session listing to cap in-flight session metadata loads and avoid OOM on large session histories ([#4583](https://github.com/earendil-works/pi/issues/4583)).
-- Fixed interactive error messages to render with trailing spacing so reload errors do not run into resource listings ([#4510](https://github.com/earendil-works/pi/issues/4510)).
+- Fixed `fd` auto-download on macOS x86_64 by pinning the last release that ships an Intel macOS binary ([#4559](https://github.com/fleetagent/pi/issues/4559)).
+- Fixed skill diagnostics to stop warning when a skill name differs from its parent directory ([#4534](https://github.com/fleetagent/pi/issues/4534)).
+- Fixed prompt template argument parsing to split unquoted multiline input on newlines ([#4553](https://github.com/fleetagent/pi/issues/4553)).
+- Fixed `--resume` session listing to cap in-flight session metadata loads and avoid OOM on large session histories ([#4583](https://github.com/fleetagent/pi/issues/4583)).
+- Fixed interactive error messages to render with trailing spacing so reload errors do not run into resource listings ([#4510](https://github.com/fleetagent/pi/issues/4510)).
 - Fixed `.agents` package provenance metadata to survive package-manager scans.
-- Fixed nested code fences in the Termux setup documentation so the example AGENTS.md renders correctly ([#4503](https://github.com/earendil-works/pi/issues/4503)).
-- Fixed tool output expansion while extension confirmation dialogs are focused ([#4429](https://github.com/earendil-works/pi/issues/4429)).
-- Fixed auto-retry for Anthropic streams that end before `message_stop` ([#4433](https://github.com/earendil-works/pi/issues/4433)).
+- Fixed nested code fences in the Termux setup documentation so the example AGENTS.md renders correctly ([#4503](https://github.com/fleetagent/pi/issues/4503)).
+- Fixed tool output expansion while extension confirmation dialogs are focused ([#4429](https://github.com/fleetagent/pi/issues/4429)).
+- Fixed auto-retry for Anthropic streams that end before `message_stop` ([#4433](https://github.com/fleetagent/pi/issues/4433)).
 - Fixed compaction summary calls to clamp requested output tokens to model limits.
-- Fixed uncaught interactive-mode exceptions to restore the terminal before exiting ([#4426](https://github.com/earendil-works/pi-mono/pull/4426) by [@ofa1](https://github.com/ofa1)).
+- Fixed uncaught interactive-mode exceptions to restore the terminal before exiting ([#4426](https://github.com/fleetagent/pi/pull/4426) by [@ofa1](https://github.com/ofa1)).
 - Fixed ANSI stripping to match `strip-ansi` behavior after dependency removal.
 - Fixed UUIDv7 sequence generation shared by session IDs after dependency removal.
 - Fixed OpenRouter cached-token usage accounting, Fireworks caching compatibility, and OpenAI Codex WebSocket proxy handling inherited from `@fleetagent/pi-ai`.
 - Fixed markdown list wrapping, task-list checkboxes, large markdown rendering, WezTerm Kitty keyboard escape handling, and short-viewport inline image placement inherited from `@fleetagent/pi-tui`.
-- Fixed theme sharing across package scopes so extensions do not crash with `Theme not initialized` ([#4333](https://github.com/earendil-works/pi/issues/4333)).
-- Fixed keybinding hints to show Option instead of Alt on macOS ([#4289](https://github.com/earendil-works/pi/issues/4289)).
-- Fixed the interactive update notification to render the changelog as an OSC 8 hyperlink when the terminal supports hyperlinks ([#4280](https://github.com/earendil-works/pi/issues/4280)).
+- Fixed theme sharing across package scopes so extensions do not crash with `Theme not initialized` ([#4333](https://github.com/fleetagent/pi/issues/4333)).
+- Fixed keybinding hints to show Option instead of Alt on macOS ([#4289](https://github.com/fleetagent/pi/issues/4289)).
+- Fixed the interactive update notification to render the changelog as an OSC 8 hyperlink when the terminal supports hyperlinks ([#4280](https://github.com/fleetagent/pi/issues/4280)).
 
 ## [0.74.0] - 2026-05-07
 
 ### Changed
 
-- Updated repository links and package references for the move to `earendil-works/pi-mono` and `@fleetagent/*` package scopes.
+- Updated repository links and package references for the move to `fleetagent/pi-mono` and `@fleetagent/*` package scopes.
 
 ## [0.73.1] - 2026-05-07
 
@@ -868,24 +941,24 @@
 
 ### Added
 
-- Added interactive login selection support so OAuth providers can present multiple login choices ([#4190](https://github.com/earendil-works/pi-mono/pull/4190) by [@mitsuhiko](https://github.com/mitsuhiko)).
+- Added interactive login selection support so OAuth providers can present multiple login choices ([#4190](https://github.com/fleetagent/pi/pull/4190) by [@mitsuhiko](https://github.com/mitsuhiko)).
 
 ### Changed
 
 - Changed `pi update --self` to honor the active package name returned by the Pi version check endpoint, defaulting to the current package when omitted and uninstalling the old global package before installing a renamed package.
-- Changed extension loading to use upstream `jiti` 2.7 instead of the `@mariozechner/jiti` fork ([#4244](https://github.com/earendil-works/pi-mono/pull/4244) by [@pi0](https://github.com/pi0)).
-- Changed `models.json` parsing to allow comments and trailing commas ([#4162](https://github.com/earendil-works/pi-mono/pull/4162) by [@julien-c](https://github.com/julien-c)).
+- Changed extension loading to use upstream `jiti` 2.7 instead of the `@mariozechner/jiti` fork ([#4244](https://github.com/fleetagent/pi/pull/4244) by [@pi0](https://github.com/pi0)).
+- Changed `models.json` parsing to allow comments and trailing commas ([#4162](https://github.com/fleetagent/pi/pull/4162) by [@julien-c](https://github.com/julien-c)).
 
 ### Fixed
 
 - Fixed `pi -p` treating prompts that start with YAML frontmatter as extension flags instead of user messages ([#4163](https://github.com/badlogic/pi-mono/issues/4163)).
 - Fixed pending tool results not updating in the live TUI after toggling thinking block visibility while the tool is running ([#4167](https://github.com/badlogic/pi-mono/issues/4167)).
 - Fixed `/copy` reporting success on Linux without writing the clipboard on Wayland-only compositors (Hyprland, Niri, ...) by skipping the X11-only native addon on Linux and routing through `wl-copy`/`xclip`/`xsel` instead ([#4177](https://github.com/badlogic/pi-mono/issues/4177)).
-- Fixed HTML session exports to strip skill wrapper XML from rendered user messages ([#4234](https://github.com/earendil-works/pi-mono/pull/4234) by [@aliou](https://github.com/aliou)).
+- Fixed HTML session exports to strip skill wrapper XML from rendered user messages ([#4234](https://github.com/fleetagent/pi/pull/4234) by [@aliou](https://github.com/aliou)).
 - Fixed OpenAI-compatible chat completion streams that interleave content and tool-call deltas in the same choice.
 - Fixed OpenAI Codex OAuth refresh failures writing directly to stderr while the TUI is active ([#4141](https://github.com/badlogic/pi-mono/issues/4141)).
-- Fixed OpenAI Codex Responses requests to send a non-empty system prompt ([#4184](https://github.com/earendil-works/pi-mono/issues/4184)).
-- Fixed Kimi For Coding model resolution for the Kimi K2 P6 alias ([#4218](https://github.com/earendil-works/pi-mono/issues/4218)).
+- Fixed OpenAI Codex Responses requests to send a non-empty system prompt ([#4184](https://github.com/fleetagent/pi/issues/4184)).
+- Fixed Kimi For Coding model resolution for the Kimi K2 P6 alias ([#4218](https://github.com/fleetagent/pi/issues/4218)).
 - Fixed Kitty inline image redraws to stay within TUI-owned terminal regions and avoid writing below the active viewport.
 - Fixed Kitty inline image rendering by letting the terminal allocate image ids and bounding parsed image ids to valid values.
 - Fixed inline image capability detection to disable inline images in cmux terminals.
@@ -1478,20 +1551,20 @@ See [0.67.1]. Version 0.67.0 shipped with a changelog formatting error that caus
 
 ### Changed
 
-- Changed the Earendil announcement from an automatic startup notice to the hidden `/dementedelves` slash command.
+- Changed the April 8 startup announcement from an automatic notice to the hidden `/dementedelves` slash command.
 
 ## [0.66.0] - 2026-04-08
 
 ### New Features
 
-- Earendil startup announcement with bundled inline image rendering and a linked blog post for April 8 and 9, 2026.
+- Seasonal startup announcement with bundled inline image rendering and a linked blog post for April 8 and 9, 2026.
 - Interactive Anthropic subscription auth warning when Anthropic subscription auth is active, clarifying that Anthropic third-party usage draws from extra usage and is billed per token.
 
 ### Fixed
 
 - Fixed bare `readline` import to use `node:readline` prefix for Deno compatibility ([#2885](https://github.com/badlogic/pi-mono/issues/2885) by [@milosv-vtool](https://github.com/milosv-vtool))
 - Fixed auto-retry to treat stream failures like `request ended without sending any chunks` as transient errors ([#2892](https://github.com/badlogic/pi-mono/issues/2892))
-- Fixed interactive startup notices to render after the initial resource listing, and added a bundled Earendil startup announcement with inline image rendering for April 8 and 9, 2026. Moved the blog link above the image to avoid overlap with terminal image rendering.
+- Fixed interactive startup notices to render after the initial resource listing, and added a bundled seasonal announcement with inline image rendering for April 8 and 9, 2026. Moved the blog link above the image to avoid overlap with terminal image rendering.
 - Fixed interactive mode to warn when Anthropic subscription auth is active, so users know Anthropic third-party usage draws from extra usage and is billed per token.
 
 ## [0.65.2] - 2026-04-06

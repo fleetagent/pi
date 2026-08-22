@@ -132,7 +132,7 @@ export class ExtensionEditorComponent extends Container implements Focusable {
 
 		try {
 			fs.writeFileSync(tmpFile, currentText, "utf-8");
-			this.tui.stop();
+			this.tui.stop({ preserveScreen: true });
 
 			const [editor, ...editorArgs] = editorCmd.split(" ");
 			process.stdout.write(`Launching external editor: ${editorCmd}\nPi will resume when the editor exits.\n`);

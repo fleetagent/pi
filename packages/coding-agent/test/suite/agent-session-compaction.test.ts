@@ -5,7 +5,7 @@ import {
 	type Model,
 } from "@fleetagent/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createHarness, type Harness } from "./harness.ts";
+import { createHarness, getUserTexts, type Harness } from "./harness.ts";
 
 type SessionWithCompactionInternals = {
 	_checkCompaction: (assistantMessage: AssistantMessage, skipAbortedCheck?: boolean) => Promise<boolean>;
@@ -120,6 +120,74 @@ describe("AgentSession compaction characterization", () => {
 		expect(result.summary).toBe("summary from extension");
 		expect(compactionEntries).toHaveLength(1);
 		expect(harness.session.messages[0]?.role).toBe("compactionSummary");
+	});
+
+	it("allows a queued prompt to start when manual compaction ends", async () => {
+		const harness = await createHarness({
+			settings: { compaction: { keepRecentTokens: 1 } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", async (event) => ({
+						compaction: {
+							summary: "manual compacted",
+							firstKeptEntryId: event.preparation.firstKeptEntryId,
+							tokensBefore: event.preparation.tokensBefore,
+							details: {},
+						},
+					}));
+				},
+			],
+		});
+		harnesses.push(harness);
+		seedCompactableSession(harness);
+		harness.setResponses([fauxAssistantMessage("queued response")]);
+
+		let queuedPrompt: Promise<void> | undefined;
+		harness.session.subscribe((event) => {
+			if (event.type === "compaction_end" && event.reason === "manual" && event.result) {
+				expect(harness.session.isCompacting).toBe(false);
+				queuedPrompt = harness.session.prompt("queued after compaction");
+			}
+		});
+
+		await harness.session.compact();
+		if (!queuedPrompt) throw new Error("compaction_end did not start the queued prompt");
+		await queuedPrompt;
+		await harness.session.waitForIdle();
+
+		expect(getUserTexts(harness)).toContain("queued after compaction");
+		expect(harness.session.getLastAssistantText()).toBe("queued response");
+		expect(harness.eventsOfType("agent_settled")).toHaveLength(1);
+	});
+
+	it("allows an extension-originated prompt when cancelled manual compaction ends", async () => {
+		let sendQueuedPrompt: (() => void) | undefined;
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					sendQueuedPrompt = () => pi.sendUserMessage("queued after cancellation");
+					pi.on("session_before_compact", async () => ({ cancel: true }));
+				},
+			],
+		});
+		harnesses.push(harness);
+		seedCompactableSession(harness);
+		harness.setResponses([fauxAssistantMessage("queued after cancellation response")]);
+
+		harness.session.subscribe((event) => {
+			if (event.type === "compaction_end" && event.reason === "manual" && event.aborted) {
+				expect(harness.session.isCompacting).toBe(false);
+				if (!sendQueuedPrompt) throw new Error("extension API was not initialized");
+				sendQueuedPrompt();
+			}
+		});
+
+		await expect(harness.session.compact()).rejects.toThrow("Compaction cancelled");
+		await harness.session.waitForIdle();
+
+		expect(getUserTexts(harness)).toContain("queued after cancellation");
+		expect(harness.session.getLastAssistantText()).toBe("queued after cancellation response");
+		expect(harness.eventsOfType("agent_settled")).toHaveLength(1);
 	});
 
 	it("rejects a concurrent compaction without replacing in-flight state", async () => {

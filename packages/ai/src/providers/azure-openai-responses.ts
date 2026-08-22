@@ -7,6 +7,7 @@ import type {
 	AssistantMessage,
 	Context,
 	Model,
+	ProviderHeaders,
 	SimpleStreamOptions,
 	StreamFunction,
 	StreamOptions,
@@ -14,13 +15,14 @@ import type {
 import { formatProviderError, normalizeProviderError } from "../utils/error-body.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
+import { retryProviderRequest } from "../utils/provider-retry.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
 import { convertResponsesMessages, convertResponsesTools, processResponsesStream } from "./openai-responses-shared.ts";
 import { buildBaseOptions } from "./simple-options.ts";
 
 const DEFAULT_AZURE_API_VERSION = "v1";
 const AZURE_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode", "azure-openai-responses"]);
-// OpenAI Responses rejects max_output_tokens below 16: https://github.com/earendil-works/pi/issues/6265
+// OpenAI Responses rejects max_output_tokens below 16: https://github.com/fleetagent/pi/issues/6265
 const OPENAI_RESPONSES_MIN_OUTPUT_TOKENS = 16;
 
 function parseDeploymentNameMap(value: string | undefined): Map<string, string> {
@@ -102,9 +104,16 @@ export const streamAzureOpenAIResponses: StreamFunction<"azure-openai-responses"
 			const requestOptions = {
 				...(options?.signal ? { signal: options.signal } : {}),
 				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
-				maxRetries: options?.maxRetries ?? 0,
+				maxRetries: 0,
 			};
-			const { data: openaiStream, response } = await client.responses.create(params, requestOptions).withResponse();
+			const { data: openaiStream, response } = await retryProviderRequest(
+				() => client.responses.create(params, requestOptions).withResponse(),
+				{
+					maxRetries: options?.maxRetries,
+					maxRetryDelayMs: options?.maxRetryDelayMs,
+					signal: options?.signal,
+				},
+			);
 			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
 			stream.push({ type: "start", partial: output });
 
@@ -114,6 +123,9 @@ export const streamAzureOpenAIResponses: StreamFunction<"azure-openai-responses"
 				throw new Error("Request was aborted");
 			}
 
+			if (output.stopReason === "pending") {
+				throw new Error("Azure OpenAI Responses stream ended without a stop reason");
+			}
 			if (output.stopReason === "aborted" || output.stopReason === "error") {
 				throw new Error("An unknown error occurred");
 			}
@@ -224,7 +236,7 @@ function createClient(model: Model<"azure-openai-responses">, apiKey: string, op
 		apiKey = process.env.AZURE_OPENAI_API_KEY;
 	}
 
-	const headers = { ...model.headers };
+	const headers: ProviderHeaders = { ...model.headers };
 
 	if (options?.headers) {
 		Object.assign(headers, options.headers);

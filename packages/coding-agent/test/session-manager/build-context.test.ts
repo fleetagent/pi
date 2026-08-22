@@ -6,6 +6,7 @@ import {
 	type ModelChangeEntry,
 	type SessionEntry,
 	type SessionMessageEntry,
+	sessionEntryToContextMessages,
 	type ThinkingLevelChangeEntry,
 } from "../../src/core/session-manager.ts";
 
@@ -86,6 +87,41 @@ describe("buildSessionContext", () => {
 			const ctx = buildSessionContext(entries);
 			expect(ctx.messages).toHaveLength(4);
 			expect(ctx.messages.map((m) => m.role)).toEqual(["user", "assistant", "user", "assistant"]);
+		});
+
+		it("projects persisted entry variants through one context conversion", () => {
+			const customMessage: SessionEntry = {
+				type: "custom_message",
+				id: "custom-message",
+				parentId: null,
+				timestamp: "2025-01-01T00:00:00Z",
+				customType: "extension",
+				content: "visible",
+				display: false,
+			};
+			const plainCustom: SessionEntry = {
+				type: "custom",
+				id: "custom-state",
+				parentId: null,
+				timestamp: "2025-01-01T00:00:00Z",
+				customType: "extension-state",
+				data: { retained: true },
+			};
+
+			expect(sessionEntryToContextMessages(msg("message", null, "user", "hello")).map((m) => m.role)).toEqual([
+				"user",
+			]);
+			expect(sessionEntryToContextMessages(customMessage).map((m) => m.role)).toEqual(["custom"]);
+			expect(
+				sessionEntryToContextMessages(branchSummary("branch", null, "summary", "source")).map((m) => m.role),
+			).toEqual(["branchSummary"]);
+			expect(
+				sessionEntryToContextMessages(compaction("compaction", null, "summary", "message")).map((m) => m.role),
+			).toEqual(["compactionSummary"]);
+			expect(sessionEntryToContextMessages(branchSummary("empty", null, "", "source"))).toEqual([]);
+			expect(sessionEntryToContextMessages(plainCustom)).toEqual([]);
+			expect(sessionEntryToContextMessages(thinkingLevel("thinking", null, "high"))).toEqual([]);
+			expect(sessionEntryToContextMessages(modelChange("model", null, "openai", "gpt"))).toEqual([]);
 		});
 
 		it("tracks thinking level changes", () => {

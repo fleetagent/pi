@@ -133,7 +133,10 @@ function randomId(prefix: string): string {
 	return `${prefix}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
 }
 
-function contentToText(content: string | Array<TextContent | ImageContent>): string {
+function contentToText(content: string | Array<TextContent | ImageContent> | null | undefined): string {
+	if (content == null) {
+		return "";
+	}
 	if (typeof content === "string") {
 		return content;
 	}
@@ -147,7 +150,10 @@ function contentToText(content: string | Array<TextContent | ImageContent>): str
 		.join("\n");
 }
 
-function assistantContentToText(content: Array<TextContent | ThinkingContent | ToolCall>): string {
+function assistantContentToText(content: Array<TextContent | ThinkingContent | ToolCall> | null | undefined): string {
+	if (content == null) {
+		return "";
+	}
 	return content
 		.map((block) => {
 			if (block.type === "text") {
@@ -162,7 +168,7 @@ function assistantContentToText(content: Array<TextContent | ThinkingContent | T
 }
 
 function toolResultToText(message: ToolResultMessage): string {
-	return [message.toolName, ...message.content.map((block) => contentToText([block]))].join("\n");
+	return [message.toolName, ...(message.content ?? []).map((block) => contentToText([block]))].join("\n");
 }
 
 function messageToText(message: Message): string {
@@ -378,6 +384,9 @@ async function streamWithDeltas(
 		stream.push({ type: "toolcall_end", contentIndex: index, toolCall: block, partial: { ...partial } });
 	}
 
+	if (message.stopReason === "pending") {
+		throw new Error("Faux stream cannot complete with a pending stop reason");
+	}
 	if (message.stopReason === "error" || message.stopReason === "aborted") {
 		stream.push({ type: "error", reason: message.stopReason, error: message });
 		stream.end(message);

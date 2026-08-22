@@ -50,10 +50,15 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+* Upgrade the exported TypeBox dependency to 1.3.7, removing deprecated APIs including `Type.Base`, `Type.Awaited`, `Type.Promise`, `Type.AsyncIterator`, `Type.Iterator`, `Type.Options`, and `Value.Mutate`, while fixing compiled validation of nullable array tool arguments. Consumers using removed APIs must migrate to supported TypeBox APIs ([upstream `f9476a61e`](https://github.com/fleetagent/pi/commit/f9476a61e557bfdce2fbf3ffeaad0988fe47c184)).
+
 ### Added
 
 * Support custom headers for Bedrock requests.
 * Add GPT-5.6 model metadata.
+* Export `ProviderHeaders` and honor `null` deletion markers across text-provider request adapters for mutable coding-agent provider-header hooks ([upstream prerequisite `129eb460c`](https://github.com/fleetagent/pi/commit/129eb460cdf88c1b3034620b91993decd714ed56), follow-up [`a24fb9e96`](https://github.com/fleetagent/pi/commit/a24fb9e96a3fbc7be2a87e81aa1aa5c0ddf95d35)).
 
 ### Changed
 
@@ -61,6 +66,27 @@
 
 ### Fixed
 
+* Make OpenAI, Anthropic, Azure OpenAI, OpenRouter image, and OpenAI Codex initial-request retry waits abortable while preserving configured retry counts and rejecting server-requested delays above the configured limit ([upstream `7af8533c6`](https://github.com/fleetagent/pi/commit/7af8533c6f22ab922fff29f252d2d3657b821d99)).
+* Retry eligible Google Generative AI and Vertex 429 and 5xx failures before the first token while preserving opt-in retry limits, caller cancellation, and non-retryable errors ([upstream `b9d360a2c`](https://github.com/fleetagent/pi/commit/b9d360a2c753e058a90dc0a252950631501c10d0)).
+
+* Reject non-HTTP(S) GitHub Copilot verification URLs and normalize accepted URLs before exposing them to OAuth clients ([upstream `ba6e5298`](https://github.com/fleetagent/pi/commit/ba6e5298df7a1b4a9dc58eaec4e2b3a06270ec0c)).
+* Apply mode 0600 when the standalone OAuth CLI creates its credential file, and correct existing file permissions after writes ([upstream `135fb545`](https://github.com/fleetagent/pi/commit/135fb545f99106a4a249274f129b90bc0a77d347)).
+* Bound OAuth token refreshes to 15 seconds with caller cancellation and preserved failure causes so stalled requests release credential-store locks ([upstream `acbdc0d25`](https://github.com/fleetagent/pi/commit/acbdc0d25e12522b4f8277c1206d2cead51d9b4e)).
+* Preserve provider validation and overflow messages by serializing only plain parsed error-body objects, not SDK or transport wrapper instances ([upstream `4523528b2`](https://github.com/fleetagent/pi/commit/4523528b21c66084fdece7ed3ffa10888bc5ac60)).
+* Retry Bun fetch socket-drop errors reported as `socket connection was closed` while retaining non-retryable quota and billing precedence ([upstream `4285712ba`](https://github.com/fleetagent/pi/commit/4285712bae831229eab5d4b6eb676f97a84ad8b1)).
+* Retry transient gRPC `ResourceExhausted` provider errors such as NVIDIA NIM worker-capacity exhaustion while retaining durable quota and billing precedence ([upstream `57d96d72e`](https://github.com/fleetagent/pi/commit/57d96d72ed4d8bd167daa57a143b78761d298e8f)).
+* Retry transient DNS lookup failures reported as `getaddrinfo`, `ENOTFOUND`, or `EAI_AGAIN` while retaining bounded, abortable session backoff ([upstream `33e40c3e1`](https://github.com/fleetagent/pi/commit/33e40c3e155a7f7c1bd67ea7dbdeca258eca7547)).
+* Retry transient failures reported as `exceeded request buffer limit while retrying upstream` while preserving configured retry limits ([upstream `fe10558eb`](https://github.com/fleetagent/pi/commit/fe10558eb3fa6d8fc3f6211bf1532e1659b9093d)).
+* Preserve Anthropic text, thinking, and thinking signatures delivered on `content_block_start` before appending later deltas ([upstream `59ad3dead`](https://github.com/fleetagent/pi/commit/59ad3dead30322217f6f027a3b67931074c0e163)).
+* Preserve signed empty Gemini text and thinking blocks for same-model history replay while continuing to discard unsigned or cross-model empty blocks ([upstream `6138f5a07`](https://github.com/fleetagent/pi/commit/6138f5a079b4e81ba1b30d998020df187512a0e8)).
+* Send configured output limits for built-in and custom DeepSeek API models through the supported `max_tokens` field ([upstream `c185d4123`](https://github.com/fleetagent/pi/commit/c185d412382581860a489b4959737bad1d119492)).
+* Send configured output limits for Z.AI providers and compatible custom endpoints through the supported `max_tokens` field without changing Z.AI thinking controls ([upstream `2fe21b407`](https://github.com/fleetagent/pi/commit/2fe21b407fcbf7625036afd46e39900ff8c081d1)).
+* Use `(no tool output)` for genuinely empty OpenAI Completions and Responses tool results while preserving image-only placeholders and attached images ([upstream `279f53b09`](https://github.com/fleetagent/pi/commit/279f53b098bc64789a1ad310a63d3473a48eba7b)).
+* Preserve unique OpenAI-compatible tool-call IDs across provider handoffs when multiple calls share a provider call ID, while keeping matching tool results paired ([upstream `d9f7f8147`](https://github.com/fleetagent/pi/commit/d9f7f814730998f191ad6c32bbd178e0834cae18)).
+* Preserve Gemini 3 tool-call IDs in function calls and matching function responses across same-model and provider-handoff history replay ([upstream `cbaca6038`](https://github.com/fleetagent/pi/commit/cbaca60389f5d7097a43c95f56a19d344ecf2195)).
+* Preserve function arguments when malformed OpenAI-compatible tool-call deltas also contain empty custom payloads ([upstream `34239180a`](https://github.com/fleetagent/pi/commit/34239180ac5c80366def592b529a3a1b882b4a16)).
+* Preserve valid `null` tool arguments in nested `anyOf` and `oneOf` unions while continuing to coerce values that match no union arm ([upstream `2e95584da`](https://github.com/fleetagent/pi/commit/2e95584dab802ae2f7c8d1a4994d6e0e9f67ec09)).
+* Normalize null or missing message content to empty arrays at the provider-conversion boundary without mutating input histories or valid signed reasoning and image blocks ([upstream `8c0ccd14b`](https://github.com/fleetagent/pi/commit/8c0ccd14b34b6e5c403363518e331094b69ebf6c)).
 * Clamp OpenAI Responses `max_output_tokens` to the API minimum.
 * Clamp default `streamSimple` max-token budgets against estimated remaining context.
 * Refresh generated model catalogs.
@@ -75,6 +101,9 @@
 * Enable Bedrock prompt caching for Claude 5 models.
 * Correct GPT-5.6 Codex context windows to 272k tokens.
 * Preserve OpenAI Responses reasoning when output items arrive out of order.
+* Finalize incomplete OpenAI Responses streams, reject premature stream endings, and report cache-write and reasoning token usage.
+* Backfill encrypted Azure OpenAI reasoning data for stateless replay.
+* Recover Codex WebSocket requests when cached response continuations are missing.
 
 ## [0.1.4](https://github.com/fleetagent/pi/compare/@fleetagent/pi-ai-v0.1.3...@fleetagent/pi-ai-v0.1.4) (2026-06-16)
 
@@ -399,11 +428,11 @@
 
 ### Breaking Changes
 
-- Renamed the npm package scope from `@earendil-works` to `@fleetagent`.
+- Changed the npm package scope to `@fleetagent`.
 
 ### Fixed
 
-- Fixed Amazon Bedrock Claude requests to send the model output token cap by default, matching Anthropic requests and avoiding Bedrock's 4096-token default truncation ([#4848](https://github.com/earendil-works/pi/issues/4848)).
+- Fixed Amazon Bedrock Claude requests to send the model output token cap by default, matching Anthropic requests and avoiding Bedrock's 4096-token default truncation ([#4848](https://github.com/fleetagent/pi/issues/4848)).
 
 ## [0.75.4] - 2026-05-20
 
@@ -418,8 +447,8 @@
 
 ### Fixed
 
-- Fixed OpenAI-compatible `streamSimple()` requests to stop sending model-derived default output token caps, avoiding context-window reservation failures on servers such as vLLM while preserving explicit `maxTokens` and required Anthropic `max_tokens` handling ([#4675](https://github.com/earendil-works/pi/issues/4675)).
-- Fixed OpenAI prompt cache keys to clamp session-derived values to the 64-character API limit across OpenAI Responses, Chat Completions, Codex Responses, and Azure OpenAI Responses ([#4720](https://github.com/earendil-works/pi/issues/4720)).
+- Fixed OpenAI-compatible `streamSimple()` requests to stop sending model-derived default output token caps, avoiding context-window reservation failures on servers such as vLLM while preserving explicit `maxTokens` and required Anthropic `max_tokens` handling ([#4675](https://github.com/fleetagent/pi/issues/4675)).
+- Fixed OpenAI prompt cache keys to clamp session-derived values to the 64-character API limit across OpenAI Responses, Chat Completions, Codex Responses, and Azure OpenAI Responses ([#4720](https://github.com/fleetagent/pi/issues/4720)).
 
 ## [0.75.3] - 2026-05-18
 
@@ -427,17 +456,17 @@
 
 ### Fixed
 
-- Fixed Xiaomi MiMo generated model metadata to replay assistant tool-call messages with `reasoning_content` for thinking-mode multi-turn requests ([#4678](https://github.com/earendil-works/pi/issues/4678)).
+- Fixed Xiaomi MiMo generated model metadata to replay assistant tool-call messages with `reasoning_content` for thinking-mode multi-turn requests ([#4678](https://github.com/fleetagent/pi/issues/4678)).
 
 ## [0.75.1] - 2026-05-18
 
 ### Fixed
 
-- Fixed Anthropic-compatible API-key requests to ignore unrelated `ANTHROPIC_AUTH_TOKEN` environment values, avoiding invalid bearer credentials for providers such as Xiaomi MiMo ([#4342](https://github.com/earendil-works/pi/issues/4342)).
-- Fixed Amazon Bedrock message conversion to skip unknown content blocks instead of failing the stream ([#4223](https://github.com/earendil-works/pi/issues/4223)).
-- Fixed Azure OpenAI Responses and OpenAI Responses error formatting to prefix HTTP status codes onto `errorMessage`, so transient 5xx and 429 errors are correctly matched by the agent-level auto-retry classifier ([#4232](https://github.com/earendil-works/pi/issues/4232)).
-- Fixed Xiaomi MiMo model metadata to use the OpenAI-compatible endpoints and `openai-completions` API, restoring multi-turn thinking/tool-call sessions ([#4505](https://github.com/earendil-works/pi/issues/4505)).
-- Fixed OpenCode Go Kimi reasoning replay by normalizing streamed `reasoning` fields back to `reasoning_content` for OpenCode Go only ([#4251](https://github.com/earendil-works/pi/issues/4251)).
+- Fixed Anthropic-compatible API-key requests to ignore unrelated `ANTHROPIC_AUTH_TOKEN` environment values, avoiding invalid bearer credentials for providers such as Xiaomi MiMo ([#4342](https://github.com/fleetagent/pi/issues/4342)).
+- Fixed Amazon Bedrock message conversion to skip unknown content blocks instead of failing the stream ([#4223](https://github.com/fleetagent/pi/issues/4223)).
+- Fixed Azure OpenAI Responses and OpenAI Responses error formatting to prefix HTTP status codes onto `errorMessage`, so transient 5xx and 429 errors are correctly matched by the agent-level auto-retry classifier ([#4232](https://github.com/fleetagent/pi/issues/4232)).
+- Fixed Xiaomi MiMo model metadata to use the OpenAI-compatible endpoints and `openai-completions` API, restoring multi-turn thinking/tool-call sessions ([#4505](https://github.com/fleetagent/pi/issues/4505)).
+- Fixed OpenCode Go Kimi reasoning replay by normalizing streamed `reasoning` fields back to `reasoning_content` for OpenCode Go only ([#4251](https://github.com/fleetagent/pi/issues/4251)).
 
 ### Removed
 
@@ -451,32 +480,32 @@
 
 ### Fixed
 
-- Fixed OpenAI Codex generated model metadata to use the current upstream model list ([#4603](https://github.com/earendil-works/pi-mono/pull/4603) by [@mattiacerutti](https://github.com/mattiacerutti)).
-- Fixed GitHub Copilot GPT model thinking metadata to map unsupported minimal thinking to low ([#4622](https://github.com/earendil-works/pi-mono/pull/4622) by [@mattiacerutti](https://github.com/mattiacerutti)).
-- Fixed `streamSimple()` defaults for models whose advertised output limit is effectively their full context window to avoid impossible default requests ([#4614](https://github.com/earendil-works/pi/issues/4614)).
+- Fixed OpenAI Codex generated model metadata to use the current upstream model list ([#4603](https://github.com/fleetagent/pi/pull/4603) by [@mattiacerutti](https://github.com/mattiacerutti)).
+- Fixed GitHub Copilot GPT model thinking metadata to map unsupported minimal thinking to low ([#4622](https://github.com/fleetagent/pi/pull/4622) by [@mattiacerutti](https://github.com/mattiacerutti)).
+- Fixed `streamSimple()` defaults for models whose advertised output limit is effectively their full context window to avoid impossible default requests ([#4614](https://github.com/fleetagent/pi/issues/4614)).
 
 ## [0.74.1] - 2026-05-16
 
 ### Added
 
-- Added image generation APIs, image model metadata, and built-in OpenRouter image generation support ([#3887](https://github.com/earendil-works/pi-mono/pull/3887) by [@cristinaponcela](https://github.com/cristinaponcela)).
-- Added Together AI as a built-in OpenAI-compatible provider with generated model metadata and `TOGETHER_API_KEY` authentication ([#3624](https://github.com/earendil-works/pi-mono/pull/3624) by [@Nutlope](https://github.com/Nutlope)).
+- Added image generation APIs, image model metadata, and built-in OpenRouter image generation support ([#3887](https://github.com/fleetagent/pi/pull/3887) by [@cristinaponcela](https://github.com/cristinaponcela)).
+- Added Together AI as a built-in OpenAI-compatible provider with generated model metadata and `TOGETHER_API_KEY` authentication ([#3624](https://github.com/fleetagent/pi/pull/3624) by [@Nutlope](https://github.com/Nutlope)).
 
 ### Fixed
 
-- Fixed GitHub Copilot model availability to ignore generic `GH_TOKEN` and `GITHUB_TOKEN` environment variables, requiring OAuth login or `COPILOT_GITHUB_TOKEN` instead ([#4485](https://github.com/earendil-works/pi/issues/4485)).
-- Fixed `openai-completions` streams to surface an error when the stream ends before any terminal `finish_reason`, so truncated responses can retry instead of being accepted as success ([#4345](https://github.com/earendil-works/pi/issues/4345)).
-- Fixed Fireworks provider caching compatibility by adding session affinity headers and model metadata compat settings ([#4358](https://github.com/earendil-works/pi-mono/pull/4358) by [@yanirz](https://github.com/yanirz)).
-- Fixed OpenAI Codex WebSocket transport to respect proxy environment variables under Bun ([#4354](https://github.com/earendil-works/pi-mono/pull/4354) by [@haoqixu](https://github.com/haoqixu)).
+- Fixed GitHub Copilot model availability to ignore generic `GH_TOKEN` and `GITHUB_TOKEN` environment variables, requiring OAuth login or `COPILOT_GITHUB_TOKEN` instead ([#4485](https://github.com/fleetagent/pi/issues/4485)).
+- Fixed `openai-completions` streams to surface an error when the stream ends before any terminal `finish_reason`, so truncated responses can retry instead of being accepted as success ([#4345](https://github.com/fleetagent/pi/issues/4345)).
+- Fixed Fireworks provider caching compatibility by adding session affinity headers and model metadata compat settings ([#4358](https://github.com/fleetagent/pi/pull/4358) by [@yanirz](https://github.com/yanirz)).
+- Fixed OpenAI Codex WebSocket transport to respect proxy environment variables under Bun ([#4354](https://github.com/fleetagent/pi/pull/4354) by [@haoqixu](https://github.com/haoqixu)).
 - Fixed OpenRouter cache usage normalization to preserve cached-token semantics without treating cached tokens as cache writes.
 - Fixed Bedrock proxy handling to preserve `NO_PROXY` exclusions while using HTTP(S)-only proxy agents.
-- Fixed compiled Bun binaries failing to start outside the repo when Bedrock proxy support tried to resolve `proxy-from-env` from external `node_modules` ([#4513](https://github.com/earendil-works/pi/issues/4513)).
+- Fixed compiled Bun binaries failing to start outside the repo when Bedrock proxy support tried to resolve `proxy-from-env` from external `node_modules` ([#4513](https://github.com/fleetagent/pi/issues/4513)).
 - Fixed GitHub Copilot Claude test coverage to use the current Claude Sonnet 4.6 model ID.
 - Fixed OpenAI Responses requests for models that support disabling reasoning to send `reasoning.effort: "none"` when thinking is off.
 - Fixed Inception Mercury 2 tool calling on OpenRouter by marking `off` as unsupported in `thinkingLevelMap`, so the openai-completions provider omits the reasoning param instead of defaulting to `{reasoning:{effort:"none"}}` (which puts Mercury 2 in instant mode, disabling tool calls).
 - Fixed OpenAI Codex SSE retries to honor `retry-after-ms` and `retry-after` headers before falling back to exponential backoff.
-- Fixed context overflow detection for LiteLLM-wrapped OpenAI-compatible errors using `exceeds the model's maximum context length of ... tokens` wording ([#4563](https://github.com/earendil-works/pi/issues/4563)).
-- Fixed `streamSimple()` defaults to respect model output limits above 32000 tokens instead of clamping provider requests to 32000 ([#4539](https://github.com/earendil-works/pi/issues/4539)).
+- Fixed context overflow detection for LiteLLM-wrapped OpenAI-compatible errors using `exceeds the model's maximum context length of ... tokens` wording ([#4563](https://github.com/fleetagent/pi/issues/4563)).
+- Fixed `streamSimple()` defaults to respect model output limits above 32000 tokens instead of clamping provider requests to 32000 ([#4539](https://github.com/fleetagent/pi/issues/4539)).
 
 ## [0.74.0] - 2026-05-07
 
@@ -484,15 +513,15 @@
 
 ### Added
 
-- Added OAuth login flow metadata so clients can present interactive provider choices during login ([#4190](https://github.com/earendil-works/pi-mono/pull/4190) by [@mitsuhiko](https://github.com/mitsuhiko)).
+- Added OAuth login flow metadata so clients can present interactive provider choices during login ([#4190](https://github.com/fleetagent/pi/pull/4190) by [@mitsuhiko](https://github.com/mitsuhiko)).
 
 ### Fixed
 
 - Fixed OpenAI Responses reasoning text streaming for LM Studio and other compatible providers that emit `response.reasoning_text.delta` events ([#4191](https://github.com/badlogic/pi-mono/pull/4191) by [@yaanfpv](https://github.com/yaanfpv)).
 - Fixed OpenAI Codex OAuth refresh failures writing directly to stderr while the TUI is active ([#4141](https://github.com/badlogic/pi-mono/issues/4141)).
 - Fixed OpenAI-compatible chat completion streams that interleave content and tool-call deltas in the same choice.
-- Fixed the Kimi K2 P6 model alias to normalize to `kimi-for-coding` ([#4218](https://github.com/earendil-works/pi-mono/issues/4218)).
-- Fixed OpenAI Codex Responses requests to send a non-empty system prompt ([#4184](https://github.com/earendil-works/pi-mono/issues/4184)).
+- Fixed the Kimi K2 P6 model alias to normalize to `kimi-for-coding` ([#4218](https://github.com/fleetagent/pi/issues/4218)).
+- Fixed OpenAI Codex Responses requests to send a non-empty system prompt ([#4184](https://github.com/fleetagent/pi/issues/4184)).
 
 ## [0.73.0] - 2026-05-04
 

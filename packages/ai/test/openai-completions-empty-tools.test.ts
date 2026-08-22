@@ -5,7 +5,7 @@ import { streamSimple } from "../src/stream.ts";
 // Empty tools arrays must NOT be serialized as `tools: []` — some OpenAI-compatible
 // backends (e.g. DashScope / Aliyun Qwen via compatible-mode) reject the request with
 // `"[] is too short - 'tools'"` (HTTP 400) when `--no-tools` produces an empty array.
-// Regression for https://github.com/earendil-works/pi-mono/issues/<issue-number>
+// Regression for https://github.com/fleetagent/pi/issues/<issue-number>
 
 const mockState = vi.hoisted(() => ({
 	lastParams: undefined as unknown,
@@ -179,6 +179,24 @@ describe("openai-completions empty tools handling", () => {
 		const clientOptions = mockState.lastClientOptions as { defaultHeaders?: Record<string, unknown> };
 		expect(clientOptions.defaultHeaders?.Authorization).toBe("Bearer upstream-token");
 		expect(clientOptions.defaultHeaders?.["cf-aig-authorization"]).toBe("Bearer cf-token");
+	});
+	it("preserves Cloudflare AI Gateway auth deletion markers", async () => {
+		process.env.CLOUDFLARE_ACCOUNT_ID = "account-id";
+		process.env.CLOUDFLARE_GATEWAY_ID = "gateway-id";
+		const model = getModel("cloudflare-ai-gateway", "gpt-5.1")!;
+
+		await streamSimple(
+			model,
+			{ messages: [{ role: "user", content: "hi", timestamp: Date.now() }] },
+			{
+				apiKey: "cf-token",
+				headers: { Authorization: null, "cf-aig-authorization": null },
+			},
+		).result();
+
+		const clientOptions = mockState.lastClientOptions as { defaultHeaders?: Record<string, unknown> };
+		expect(clientOptions.defaultHeaders?.Authorization).toBeNull();
+		expect(clientOptions.defaultHeaders?.["cf-aig-authorization"]).toBeNull();
 	});
 
 	it("sends session affinity headers for Workers AI through Cloudflare AI Gateway", async () => {

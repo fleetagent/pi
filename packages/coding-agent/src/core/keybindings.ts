@@ -23,6 +23,7 @@ export interface AppKeybindings {
 	"app.thinking.toggle": true;
 	"app.session.toggleNamedFilter": true;
 	"app.editor.external": true;
+	"app.message.copy": true;
 	"app.message.followUp": true;
 	"app.message.dequeue": true;
 	"app.clipboard.pasteImage": true;
@@ -95,6 +96,10 @@ export const KEYBINDINGS = {
 		defaultKeys: "ctrl+g",
 		description: "Open external editor",
 	},
+	"app.message.copy": {
+		defaultKeys: "ctrl+x",
+		description: "Copy message to clipboard",
+	},
 	"app.message.followUp": {
 		defaultKeys: "alt+enter",
 		description: "Queue follow-up message",
@@ -105,7 +110,7 @@ export const KEYBINDINGS = {
 	},
 	"app.clipboard.pasteImage": {
 		defaultKeys: process.platform === "win32" ? "alt+v" : "ctrl+v",
-		description: "Paste image from clipboard",
+		description: "Paste image from clipboard (text fallback)",
 	},
 	"app.session.new": { defaultKeys: [], description: "Start a new session" },
 	"app.session.tree": { defaultKeys: [], description: "Open session tree" },

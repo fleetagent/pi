@@ -78,9 +78,21 @@
 
 ## [Unreleased]
 
+### Added
+
+* Allow blocked `beforeToolCall` results to terminate all-terminating tool batches without another model call ([upstream `1eb988cfe`](https://github.com/fleetagent/pi/commit/1eb988cfe88fb0ff740ff62583d2f16359f7b6b0)).
+* Export typed JSONL decode and session errors with exact references, physical lines, byte offsets, operation phases, decode kinds, original causes, and write outcomes while preserving existing outer session error codes ([upstream `7aca0d7b3`](https://github.com/fleetagent/pi/commit/7aca0d7b3e041a9e2b635e8370b2549f032932d6)).
+
 ### Fixed
 
+* Publish JSONL session creation and forks through unique sibling files and rename, serialize append-before-memory updates, and fence ambiguous append failures so partial sessions cannot become visible ([upstream `a838c069e`](https://github.com/fleetagent/pi/commit/a838c069e6318edee8317eff759b74c3934745f0)).
+* Reject same-owner JSONL create/create, create/fork, and fork/fork collisions for one canonical cwd and session ID with `already_exists`, while allowing the same ID in different cwd namespaces and detecting already-published IDs across owners/processes ([upstream `9d090bc5d`](https://github.com/fleetagent/pi/commit/9d090bc5dcecf8f35354e09fe57413e57dea8e5b)).
+* Repair only unterminated final JSON/UTF-8 fragments or missing final newlines through atomic replacement, while rejecting interior, schema, duplicate-ID, parent, target, and other state corruption without changing session bytes ([upstream `4a0e2f115`](https://github.com/fleetagent/pi/commit/4a0e2f115ad46d34c19d200c6a71fa79d264092d), follow-up [`7aca0d7b3`](https://github.com/fleetagent/pi/commit/7aca0d7b3e041a9e2b635e8370b2549f032932d6)).
+
+* Normalize missing or null tool result content before it enters agent history or provider payloads, including results from untyped extension and remote-backed tools ([upstream `8c0ccd14b`](https://github.com/fleetagent/pi/commit/8c0ccd14b34b6e5c403363518e331094b69ebf6c)).
+
 * Reject invalid harness shell execution timeouts.
+* Reject `Agent.reset()` while a run is active to prevent transcript and runtime-state corruption ([upstream `1532c99943`](https://github.com/fleetagent/pi/commit/1532c99943b894fe1d12e15ac388c7b1887ca403)).
 * Fixed harness session storage short entry ids to use the random tail of generated uuidv7 ids instead of the timestamp prefix.
 * Serialize split-turn compaction summary requests in the harness.
 
@@ -355,7 +367,7 @@
 
 ### Breaking Changes
 
-- Renamed the npm package scope from `@earendil-works` to `@fleetagent`.
+- Changed the npm package scope to `@fleetagent`.
 
 ## [0.75.4] - 2026-05-20
 
@@ -366,9 +378,9 @@
 
 ### Fixed
 
-- Fixed tool-call preflight to stop preparing sibling tool calls after the run is aborted ([#4276](https://github.com/earendil-works/pi/issues/4276)).
-- Fixed tail truncation for oversized single-line output that ends with a trailing newline ([#4715](https://github.com/earendil-works/pi/issues/4715)).
-- Fixed Windows Node execution environment command spawns to hide helper console windows from background processes ([#4699](https://github.com/earendil-works/pi/issues/4699)).
+- Fixed tool-call preflight to stop preparing sibling tool calls after the run is aborted ([#4276](https://github.com/fleetagent/pi/issues/4276)).
+- Fixed tail truncation for oversized single-line output that ends with a trailing newline ([#4715](https://github.com/fleetagent/pi/issues/4715)).
+- Fixed Windows Node execution environment command spawns to hide helper console windows from background processes ([#4699](https://github.com/fleetagent/pi/issues/4699)).
 
 ## [0.75.3] - 2026-05-18
 

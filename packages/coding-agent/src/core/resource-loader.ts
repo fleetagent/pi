@@ -107,12 +107,14 @@ async function resolvePromptInput(
 	return input;
 }
 
+const CONTEXT_FILE_CANDIDATES = ["AGENTS.override.md", "AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"];
+
 function loadContextFileFromDir(dir: string): { path: string; content: string } | null {
-	const candidates = ["AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"];
-	for (const filename of candidates) {
+	for (const filename of CONTEXT_FILE_CANDIDATES) {
 		const filePath = join(dir, filename);
 		if (existsSync(filePath)) {
 			try {
+				if (!statSync(filePath).isFile()) continue;
 				return {
 					path: filePath,
 					content: readFileSync(filePath, "utf-8"),
@@ -167,10 +169,10 @@ async function loadContextFileFromDirWithOperations(
 	dir: string,
 	workspace?: WorkspaceIdentity,
 ): Promise<ProjectContextFile | null> {
-	const candidates = ["AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"];
-	for (const filename of candidates) {
+	for (const filename of CONTEXT_FILE_CANDIDATES) {
 		const filePath = joinPortablePath(dir, filename);
 		try {
+			if (!(await operations.stat(filePath)).isFile()) continue;
 			await operations.access(filePath, "read");
 			return {
 				path: filePath,
@@ -820,6 +822,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 			}
 		}
 
+		const contextInstructionBackend = instructionOperations?.getBackendInfo?.();
 		const agentsFiles = {
 			agentsFiles: this.noContextFiles
 				? []
@@ -829,13 +832,8 @@ export class DefaultResourceLoader implements ResourceLoader {
 							agentDir: this.agentDir,
 							operations: instructionOperations,
 							workspace:
-								instructionOperations.getBackendInfo?.().type === "remote"
-									? (
-											instructionOperations.getBackendInfo?.() as Extract<
-												ToolBackendInfo,
-												{ type: "remote"; configured: true }
-											>
-										).workspace
+								contextInstructionBackend?.type === "remote" && contextInstructionBackend.configured
+									? contextInstructionBackend.workspace
 									: undefined,
 						})
 					: loadProjectContextFiles({ cwd: this.cwd, agentDir: this.agentDir }),

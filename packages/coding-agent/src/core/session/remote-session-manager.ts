@@ -1,5 +1,7 @@
 import { existsSync } from "node:fs";
 import { basename, resolve } from "node:path";
+import type { JsonlErrorPhase } from "./jsonl-errors.ts";
+import { createJsonlSessionDecodeError } from "./jsonl-errors.ts";
 import { loadEntriesFromFile } from "./jsonl-helpers.ts";
 import { migrateToCurrentVersion } from "./migrations.ts";
 import { RemoteSession } from "./remote-session.ts";
@@ -7,6 +9,7 @@ import type { RemoteSessionInfo, RemoteSessionSnapshot } from "./remote-session-
 import { RemoteSessionClient } from "./remote-session-client.ts";
 import type { Session } from "./session.ts";
 import type { OpenSessionOptions, SessionManager } from "./session-manager.ts";
+import { getJsonlEntryLocations, validateCurrentSessionEntries } from "./stores/jsonl-session-store.ts";
 import type { NewSessionOptions, SessionHeader, SessionInfo, SessionListProgress } from "./types.ts";
 
 export interface RemoteSessionManagerOptions {
@@ -19,7 +22,12 @@ export interface RemoteSessionManagerOptions {
 
 function getSnapshotCwd(snapshot: RemoteSessionSnapshot, fallback: string): string {
 	const header = snapshot.entries.find((entry) => entry.type === "session") as SessionHeader | undefined;
-	return header?.cwd ?? fallback;
+	return typeof header?.cwd === "string" ? header.cwd : fallback;
+}
+
+function validateRemoteSnapshot(snapshot: RemoteSessionSnapshot, phase: JsonlErrorPhase): RemoteSessionSnapshot {
+	validateCurrentSessionEntries(snapshot.entries, snapshot.reference, { phase });
+	return snapshot;
 }
 
 function normalizeRemoteSessionInfo(session: RemoteSessionInfo): SessionInfo {
@@ -51,17 +59,20 @@ export class RemoteSessionManager implements SessionManager {
 	}
 
 	async create(options?: NewSessionOptions): Promise<RemoteSession> {
-		const snapshot = await this.client.createSession({
-			id: options?.id,
-			cwd: this.cwd,
-			projectId: this.projectId,
-			parentSession: options?.parentSession,
-		});
+		const snapshot = validateRemoteSnapshot(
+			await this.client.createSession({
+				id: options?.id,
+				cwd: this.cwd,
+				projectId: this.projectId,
+				parentSession: options?.parentSession,
+			}),
+			"create",
+		);
 		return new RemoteSession({ client: this.client, cwd: this.cwd, snapshot, sessionManager: this });
 	}
 
 	async openReference(reference: string, options?: OpenSessionOptions): Promise<RemoteSession> {
-		const snapshot = await this.client.openSession(reference);
+		const snapshot = validateRemoteSnapshot(await this.client.openSession(reference), "open");
 		return new RemoteSession({
 			client: this.client,
 			cwd: options?.cwdOverride ?? getSnapshotCwd(snapshot, this.cwd),
@@ -71,7 +82,7 @@ export class RemoteSessionManager implements SessionManager {
 	}
 
 	async continueRecent(): Promise<RemoteSession> {
-		const snapshot = await this.client.getRecentSession();
+		const snapshot = validateRemoteSnapshot(await this.client.getRecentSession(), "open");
 		return new RemoteSession({
 			client: this.client,
 			cwd: getSnapshotCwd(snapshot, this.cwd),
@@ -81,20 +92,27 @@ export class RemoteSessionManager implements SessionManager {
 	}
 
 	async forkFrom(reference: string): Promise<RemoteSession> {
-		const snapshot = await this.client.forkSession(reference, { cwd: this.cwd, projectId: this.projectId });
+		const snapshot = validateRemoteSnapshot(
+			await this.client.forkSession(reference, { cwd: this.cwd, projectId: this.projectId }),
+			"fork",
+		);
 		return new RemoteSession({ client: this.client, cwd: this.cwd, snapshot, sessionManager: this });
 	}
 
 	async forkSession(source: Session, targetLeafId: string | null): Promise<RemoteSession> {
+		if (source instanceof RemoteSession) await source.flushPendingSync();
 		const reference = source.getSessionReference();
 		if (!reference) {
 			throw new Error("Cannot fork a remote session without a session reference");
 		}
-		const snapshot = await this.client.forkSession(reference, {
-			cwd: this.cwd,
-			projectId: this.projectId,
-			leafId: targetLeafId ?? undefined,
-		});
+		const snapshot = validateRemoteSnapshot(
+			await this.client.forkSession(reference, {
+				cwd: this.cwd,
+				projectId: this.projectId,
+				leafId: targetLeafId ?? undefined,
+			}),
+			"fork",
+		);
 		return new RemoteSession({ client: this.client, cwd: this.cwd, snapshot, sessionManager: this });
 	}
 
@@ -104,19 +122,31 @@ export class RemoteSessionManager implements SessionManager {
 			throw new Error(`File not found: ${resolvedPath}`);
 		}
 
-		const entries = loadEntriesFromFile(resolvedPath);
+		const entries = loadEntriesFromFile(resolvedPath, { repair: false, phase: "import" });
 		if (entries.length === 0) {
-			throw new Error(`Cannot import empty or invalid session JSONL: ${resolvedPath}`);
+			throw createJsonlSessionDecodeError(
+				resolvedPath,
+				"import",
+				"schema",
+				`Cannot import empty or invalid session JSONL: ${resolvedPath}`,
+			);
 		}
 		migrateToCurrentVersion(entries);
+		validateCurrentSessionEntries(entries, resolvedPath, {
+			phase: "import",
+			locations: getJsonlEntryLocations(entries),
+		});
 
 		const cwd = options?.cwdOverride ?? getSnapshotCwd({ id: "", reference: "", entries }, this.cwd);
-		const snapshot = await this.client.importJsonl({
-			cwd,
-			projectId: this.projectId,
-			sourceName: basename(resolvedPath),
-			entries,
-		});
+		const snapshot = validateRemoteSnapshot(
+			await this.client.importJsonl({
+				cwd,
+				projectId: this.projectId,
+				sourceName: basename(resolvedPath),
+				entries,
+			}),
+			"import",
+		);
 		return new RemoteSession({
 			client: this.client,
 			cwd: getSnapshotCwd(snapshot, cwd),

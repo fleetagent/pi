@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { constants, createReadStream, createWriteStream, type Stats, type WriteStream } from "node:fs";
 import {
 	access as fsAccess,
@@ -357,6 +357,33 @@ async function runSshBuffer(
 	});
 }
 
+async function cancelSshCommand(remote: string, pidFile: string): Promise<void> {
+	const attempts = Array.from({ length: 20 }, (_, index) => index + 1).join(" ");
+	const waits = Array.from({ length: 10 }, (_, index) => index + 1).join(" ");
+	const quotedPidFile = shellQuote(pidFile);
+	const quotedPendingPidFile = shellQuote(`${pidFile}.pending`);
+	const command = [
+		`is_running() { pid_alive=0; group_alive=0; kill -0 "$pid" 2>/dev/null && pid_alive=1; kill -0 -- "-$pid" 2>/dev/null && group_alive=1; if test "$pid_alive" -eq 0 && test "$group_alive" -eq 0; then return 1; fi; if test "$pid_alive" -eq 1; then state=$(ps -o stat= -p "$pid" 2>/dev/null) || return 0; state=\${state//[[:space:]]/}; case "$state" in Z*) ;; '') return 0 ;; *) return 0 ;; esac; fi; process_group=$(ps -eo pgid=,stat= 2>/dev/null) || return 0; printf '%s\\n' "$process_group" | awk -v target="$pid" '$1 ~ /^[0-9]+$/ { parsed=1 } $1 == target && $2 !~ /^Z/ { found=1 } END { if (!parsed || found) exit 0; exit 1 }'; }`,
+		'terminate() { pkill -TERM -P "$pid" 2>/dev/null || true; kill -TERM -- "-$pid" 2>/dev/null || true; kill -TERM "$pid" 2>/dev/null || true; }',
+		'terminate_forcefully() { pkill -KILL -P "$pid" 2>/dev/null || true; kill -KILL -- "-$pid" 2>/dev/null || true; kill -KILL "$pid" 2>/dev/null || true; }',
+		`for attempt in ${attempts}; do`,
+		`if test -r ${quotedPidFile}; then`,
+		`pid=$(cat ${quotedPidFile} 2>/dev/null)`,
+		`case "$pid" in ''|*[!0-9]*) rm -f ${quotedPidFile} ${quotedPendingPidFile}; exit 2 ;; esac`,
+		"terminate",
+		`for wait_attempt in ${waits}; do if ! is_running; then rm -f ${quotedPidFile} ${quotedPendingPidFile}; exit 0; fi; sleep 0.05; done`,
+		"terminate_forcefully",
+		`for wait_attempt in ${waits}; do if ! is_running; then rm -f ${quotedPidFile} ${quotedPendingPidFile}; exit 0; fi; sleep 0.05; done`,
+		`rm -f ${quotedPidFile} ${quotedPendingPidFile}`,
+		"exit 1",
+		"fi",
+		"sleep 0.05",
+		"done",
+		`rm -f ${quotedPendingPidFile}`,
+	].join("\n");
+	await runSshBuffer(remote, `bash -c ${shellQuote(command)}`, { timeout: 3 });
+}
+
 export class LocalToolOperations implements ToolOperations {
 	cwd: string;
 	private shellPath: string | undefined;
@@ -496,39 +523,98 @@ export class SshToolOperations implements ToolOperations {
 	}
 
 	async exec(command: string, options: ToolExecOptions): Promise<{ exitCode: number | null }> {
+		if (options.signal?.aborted) throw new Error("aborted");
 		const timeoutMs = resolveTimeoutMs(options.timeout);
 		const cwd = options.cwd ?? this.cwd;
-		const remoteCommand = `cd ${shellQuote(cwd)} && bash -s`;
+		const commandId = randomBytes(16).toString("hex");
+		const pidFile = `/tmp/pi-ssh-command-${commandId}.pid`;
+		const pendingPidFile = `${pidFile}.pending`;
+		const readyMarker = `pi-ssh-ready-${commandId}`;
+		const worker = [
+			`if ! printf '%s\\n' "$$" > ${shellQuote(pendingPidFile)} || ! mv -f ${shellQuote(pendingPidFile)} ${shellQuote(pidFile)} || ! printf '%s\\n' ${shellQuote(readyMarker)}; then`,
+			`rm -f ${shellQuote(pidFile)} ${shellQuote(pendingPidFile)}`,
+			"exit 125",
+			"fi",
+			"exec bash -s",
+		].join("\n");
+		const supervisor = [
+			"exec 3<&0 4>&2",
+			"if command -v setsid >/dev/null 2>&1 && setsid --wait true >/dev/null 2>&1; then",
+			`setsid --wait bash -c ${shellQuote(worker)} <&3 2>&4 &`,
+			"else",
+			"set -m",
+			`bash -c ${shellQuote(worker)} <&3 2>&4 &`,
+			"fi",
+			"child=$!",
+			"exec 2>/dev/null",
+			'wait "$child"',
+			"status=$?",
+			`rm -f ${shellQuote(pidFile)} ${shellQuote(pendingPidFile)}`,
+			'exit "$status"',
+		].join("\n");
+		const remoteCommand = `cd ${shellQuote(cwd)} && bash -c ${shellQuote(supervisor)}`;
 		return new Promise((resolve, reject) => {
 			const child = spawn("ssh", sshArgs(this.remote, remoteCommand), {
 				stdio: ["pipe", "pipe", "pipe"],
 			});
 			let timedOut = false;
 			let timeoutHandle: NodeJS.Timeout | undefined;
+			let cancellationPromise: Promise<void> | undefined;
+			let ready = false;
+			let stdoutBuffer = Buffer.alloc(0);
+			const cancelRemote = () => {
+				cancellationPromise ??= cancelSshCommand(this.remote, pidFile).finally(() => child.kill());
+			};
 			if (timeoutMs !== undefined) {
 				timeoutHandle = setTimeout(() => {
 					timedOut = true;
-					child.kill();
+					cancelRemote();
 				}, timeoutMs);
 			}
-			child.stdout?.on("data", options.onData);
+			child.stdout?.on("data", (data: Buffer) => {
+				if (ready) {
+					options.onData(data);
+					return;
+				}
+				stdoutBuffer = Buffer.concat([stdoutBuffer, data]);
+				const newline = stdoutBuffer.indexOf(0x0a);
+				if (newline === -1) return;
+				const firstLine = stdoutBuffer.subarray(0, newline).toString("utf-8").replace(/\r$/, "");
+				if (firstLine !== readyMarker) {
+					options.onData(stdoutBuffer);
+					stdoutBuffer = Buffer.alloc(0);
+					cancelRemote();
+					return;
+				}
+				ready = true;
+				const remainder = stdoutBuffer.subarray(newline + 1);
+				stdoutBuffer = Buffer.alloc(0);
+				if (remainder.length > 0) options.onData(remainder);
+				child.stdin.end(cancellationPromise ? undefined : command);
+			});
 			child.stderr?.on("data", options.onData);
 			child.on("error", reject);
-			child.stdin.end(command);
-			const onAbort = () => child.kill();
+			const onAbort = () => cancelRemote();
 			options.signal?.addEventListener("abort", onAbort, { once: true });
 			child.on("close", (code) => {
-				if (timeoutHandle) clearTimeout(timeoutHandle);
-				options.signal?.removeEventListener("abort", onAbort);
-				if (options.signal?.aborted) {
-					reject(new Error("aborted"));
-					return;
-				}
-				if (timedOut) {
-					reject(new Error(`timeout:${options.timeout}`));
-					return;
-				}
-				resolve({ exitCode: code });
+				void (async () => {
+					if (timeoutHandle) clearTimeout(timeoutHandle);
+					options.signal?.removeEventListener("abort", onAbort);
+					await cancellationPromise;
+					if (options.signal?.aborted) {
+						reject(new Error("aborted"));
+						return;
+					}
+					if (timedOut) {
+						reject(new Error(`timeout:${options.timeout}`));
+						return;
+					}
+					if (!ready) {
+						reject(new Error("SSH command supervisor failed to initialize"));
+						return;
+					}
+					resolve({ exitCode: code });
+				})().catch(reject);
 			});
 		});
 	}
@@ -705,7 +791,9 @@ export class DeferredRemoteToolOperations implements ToolOperations {
 
 	private requireOperations(): SshToolOperations | RemoteToolOperations {
 		if (!this.operations) {
-			throw new Error("Remote backend is not configured. Configure it over RPC or with /remote before using tools.");
+			throw new Error(
+				"Remote backend is not configured. Configure it over RPC or with /sandbox before using tools.",
+			);
 		}
 		return this.operations;
 	}

@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -337,6 +337,80 @@ describe("RemoteSessionManager", () => {
 		});
 	});
 
+	it("rejects a torn local remote-import source without repairing it or issuing a request", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "pi-remote-session-torn-import-"));
+		const inputPath = join(tempDir, "torn.jsonl");
+		const original = `${JSON.stringify(header("torn"))}\n{`;
+		writeFileSync(inputPath, original);
+		let requestCount = 0;
+		const manager = new RemoteSessionManager({
+			baseUrl: "https://sessions.example.test",
+			token: "secret-token",
+			cwd: "/repo",
+			projectId: "project-1",
+			fetch: async () => {
+				requestCount++;
+				throw new Error("unexpected request");
+			},
+		});
+		await expect(manager.importJsonl(inputPath)).rejects.toThrow("Invalid JSONL session file");
+		expect(requestCount).toBe(0);
+		expect(readFileSync(inputPath, "utf8")).toBe(original);
+	});
+
+	it("flushes queued entries before direct session forks", async () => {
+		let releaseAppend: () => void = () => undefined;
+		let markAppendStarted: () => void = () => undefined;
+		const appendGate = new Promise<void>((resolve) => {
+			releaseAppend = resolve;
+		});
+		const appendStarted = new Promise<void>((resolve) => {
+			markAppendStarted = resolve;
+		});
+		const requestOrder: string[] = [];
+		let sourceEntries: FileEntry[] = [header("source")];
+		let forkRequests = 0;
+		const manager = new RemoteSessionManager({
+			baseUrl: "https://sessions.example.test",
+			token: "secret-token",
+			cwd: "/repo",
+			fetch: async (input, init) => {
+				const url = String(input);
+				const body = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
+				if (url.endsWith("/v1/sessions") && init?.method === "POST") {
+					return jsonResponse({ reference: "remote:source", id: "source", entries: sourceEntries, etag: "v1" });
+				}
+				if (url.endsWith("/source/entries") && init?.method === "POST") {
+					requestOrder.push("append");
+					markAppendStarted();
+					await appendGate;
+					const entries = (body as { entries: FileEntry[] }).entries;
+					sourceEntries = [...sourceEntries, ...entries];
+					return jsonResponse({ accepted: entries.length, etag: "v2" });
+				}
+				if (url.endsWith("/source/fork") && init?.method === "POST") {
+					requestOrder.push("fork");
+					forkRequests++;
+					return jsonResponse({
+						reference: "remote:forked",
+						id: "forked",
+						entries: [{ ...header("forked"), parentSession: "remote:source" }, ...sourceEntries.slice(1)],
+					});
+				}
+				throw new Error(`Unexpected request: ${init?.method} ${url}`);
+			},
+		});
+		const source = await manager.create();
+		const leafId = source.appendMessage({ role: "user", content: "fork me", timestamp: 1 });
+		const forking = source.forkSubSession(leafId);
+		await appendStarted;
+		expect(forkRequests).toBe(0);
+		releaseAppend();
+		const forked = await forking;
+		expect(requestOrder).toEqual(["append", "fork"]);
+		expect(forked.getEntry(leafId)).toBeDefined();
+	});
+
 	it("passes target leaf ids when forking sessions", async () => {
 		const requests: Array<{ url: string; init: RequestInit; body: unknown }> = [];
 		const manager = new RemoteSessionManager({
@@ -347,14 +421,21 @@ describe("RemoteSessionManager", () => {
 			fetch: async (input, init) => {
 				const body = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
 				requests.push({ url: String(input), init: init ?? {}, body });
-				return jsonResponse({ reference: "remote:forked", id: "forked", entries: [header("forked")] });
+				if (requests.length === 1) {
+					return jsonResponse({ reference: "remote:source", id: "source", entries: [header("source")] });
+				}
+				return jsonResponse({
+					reference: "remote:forked",
+					id: "forked",
+					entries: [{ ...header("forked"), parentSession: "remote:source" }],
+				});
 			},
 		});
 		const source = await manager.create();
 
 		await manager.forkSession(source, "leaf-1");
 
-		expect(requests[1].url).toBe("https://sessions.example.test/v1/sessions/forked/fork");
+		expect(requests[1].url).toBe("https://sessions.example.test/v1/sessions/source/fork");
 		expect(requests[1].body).toEqual({ cwd: "/repo", projectId: "project-1", leafId: "leaf-1" });
 	});
 });

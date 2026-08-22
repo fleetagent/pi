@@ -1,6 +1,16 @@
 import type { ChildProcess, ChildProcessByStdio } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	lstatSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	realpathSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
 import { homedir, tmpdir } from "node:os";
 
 function getEnv(): NodeJS.ProcessEnv {
@@ -22,16 +32,17 @@ function getEnv(): NodeJS.ProcessEnv {
 	}
 }
 
-import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { Readable } from "node:stream";
 import { globSync } from "glob";
 import ignore from "ignore";
 import { minimatch } from "minimatch";
 import { CONFIG_DIR_NAME } from "../config.ts";
 import { spawnProcess, spawnProcessSync } from "../utils/child-process.ts";
-import { type GitSource, parseGitUrl } from "../utils/git.ts";
+import { type GitSource, isSafeGitInstallPath, parseGitUrl } from "../utils/git.ts";
 import { canonicalizePath, isLocalPath, markPathIgnoredByCloudSync, resolvePath } from "../utils/paths.ts";
 import { isStdoutTakenOver } from "./output-guard.ts";
+import { type PiManifest, readPiManifest } from "./pi-manifest.ts";
 import type { PackageSource, SettingsManager } from "./settings-manager.ts";
 import type { WorkspaceIdentity } from "./workspace-identity.ts";
 
@@ -147,14 +158,6 @@ interface GitUpdateTarget extends ConfiguredUpdateSource {
 	parsed: GitSource;
 }
 
-interface PiManifest {
-	extensions?: string[];
-	skills?: string[];
-	rules?: string[];
-	prompts?: string[];
-	themes?: string[];
-}
-
 interface ResourceAccumulator {
 	extensions: Map<string, { metadata: PathMetadata; enabled: boolean }>;
 	skills: Map<string, { metadata: PathMetadata; enabled: boolean }>;
@@ -207,6 +210,17 @@ type IgnoreMatcher = ReturnType<typeof ignore>;
 
 function toPosixPath(p: string): string {
 	return p.split(sep).join("/");
+}
+
+function isPathWithin(root: string, candidate: string): boolean {
+	const rel = relative(root, candidate);
+	return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
+
+function isMissingPathError(error: unknown): boolean {
+	return (
+		typeof error === "object" && error !== null && "code" in error && (error as { code?: unknown }).code === "ENOENT"
+	);
 }
 
 function getHomeDir(): string {
@@ -287,9 +301,18 @@ function collectFiles(
 	skipNodeModules = true,
 	ignoreMatcher?: IgnoreMatcher,
 	rootDir?: string,
+	visited = new Set<string>(),
 ): string[] {
 	const files: string[] = [];
 	if (!existsSync(dir)) return files;
+	let canonicalDir: string;
+	try {
+		canonicalDir = realpathSync(dir);
+	} catch {
+		return files;
+	}
+	if (visited.has(canonicalDir)) return files;
+	visited.add(canonicalDir);
 
 	const root = rootDir ?? dir;
 	const ig = ignoreMatcher ?? ignore();
@@ -320,7 +343,7 @@ function collectFiles(
 			if (ig.ignores(ignorePath)) continue;
 
 			if (isDir) {
-				files.push(...collectFiles(fullPath, filePattern, skipNodeModules, ig, root));
+				files.push(...collectFiles(fullPath, filePattern, skipNodeModules, ig, root, visited));
 			} else if (isFile && filePattern.test(entry.name)) {
 				files.push(fullPath);
 			}
@@ -339,9 +362,18 @@ function collectSkillEntries(
 	mode: SkillDiscoveryMode,
 	ignoreMatcher?: IgnoreMatcher,
 	rootDir?: string,
+	visited = new Set<string>(),
 ): string[] {
 	const entries: string[] = [];
 	if (!existsSync(dir)) return entries;
+	let canonicalDir: string;
+	try {
+		canonicalDir = realpathSync(dir);
+	} catch {
+		return entries;
+	}
+	if (visited.has(canonicalDir)) return entries;
+	visited.add(canonicalDir);
 
 	const root = rootDir ?? dir;
 	const ig = ignoreMatcher ?? ignore();
@@ -399,7 +431,7 @@ function collectSkillEntries(
 			if (!isDir) continue;
 			if (ig.ignores(`${relPath}/`)) continue;
 
-			entries.push(...collectSkillEntries(fullPath, mode, ig, root));
+			entries.push(...collectSkillEntries(fullPath, mode, ig, root, visited));
 		}
 	} catch {
 		// Ignore errors
@@ -417,9 +449,18 @@ function collectRuleEntries(
 	mode: SkillDiscoveryMode,
 	ignoreMatcher?: IgnoreMatcher,
 	rootDir?: string,
+	visited = new Set<string>(),
 ): string[] {
 	const entries: string[] = [];
 	if (!existsSync(dir)) return entries;
+	let canonicalDir: string;
+	try {
+		canonicalDir = realpathSync(dir);
+	} catch {
+		return entries;
+	}
+	if (visited.has(canonicalDir)) return entries;
+	visited.add(canonicalDir);
 
 	const root = rootDir ?? dir;
 	const ig = ignoreMatcher ?? ignore();
@@ -475,7 +516,7 @@ function collectRuleEntries(
 			if (!isDir) continue;
 			if (ig.ignores(`${relPath}/`)) continue;
 
-			entries.push(...collectRuleEntries(fullPath, mode, ig, root));
+			entries.push(...collectRuleEntries(fullPath, mode, ig, root, visited));
 		}
 	} catch {
 		// Ignore errors
@@ -618,20 +659,10 @@ function collectAutoThemeEntries(dir: string): string[] {
 	return entries;
 }
 
-function readPiManifestFile(packageJsonPath: string): PiManifest | null {
-	try {
-		const content = readFileSync(packageJsonPath, "utf-8");
-		const pkg = JSON.parse(content) as { pi?: PiManifest };
-		return pkg.pi ?? null;
-	} catch {
-		return null;
-	}
-}
-
 function resolveExtensionEntries(dir: string): string[] | null {
 	const packageJsonPath = join(dir, "package.json");
 	if (existsSync(packageJsonPath)) {
-		const manifest = readPiManifestFile(packageJsonPath);
+		const manifest = readPiManifest(packageJsonPath);
 		if (manifest?.extensions?.length) {
 			const entries: string[] = [];
 			for (const extPath of manifest.extensions) {
@@ -1360,7 +1391,7 @@ export class DefaultPackageManager implements PackageManager {
 					await this.refreshTemporaryGitSource(parsed, sourceStr);
 				}
 				metadata.baseDir = installedPath;
-				this.collectPackageResources(installedPath, accumulator, filter, metadata);
+				this.collectManagedGitPackageResources(installedPath, accumulator, filter, metadata);
 			}
 		}
 	}
@@ -1504,6 +1535,9 @@ export class DefaultPackageManager implements PackageManager {
 		const gitParsed = parseGitUrl(source);
 		if (gitParsed) {
 			return gitParsed;
+		}
+		if (!isLocalPath(source)) {
+			throw new Error(`Unsafe or invalid Git package source: ${source}`);
 		}
 
 		return { type: "local", path: source };
@@ -1816,7 +1850,7 @@ export class DefaultPackageManager implements PackageManager {
 		// Extension packages run inside pi and resolve pi APIs through loader aliases/virtual modules.
 		// Disable peer dependency resolution for managed installs (npm's --legacy-peer-deps, and
 		// equivalent bun/pnpm settings) so package managers do not install or solve host-provided
-		// @earendil-works/pi-* peers. Stale auto-installed pi peers can otherwise block updates.
+		// @fleetagent/pi-* peers. Stale auto-installed pi peers can otherwise block updates.
 		if (packageManagerName === "bun") {
 			return ["install", ...specs, "--cwd", installRoot, "--omit=peer"];
 		}
@@ -1855,26 +1889,34 @@ export class DefaultPackageManager implements PackageManager {
 	private async installGit(source: GitSource, scope: SourceScope): Promise<void> {
 		const targetDir = this.getGitInstallPath(source, scope);
 		if (existsSync(targetDir)) {
+			this.assertGitTarget(source, scope, targetDir);
 			if (source.ref) {
-				await this.ensureGitRef(targetDir, ["fetch", "origin", source.ref], "FETCH_HEAD");
+				await this.ensureGitRef(targetDir, ["fetch", "origin", source.ref], "FETCH_HEAD", source, scope);
 				return;
 			}
 			const target = await this.getLocalGitUpdateTarget(targetDir);
-			await this.ensureGitRef(targetDir, target.fetchArgs, target.ref);
+			this.assertGitTarget(source, scope, targetDir);
+			await this.ensureGitRef(targetDir, target.fetchArgs, target.ref, source, scope);
 			return;
 		}
 		const gitRoot = this.getGitInstallRoot(scope);
+		this.assertGitTarget(source, scope, targetDir);
 		if (gitRoot) {
-			this.ensureGitIgnore(gitRoot);
+			this.ensureGitIgnore(gitRoot, true);
 		}
+		this.assertGitTarget(source, scope, targetDir);
 		mkdirSync(dirname(targetDir), { recursive: true });
+		this.assertGitTarget(source, scope, targetDir);
 
 		await this.runCommand("git", ["clone", source.repo, targetDir]);
+		this.assertGitTarget(source, scope, targetDir);
 		if (source.ref) {
 			await this.runCommand("git", ["checkout", source.ref], { cwd: targetDir });
+			this.assertGitTarget(source, scope, targetDir);
 		}
 		const packageJsonPath = join(targetDir, "package.json");
 		if (existsSync(packageJsonPath)) {
+			this.assertConfinedResourcePath(packageJsonPath, targetDir);
 			await this.runNpmCommand(this.getGitDependencyInstallArgs(), { cwd: targetDir });
 		}
 	}
@@ -1886,23 +1928,34 @@ export class DefaultPackageManager implements PackageManager {
 			return;
 		}
 
+		this.assertGitTarget(source, scope, targetDir);
 		if (source.ref) {
-			await this.ensureGitRef(targetDir, ["fetch", "origin", source.ref], "FETCH_HEAD");
+			await this.ensureGitRef(targetDir, ["fetch", "origin", source.ref], "FETCH_HEAD", source, scope);
 			return;
 		}
 
 		const target = await this.getLocalGitUpdateTarget(targetDir);
-		await this.ensureGitRef(targetDir, target.fetchArgs, target.ref);
+		this.assertGitTarget(source, scope, targetDir);
+		await this.ensureGitRef(targetDir, target.fetchArgs, target.ref, source, scope);
 	}
 
-	private async ensureGitRef(targetDir: string, fetchArgs: string[], ref: string): Promise<void> {
+	private async ensureGitRef(
+		targetDir: string,
+		fetchArgs: string[],
+		ref: string,
+		source: GitSource,
+		scope: SourceScope,
+	): Promise<void> {
 		// Fetch only the ref we will reset to, avoiding unrelated branch/tag noise.
+		this.assertGitTarget(source, scope, targetDir);
 		await this.runCommand("git", fetchArgs, { cwd: targetDir });
+		this.assertGitTarget(source, scope, targetDir);
 
 		const localHead = await this.runCommandCapture("git", ["rev-parse", "HEAD"], {
 			cwd: targetDir,
 			timeoutMs: NETWORK_TIMEOUT_MS,
 		});
+		this.assertGitTarget(source, scope, targetDir);
 		const commitRef = `${ref}^{commit}`;
 		const targetHead = await this.runCommandCapture("git", ["rev-parse", commitRef], {
 			cwd: targetDir,
@@ -1912,13 +1965,17 @@ export class DefaultPackageManager implements PackageManager {
 			return;
 		}
 
+		this.assertGitTarget(source, scope, targetDir);
 		await this.runCommand("git", ["reset", "--hard", commitRef], { cwd: targetDir });
 
 		// Clean untracked files (extensions should be pristine)
+		this.assertGitTarget(source, scope, targetDir);
 		await this.runCommand("git", ["clean", "-fdx"], { cwd: targetDir });
+		this.assertGitTarget(source, scope, targetDir);
 
 		const packageJsonPath = join(targetDir, "package.json");
 		if (existsSync(packageJsonPath)) {
+			this.assertConfinedResourcePath(packageJsonPath, targetDir);
 			await this.runNpmCommand(this.getGitDependencyInstallArgs(), { cwd: targetDir });
 		}
 	}
@@ -1939,15 +1996,27 @@ export class DefaultPackageManager implements PackageManager {
 	private async removeGit(source: GitSource, scope: SourceScope): Promise<void> {
 		const targetDir = this.getGitInstallPath(source, scope);
 		if (!existsSync(targetDir)) return;
+		this.assertGitTarget(source, scope, targetDir);
 		rmSync(targetDir, { recursive: true, force: true });
-		this.pruneEmptyGitParents(targetDir, this.getGitInstallRoot(scope));
+		this.pruneEmptyGitParents(targetDir, this.getGitInstallRoot(scope), source, scope);
 	}
 
-	private pruneEmptyGitParents(targetDir: string, installRoot: string | undefined): void {
+	private pruneEmptyGitParents(
+		targetDir: string,
+		installRoot: string | undefined,
+		source: GitSource,
+		scope: SourceScope,
+	): void {
 		if (!installRoot) return;
 		const resolvedRoot = resolve(installRoot);
-		let current = dirname(targetDir);
-		while (current.startsWith(resolvedRoot) && current !== resolvedRoot) {
+		let current = dirname(resolve(targetDir));
+		while (current !== resolvedRoot && isPathWithin(resolvedRoot, current)) {
+			try {
+				this.assertGitTarget(source, scope, targetDir);
+				if (existsSync(current) && lstatSync(current).isSymbolicLink()) break;
+			} catch {
+				break;
+			}
 			if (!existsSync(current)) {
 				current = dirname(current);
 				continue;
@@ -1957,6 +2026,11 @@ export class DefaultPackageManager implements PackageManager {
 				break;
 			}
 			try {
+				this.assertGitTarget(source, scope, targetDir);
+				this.resolveManagedPath(resolvedRoot, relative(resolvedRoot, current));
+				if (lstatSync(current).isSymbolicLink()) {
+					break;
+				}
 				rmSync(current, { recursive: true, force: true });
 			} catch {
 				break;
@@ -1978,12 +2052,24 @@ export class DefaultPackageManager implements PackageManager {
 		}
 	}
 
-	private ensureGitIgnore(dir: string): void {
+	private ensureGitIgnore(dir: string, managedGitRoot = false): void {
 		if (!existsSync(dir)) {
 			mkdirSync(dir, { recursive: true });
 		}
 		const ignorePath = join(dir, ".gitignore");
-		if (!existsSync(ignorePath)) {
+		if (!managedGitRoot) {
+			if (!existsSync(ignorePath)) {
+				writeFileSync(ignorePath, "*\n!.gitignore\n", "utf-8");
+			}
+			return;
+		}
+		try {
+			const stats = lstatSync(ignorePath);
+			if (stats.isSymbolicLink()) {
+				throw new Error(`Refusing symbolic link in managed Git metadata path: ${ignorePath}`);
+			}
+		} catch (error) {
+			if (!isMissingPathError(error)) throw error;
 			writeFileSync(ignorePath, "*\n!.gitignore\n", "utf-8");
 		}
 	}
@@ -2056,13 +2142,23 @@ export class DefaultPackageManager implements PackageManager {
 	}
 
 	private getGitInstallPath(source: GitSource, scope: SourceScope): string {
+		if (!isSafeGitInstallPath(source)) {
+			throw new Error(`Refusing unsafe Git package path: ${source.host}/${source.path}`);
+		}
+
+		let targetDir: string;
 		if (scope === "temporary") {
-			return this.getTemporaryDir(`git-${source.host}`, source.path);
+			targetDir = this.getTemporaryDir(`git-${source.host}`, source.path);
+		} else {
+			const installRoot = this.getGitInstallRoot(scope);
+			if (!installRoot) {
+				throw new Error("Missing Git install root");
+			}
+			targetDir = this.resolveManagedPath(installRoot, source.host, source.path);
 		}
-		if (scope === "project") {
-			return join(this.cwd, CONFIG_DIR_NAME, "git", source.host, source.path);
-		}
-		return join(this.agentDir, "git", source.host, source.path);
+
+		this.assertManagedGitPath(source, scope, targetDir);
+		return targetDir;
 	}
 
 	private getGitInstallRoot(scope: SourceScope): string | undefined {
@@ -2075,12 +2171,102 @@ export class DefaultPackageManager implements PackageManager {
 		return join(this.agentDir, "git");
 	}
 
+	private getGitConfinementRoot(scope: SourceScope): string {
+		return scope === "temporary" ? join(tmpdir(), "pi-extensions") : (this.getGitInstallRoot(scope) ?? "");
+	}
+
+	private getGitScopeAnchor(scope: SourceScope): string {
+		if (scope === "temporary") return tmpdir();
+		return scope === "project" ? this.cwd : this.agentDir;
+	}
+
 	private getTemporaryDir(prefix: string, suffix?: string): string {
+		const root = this.resolveManagedPath(join(tmpdir(), "pi-extensions"), prefix);
 		const hash = createHash("sha256")
 			.update(`${prefix}-${suffix ?? ""}`)
 			.digest("hex")
 			.slice(0, 8);
-		return join(tmpdir(), "pi-extensions", prefix, hash, suffix ?? "");
+		return this.resolveManagedPath(root, hash, suffix ?? "");
+	}
+
+	private resolveManagedPath(root: string, ...parts: string[]): string {
+		const resolvedRoot = resolve(root);
+		const resolvedPath = resolve(resolvedRoot, ...parts);
+		if (!isPathWithin(resolvedRoot, resolvedPath)) {
+			throw new Error(`Refusing to use path outside package install root: ${resolvedPath}`);
+		}
+		return resolvedPath;
+	}
+
+	private canonicalizeProspectivePath(path: string): string {
+		let current = resolve(path);
+		const missingParts: string[] = [];
+		while (true) {
+			try {
+				lstatSync(current);
+			} catch (error) {
+				if (!isMissingPathError(error)) {
+					throw error;
+				}
+				const parent = dirname(current);
+				if (parent === current) {
+					throw error;
+				}
+				missingParts.unshift(basename(current));
+				current = parent;
+				continue;
+			}
+			return resolve(realpathSync(current), ...missingParts);
+		}
+	}
+
+	private assertManagedGitPath(source: GitSource, scope: SourceScope, targetDir: string): void {
+		if (!isSafeGitInstallPath(source)) {
+			throw new Error(`Refusing unsafe Git package path: ${source.host}/${source.path}`);
+		}
+
+		const anchor = resolve(this.getGitScopeAnchor(scope));
+		const root = resolve(this.getGitConfinementRoot(scope));
+		const target = resolve(targetDir);
+		if (!isPathWithin(anchor, root) || !isPathWithin(root, target)) {
+			throw new Error(`Refusing to use path outside package install root: ${target}`);
+		}
+
+		let canonicalAnchor: string;
+		let canonicalRoot: string;
+		try {
+			canonicalAnchor = this.canonicalizeProspectivePath(anchor);
+			canonicalRoot = this.canonicalizeProspectivePath(root);
+		} catch {
+			throw new Error(`Refusing unsafe Git package install root: ${root}`);
+		}
+		if (!isPathWithin(canonicalAnchor, canonicalRoot)) {
+			throw new Error(`Refusing Git package install root outside its trusted anchor: ${root}`);
+		}
+
+		const relativeTarget = relative(root, target);
+		let current = canonicalRoot;
+		for (const component of relativeTarget.split(sep).filter(Boolean)) {
+			current = join(current, component);
+			try {
+				const stats = lstatSync(current);
+				if (stats.isSymbolicLink()) {
+					throw new Error(`Refusing symbolic link in Git package path: ${current}`);
+				}
+			} catch (error) {
+				if (isMissingPathError(error)) {
+					break;
+				}
+				throw error;
+			}
+		}
+	}
+
+	private assertGitTarget(source: GitSource, scope: SourceScope, targetDir: string): void {
+		const expected = this.getGitInstallPath(source, scope);
+		if (expected !== resolve(targetDir)) {
+			throw new Error(`Refusing unexpected Git package path: ${targetDir}`);
+		}
 	}
 
 	private getBaseDirForScope(scope: SourceScope): string {
@@ -2099,6 +2285,107 @@ export class DefaultPackageManager implements PackageManager {
 
 	private resolvePathFromBase(input: string, baseDir: string): string {
 		return resolvePath(input, baseDir, { homeDir: getHomeDir(), trim: true });
+	}
+
+	private assertConfinedResourcePath(candidate: string, packageRoot: string): void {
+		let canonicalRoot: string;
+		let canonicalCandidate: string;
+		try {
+			canonicalRoot = realpathSync(packageRoot);
+			canonicalCandidate = realpathSync(candidate);
+		} catch {
+			throw new Error(`Refusing unreadable or broken managed Git package resource: ${candidate}`);
+		}
+		if (!isPathWithin(canonicalRoot, canonicalCandidate)) {
+			throw new Error(`Refusing managed Git package resource outside checkout: ${candidate}`);
+		}
+	}
+
+	private validateConfinedResourceTree(candidate: string, packageRoot: string, visited = new Set<string>()): void {
+		lstatSync(candidate);
+		this.assertConfinedResourcePath(candidate, packageRoot);
+		const canonicalCandidate = realpathSync(candidate);
+		const stats = statSync(candidate);
+		if (!stats.isDirectory() || visited.has(canonicalCandidate)) return;
+		visited.add(canonicalCandidate);
+		for (const entry of readdirSync(candidate, { withFileTypes: true })) {
+			if (entry.name === "node_modules") continue;
+			if (entry.name.startsWith(".") && !IGNORE_FILE_NAMES.includes(entry.name)) continue;
+			this.validateConfinedResourceTree(join(candidate, entry.name), packageRoot, visited);
+		}
+	}
+
+	private validateManagedGitResourceInputs(packageRoot: string): void {
+		this.assertConfinedResourcePath(packageRoot, packageRoot);
+		const packageJsonPath = join(packageRoot, "package.json");
+		try {
+			lstatSync(packageJsonPath);
+			this.assertConfinedResourcePath(packageJsonPath, packageRoot);
+		} catch (error) {
+			if (!isMissingPathError(error)) throw error;
+		}
+
+		for (const resourceType of RESOURCE_TYPES) {
+			const conventionalDir = join(packageRoot, resourceType);
+			try {
+				this.validateConfinedResourceTree(conventionalDir, packageRoot);
+			} catch (error) {
+				if (!isMissingPathError(error)) throw error;
+			}
+		}
+
+		const manifest = readPiManifest(join(packageRoot, "package.json"));
+		if (!manifest) return;
+		for (const resourceType of RESOURCE_TYPES) {
+			const entries = manifest[resourceType as keyof PiManifest];
+			if (!Array.isArray(entries)) continue;
+			for (const entry of entries) {
+				if (typeof entry !== "string" || isOverridePattern(entry)) continue;
+				if (entry.includes("\\") || /^[a-z]:/i.test(entry)) {
+					throw new Error(`Refusing unsafe managed Git package resource entry: ${entry}`);
+				}
+				this.resolveManagedPath(packageRoot, entry);
+				const entryParts = entry.split("/");
+				const firstGlobPart = entryParts.findIndex((part) => hasGlobPattern(part));
+				const scanEntry = firstGlobPart < 0 ? entry : entryParts.slice(0, firstGlobPart).join("/") || ".";
+				const resolvedEntry = resolve(packageRoot, scanEntry);
+				try {
+					this.validateConfinedResourceTree(resolvedEntry, packageRoot);
+				} catch (error) {
+					if (!isMissingPathError(error)) throw error;
+				}
+				if (firstGlobPart >= 0) {
+					for (const match of globSync(entry, {
+						cwd: packageRoot,
+						absolute: true,
+						dot: false,
+						follow: false,
+						nodir: false,
+					})) {
+						this.validateConfinedResourceTree(resolve(match), packageRoot);
+					}
+				}
+			}
+		}
+	}
+
+	private collectManagedGitPackageResources(
+		packageRoot: string,
+		accumulator: ResourceAccumulator,
+		filter: PackageFilter | undefined,
+		metadata: PathMetadata,
+	): void {
+		this.validateManagedGitResourceInputs(packageRoot);
+		const packageAccumulator = this.createAccumulator();
+		this.collectPackageResources(packageRoot, packageAccumulator, filter, metadata);
+		for (const resourceType of RESOURCE_TYPES) {
+			const sourceMap = this.getTargetMap(packageAccumulator, resourceType);
+			const targetMap = this.getTargetMap(accumulator, resourceType);
+			for (const [path, value] of sourceMap) {
+				this.assertConfinedResourcePath(path, packageRoot);
+				this.addResource(targetMap, path, value.metadata, value.enabled);
+			}
+		}
 	}
 
 	private collectPackageResources(
@@ -2120,7 +2407,7 @@ export class DefaultPackageManager implements PackageManager {
 			return true;
 		}
 
-		const manifest = this.readPiManifest(packageRoot);
+		const manifest = readPiManifest(join(packageRoot, "package.json"));
 		if (manifest) {
 			for (const resourceType of RESOURCE_TYPES) {
 				const entries = manifest[resourceType as keyof PiManifest];
@@ -2156,7 +2443,7 @@ export class DefaultPackageManager implements PackageManager {
 		target: Map<string, { metadata: PathMetadata; enabled: boolean }>,
 		metadata: PathMetadata,
 	): void {
-		const manifest = this.readPiManifest(packageRoot);
+		const manifest = readPiManifest(join(packageRoot, "package.json"));
 		const entries = manifest?.[resourceType as keyof PiManifest];
 		if (entries) {
 			this.addManifestEntries(entries, packageRoot, resourceType, target, metadata);
@@ -2207,7 +2494,7 @@ export class DefaultPackageManager implements PackageManager {
 		packageRoot: string,
 		resourceType: ResourceType,
 	): { allFiles: string[]; enabledByManifest: Set<string> } {
-		const manifest = this.readPiManifest(packageRoot);
+		const manifest = readPiManifest(join(packageRoot, "package.json"));
 		const entries = manifest?.[resourceType as keyof PiManifest];
 		if (entries && entries.length > 0) {
 			const allFiles = this.collectFilesFromManifestEntries(entries, packageRoot, resourceType);
@@ -2223,21 +2510,6 @@ export class DefaultPackageManager implements PackageManager {
 		}
 		const allFiles = collectResourceFiles(conventionDir, resourceType);
 		return { allFiles, enabledByManifest: new Set(allFiles) };
-	}
-
-	private readPiManifest(packageRoot: string): PiManifest | null {
-		const packageJsonPath = join(packageRoot, "package.json");
-		if (!existsSync(packageJsonPath)) {
-			return null;
-		}
-
-		try {
-			const content = readFileSync(packageJsonPath, "utf-8");
-			const pkg = JSON.parse(content) as { pi?: PiManifest };
-			return pkg.pi ?? null;
-		} catch {
-			return null;
-		}
 	}
 
 	private addManifestEntries(
@@ -2271,6 +2543,7 @@ export class DefaultPackageManager implements PackageManager {
 				cwd: root,
 				absolute: true,
 				dot: false,
+				follow: false,
 				nodir: false,
 			}).map((match) => resolve(match));
 		});

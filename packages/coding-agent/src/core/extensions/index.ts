@@ -22,6 +22,7 @@ export { ExtensionRunner } from "./runner.ts";
 export type {
 	AfterProviderResponseEvent,
 	AgentEndEvent,
+	AgentSettledEvent,
 	AgentStartEvent,
 	// Re-exports
 	AgentToolResult,
@@ -36,6 +37,7 @@ export type {
 	BashToolResultEvent,
 	BeforeAgentStartEvent,
 	BeforeAgentStartEventResult,
+	BeforeProviderHeadersEvent,
 	BeforeProviderRequestEvent,
 	BeforeProviderRequestEventResult,
 	BuildSystemPromptOptions,
@@ -90,6 +92,8 @@ export type {
 	LoadExtensionsResult,
 	LsToolCallEvent,
 	LsToolResultEvent,
+	MarkdownTransformContext,
+	MarkdownTransformer,
 	// Events - Message
 	MessageEndEvent,
 	// Message Rendering

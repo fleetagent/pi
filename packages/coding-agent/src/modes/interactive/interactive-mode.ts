@@ -27,6 +27,9 @@ import type {
 	OverlayHandle,
 	OverlayOptions,
 	SlashCommand,
+	Terminal,
+	TuiMainScreenRenderState,
+	TuiMode,
 } from "@fleetagent/pi-tui";
 import {
 	CombinedAutocompleteProvider,
@@ -35,16 +38,21 @@ import {
 	fuzzyFilter,
 	getCapabilities,
 	hyperlink,
+	isViewportTUI,
 	Loader,
 	type LoaderIndicatorOptions,
 	Markdown,
 	matchesKey,
 	ProcessTerminal,
+	ScrollView,
 	Spacer,
 	setKeybindings,
 	Text,
 	TruncatedText,
-	TUI,
+	type TUI,
+	TuiAltScreen,
+	TuiMainScreen,
+	VStack,
 	visibleWidth,
 } from "@fleetagent/pi-tui";
 import { spawn, spawnSync } from "child_process";
@@ -70,6 +78,7 @@ import type {
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
 	ExtensionWidgetOptions,
+	MarkdownTransformer,
 } from "../../core/extensions/index.ts";
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
@@ -92,15 +101,17 @@ import {
 import { DockerSandboxService, redactSecrets } from "../../core/sandbox/docker.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
 import { LocalSessionManager, type SessionContext } from "../../core/session-manager.ts";
+import type { FullscreenExitOutput } from "../../core/settings-manager.ts";
 import { BUILTIN_SLASH_COMMANDS, HIDDEN_BUILTIN_SLASH_COMMAND_NAMES } from "../../core/slash-commands.ts";
 import { getSourceBackendIcon, type SourceInfo } from "../../core/source-info.ts";
 import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
 import type { ToolBackendInfo } from "../../core/tools/index.ts";
 import type { TruncationResult } from "../../core/tools/truncate.ts";
 import { getChangelogPath, getNewEntries, parseChangelog } from "../../utils/changelog.ts";
-import { copyToClipboard } from "../../utils/clipboard.ts";
+import { copyToClipboard, readClipboardText } from "../../utils/clipboard.ts";
 import { extensionForImageMimeType, readClipboardImage } from "../../utils/clipboard-image.ts";
 import { parseGitUrl } from "../../utils/git.ts";
+import { openBrowser } from "../../utils/open-browser.ts";
 import { getCwdRelativePath } from "../../utils/paths.ts";
 import { getPiUserAgent } from "../../utils/pi-user-agent.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
@@ -121,6 +132,7 @@ import { ExtensionSelectorComponent } from "./components/extension-selector.ts";
 import { FooterComponent } from "./components/footer.ts";
 import { formatKeyText, keyDisplayText, keyHint, keyText, rawKeyHint } from "./components/keybinding-hints.ts";
 import { LoginDialogComponent } from "./components/login-dialog.ts";
+import { createMermaidMarkdownTransformer } from "./components/mermaid.ts";
 import { ModelSelectorComponent } from "./components/model-selector.ts";
 import { type AuthSelectorProvider, OAuthSelectorComponent } from "./components/oauth-selector.ts";
 import { ScopedModelsSelectorComponent } from "./components/scoped-models-selector.ts";
@@ -242,14 +254,75 @@ export interface InteractiveModeOptions {
 	initialMessages?: string[];
 	/** Force verbose startup (overrides quietStartup setting) */
 	verbose?: boolean;
+	/** Initial renderer choice. Defaults to the persisted mode and can be changed during the session. */
+	tuiMode?: TuiMode;
+}
+
+interface InteractiveTuiOptions {
+	tuiMode?: TuiMode;
+	showHardwareCursor: boolean;
+	logDirectory: string;
+	terminal?: Terminal;
+	onRightClickPaste?: () => void;
+}
+
+/** Composition root for selecting the interactive terminal renderer. */
+export function createInteractiveTui(options: InteractiveTuiOptions): TuiMainScreen | TuiAltScreen {
+	const terminal = options.terminal ?? new ProcessTerminal();
+	if (options.tuiMode === "fullscreen") {
+		return new TuiAltScreen(terminal, options.showHardwareCursor, options.logDirectory, {
+			openUrl: openBrowser,
+			onRightClickPaste: options.onRightClickPaste,
+		});
+	}
+	return new TuiMainScreen(terminal, options.showHardwareCursor, options.logDirectory);
+}
+
+/** Stable reference for components while InteractiveMode replaces the active renderer. */
+export function createInteractiveTuiReference(getTui: () => TUI): TUI {
+	return new Proxy({} as TUI, {
+		get: (_target, property) => {
+			const tui = getTui();
+			const value = Reflect.get(tui, property, tui);
+			if (typeof value !== "function") return value;
+			let methodTui = tui;
+			let method = value;
+			return (...args: unknown[]) => {
+				const currentTui = getTui();
+				if (currentTui !== methodTui) {
+					const currentMethod = Reflect.get(currentTui, property, currentTui);
+					if (typeof currentMethod !== "function") {
+						throw new TypeError(`TUI property ${String(property)} is not callable`);
+					}
+					methodTui = currentTui;
+					method = currentMethod;
+				}
+				return Reflect.apply(method, methodTui, args);
+			};
+		},
+		set: (_target, property, value) => {
+			const tui = getTui();
+			return Reflect.set(tui, property, value, tui);
+		},
+		has: (_target, property) => Reflect.has(getTui(), property),
+		getPrototypeOf: () => Reflect.getPrototypeOf(getTui()),
+	});
 }
 
 export class InteractiveMode {
 	private runtimeHost: PiAgentRuntimeHost;
 	private options: InteractiveModeOptions;
+	private readonly onRightClickPaste = (): void => {
+		void this.handleRightClickPaste();
+	};
+	private renderer: TuiMainScreen | TuiAltScreen;
 	private ui: TUI;
+	private mainScreenRenderState: TuiMainScreenRenderState | undefined;
 	private loadedResourcesContainer: Container;
 	private chatContainer: Container;
+	private documentContainer: Container;
+	private transcriptScrollView: ScrollView | undefined;
+	private fullscreenLayoutRoot: Component | undefined;
 	private pendingMessagesContainer: Container;
 	private statusContainer: Container;
 	private defaultEditor: CustomEditor;
@@ -260,11 +333,13 @@ export class InteractiveMode {
 	private fdPath: string | undefined;
 	private editorContainer: Container;
 	private footer: FooterComponent;
+	private footerContainer: Container;
 	private footerDataProvider: FooterDataProvider;
 	// Stored so the same manager can be injected into custom editors, selectors, and extension UI.
 	private keybindings: KeybindingsManager;
 	private version: string;
 	private isInitialized = false;
+	private transcriptRendered = false;
 	private onInputCallback?: (text: string) => void;
 	private pendingUserInputs: string[] = [];
 	private loadingAnimation: Loader | undefined = undefined;
@@ -300,7 +375,7 @@ export class InteractiveMode {
 	// Thinking block visibility state
 	private hideThinkingBlock = false;
 	private outputPad = 1;
-
+	private readonly mermaidMarkdownTransformer: MarkdownTransformer;
 	// Skill commands: command name -> skill file path
 	private skillCommands = new Map<string, string>();
 
@@ -320,6 +395,9 @@ export class InteractiveMode {
 	// Auto-compaction state
 	private autoCompactionLoader: Loader | undefined = undefined;
 	private autoCompactionEscapeHandler?: () => void;
+	private branchSummaryLoader: Loader | undefined;
+	private summarizationRetryLoader: Loader | undefined;
+	private summarizationRetryCountdown: CountdownTimer | undefined;
 
 	// Auto-retry state
 	private retryLoader: Loader | undefined = undefined;
@@ -336,8 +414,10 @@ export class InteractiveMode {
 	private extensionSelector: ExtensionSelectorComponent | undefined = undefined;
 	private extensionInput: ExtensionInputComponent | undefined = undefined;
 	private extensionEditor: ExtensionEditorComponent | undefined = undefined;
-	private extensionTerminalInputUnsubscribers = new Set<() => void>();
-
+	private extensionTerminalInputSubscriptions = new Set<{
+		handler: (data: string) => { consume?: boolean; data?: string } | undefined;
+		unsubscribe: () => void;
+	}>();
 	// Extension widgets (components rendered above/below the editor)
 	private extensionWidgetsAbove = new Map<string, Component & { dispose?(): void }>();
 	private extensionWidgetsBelow = new Map<string, Component & { dispose?(): void }>();
@@ -372,7 +452,12 @@ export class InteractiveMode {
 
 	constructor(runtimeHost: PiAgentRuntimeHost, options: InteractiveModeOptions = {}) {
 		this.runtimeHost = runtimeHost;
-		this.options = options;
+		const tuiMode = options.tuiMode ?? this.settingsManager.getTuiMode();
+		this.options = { ...options, tuiMode };
+		this.mermaidMarkdownTransformer = createMermaidMarkdownTransformer({
+			getMode: () => this.settingsManager.getMermaidRenderingMode(),
+			theme,
+		});
 		this.runtimeHost.setBeforeSessionInvalidate(() => {
 			this.resetExtensionUI();
 		});
@@ -380,11 +465,21 @@ export class InteractiveMode {
 			await this.rebindCurrentSession();
 		});
 		this.version = VERSION;
-		this.ui = new TUI(new ProcessTerminal(), this.settingsManager.getShowHardwareCursor());
+		this.renderer = createInteractiveTui({
+			tuiMode,
+			showHardwareCursor: this.settingsManager.getShowHardwareCursor(),
+			logDirectory: getAgentDir(),
+			onRightClickPaste: this.onRightClickPaste,
+		});
+		this.ui = createInteractiveTuiReference(() => this.renderer);
 		this.ui.setClearOnShrink(this.settingsManager.getClearOnShrink());
 		this.headerContainer = new Container();
 		this.loadedResourcesContainer = new Container();
 		this.chatContainer = new Container();
+		this.documentContainer = new Container();
+		this.documentContainer.addChild(this.headerContainer);
+		this.documentContainer.addChild(this.loadedResourcesContainer);
+		this.documentContainer.addChild(this.chatContainer);
 		this.pendingMessagesContainer = new Container();
 		this.statusContainer = new Container();
 		this.widgetContainerAbove = new Container();
@@ -403,6 +498,8 @@ export class InteractiveMode {
 		this.footerDataProvider = new FooterDataProvider(this.activeSession.getCwd());
 		this.footer = new FooterComponent(this.session, this.footerDataProvider);
 		this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);
+		this.footerContainer = new Container();
+		this.footerContainer.addChild(this.footer);
 
 		// Load hide thinking block setting
 		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
@@ -595,44 +692,10 @@ export class InteractiveMode {
 		this.chatContainer.addChild(new DynamicBorder());
 	}
 
-	async init(): Promise<void> {
-		if (this.isInitialized) return;
-
-		this.registerSignalHandlers();
-
-		// Load changelog (only show new entries, skip for resumed sessions)
-		this.changelogMarkdown = this.getChangelogForDisplay();
-
-		// Ensure fd and rg are available (downloads if missing, adds to PATH via getBinDir)
-		// Both are needed: fd for autocomplete, rg for grep tool and bash commands
-		const [fdPath] = await Promise.all([ensureTool("fd"), ensureTool("rg")]);
-		this.fdPath = fdPath;
-
-		if (this.session.scopedModels.length > 0 && (this.options.verbose || !this.settingsManager.getQuietStartup())) {
-			const modelList = this.session.scopedModels
-				.map((sm) => {
-					const thinkingStr = sm.thinkingLevel ? `:${sm.thinkingLevel}` : "";
-					return `${sm.model.id}${thinkingStr}`;
-				})
-				.join(", ");
-			const cycleKeys = this.keybindings.getKeys("app.model.cycleForward");
-			const cycleHint =
-				cycleKeys.length > 0
-					? theme.fg("muted", ` (${formatKeyText(cycleKeys.join("/"), { capitalize: true })} to cycle)`)
-					: "";
-			console.log(theme.fg("dim", `Model scope: ${modelList}${cycleHint}`));
-		}
-
-		// Add header container as first child
-		this.ui.addChild(this.headerContainer);
-
-		// Add header with keybindings from config (unless silenced)
+	private initializeBuiltInHeader(): void {
 		if (this.options.verbose || !this.settingsManager.getQuietStartup()) {
 			const logo = theme.bold(theme.fg("accent", APP_NAME)) + theme.fg("dim", ` v${this.version}`);
-
-			// Build startup instructions using keybinding hint helpers
 			const hint = (keybinding: AppKeybinding, description: string) => keyHint(keybinding, description);
-
 			const expandedInstructions = [
 				hint("app.interrupt", "to interrupt"),
 				hint("app.clear", "to clear"),
@@ -667,7 +730,7 @@ export class InteractiveMode {
 			);
 			const onboarding = theme.fg(
 				"dim",
-				`Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.`,
+				"Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.",
 			);
 			this.builtInHeader = new ExpandableText(
 				() => `${logo}\n${compactInstructions}\n${compactOnboarding}\n\n${onboarding}`,
@@ -676,26 +739,148 @@ export class InteractiveMode {
 				1,
 				0,
 			);
-
-			// Setup UI layout
 			this.headerContainer.addChild(new Spacer(1));
 			this.headerContainer.addChild(this.builtInHeader);
 			this.headerContainer.addChild(new Spacer(1));
 		} else {
-			// Minimal header when silenced
 			this.builtInHeader = new Text("", 0, 0);
 			this.headerContainer.addChild(this.builtInHeader);
 		}
+	}
 
-		this.ui.addChild(this.loadedResourcesContainer);
-		this.ui.addChild(this.chatContainer);
-		this.ui.addChild(this.pendingMessagesContainer);
-		this.ui.addChild(this.statusContainer);
-		this.renderWidgets(); // Initialize with default spacer
-		this.ui.addChild(this.widgetContainerAbove);
-		this.ui.addChild(this.editorContainer);
-		this.ui.addChild(this.widgetContainerBelow);
-		this.ui.addChild(this.footer);
+	private mountInteractiveTui(tui: TuiMainScreen | TuiAltScreen, components: readonly Component[]): void {
+		for (const component of components) tui.addChild(component);
+		if (isViewportTUI(tui)) {
+			if (!this.fullscreenLayoutRoot) throw new Error("Fullscreen layout is not initialized");
+			tui.setLayoutRoot(this.fullscreenLayoutRoot);
+		}
+	}
+
+	private mountRootComponents(): void {
+		// Build one stable component tree. Main-screen mode renders the flat child list;
+		// fullscreen mode constrains the same instances into a transcript and fixed dock.
+		this.renderWidgets();
+		this.transcriptScrollView = new ScrollView(this.documentContainer, {
+			follow: "end",
+			primary: true,
+			overscroll: "chain",
+			scrollbar: this.settingsManager.getFullscreenScrollbar(),
+			scrollbarStyle: (text) => theme.bg("selectedBg", text),
+		});
+		const dock = new VStack([
+			{ component: this.pendingMessagesContainer, shrink: 1, minSize: 0 },
+			{ component: this.statusContainer, shrink: 1, minSize: 0 },
+			{ component: this.widgetContainerAbove, shrink: 1, minSize: 0 },
+			{ component: this.editorContainer, shrink: 1, minSize: 3 },
+			{ component: this.widgetContainerBelow, shrink: 1, minSize: 0 },
+			{ component: this.footerContainer, shrink: 1, minSize: 1 },
+		]);
+		this.fullscreenLayoutRoot = new VStack([
+			{ component: this.transcriptScrollView, basis: 0, grow: 1, shrink: 1, minSize: 1 },
+			{ component: dock, basis: "auto", grow: 0, shrink: 1, minSize: 1 },
+		]);
+
+		this.mountInteractiveTui(this.renderer, [
+			this.documentContainer,
+			this.pendingMessagesContainer,
+			this.statusContainer,
+			this.widgetContainerAbove,
+			this.editorContainer,
+			this.widgetContainerBelow,
+			this.footerContainer,
+		]);
+		this.ui.setFocus(this.editor);
+	}
+
+	private stopInteractiveTui(fullscreenExitOutput: FullscreenExitOutput): void {
+		if (this.renderer.mode === "fullscreen" && fullscreenExitOutput === "transcript") {
+			while (this.renderer.hasOverlayEntries) this.renderer.hideOverlay();
+			this.switchTuiMode("regular", false, false);
+			this.renderer.renderNow();
+		}
+		this.ui.stop({ preserveScreen: this.renderer.mode === "fullscreen" });
+	}
+
+	private switchTuiMode(mode: TuiMode, restoreProgress = true, startRenderer = true): boolean {
+		const previousUi = this.renderer;
+		if (mode === previousUi.mode) return true;
+		if (previousUi.hasOverlayEntries) return false;
+
+		const components = [...previousUi.children];
+		const focus = previousUi.getFocusedComponent();
+		const terminal = previousUi.terminal;
+		const showHardwareCursor = previousUi.getShowHardwareCursor();
+		const clearOnShrink = previousUi.getClearOnShrink();
+		const onDebug = previousUi.onDebug;
+		if (previousUi instanceof TuiMainScreen) this.mainScreenRenderState = previousUi.captureRenderState();
+
+		previousUi.stop({ preserveScreen: true });
+		previousUi.setFocus(null);
+		previousUi.clear();
+		if (isViewportTUI(previousUi)) previousUi.setLayoutRoot(undefined);
+
+		const nextUi = createInteractiveTui({
+			tuiMode: mode,
+			showHardwareCursor,
+			logDirectory: getAgentDir(),
+			terminal,
+			onRightClickPaste: this.onRightClickPaste,
+		});
+		nextUi.setClearOnShrink(clearOnShrink);
+		nextUi.onDebug = onDebug;
+		if (nextUi instanceof TuiMainScreen && this.mainScreenRenderState) {
+			nextUi.restoreRenderState(this.mainScreenRenderState);
+		}
+		this.renderer = nextUi;
+		this.options.tuiMode = mode;
+		this.mountInteractiveTui(nextUi, components);
+		nextUi.invalidate();
+		nextUi.setFocus(focus);
+		if (!startRenderer) return true;
+		nextUi.start();
+		this.rebindExtensionTerminalInputListeners();
+		if (
+			restoreProgress &&
+			this.settingsManager.getShowTerminalProgress() &&
+			(this.session.isStreaming || this.session.isCompacting)
+		) {
+			terminal.setProgress(true);
+		}
+		return true;
+	}
+
+	async init(): Promise<void> {
+		if (this.isInitialized) return;
+
+		this.registerSignalHandlers();
+
+		// Load changelog (only show new entries, skip for resumed sessions)
+		this.changelogMarkdown = this.getChangelogForDisplay();
+
+		// Ensure fd and rg are available (downloads if missing, adds to PATH via getBinDir)
+		// Both are needed: fd for autocomplete, rg for grep tool and bash commands
+		const [fdPath] = await Promise.all([ensureTool("fd"), ensureTool("rg")]);
+		this.fdPath = fdPath;
+
+		if (this.session.scopedModels.length > 0 && (this.options.verbose || !this.settingsManager.getQuietStartup())) {
+			const modelList = this.session.scopedModels
+				.map((sm) => {
+					const thinkingStr = sm.thinkingLevel ? `:${sm.thinkingLevel}` : "";
+					return `${sm.model.id}${thinkingStr}`;
+				})
+				.join(", ");
+			const cycleKeys = this.keybindings.getKeys("app.model.cycleForward");
+			const cycleHint =
+				cycleKeys.length > 0
+					? theme.fg("muted", ` (${formatKeyText(cycleKeys.join("/"), { capitalize: true })} to cycle)`)
+					: "";
+			console.log(theme.fg("dim", `Model scope: ${modelList}${cycleHint}`));
+		}
+
+		this.initializeBuiltInHeader();
+
+		// Mount the existing flat document in the same order for both renderers.
+		this.mountRootComponents();
 		this.ui.setFocus(this.editor);
 
 		this.setupKeyHandlers();
@@ -1573,7 +1758,7 @@ export class InteractiveMode {
 				this.restoreQueuedMessagesToEditor({ abort: true });
 			},
 			commandContextActions: {
-				waitForIdle: () => this.session.agent.waitForIdle(),
+				waitForIdle: () => this.session.waitForIdle(),
 				newSession: async (options) => {
 					if (this.loadingAnimation) {
 						this.loadingAnimation.stop();
@@ -1633,7 +1818,7 @@ export class InteractiveMode {
 			},
 			shutdownHandler: () => {
 				this.shutdownRequested = true;
-				if (!this.session.isStreaming) {
+				if (this.session.isIdle) {
 					void this.shutdown();
 				}
 			},
@@ -1653,6 +1838,7 @@ export class InteractiveMode {
 	}
 
 	private applyRuntimeSettings(): void {
+		this.transcriptScrollView?.setScrollbar(this.settingsManager.getFullscreenScrollbar());
 		this.footer.setSession(this.session);
 		this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);
 		this.footerDataProvider.setCwd(this.activeSession.getCwd());
@@ -1675,6 +1861,9 @@ export class InteractiveMode {
 		this.unsubscribe = undefined;
 		this.applyRuntimeSettings();
 		await this.bindCurrentSessionExtensions();
+		if (this.transcriptRendered) {
+			this.retireAndRenderCurrentTranscript();
+		}
 		this.subscribeToAgent();
 		await this.updateAvailableProviderCount();
 		this.updateEditorBorderColor();
@@ -1685,12 +1874,12 @@ export class InteractiveMode {
 		const message = error instanceof Error ? error.message : String(error);
 		this.showError(`${prefix}: ${message}`);
 		stopThemeWatcher();
-		this.stop();
+		this.stop("transcript");
 		process.exit(1);
 	}
 
-	private renderCurrentSessionState(): void {
-		(this.loadedResourcesContainer ?? this.chatContainer).clear();
+	private retireAndRenderCurrentTranscript(): void {
+		this.transcriptScrollView?.scrollToEnd();
 		this.chatContainer.clear();
 		this.pendingMessagesContainer.clear();
 		this.compactionQueuedMessages = [];
@@ -1698,6 +1887,11 @@ export class InteractiveMode {
 		this.streamingMessage = undefined;
 		this.pendingTools.clear();
 		this.renderInitialMessages();
+	}
+
+	private renderCurrentSessionState(): void {
+		(this.loadedResourcesContainer ?? this.chatContainer).clear();
+		this.retireAndRenderCurrentTranscript();
 		this.showRuntimeDiagnostics();
 	}
 
@@ -1707,6 +1901,10 @@ export class InteractiveMode {
 			else if (diagnostic.type === "warning") this.showWarning(diagnostic.message);
 			else this.showStatus(diagnostic.message);
 		}
+	}
+
+	private getMarkdownTransformers(): MarkdownTransformer[] {
+		return [this.mermaidMarkdownTransformer, ...this.session.extensionRunner.getMarkdownTransformers()];
 	}
 
 	/**
@@ -1739,7 +1937,7 @@ export class InteractiveMode {
 			session: this.activeSession,
 			modelRegistry: this.session.modelRegistry,
 			model: this.session.model,
-			isIdle: () => !this.session.isStreaming,
+			isIdle: () => this.session.isIdle,
 			signal: this.session.agent.signal,
 			abort: () => {
 				this.restoreQueuedMessagesToEditor({ abort: true });
@@ -1996,21 +2194,15 @@ export class InteractiveMode {
 			this.customFooter.dispose();
 		}
 
-		// Remove current footer from UI
-		if (this.customFooter) {
-			this.ui.removeChild(this.customFooter);
-		} else {
-			this.ui.removeChild(this.footer);
-		}
-
+		this.footerContainer.clear();
 		if (factory) {
 			// Create and add custom footer, passing the data provider
 			this.customFooter = factory(this.ui, theme, this.footerDataProvider);
-			this.ui.addChild(this.customFooter);
+			this.footerContainer.addChild(this.customFooter);
 		} else {
 			// Restore built-in footer
 			this.customFooter = undefined;
-			this.ui.addChild(this.footer);
+			this.footerContainer.addChild(this.footer);
 		}
 
 		this.ui.requestRender();
@@ -2063,19 +2255,24 @@ export class InteractiveMode {
 	private addExtensionTerminalInputListener(
 		handler: (data: string) => { consume?: boolean; data?: string } | undefined,
 	): () => void {
-		const unsubscribe = this.ui.addInputListener(handler);
-		this.extensionTerminalInputUnsubscribers.add(unsubscribe);
+		const subscription = { handler, unsubscribe: this.ui.addInputListener(handler) };
+		this.extensionTerminalInputSubscriptions.add(subscription);
 		return () => {
-			unsubscribe();
-			this.extensionTerminalInputUnsubscribers.delete(unsubscribe);
+			subscription.unsubscribe();
+			this.extensionTerminalInputSubscriptions.delete(subscription);
 		};
 	}
 
-	private clearExtensionTerminalInputListeners(): void {
-		for (const unsubscribe of this.extensionTerminalInputUnsubscribers) {
-			unsubscribe();
+	private rebindExtensionTerminalInputListeners(): void {
+		for (const subscription of this.extensionTerminalInputSubscriptions) {
+			subscription.unsubscribe();
+			subscription.unsubscribe = this.ui.addInputListener(subscription.handler);
 		}
-		this.extensionTerminalInputUnsubscribers.clear();
+	}
+
+	private clearExtensionTerminalInputListeners(): void {
+		for (const subscription of this.extensionTerminalInputSubscriptions) subscription.unsubscribe();
+		this.extensionTerminalInputSubscriptions.clear();
 	}
 
 	/**
@@ -2121,6 +2318,7 @@ export class InteractiveMode {
 			setTheme: (themeOrName) => {
 				if (themeOrName instanceof Theme) {
 					setThemeInstance(themeOrName);
+					this.ui.invalidate();
 					this.ui.requestRender();
 					return { success: true };
 				}
@@ -2129,6 +2327,7 @@ export class InteractiveMode {
 					if (this.settingsManager.getTheme() !== themeOrName) {
 						this.settingsManager.setTheme(themeOrName);
 					}
+					this.ui.invalidate();
 					this.ui.requestRender();
 				}
 				return result;
@@ -2540,6 +2739,7 @@ export class InteractiveMode {
 		this.defaultEditor.onAction("app.tools.expand", () => this.toggleToolOutputExpansion());
 		this.defaultEditor.onAction("app.thinking.toggle", () => this.toggleThinkingBlockVisibility());
 		this.defaultEditor.onAction("app.editor.external", () => this.openExternalEditor());
+		this.defaultEditor.onAction("app.message.copy", () => void this.handleCopyCommand({ flashConfirmation: true }));
 		this.defaultEditor.onAction("app.message.followUp", () => this.handleFollowUp());
 		this.defaultEditor.onAction("app.message.dequeue", () => this.handleDequeue());
 		this.defaultEditor.onAction("app.session.new", () => this.handleClearCommand());
@@ -2555,28 +2755,46 @@ export class InteractiveMode {
 			}
 		};
 
-		// Handle clipboard image paste (triggered on Ctrl+V)
+		// Handle clipboard paste (triggered on Ctrl+V). Images are attached by path;
+		// otherwise, paste plain text from the system clipboard.
 		this.defaultEditor.onPasteImage = () => {
-			this.handleClipboardImagePaste();
+			void this.handleClipboardPaste();
 		};
 	}
 
-	private async handleClipboardImagePaste(): Promise<void> {
+	private async handleClipboardPaste(): Promise<void> {
 		try {
 			const image = await readClipboardImage();
-			if (!image) {
+			if (image) {
+				const tmpDir = os.tmpdir();
+				const ext = extensionForImageMimeType(image.mimeType) ?? "png";
+				const fileName = `pi-clipboard-${crypto.randomUUID()}.${ext}`;
+				const filePath = path.join(tmpDir, fileName);
+				fs.writeFileSync(filePath, Buffer.from(image.bytes));
+
+				this.editor.insertTextAtCursor?.(filePath);
+				this.ui.requestRender();
 				return;
 			}
 
-			// Write to temp file
-			const tmpDir = os.tmpdir();
-			const ext = extensionForImageMimeType(image.mimeType) ?? "png";
-			const fileName = `pi-clipboard-${crypto.randomUUID()}.${ext}`;
-			const filePath = path.join(tmpDir, fileName);
-			fs.writeFileSync(filePath, Buffer.from(image.bytes));
+			const text = await readClipboardText();
+			if (text) {
+				this.editor.insertTextAtCursor?.(text);
+				this.ui.requestRender();
+			}
+		} catch {
+			// Silently ignore clipboard errors (may not have permission, etc.)
+		}
+	}
 
-			// Insert file path directly
-			this.editor.insertTextAtCursor?.(filePath);
+	private async handleRightClickPaste(): Promise<void> {
+		const target = this.renderer.getFocusedComponent();
+		const handleInput = target?.handleInput;
+		if (!target || !handleInput) return;
+		try {
+			const text = await readClipboardText();
+			if (!text || this.renderer.getFocusedComponent() !== target) return;
+			handleInput.call(target, `\x1b[200~${text}\x1b[201~`);
 			this.ui.requestRender();
 		} catch {
 			// Silently ignore clipboard errors (may not have permission, etc.)
@@ -2638,11 +2856,6 @@ export class InteractiveMode {
 			if (text === "/sandbox" || /^\/sandbox\s/.test(text)) {
 				this.editor.setText("");
 				await this.handleSandboxCommand(text);
-				return;
-			}
-			if (text === "/remote" || text.startsWith("/remote ")) {
-				this.editor.setText("");
-				await this.handleRemoteCommand(text);
 				return;
 			}
 
@@ -2839,10 +3052,11 @@ export class InteractiveMode {
 						this.getMarkdownThemeWithSettings(),
 						this.hiddenThinkingLabel,
 						this.outputPad,
+						this.getMarkdownTransformers(),
 					);
 					this.streamingMessage = event.message;
 					this.chatContainer.addChild(this.streamingComponent);
-					this.streamingComponent.updateContent(this.streamingMessage);
+					this.streamingComponent.updateContent(this.streamingMessage, true);
 					this.ui.requestRender();
 				}
 				break;
@@ -2850,8 +3064,7 @@ export class InteractiveMode {
 			case "message_update":
 				if (this.streamingComponent && event.message.role === "assistant") {
 					this.streamingMessage = event.message;
-					this.streamingComponent.updateContent(this.streamingMessage);
-
+					this.streamingComponent.updateContent(this.streamingMessage, true);
 					for (const content of this.streamingMessage.content) {
 						if (content.type === "toolCall") {
 							if (!this.pendingTools.has(content.id)) {
@@ -2893,10 +3106,9 @@ export class InteractiveMode {
 							retryAttempt > 0
 								? `Aborted after ${retryAttempt} retry attempt${retryAttempt > 1 ? "s" : ""}`
 								: "Operation aborted";
-						this.streamingMessage.errorMessage = errorMessage;
+						this.streamingMessage = { ...this.streamingMessage, errorMessage };
 					}
-					this.streamingComponent.updateContent(this.streamingMessage);
-
+					this.streamingComponent.updateContent(this.streamingMessage, false);
 					if (this.streamingMessage.stopReason === "aborted" || this.streamingMessage.stopReason === "error") {
 						if (!errorMessage) {
 							errorMessage = this.streamingMessage.errorMessage || "Error";
@@ -2980,8 +3192,11 @@ export class InteractiveMode {
 				}
 				this.pendingTools.clear();
 
-				await this.checkShutdownRequested();
+				this.ui.requestRender();
+				break;
 
+			case "agent_settled":
+				await this.checkShutdownRequested();
 				this.ui.requestRender();
 				break;
 
@@ -3112,6 +3327,79 @@ export class InteractiveMode {
 				this.ui.requestRender();
 				break;
 			}
+
+			case "summarization_retry_scheduled": {
+				this.showError(event.errorMessage);
+				this.autoCompactionLoader?.stop();
+				this.autoCompactionLoader = undefined;
+				this.branchSummaryLoader?.stop();
+				this.branchSummaryLoader = undefined;
+				this.summarizationRetryCountdown?.dispose();
+				this.summarizationRetryLoader?.stop();
+				this.statusContainer.clear();
+				const retryMessage = (seconds: number) =>
+					`Retrying summary (${event.attempt}/${event.maxAttempts}) in ${seconds}s... (${keyText("app.interrupt")} to cancel)`;
+				this.summarizationRetryLoader = new Loader(
+					this.ui,
+					(spinner) => theme.fg("warning", spinner),
+					(text) => theme.fg("muted", text),
+					retryMessage(Math.ceil(event.delayMs / 1000)),
+				);
+				this.summarizationRetryCountdown = new CountdownTimer(
+					event.delayMs,
+					this.ui,
+					(seconds) => this.summarizationRetryLoader?.setMessage(retryMessage(seconds)),
+					() => {
+						this.summarizationRetryCountdown = undefined;
+					},
+				);
+				this.statusContainer.addChild(this.summarizationRetryLoader);
+				this.ui.requestRender();
+				break;
+			}
+
+			case "summarization_retry_attempt_start": {
+				this.summarizationRetryCountdown?.dispose();
+				this.summarizationRetryCountdown = undefined;
+				this.summarizationRetryLoader?.stop();
+				this.summarizationRetryLoader = undefined;
+				this.statusContainer.clear();
+				const cancelHint = `(${keyText("app.interrupt")} to cancel)`;
+				if (event.source === "branchSummary") {
+					this.branchSummaryLoader = new Loader(
+						this.ui,
+						(spinner) => theme.fg("accent", spinner),
+						(text) => theme.fg("muted", text),
+						`Summarizing branch... ${cancelHint}`,
+					);
+					this.statusContainer.addChild(this.branchSummaryLoader);
+				} else {
+					const label =
+						event.reason === "manual"
+							? `Compacting context... ${cancelHint}`
+							: `${event.reason === "overflow" ? "Context overflow detected, " : ""}Auto-compacting... ${cancelHint}`;
+					this.autoCompactionLoader = new Loader(
+						this.ui,
+						(spinner) => theme.fg("accent", spinner),
+						(text) => theme.fg("muted", text),
+						label,
+					);
+					this.statusContainer.addChild(this.autoCompactionLoader);
+				}
+				this.ui.requestRender();
+				break;
+			}
+
+			case "summarization_retry_finished":
+				this.summarizationRetryCountdown?.dispose();
+				this.summarizationRetryCountdown = undefined;
+				if (this.summarizationRetryLoader) {
+					this.summarizationRetryLoader.stop();
+					this.summarizationRetryLoader = undefined;
+					this.statusContainer.clear();
+				}
+				this.ui.requestRender();
+				break;
 		}
 	}
 
@@ -3167,7 +3455,7 @@ export class InteractiveMode {
 				this.chatContainer.addChild(component);
 				break;
 			}
-			case "custom": {
+			case "custom":
 				if (message.display) {
 					const renderer = this.session.extensionRunner.getMessageRenderer(message.customType);
 					const component = new CustomMessageComponent(message, renderer, this.getMarkdownThemeWithSettings());
@@ -3175,7 +3463,6 @@ export class InteractiveMode {
 					this.chatContainer.addChild(component);
 				}
 				break;
-			}
 			case "compactionSummary": {
 				this.chatContainer.addChild(new Spacer(1));
 				const component = new CompactionSummaryMessageComponent(message, this.getMarkdownThemeWithSettings());
@@ -3211,6 +3498,7 @@ export class InteractiveMode {
 								skillBlock.userMessage,
 								this.getMarkdownThemeWithSettings(),
 								this.outputPad,
+								this.getMarkdownTransformers(),
 							);
 							this.chatContainer.addChild(userComponent);
 						}
@@ -3219,6 +3507,7 @@ export class InteractiveMode {
 							textContent,
 							this.getMarkdownThemeWithSettings(),
 							this.outputPad,
+							this.getMarkdownTransformers(),
 						);
 						this.chatContainer.addChild(userComponent);
 					}
@@ -3235,14 +3524,14 @@ export class InteractiveMode {
 					this.getMarkdownThemeWithSettings(),
 					this.hiddenThinkingLabel,
 					this.outputPad,
+					this.getMarkdownTransformers(),
 				);
 				this.chatContainer.addChild(assistantComponent);
 				break;
 			}
-			case "toolResult": {
+			case "toolResult":
 				// Tool results are rendered inline with tool calls, handled separately
 				break;
-			}
 			default: {
 				const _exhaustive: never = message;
 			}
@@ -3326,6 +3615,7 @@ export class InteractiveMode {
 	}
 
 	renderInitialMessages(): void {
+		this.transcriptRendered = true;
 		// Get aligned messages and entries from session context
 		const context = this.activeSession.buildSessionContext();
 		this.renderSessionContext(context, {
@@ -3403,7 +3693,7 @@ export class InteractiveMode {
 			// the render loop is already idle, so this cannot hot-spin (see #4144).
 			await this.runtimeHost.dispose();
 			await this.ui.terminal.drainInput(1000);
-			this.stop();
+			this.stop(this.settingsManager.getFullscreenExitOutput());
 			process.exit(0);
 		}
 
@@ -3414,7 +3704,7 @@ export class InteractiveMode {
 		// This prevents escape sequences from leaking to the parent shell over slow SSH.
 		await this.ui.terminal.drainInput(1000);
 
-		this.stop();
+		this.stop(this.settingsManager.getFullscreenExitOutput());
 		await this.runtimeHost.dispose();
 		process.exit(0);
 	}
@@ -3451,7 +3741,7 @@ export class InteractiveMode {
 			killTrackedDetachedChildren();
 		} catch {}
 		try {
-			this.ui.stop();
+			this.stopInteractiveTui("transcript");
 		} catch {}
 		console.error("pi exiting due to uncaughtException:");
 		console.error(error);
@@ -3539,7 +3829,7 @@ export class InteractiveMode {
 
 		try {
 			// Stop the TUI (restore terminal to normal mode)
-			this.ui.stop();
+			this.ui.stop({ preserveScreen: true });
 
 			// Send SIGTSTP to process group (pid=0 means all processes in group)
 			process.kill(0, "SIGTSTP");
@@ -3687,7 +3977,7 @@ export class InteractiveMode {
 			fs.writeFileSync(tmpFile, currentText, "utf-8");
 
 			// Stop TUI to release terminal
-			this.ui.stop();
+			this.ui.stop({ preserveScreen: true });
 
 			// Split by space to support editor arguments (e.g., "code --wait")
 			const [editor, ...editorArgs] = editorCmd.split(" ");
@@ -4001,7 +4291,8 @@ export class InteractiveMode {
 
 	private showSettingsSelector(): void {
 		this.showSelector((done) => {
-			const selector = new SettingsSelectorComponent(
+			let selector: SettingsSelectorComponent | undefined;
+			selector = new SettingsSelectorComponent(
 				{
 					autoCompact: this.session.autoCompactionEnabled,
 					showImages: this.settingsManager.getShowImages(),
@@ -4017,6 +4308,7 @@ export class InteractiveMode {
 					currentTheme: this.settingsManager.getTheme() || "dark",
 					availableThemes: getAvailableThemes(),
 					hideThinkingBlock: this.hideThinkingBlock,
+					mermaidRenderingMode: this.settingsManager.getMermaidRenderingMode(),
 					collapseChangelog: this.settingsManager.getCollapseChangelog(),
 					enableInstallTelemetry: this.settingsManager.getEnableInstallTelemetry(),
 					doubleEscapeAction: this.settingsManager.getDoubleEscapeAction(),
@@ -4028,6 +4320,9 @@ export class InteractiveMode {
 					quietStartup: this.settingsManager.getQuietStartup(),
 					clearOnShrink: this.settingsManager.getClearOnShrink(),
 					showTerminalProgress: this.settingsManager.getShowTerminalProgress(),
+					tuiMode: this.ui.mode,
+					fullscreenExitOutput: this.settingsManager.getFullscreenExitOutput(),
+					fullscreenScrollbar: this.settingsManager.getFullscreenScrollbar(),
 					httpIdleTimeoutMs: this.settingsManager.getHttpIdleTimeoutMs(),
 					warnings: this.settingsManager.getWarnings(),
 				},
@@ -4103,6 +4398,11 @@ export class InteractiveMode {
 						this.chatContainer.clear();
 						this.rebuildChatFromMessages();
 					},
+					onMermaidRenderingModeChange: (mode) => {
+						this.settingsManager.setMermaidRenderingMode(mode);
+						this.chatContainer.invalidate();
+						this.ui.requestRender();
+					},
 					onCollapseChangelogChange: (collapsed) => {
 						this.settingsManager.setCollapseChangelog(collapsed);
 					},
@@ -4159,6 +4459,22 @@ export class InteractiveMode {
 					},
 					onShowTerminalProgressChange: (enabled) => {
 						this.settingsManager.setShowTerminalProgress(enabled);
+					},
+					onTuiModeChange: (mode) => {
+						if (!this.switchTuiMode(mode)) {
+							selector?.getSettingsList().updateValue("tui-mode", this.ui.mode);
+							this.showStatus("Close active overlays before changing TUI mode");
+							return;
+						}
+						this.settingsManager.setTuiMode(mode);
+						this.showStatus(`TUI mode: ${mode}`);
+					},
+					onFullscreenExitOutputChange: (output) => {
+						this.settingsManager.setFullscreenExitOutput(output);
+					},
+					onFullscreenScrollbarChange: (mode) => {
+						this.settingsManager.setFullscreenScrollbar(mode);
+						this.transcriptScrollView?.setScrollbar(mode);
 					},
 					onHttpIdleTimeoutMsChange: (timeoutMs) => {
 						this.settingsManager.setHttpIdleTimeoutMs(timeoutMs);
@@ -4378,20 +4694,18 @@ export class InteractiveMode {
 			const selector = new UserMessageSelectorComponent(
 				userMessages.map((m) => ({ id: m.entryId, text: m.text })),
 				async (entryId) => {
+					done();
 					try {
 						const result = await this.runtimeHost.fork(entryId);
 						if (result.cancelled) {
-							done();
 							this.ui.requestRender();
 							return;
 						}
 
 						this.renderCurrentSessionState();
 						this.editor.setText(result.selectedText ?? "");
-						done();
 						this.showStatus("Forked to new session");
 					} catch (error: unknown) {
-						done();
 						this.showError(error instanceof Error ? error.message : String(error));
 					}
 				},
@@ -4488,21 +4802,19 @@ export class InteractiveMode {
 					}
 
 					// Set up escape handler and loader if summarizing
-					let summaryLoader: Loader | undefined;
 					const originalOnEscape = this.defaultEditor.onEscape;
-
 					if (wantsSummary) {
 						this.defaultEditor.onEscape = () => {
 							this.session.abortBranchSummary();
 						};
 						this.chatContainer.addChild(new Spacer(1));
-						summaryLoader = new Loader(
+						this.branchSummaryLoader = new Loader(
 							this.ui,
 							(spinner) => theme.fg("accent", spinner),
 							(text) => theme.fg("muted", text),
 							`Summarizing branch... (${keyText("app.interrupt")} to cancel)`,
 						);
-						this.statusContainer.addChild(summaryLoader);
+						this.statusContainer.addChild(this.branchSummaryLoader);
 						this.ui.requestRender();
 					}
 
@@ -4534,8 +4846,9 @@ export class InteractiveMode {
 					} catch (error) {
 						this.showError(error instanceof Error ? error.message : String(error));
 					} finally {
-						if (summaryLoader) {
-							summaryLoader.stop();
+						if (this.branchSummaryLoader) {
+							this.branchSummaryLoader.stop();
+							this.branchSummaryLoader = undefined;
 							this.statusContainer.clear();
 						}
 						this.defaultEditor.onEscape = originalOnEscape;
@@ -4552,6 +4865,18 @@ export class InteractiveMode {
 				initialSelectedId,
 				initialFilterMode,
 			);
+			selector.onCopy = async (text) => {
+				if (!text) {
+					this.showError("Selected entry has no text to copy");
+					return;
+				}
+				try {
+					await copyToClipboard(text);
+					this.showStatus("Copied selected message to clipboard");
+				} catch (error) {
+					this.showError(error instanceof Error ? error.message : String(error));
+				}
+			};
 			return { component: selector, focus: selector };
 		});
 	}
@@ -5316,7 +5641,7 @@ export class InteractiveMode {
 		}
 	}
 
-	private async handleCopyCommand(): Promise<void> {
+	private async handleCopyCommand(options: { flashConfirmation?: boolean } = {}): Promise<void> {
 		const text = this.session.getLastAssistantText();
 		if (!text) {
 			this.showError("No agent messages to copy yet.");
@@ -5325,7 +5650,11 @@ export class InteractiveMode {
 
 		try {
 			await copyToClipboard(text);
-			this.showStatus("Copied last agent message to clipboard");
+			if (options.flashConfirmation && this.ui instanceof TuiAltScreen) {
+				this.ui.flash("Copied!");
+			} else {
+				this.showStatus("Copied last agent message to clipboard");
+			}
 		} catch (error) {
 			this.showError(error instanceof Error ? error.message : String(error));
 		}
@@ -5373,6 +5702,63 @@ export class InteractiveMode {
 		const service = this.createDockerSandboxService();
 		const workspaceRoot = this.activeSession.getCwd();
 		try {
+			if (command.subcommand === "status") {
+				this.showStatus(this.formatToolBackendStatus(this.session.getToolBackendInfo()));
+				return;
+			}
+			if (command.subcommand === "clear") {
+				await this.session.clearRemoteSandbox();
+				this.activeSandboxBackendConnected = false;
+				this.refreshUiAfterBackendChange();
+				this.updateToolBackendStatus();
+				this.showStatus("Sandbox backend cleared");
+				return;
+			}
+			if (
+				(command.subcommand === "attach" || command.subcommand === "ssh" || command.subcommand === "start") &&
+				this.activeSandboxBackendConnected
+			) {
+				this.showWarning(
+					"A sandbox backend is already active. Run /sandbox stop before starting or attaching another.",
+				);
+				return;
+			}
+			if (command.subcommand === "ssh") {
+				const separatorIndex = command.target.indexOf(":");
+				const remote = separatorIndex === -1 ? command.target : command.target.slice(0, separatorIndex);
+				const cwd = command.cwd ?? (separatorIndex === -1 ? undefined : command.target.slice(separatorIndex + 1));
+				const info = await this.session.configureRemoteSandbox({
+					type: "ssh",
+					remote,
+					cwd,
+				});
+				this.activeSandboxContainerId = undefined;
+				this.activeSandboxBackendConnected = true;
+				this.refreshUiAfterBackendChange();
+				this.updateToolBackendStatus();
+				this.showStatus(this.formatToolBackendStatus(info));
+				return;
+			}
+			if (command.subcommand === "attach") {
+				const currentBackend = this.session.getToolBackendInfo();
+				const expectedCwd =
+					currentBackend.type === "remote" && !currentBackend.configured
+						? currentBackend.cwd
+						: service.resolveConfig().workspaceMountPath;
+				const info = await this.session.activateSandboxDaemon({
+					url: command.url,
+					token: process.env.PI_REMOTE_TOKEN ?? "",
+					expectedCwd,
+				});
+				this.activeSandboxContainerId = undefined;
+				this.activeSandboxBackendConnected = true;
+				this.refreshUiAfterBackendChange();
+				this.updateToolBackendStatus();
+				this.showStatus(
+					[`Sandbox attached: ${redactSecrets(command.url)}`, this.formatToolBackendStatus(info)].join("\n"),
+				);
+				return;
+			}
 			if (command.subcommand === "start") {
 				let sandboxLoader: Loader | undefined;
 				if (this.statusContainer && this.ui) {
@@ -5440,6 +5826,14 @@ export class InteractiveMode {
 				this.showStatus(formatSandboxList(await service.list({ workspaceRoot })));
 				return;
 			}
+			if (this.activeSandboxBackendConnected && !this.activeSandboxContainerId) {
+				await this.session.clearRemoteSandbox();
+				this.activeSandboxBackendConnected = false;
+				this.refreshUiAfterBackendChange();
+				this.updateToolBackendStatus();
+				this.showStatus("Sandbox detached");
+				return;
+			}
 			const result = await service.stop({
 				workspaceRoot,
 				target: command.target,
@@ -5466,61 +5860,6 @@ export class InteractiveMode {
 		} catch (error) {
 			this.showError(redactSecrets(error instanceof Error ? error.message : String(error)));
 		}
-	}
-
-	private async handleRemoteCommand(text: string): Promise<void> {
-		const args = text.replace(/^\/remote\s*/, "").trim();
-		if (!args || args === "status") {
-			this.showStatus(this.formatToolBackendStatus(this.session.getToolBackendInfo()));
-			return;
-		}
-		if (args === "clear") {
-			try {
-				await this.session.clearRemoteSandbox();
-				this.refreshUiAfterBackendChange();
-				this.updateToolBackendStatus();
-				this.showStatus("Remote backend cleared");
-			} catch (error) {
-				this.showError(error instanceof Error ? error.message : String(error));
-			}
-			return;
-		}
-
-		const [kind, targetArg, cwdArg] = args.split(/\s+/, 3);
-		if (kind !== "ssh" && kind !== "daemon") {
-			this.showWarning("Usage: /remote <ssh|daemon> <url> [path]");
-			return;
-		}
-		if (!targetArg) {
-			this.showWarning(
-				kind === "ssh" ? "Usage: /remote ssh <user@host[:/path]> [path]" : "Usage: /remote daemon <ws://url>",
-			);
-			return;
-		}
-
-		try {
-			const info =
-				kind === "ssh"
-					? await this.session.configureRemoteSandbox({
-							type: "ssh",
-							...this.parseSshRemoteTarget(targetArg, cwdArg),
-						})
-					: await this.session.configureRemoteSandbox({ type: "daemon", url: targetArg });
-			this.refreshUiAfterBackendChange();
-			this.updateToolBackendStatus();
-			this.showStatus(this.formatToolBackendStatus(info));
-		} catch (error) {
-			this.showError(
-				`Failed to configure remote backend: ${error instanceof Error ? error.message : String(error)}`,
-			);
-		}
-	}
-
-	private parseSshRemoteTarget(targetArg: string, cwdArg?: string): { remote: string; cwd?: string } {
-		const separatorIndex = targetArg.indexOf(":");
-		const remote = separatorIndex === -1 ? targetArg : targetArg.slice(0, separatorIndex);
-		const cwd = cwdArg ?? (separatorIndex === -1 ? undefined : targetArg.slice(separatorIndex + 1));
-		return { remote, cwd };
 	}
 
 	private handleSessionCommand(): void {
@@ -5634,6 +5973,7 @@ export class InteractiveMode {
 		const toggleThinking = this.getAppKeyDisplay("app.thinking.toggle");
 		const externalEditor = this.getAppKeyDisplay("app.editor.external");
 		const cycleModelBackward = this.getAppKeyDisplay("app.model.cycleBackward");
+		const copyMessage = this.getAppKeyDisplay("app.message.copy");
 		const followUp = this.getAppKeyDisplay("app.message.followUp");
 		const dequeue = this.getAppKeyDisplay("app.message.dequeue");
 		const pasteImage = this.getAppKeyDisplay("app.clipboard.pasteImage");
@@ -5677,9 +6017,10 @@ export class InteractiveMode {
 | \`${expandTools}\` | Toggle tool output expansion |
 | \`${toggleThinking}\` | Toggle thinking block visibility |
 | \`${externalEditor}\` | Edit message in external editor |
+| \`${copyMessage}\` | Copy last assistant message |
 | \`${followUp}\` | Queue follow-up message |
 | \`${dequeue}\` | Restore queued messages |
-| \`${pasteImage}\` | Paste image from clipboard |
+| \`${pasteImage}\` | Paste image or text from clipboard |
 | \`/\` | Slash commands |
 | \`!\` | Run bash command |
 | \`!!\` | Run bash command (excluded from context) |
@@ -5872,7 +6213,7 @@ export class InteractiveMode {
 		}
 	}
 
-	stop(): void {
+	stop(fullscreenExitOutput = this.settingsManager.getFullscreenExitOutput()): void {
 		this.unregisterSignalHandlers();
 		if (this.settingsManager.getShowTerminalProgress()) {
 			this.ui.terminal.setProgress(false);
@@ -5881,6 +6222,12 @@ export class InteractiveMode {
 			this.loadingAnimation.stop();
 			this.loadingAnimation = undefined;
 		}
+		this.summarizationRetryCountdown?.dispose();
+		this.summarizationRetryCountdown = undefined;
+		this.summarizationRetryLoader?.stop();
+		this.summarizationRetryLoader = undefined;
+		this.branchSummaryLoader?.stop();
+		this.branchSummaryLoader = undefined;
 		this.clearExtensionTerminalInputListeners();
 		this.footer.dispose();
 		this.footerDataProvider.dispose();
@@ -5888,7 +6235,7 @@ export class InteractiveMode {
 			this.unsubscribe();
 		}
 		if (this.isInitialized) {
-			this.ui.stop();
+			this.stopInteractiveTui(fullscreenExitOutput);
 			this.isInitialized = false;
 		}
 	}

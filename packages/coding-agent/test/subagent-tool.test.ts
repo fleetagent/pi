@@ -14,9 +14,12 @@ import { SettingsManager } from "../src/core/settings-manager.ts";
 import { createAllToolDefinitions } from "../src/core/tools/index.ts";
 import { LocalToolOperations } from "../src/core/tools/operations.ts";
 import {
+	createCreateSubagentToolDefinition,
 	createSubagentToolDefinition,
 	formatSubagentModelCatalog,
 	formatSubagentTaskPrompt,
+	type SessionSubagentConfig,
+	type SubagentConfigRegistry,
 	subagentParamsSchema,
 } from "../src/core/tools/subagent.ts";
 import { discoverAgents, discoverAgentsWithOperations } from "../src/core/tools/subagent-agents.ts";
@@ -127,7 +130,9 @@ describe("native subagent tool", () => {
 			responseFormat: expect.any(Object),
 			systemPrompt: expect.any(Object),
 			model: expect.any(Object),
+			modelHint: expect.any(Object),
 			tools: expect.any(Object),
+			skills: expect.any(Object),
 		});
 		expect("confirmProjectAgents" in subagentParamsSchema.properties).toBe(false);
 		const taskProperties = subagentParamsSchema.properties.tasks.items.properties;
@@ -135,11 +140,63 @@ describe("native subagent tool", () => {
 		expect(taskProperties.responseFormat).toBeDefined();
 		expect(taskProperties.systemPrompt).toBeDefined();
 		expect(taskProperties.model).toBeDefined();
+		expect(taskProperties.modelHint).toBeDefined();
 		expect(taskProperties.tools).toBeDefined();
+		expect(taskProperties.skills).toBeDefined();
 		const prompt = formatSubagentTaskPrompt("Inspect auth", "Return files and risks");
 		expect(prompt).toBe(
 			"<task>\nInspect auth\n</task>\n\n<response-format>\nReturn files and risks\n</response-format>",
 		);
+	});
+
+	it("creates session-scoped subagent presets with model hints and skills", async () => {
+		const cwd = createTempDir("pi-subagent-create-");
+		const configs = new Map<string, SessionSubagentConfig>();
+		const registry: SubagentConfigRegistry = {
+			list: () => Array.from(configs.values()),
+			upsert: (config) => configs.set(config.name, config),
+			get: (name) => configs.get(name),
+		};
+		const createResult = await createCreateSubagentToolDefinition(registry).execute(
+			"create-builder",
+			{
+				name: "builder",
+				description: "Build-focused worker",
+				systemPrompt: "You build and check code.",
+				modelHint: "cheapest",
+				tools: ["bash"],
+				skills: ["search"],
+			},
+			undefined,
+			undefined,
+			{ cwd, hasUI: false } as unknown as ExtensionContext,
+		);
+		expect(createResult.details.config).toMatchObject({ name: "builder", modelHint: "cheapest", skills: ["search"] });
+
+		let receivedModel: string | undefined;
+		let receivedTools: string[] | undefined;
+		let receivedSkills: string[] | undefined;
+		let receivedSystemPrompt = "";
+		const subagentResult = await createSubagentToolDefinition({
+			configRegistry: registry,
+			resolveModelHint: (hint) => (hint === "cheapest" ? "openai-codex/gpt-5.6-luna" : undefined),
+			runner: async (request) => {
+				receivedModel = request.model;
+				receivedTools = request.tools;
+				receivedSkills = request.skills;
+				receivedSystemPrompt = request.systemPrompt;
+				request.onMessage(fauxAssistantMessage("built"));
+				return { exitCode: 0, stderr: "" };
+			},
+		}).execute("run-builder", { agent: "builder", task: "run checks" }, undefined, undefined, {
+			cwd,
+			hasUI: false,
+		} as unknown as ExtensionContext);
+		expect(subagentResult.content).toEqual([{ type: "text", text: "built" }]);
+		expect(receivedModel).toBe("openai-codex/gpt-5.6-luna");
+		expect(receivedTools).toEqual(["bash"]);
+		expect(receivedSkills).toEqual(["search"]);
+		expect(receivedSystemPrompt).toBe("You build and check code.");
 	});
 
 	it("requires host approval for project presets and fails closed without a UI", async () => {
@@ -362,6 +419,7 @@ describe("native subagent tool", () => {
 			modelRegistry,
 			settingsManager: SettingsManager.inMemory(),
 			model,
+			scopedModels: [{ model }],
 			excludedTools: ["bash"],
 		});
 		try {
@@ -385,13 +443,18 @@ describe("native subagent tool", () => {
 			const initialParameters = session.getToolDefinition("subagent")?.parameters as typeof subagentParamsSchema;
 			const initialModelDescription = (initialParameters.properties.model as { description?: string }).description;
 			expect(initialModelDescription).toContain("faux/faux-1.0-alpha");
-			expect(initialModelDescription).toContain("faux/faux-2.0-beta");
+			expect(initialModelDescription).not.toContain("faux/faux-2.0-beta");
 
+			session.setScopedModels([{ model: faux.getModel("faux-2.0-beta")! }]);
+			const rescopedParameters = session.getToolDefinition("subagent")?.parameters as typeof subagentParamsSchema;
+			const rescopedModelDescription = (rescopedParameters.properties.model as { description?: string }).description;
+			expect(rescopedModelDescription).toContain("faux/faux-2.0-beta");
+			expect(rescopedModelDescription).not.toContain("faux/faux-1.0-alpha");
 			await session.setModel(faux.getModel("faux-2.0-beta")!);
 			const switchedParameters = session.getToolDefinition("subagent")?.parameters as typeof subagentParamsSchema;
 			const switchedModelDescription = (switchedParameters.properties.model as { description?: string }).description;
 			expect(switchedModelDescription).toContain("faux/faux-2.0-beta");
-			expect(switchedModelDescription).toContain("faux/faux-1.0-alpha");
+			expect(switchedModelDescription).not.toContain("faux/faux-1.0-alpha");
 		} finally {
 			await pi.dispose();
 			faux.unregister();
@@ -493,13 +556,79 @@ describe("native subagent tool", () => {
 		}
 	});
 
-	it("runs subagents with remote cwd values that do not exist on the host", async () => {
+	it("uses the active sandbox backend when it changes after the parent session starts", async () => {
 		const localCwd = createTempDir("pi-subagent-remote-host-cwd-");
 		const remoteCwd = join(tmpdir(), "pi-subagent-remote-workspace-does-not-exist");
 		rmSync(remoteCwd, { recursive: true, force: true });
 		const agentDir = createTempDir("pi-subagent-remote-host-config-");
 		const faux = registerFauxProvider({ models: [{ id: "faux-remote", reasoning: true }] });
 		const model = faux.getModel("faux-remote")!;
+		const authStorage = AuthStorage.inMemory();
+		authStorage.setRuntimeApiKey(model.provider, "faux-key");
+		const modelRegistry = ModelRegistry.inMemory(authStorage);
+		modelRegistry.registerProvider(model.provider, {
+			baseUrl: model.baseUrl,
+			apiKey: "faux-key",
+			api: faux.api,
+			models: faux.models.map((registeredModel) => ({
+				id: registeredModel.id,
+				name: registeredModel.name,
+				api: registeredModel.api,
+				reasoning: registeredModel.reasoning,
+				input: registeredModel.input,
+				cost: registeredModel.cost,
+				contextWindow: registeredModel.contextWindow,
+				maxTokens: registeredModel.maxTokens,
+				baseUrl: registeredModel.baseUrl,
+			})),
+		});
+		const operations = new LocalToolOperations(localCwd);
+		operations.cwd = remoteCwd;
+		Object.defineProperty(operations, "getBackendInfo", {
+			configurable: true,
+			value: () => ({
+				type: "remote" as const,
+				cwd: remoteCwd,
+				url: "ws://sandbox.test/pi/workspace",
+				protocol: "ws" as const,
+				configured: true as const,
+				workspace: { id: "sandbox-workspace", root: remoteCwd, pathFlavor: "posix" as const },
+			}),
+		});
+		faux.setResponses([fauxAssistantMessage("child output")]);
+		const pi = await PiAgent.create({
+			cwd: localCwd,
+			agentDir,
+			sessionManager: new InMemorySessionManager(localCwd),
+			authStorage,
+			modelRegistry,
+			settingsManager: SettingsManager.inMemory(),
+			model,
+		});
+		try {
+			const session = await pi.createAgentSession();
+			const result = await session
+				.getToolDefinition("subagent")!
+				.execute("subagent-sandbox", { task: "Return child output" }, undefined, undefined, {
+					cwd: localCwd,
+					toolOperations: operations,
+					model,
+					hasUI: false,
+				} as never);
+			expect(result.content).toEqual([{ type: "text", text: "child output" }]);
+			expect(faux.state.callCount).toBe(1);
+		} finally {
+			await pi.dispose();
+			faux.unregister();
+		}
+	});
+	it("runs parent-driven subagents with remote cwd values that do not exist on the host", async () => {
+		const localCwd = createTempDir("pi-subagent-parent-remote-local-");
+		const remoteCwd = join(tmpdir(), "pi-subagent-parent-remote-workspace-does-not-exist");
+		rmSync(remoteCwd, { recursive: true, force: true });
+		const agentDir = createTempDir("pi-subagent-parent-remote-config-");
+		const faux = registerFauxProvider({ models: [{ id: "faux-parent-remote", reasoning: true }] });
+		const model = faux.getModel("faux-parent-remote")!;
 		const authStorage = AuthStorage.inMemory();
 		authStorage.setRuntimeApiKey(model.provider, "faux-key");
 		const modelRegistry = ModelRegistry.inMemory(authStorage);
@@ -553,6 +682,7 @@ describe("native subagent tool", () => {
 							.join("\n")
 					: "";
 			expect(toolText).toBe("child output");
+			expect(session.messages.at(-1)).toMatchObject({ role: "assistant" });
 			expect(faux.state.callCount).toBe(3);
 		} finally {
 			await pi.dispose();

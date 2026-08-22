@@ -3,6 +3,7 @@
  */
 
 import type { ThinkingLevel } from "@fleetagent/pi-agent-core";
+import type { TuiMode } from "@fleetagent/pi-tui";
 import chalk from "chalk";
 import {
 	APP_NAME,
@@ -57,6 +58,7 @@ export interface Args {
 	noContextFiles?: boolean;
 	listModels?: string | true;
 	offline?: boolean;
+	tuiMode?: TuiMode;
 	verbose?: boolean;
 	ssh?: string;
 	remote?: string;
@@ -198,6 +200,20 @@ export function parseArgs(args: string[]): Args {
 			} else {
 				result.listModels = true;
 			}
+		} else if (arg === "--tui-mode") {
+			const mode = args[i + 1];
+			if (mode === "regular" || mode === "fullscreen") {
+				result.tuiMode = mode;
+				i++;
+			} else if (mode === undefined || mode.startsWith("-")) {
+				result.diagnostics.push({ type: "error", message: "--tui-mode requires regular or fullscreen" });
+			} else {
+				i++;
+				result.diagnostics.push({
+					type: "error",
+					message: `Invalid TUI mode "${mode}". Valid values: regular, fullscreen`,
+				});
+			}
 		} else if (arg === "--verbose") {
 			result.verbose = true;
 		} else if (arg === "--offline") {
@@ -308,11 +324,12 @@ ${chalk.bold("Options:")}
   --no-context-files, -nc        Disable AGENTS.md and CLAUDE.md discovery and loading
   --export <file>                Export session file to HTML and exit
   --list-models [search]         List available models (with optional fuzzy search)
+  --tui-mode <mode>              TUI mode: regular (default) or fullscreen
   --verbose                      Force verbose startup (overrides quietStartup setting)
   --offline                      Disable startup network operations (same as PI_OFFLINE=1)
   --ssh <target>                 Run built-in tools over SSH (user@host or user@host:/path)
   --remote <url>                 Run built-in tools through a remote commander (ws:// or wss://)
-  --remote-deferred              Start without a connected tool backend; configure later with /remote
+  --remote-deferred              Start without a connected tool backend; configure later with /sandbox
   --remote-cwd <path>            Stable backend cwd for --remote-deferred
   --help, -h                     Show this help
   --version, -v                  Show version number
@@ -365,7 +382,7 @@ ${chalk.bold("Examples:")}
   # Run built-in tools on a remote machine over SSH
   ${APP_NAME} --ssh user@host:/home/user/project "Inspect this repo"
 
-  # Start without a connected tool backend and configure SSH or daemon later with /remote
+  # Start without a connected tool backend and configure SSH or daemon later with /sandbox
   ${APP_NAME} --remote-deferred --remote-cwd /workspace
 
   # Export a session file to HTML

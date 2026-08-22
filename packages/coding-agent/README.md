@@ -166,7 +166,7 @@ The editor can be temporarily replaced by other UI, like built-in `/settings` or
 | File reference | Type `@` to fuzzy-search project files |
 | Path completion | Tab to complete paths |
 | Multi-line | Shift+Enter (or Ctrl+Enter on Windows Terminal) |
-| Images | Ctrl+V to paste (Alt+V on Windows), or drag onto terminal |
+| Clipboard | Ctrl+V to paste an image or text (Alt+V on Windows), or drag images onto terminal |
 | Bash commands | `!command` runs and sends output to LLM, `!!command` runs without sending |
 
 Standard editing keybindings for delete word, undo, etc. See [docs/keybindings.md](docs/keybindings.md).
@@ -214,6 +214,7 @@ See `/hotkeys` for the full list. Customize via `~/.pi/agent/keybindings.json`. 
 | Shift+Tab | Cycle thinking level |
 | Ctrl+O | Collapse/expand tool output |
 | Ctrl+T | Collapse/expand thinking blocks |
+| Ctrl+X | Copy the last assistant message |
 
 ### Message Queue
 
@@ -256,6 +257,7 @@ Use `/session` in interactive mode to see the current session ID before reusing 
 
 - Search by typing, fold/unfold and jump between branches with Ctrl+←/Ctrl+→ or Alt+←/Alt+→, page with ←/→
 - Filter modes (Ctrl+O): default → no-tools → user-only → labeled-only → all
+- Press Ctrl+X to copy the selected entry
 - Press Shift+L to label entries as bookmarks and Shift+T to toggle label timestamps
 
 **`/fork`** - Create a new session file from a previous user message on the active branch. Opens a selector, copies the active path up to that point, and places the selected prompt in the editor for modification.
@@ -324,7 +326,7 @@ The retired `@fleetagent/pi-daemon` package and `pi-daemon` binary are not suppo
 
 ## Docker Sandbox
 
-Interactive `/sandbox start|list|stop` manages a Pi-owned Docker container for the current workspace. The command is user-only and appears in slash-command completion, but is hidden from model-visible command catalogs, tools, prompts, skills, and rules. On start, local Pi keeps model/session/UI orchestration and routes workspace tools/resources through the container's `pi --daemon` at `/workspace`. See [docs/sandbox.md](docs/sandbox.md) for command syntax, image configuration, local base-image builds, troubleshooting, and Docker security limits.
+Interactive `/sandbox` is the sole command for inspecting, connecting, clearing, starting, listing, and stopping workspace tool backends. It supports deferred SSH, existing sandbox daemons, and Pi-owned Docker containers. The command is user-only and appears in slash-command completion, but is hidden from model-visible command catalogs, tools, prompts, skills, and rules. Local Pi keeps model/session/UI orchestration while workspace tools/resources use the selected backend. See [docs/sandbox.md](docs/sandbox.md) for command syntax, image configuration, local base-image builds, troubleshooting, and security limits.
 
 ---
 
@@ -335,7 +337,9 @@ Pi loads `AGENTS.md` (or `CLAUDE.md`) at startup from:
 - Parent directories (walking up from cwd)
 - Current directory
 
-Use for project instructions, conventions, common commands. All matching files are concatenated.
+If a directory contains `AGENTS.override.md`, Pi loads it instead of `AGENTS.md` or `CLAUDE.md` from that directory. Context files from other directories still layer normally, including when project instructions come from SSH or daemon tool backends.
+
+Use for project instructions, conventions, common commands. All selected files are concatenated.
 
 Disable context file loading with `--no-context-files` (or `-nc`).
 
@@ -613,7 +617,7 @@ cat README.md | pi -p "Summarize this text"
 | `--ssh-deferred` | Start in SSH sandbox mode and configure the target later |
 | `--ssh-cwd <path>` | Stable remote cwd for `--ssh-deferred` |
 | `--remote <url>` | Run built-in workspace tools through a `pi --daemon` WebSocket backend |
-| `--remote-deferred` | Start with a deferred daemon backend and connect later with `/remote daemon <ws://url>` |
+| `--remote-deferred` | Start with a deferred backend and connect later with `/sandbox ssh ...` or `/sandbox --attach <ws://url>` |
 | `--remote-cwd <path>` | Stable daemon workspace cwd for deferred remote mode |
 | `--daemon` | Start the integrated remote workspace daemon instead of a normal Pi session |
 Available built-in tools: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`, `subagent`, and—when externally configured—`lsp_diagnostics`, `lsp_hover`, `lsp_definition`, `lsp_references`, `lsp_rename`, and `lsp_code_actions`.
@@ -632,7 +636,7 @@ Available built-in tools: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`,
 | `--no-prompt-templates` | Disable prompt template discovery |
 | `--theme <path>` | Load theme (repeatable) |
 | `--no-themes` | Disable theme discovery |
-| `--no-context-files`, `-nc` | Disable AGENTS.md and CLAUDE.md context file discovery |
+| `--no-context-files`, `-nc` | Disable `AGENTS.override.md`, `AGENTS.md`, and `CLAUDE.md` context file discovery |
 
 Combine `--no-*` with explicit flags to load exactly what you need, ignoring settings.json (e.g., `--no-extensions -e ./my-ext.ts`).
 
@@ -642,9 +646,12 @@ Combine `--no-*` with explicit flags to load exactly what you need, ignoring set
 |--------|-------------|
 | `--system-prompt <text>` | Replace default prompt (context files and skills still appended) |
 | `--append-system-prompt <text>` | Append to system prompt |
+| `--tui-mode <mode>` | TUI mode: `regular` (default) or experimental `fullscreen` |
 | `--verbose` | Force verbose startup |
 | `-h`, `--help` | Show help |
 | `-v`, `--version` | Show version |
+
+`fullscreen` keeps the transcript in an application-owned viewport above a fixed status/editor/footer dock. `regular` retains the main screen and terminal-owned scrollback. Set **TUI mode** in `/settings` for future sessions or use `--tui-mode` for one startup.
 
 ### File Arguments
 
@@ -715,6 +722,7 @@ pi --thinking high "Solve this complex problem"
 | `PI_CACHE_RETENTION` | Set to `long` for extended prompt cache (Anthropic: 1h, OpenAI: 24h) |
 | `VISUAL`, `EDITOR` | External editor for Ctrl+G |
 | `PI_DAEMON_HOST`, `PI_DAEMON_PORT`, `PI_DAEMON_CWD`, `PI_DAEMON_TOKEN` | Integrated daemon bind address, port, workspace root, and bearer token |
+| `PI_DAEMON_TEMP_ROOT` | Optional additional confined daemon temporary root; the default sandbox image uses `/tmp` |
 ---
 
 ## Contributing & Development

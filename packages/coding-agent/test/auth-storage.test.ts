@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { registerOAuthProvider } from "@fleetagent/pi-ai/oauth";
 import lockfile from "proper-lockfile";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { AuthStorage } from "../src/core/auth-storage.ts";
+import { AuthStorage, FileAuthStorageBackend } from "../src/core/auth-storage.ts";
 import { clearConfigValueCache } from "../src/core/resolve-config-value.ts";
 
 describe("AuthStorage", () => {
@@ -33,6 +33,106 @@ describe("AuthStorage", () => {
 	function toShPath(value: string): string {
 		return value.replace(/\\/g, "/").replace(/"/g, '\\"');
 	}
+
+	test("coalesces revision-triggered reloads across concurrent storage instances", async () => {
+		writeAuthJson({ anthropic: { type: "api_key", key: "old" } });
+		const first = AuthStorage.create(authJsonPath);
+		const second = AuthStorage.create(authJsonPath);
+		const lockSpy = vi.spyOn(lockfile, "lock");
+
+		writeAuthJson({
+			anthropic: { type: "api_key", key: "new" },
+			openai: { type: "api_key", key: "openai-key" },
+		});
+
+		const [anthropic, openai, repeated] = await Promise.all([
+			first.getApiKey("anthropic"),
+			second.getApiKey("openai"),
+			first.getApiKey("anthropic"),
+		]);
+		expect(anthropic).toBe("new");
+		expect(openai).toBe("openai-key");
+		expect(repeated).toBe("new");
+		expect(lockSpy).toHaveBeenCalledTimes(1);
+
+		await expect(second.getApiKey("anthropic")).resolves.toBe("new");
+		expect(lockSpy).toHaveBeenCalledTimes(1);
+
+		const otherPath = join(tempDir, "other-auth.json");
+		writeFileSync(otherPath, JSON.stringify({ google: { type: "api_key", key: "google-key" } }));
+		const other = AuthStorage.create(otherPath);
+		await expect(other.getApiKey("google")).resolves.toBe("google-key");
+		expect(lockSpy).toHaveBeenCalledTimes(1);
+
+		const third = AuthStorage.create(authJsonPath);
+		writeAuthJson({ anthropic: { type: "api_key", key: "newest" } });
+		const [firstReload, secondReload] = await Promise.all([
+			first.getApiKey("anthropic"),
+			third.getApiKey("anthropic"),
+		]);
+		expect(firstReload).toBe("newest");
+		expect(secondReload).toBe("newest");
+		expect(lockSpy).toHaveBeenCalledTimes(2);
+	});
+
+	test("keeps synchronous credential views current while an async reload is pending", async () => {
+		writeAuthJson({ anthropic: { type: "api_key", key: "old" } });
+		const storage = AuthStorage.create(authJsonPath);
+		writeAuthJson({ openai: { type: "api_key", key: "external-login" } });
+
+		let grantLock = () => {};
+		const lockGate = new Promise<void>((resolve) => {
+			grantLock = resolve;
+		});
+		const realLock = lockfile.lock.bind(lockfile);
+		const lockSpy = vi.spyOn(lockfile, "lock").mockImplementation(async (file, options) => {
+			await lockGate;
+			return realLock(file, options);
+		});
+		const pendingRead = storage.getApiKey("openai");
+		await vi.waitFor(() => expect(lockSpy).toHaveBeenCalledTimes(1));
+
+		expect(storage.get("anthropic")).toBeUndefined();
+		expect(storage.has("openai")).toBe(true);
+		expect(storage.hasAuth("openai")).toBe(true);
+		expect(storage.getAuthStatus("openai")).toEqual({ configured: true, source: "stored" });
+		expect(storage.list()).toEqual(["openai"]);
+		expect(storage.getAll()).toEqual({ openai: { type: "api_key", key: "external-login" } });
+
+		grantLock();
+		await expect(pendingRead).resolves.toBe("external-login");
+	});
+
+	test("refreshes synchronous credential views after external login and logout", () => {
+		writeAuthJson({ anthropic: { type: "api_key", key: "old" } });
+		const storage = AuthStorage.create(authJsonPath);
+		expect(storage.get("anthropic")).toEqual({ type: "api_key", key: "old" });
+
+		writeAuthJson({ openai: { type: "api_key", key: "external-login" } });
+		expect(storage.has("anthropic")).toBe(false);
+		expect(storage.hasAuth("openai")).toBe(true);
+		expect(storage.getAuthStatus("openai")).toEqual({ configured: true, source: "stored" });
+		expect(storage.list()).toEqual(["openai"]);
+		expect(storage.getAll()).toEqual({ openai: { type: "api_key", key: "external-login" } });
+
+		writeAuthJson({});
+		expect(storage.get("openai")).toBeUndefined();
+		expect(storage.hasAuth("openai")).toBe(false);
+		expect(storage.list()).toEqual([]);
+	});
+
+	test("preserves the last valid snapshot when an external reload is malformed", async () => {
+		writeAuthJson({ anthropic: { type: "api_key", key: "last-valid" } });
+		const storage = AuthStorage.create(authJsonPath);
+		writeFileSync(authJsonPath, "{invalid-json", "utf-8");
+
+		await expect(storage.getApiKey("anthropic")).resolves.toBe("last-valid");
+		expect(storage.drainErrors()).toHaveLength(1);
+		expect(() => storage.set("openai", { type: "api_key", key: "must-not-write" })).toThrow(
+			"Cannot update auth storage because it could not be loaded",
+		);
+		expect(readFileSync(authJsonPath, "utf-8")).toBe("{invalid-json");
+	});
 
 	describe("API key resolution", () => {
 		test("literal API key is returned directly", async () => {
@@ -432,7 +532,61 @@ describe("AuthStorage", () => {
 		});
 	});
 
-	describe("oauth lock compromise handling", () => {
+	test("retries a briefly contended file lock with a short initial delay", async () => {
+		writeAuthJson({ anthropic: { type: "api_key", key: "stored" } });
+		const backend = new FileAuthStorageBackend(authJsonPath);
+		const release = vi.fn(async () => {});
+		const lockSpy = vi
+			.spyOn(lockfile, "lock")
+			.mockRejectedValueOnce(Object.assign(new Error("locked"), { code: "ELOCKED" }))
+			.mockResolvedValueOnce(release);
+		vi.spyOn(Math, "random").mockReturnValue(0);
+		const read = vi.fn(async () => ({ result: "read" }));
+
+		await expect(backend.withLockAsync(read)).resolves.toBe("read");
+		expect(lockSpy).toHaveBeenCalledTimes(2);
+		expect(read).toHaveBeenCalledTimes(1);
+		expect(release).toHaveBeenCalledTimes(1);
+	});
+
+	describe("oauth locking", () => {
+		test("shares one OAuth refresh across storage instances", async () => {
+			const providerId = `shared-oauth-provider-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+			let refreshCalls = 0;
+			registerOAuthProvider({
+				id: providerId,
+				name: "Shared OAuth Provider",
+				async login() {
+					throw new Error("Not used in this test");
+				},
+				async refreshToken(credentials) {
+					refreshCalls++;
+					return {
+						...credentials,
+						access: "shared-refreshed-token",
+						expires: Date.now() + 60_000,
+					};
+				},
+				getApiKey(credentials) {
+					return `Bearer ${credentials.access}`;
+				},
+			});
+			writeAuthJson({
+				[providerId]: {
+					type: "oauth",
+					refresh: "refresh-token",
+					access: "expired-token",
+					expires: Date.now() - 10_000,
+				},
+			});
+			const first = AuthStorage.create(authJsonPath);
+			const second = AuthStorage.create(authJsonPath);
+
+			const keys = await Promise.all([first.getApiKey(providerId), second.getApiKey(providerId)]);
+			expect(keys).toEqual(["Bearer shared-refreshed-token", "Bearer shared-refreshed-token"]);
+			expect(refreshCalls).toBe(1);
+		});
+
 		test("returns undefined on compromised lock and allows a later retry", async () => {
 			const providerId = `test-oauth-provider-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 			registerOAuthProvider({

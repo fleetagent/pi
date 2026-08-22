@@ -6,7 +6,7 @@ import { createFindToolDefinition } from "../../../src/core/tools/find.ts";
 import { LocalToolOperations } from "../../../src/core/tools/index.ts";
 
 /**
- * Regression test for https://github.com/earendil-works/pi-mono/issues/3303
+ * Regression test for https://github.com/fleetagent/pi/issues/3303
  *
  * The `find` tool previously collected every `.gitignore` under the search
  * path and passed them to `fd` via `--ignore-file`. fd treats `--ignore-file`

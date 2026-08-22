@@ -85,4 +85,14 @@ describe("keybindings migration", () => {
 		expect(effective["tui.select.confirm"]).toBe("enter");
 		expect(effective["app.interrupt"]).toBe("ctrl+x");
 	});
+
+	it("exposes a configurable message-copy action with Ctrl+X by default", () => {
+		const defaults = new KeybindingsManager();
+		expect(defaults.getEffectiveConfig()["app.message.copy"]).toBe("ctrl+x");
+		expect(defaults.matches("\x18", "app.message.copy")).toBe(true);
+
+		const rebound = new KeybindingsManager({ "app.message.copy": "ctrl+y" });
+		expect(rebound.matches("\x18", "app.message.copy")).toBe(false);
+		expect(rebound.matches("\x19", "app.message.copy")).toBe(true);
+	});
 });

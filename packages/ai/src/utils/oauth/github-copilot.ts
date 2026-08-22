@@ -133,10 +133,22 @@ async function startDeviceFlow(domain: string): Promise<DeviceCodeResponse> {
 		throw new Error("Invalid device code response fields");
 	}
 
+	// The verification URI is opened in the user's browser and to prevent `open` from
+	// opening an executable or similar, we force it to be a URL.
+	let parsedUri: URL;
+	try {
+		parsedUri = new URL(verificationUri);
+	} catch {
+		throw new Error("Untrusted verification_uri in device code response");
+	}
+	if (parsedUri.protocol !== "https:" && parsedUri.protocol !== "http:") {
+		throw new Error("Untrusted verification_uri in device code response");
+	}
+
 	return {
 		device_code: deviceCode,
 		user_code: userCode,
-		verification_uri: verificationUri,
+		verification_uri: parsedUri.href,
 		interval,
 		expires_in: expiresIn,
 	};
@@ -193,6 +205,7 @@ async function pollForGitHubAccessToken(domain: string, device: DeviceCodeRespon
 export async function refreshGitHubCopilotToken(
 	refreshToken: string,
 	enterpriseDomain?: string,
+	signal?: AbortSignal,
 ): Promise<OAuthCredentials> {
 	const domain = enterpriseDomain || "github.com";
 	const urls = getUrls(domain);
@@ -203,6 +216,7 @@ export async function refreshGitHubCopilotToken(
 			Authorization: `Bearer ${refreshToken}`,
 			...COPILOT_HEADERS,
 		},
+		signal,
 	});
 
 	if (!raw || typeof raw !== "object") {
@@ -333,9 +347,9 @@ export const githubCopilotOAuthProvider: OAuthProviderInterface = {
 		});
 	},
 
-	async refreshToken(credentials: OAuthCredentials): Promise<OAuthCredentials> {
+	async refreshToken(credentials: OAuthCredentials, signal?: AbortSignal): Promise<OAuthCredentials> {
 		const creds = credentials as CopilotCredentials;
-		return refreshGitHubCopilotToken(creds.refresh, creds.enterpriseUrl);
+		return refreshGitHubCopilotToken(creds.refresh, creds.enterpriseUrl, signal);
 	},
 
 	getApiKey(credentials: OAuthCredentials): string {

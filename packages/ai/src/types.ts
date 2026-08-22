@@ -76,6 +76,9 @@ export type CacheRetention = "none" | "short" | "long";
 
 export type Transport = "sse" | "websocket" | "websocket-cached" | "auto";
 
+/** Mutable provider request headers. Null suppresses a provider/API default header. */
+export type ProviderHeaders = Record<string, string | null>;
+
 export interface ProviderResponse {
 	status: number;
 	headers: Record<string, string>;
@@ -118,8 +121,9 @@ export interface StreamOptions {
 	 * On AWS Bedrock these are injected via a Smithy `build`-step middleware so
 	 * they are covered by SigV4 signing; reserved headers (`x-amz-*`,
 	 * `authorization`, `host`) are silently ignored to preserve SigV4 / bearer auth.
+	 * A null value suppresses a provider/API default header with the same name.
 	 */
-	headers?: Record<string, string>;
+	headers?: ProviderHeaders;
 	/**
 	 * HTTP request timeout in milliseconds for providers/SDKs that support it.
 	 * For example, OpenAI and Anthropic SDK clients default to 10 minutes.
@@ -264,6 +268,11 @@ export interface Usage {
 	output: number;
 	cacheRead: number;
 	cacheWrite: number;
+	/**
+	 * Reasoning/thinking tokens when reported by the provider. This is already
+	 * included in `output`; it is exposed only as a breakdown.
+	 */
+	reasoning?: number;
 	totalTokens: number;
 	cost: {
 		input: number;
@@ -274,7 +283,7 @@ export interface Usage {
 	};
 }
 
-export type StopReason = "stop" | "length" | "toolUse" | "error" | "aborted";
+export type StopReason = "pending" | "stop" | "length" | "toolUse" | "error" | "aborted";
 
 export interface UserMessage {
 	role: "user";
@@ -294,6 +303,8 @@ export interface AssistantMessage {
 	usage: Usage;
 	stopReason: StopReason;
 	errorMessage?: string;
+	/** Raw provider response status, when available. */
+	rawStopReason?: string;
 	timestamp: number; // Unix timestamp in milliseconds
 }
 
@@ -417,6 +428,8 @@ export interface OpenAICompletionsCompat {
 
 /** Compatibility settings for OpenAI Responses APIs. */
 export interface OpenAIResponsesCompat {
+	/** Whether the provider supports reasoning effort controls. Default: true. */
+	supportsReasoningEffort?: boolean;
 	/** Whether to send the OpenAI `session_id` cache-affinity header from `options.sessionId` when caching is enabled. Default: true. */
 	sendSessionIdHeader?: boolean;
 	/** Whether the provider supports `prompt_cache_retention: "24h"`. Default: true. */

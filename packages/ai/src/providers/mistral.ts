@@ -13,6 +13,7 @@ import type {
 	Context,
 	Message,
 	Model,
+	ProviderHeaders,
 	SimpleStreamOptions,
 	StopReason,
 	StreamFunction,
@@ -24,6 +25,7 @@ import type {
 } from "../types.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { shortHash } from "../utils/hash.ts";
+import { providerHeadersToRecord } from "../utils/headers.ts";
 import { parseStreamingJson } from "../utils/json-parse.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { buildBaseOptions } from "./simple-options.ts";
@@ -84,6 +86,9 @@ export const streamMistral: StreamFunction<"mistral-conversations", MistralOptio
 				throw new Error("Request was aborted");
 			}
 
+			if (output.stopReason === "pending") {
+				throw new Error("Mistral stream ended without a finish reason");
+			}
 			if (output.stopReason === "aborted" || output.stopReason === "error") {
 				throw new Error("An unknown error occurred");
 			}
@@ -221,13 +226,13 @@ function buildRequestOptions(model: Model<"mistral-conversations">, options?: Mi
 	};
 	if (options?.signal) requestOptions.signal = options.signal;
 
-	const headers: Record<string, string> = {};
-	if (model.headers) Object.assign(headers, model.headers);
-	if (options?.headers) Object.assign(headers, options.headers);
+	const explicitHeaders: ProviderHeaders = { ...model.headers, ...options?.headers };
+	const hasExplicitAffinity = Object.keys(explicitHeaders).some((name) => name.toLowerCase() === "x-affinity");
+	const headers = providerHeadersToRecord(explicitHeaders) ?? {};
 
 	// Mistral infrastructure uses `x-affinity` for KV-cache reuse (prefix caching).
 	// Respect explicit caller-provided header values.
-	if (options?.sessionId && !headers["x-affinity"]) {
+	if (options?.sessionId && !hasExplicitAffinity) {
 		headers["x-affinity"] = options.sessionId;
 	}
 

@@ -70,11 +70,18 @@ export {
 	type ReadToolOptions,
 } from "./read.ts";
 export {
+	type CreateSubagentDetails,
+	type CreateSubagentToolInput,
+	createCreateSubagentTool,
+	createCreateSubagentToolDefinition,
 	createSubagentRunsTool,
 	createSubagentRunsToolDefinition,
 	createSubagentTool,
 	createSubagentToolDefinition,
+	type SessionSubagentConfig,
+	type SubagentConfigRegistry,
 	type SubagentDetails,
+	type SubagentModelHint,
 	type SubagentResult,
 	type SubagentRunInfo,
 	type SubagentRunner,
@@ -137,6 +144,8 @@ import { createLsTool, createLsToolDefinition, type LsToolOptions } from "./ls.t
 import type { ToolOperations } from "./operations.ts";
 import { createReadTool, createReadToolDefinition, type ReadToolOptions } from "./read.ts";
 import {
+	createCreateSubagentTool,
+	createCreateSubagentToolDefinition,
 	createSubagentRunsTool,
 	createSubagentRunsToolDefinition,
 	createSubagentTool,
@@ -158,6 +167,7 @@ export type ToolName =
 	| "ls"
 	| "subagent"
 	| "subagent_runs"
+	| "create_subagent"
 	| "websearch";
 export const allToolNames: Set<ToolName> = new Set([
 	"read",
@@ -169,6 +179,7 @@ export const allToolNames: Set<ToolName> = new Set([
 	"ls",
 	"subagent",
 	"subagent_runs",
+	"create_subagent",
 	"websearch",
 ]);
 
@@ -204,6 +215,8 @@ export function createToolDefinition(toolName: ToolName, operations: ToolOperati
 			return createSubagentToolDefinition(options?.subagent);
 		case "subagent_runs":
 			return createSubagentRunsToolDefinition(options?.subagent?.runRegistry);
+		case "create_subagent":
+			return createCreateSubagentToolDefinition(options?.subagent?.configRegistry);
 		case "websearch":
 			return createWebsearchToolDefinition(options?.websearch);
 		default:
@@ -231,6 +244,8 @@ export function createTool(toolName: ToolName, operations: ToolOperations, optio
 			return createSubagentTool(options?.subagent);
 		case "subagent_runs":
 			return createSubagentRunsTool(options?.subagent?.runRegistry);
+		case "create_subagent":
+			return createCreateSubagentTool(options?.subagent?.configRegistry);
 		case "websearch":
 			return createWebsearchTool(options?.websearch);
 		default:
@@ -270,6 +285,7 @@ export function createAllToolDefinitions(
 		ls: createLsToolDefinition(operations, options?.ls),
 		subagent: createSubagentToolDefinition(options?.subagent),
 		subagent_runs: createSubagentRunsToolDefinition(options?.subagent?.runRegistry),
+		create_subagent: createCreateSubagentToolDefinition(options?.subagent?.configRegistry),
 		websearch: createWebsearchToolDefinition(options?.websearch),
 	};
 }
@@ -303,6 +319,7 @@ export function createAllTools(operations: ToolOperations, options?: ToolsOption
 		ls: createLsTool(operations, options?.ls),
 		subagent: createSubagentTool(options?.subagent),
 		subagent_runs: createSubagentRunsTool(options?.subagent?.runRegistry),
+		create_subagent: createCreateSubagentTool(options?.subagent?.configRegistry),
 		websearch: createWebsearchTool(options?.websearch),
 	};
 }

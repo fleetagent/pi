@@ -89,6 +89,11 @@ async function* createInterleavedEvents(): AsyncIterable<ResponseStreamEvent> {
 			content: [{ type: "output_text", text: "Visible text", annotations: [] }],
 		},
 	} as ResponseStreamEvent;
+	yield {
+		type: "response.completed",
+		sequence_number: 6,
+		response: { id: "resp_test", status: "completed" },
+	} as ResponseStreamEvent;
 }
 
 describe("OpenAI Responses out-of-order output items", () => {

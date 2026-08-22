@@ -121,6 +121,20 @@ export function createCompactionSummaryMessage(
 	};
 }
 
+/** Normalize content-bearing messages received from untyped extension and session boundaries. */
+export function normalizeMessageContent(message: AgentMessage): AgentMessage {
+	if (
+		(message.role === "user" ||
+			message.role === "assistant" ||
+			message.role === "toolResult" ||
+			message.role === "custom") &&
+		message.content == null
+	) {
+		return { ...message, content: [] } as AgentMessage;
+	}
+	return message;
+}
+
 /** Convert CustomMessageEntry to AgentMessage format */
 export function createCustomMessage(
 	customType: string,
@@ -132,7 +146,7 @@ export function createCustomMessage(
 	return {
 		role: "custom",
 		customType,
-		content,
+		content: content ?? [],
 		display,
 		details,
 		timestamp: new Date(timestamp).getTime(),

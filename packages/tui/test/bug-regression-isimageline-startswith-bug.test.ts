@@ -117,7 +117,7 @@ describe("Bug regression: isImageLine() crash with image escape sequences", () =
 		 * ```
 		 *
 		 * When this is rendered, the image component creates escape sequences.
-		 * If isImageLine() doesn't detect them, TUI crashes.
+		 * If isImageLine() doesn't detect them, type TUI crashes.
 		 */
 
 		it("detects image sequences in read tool output", async () => {

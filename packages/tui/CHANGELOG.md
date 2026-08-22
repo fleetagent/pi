@@ -43,15 +43,57 @@
 
 ## [Unreleased]
 
+### Added
+
+* Add configurable previous/next prompt history actions for navigation independent of vertical cursor movement ([16ad96ae8](https://github.com/fleetagent/pi/commit/16ad96ae89c028f9058c8de2fad0ab45c20ce233)).
+* Add terminal-friendly Unicode rendering for inline and display LaTeX in Markdown, with bounded parsing and readable fallback for unsupported, malformed, oversized, or over-width expressions ([05e89b418](https://github.com/fleetagent/pi/commit/05e89b4188d1b0b4631d470300ce5960baf85a62)).
+* Export the pinned Marked parser and token types so coding-agent Markdown adapters share the TUI parser version ([714978bf5](https://github.com/fleetagent/pi/commit/714978bf51225520a9b1e153115f0c5ff057be9e)).
+* Add a width-aware Markdown pre-transform hook that participates in render caching and invalidation before tab normalization and Marked parsing ([714978bf5](https://github.com/fleetagent/pi/commit/714978bf51225520a9b1e153115f0c5ff057be9e)).
+* Add interface-compatible `TuiMainScreen` and `TuiAltScreen` renderers, with main-screen rendering remaining the explicit default at existing construction sites ([upstream `c13ffe187`](https://github.com/fleetagent/pi/commit/c13ffe187)).
+* Add application-owned alternate-screen scrolling, hyperlink activation, text selection, clipboard copying, terminal image handling, and configurable viewport navigation ([upstream `c13ffe187`](https://github.com/fleetagent/pi/commit/c13ffe187)).
+* Add renderer mode discriminants, temporary preserve-screen stops, and stacked transient fullscreen flashes with timer cleanup ([upstream `c13ffe187`](https://github.com/fleetagent/pi/commit/c13ffe187), [upstream `17090d4b9`](https://github.com/fleetagent/pi/commit/17090d4b9964957c7e7473506f93225c42d9e6fd)).
+* Add deterministic fullscreen `VStack`, `HStack`, and `ScrollView` layout primitives with nested clipping, resizing, follow-end scrolling, isolated rendering, and nested minimum-size measurement ([upstream `ea1e77e2d`](https://github.com/fleetagent/pi/commit/ea1e77e2db5cd07bf83365490bd3f52c881efa77), [upstream `f24ab6e14`](https://github.com/fleetagent/pi/commit/f24ab6e14c0be7e623ec9beab0fc792cbb041cc0)).
+* Add proportional fullscreen `ScrollView` scrollbars with transient `auto`, reserved-column `always`, and `hidden` policies, including runtime changes and narrow-terminal handling ([upstream `6129a353b`](https://github.com/fleetagent/pi/commit/6129a353b18310eb06085e2f17f58cf501f725f3), rendering prerequisite adapted from [`8ac92f831`](https://github.com/fleetagent/pi/commit/8ac92f831c67c3642fa321a182a6c91044adec9c)).
+* Add mouse hit testing, hover-held visibility, drag capture, proportional transcript scrolling, selection cancellation, and one-column support for fullscreen scrollbars ([upstream `8ac92f831`](https://github.com/fleetagent/pi/commit/8ac92f831c67c3642fa321a182a6c91044adec9c)).
+* Add timed double-click word selection, word-aware dragging, and triple-click visual-line selection in fullscreen transcripts, with Unicode, wrapping, hyperlink, and clipboard integration ([upstream `58fc0431a`](https://github.com/fleetagent/pi/commit/58fc0431a)).
+* Add configurable fullscreen transcript page, top/bottom, and OSC 133 marked-message navigation with four-row page overlap, key-release suppression, and Ctrl-modified editor fallbacks ([upstream `3c717842e`](https://github.com/fleetagent/pi/commit/3c717842e), editor-routing follow-up [`b0d382e25`](https://github.com/fleetagent/pi/commit/b0d382e25)).
+* Add unbound `tui.altScreen.halfPageUp` and `tui.altScreen.halfPageDown` actions that scroll the primary fullscreen transcript by half its actual viewport height, with a one-row minimum ([upstream `a3e93ec85`](https://github.com/fleetagent/pi/commit/a3e93ec85)).
+* Add an optional alternate-screen handler for unmodified Windows right-click paste events, isolated from primary-button selection and scrollbar handling ([upstream `c96bfaccd`](https://github.com/fleetagent/pi/commit/c96bfaccd)).
+* Add renderer lifecycle, focus, synchronous-render, and main-screen render-state handoff APIs for switching renderers without replaying transcript content or leaking fullscreen terminal state ([upstream `b103937d3`](https://github.com/fleetagent/pi/commit/b103937d3c003a48d32de9763856f2dae55ab605), shutdown follow-up [`3d264e85b`](https://github.com/fleetagent/pi/commit/3d264e85b4f870a93c5b763b95dd988a4f225da4)).
+
 ### Changed
 
 * Update the Markdown parser dependency.
+* Skip OSC 8 hyperlink-state scans when truncated prefixes contain no OSC 8 marker, preserving identical plain, SGR, and non-hyperlink OSC output ([229afb825](https://github.com/fleetagent/pi/commit/229afb825cfc880714a6f38044531e8d4bcc6ef8)).
+* Reduce fullscreen painter allocation churn by retaining fitting full-width source rows instead of recompositing them through ANSI/grapheme segmentation, while keeping over-wide and horizontally clipped rows on the bounded compositing path; seeded cell-state equivalence and Kitty lifecycle matrices cover streaming, tool-output shrink, resize, overlays, scroll, and image reentry/removal ([upstream `18dee5f0a`](https://github.com/fleetagent/pi/commit/18dee5f0a89f41466e876cbbbfe77635cd250882)).
 
 ### Fixed
 
 * Preserve source backslash escapes when requested by Markdown callers.
+* Keep capturing overlays ahead of fullscreen transcript wheel and navigation handling, and cancel active selection autoscroll or scrollbar capture when an overlay appears or the terminal resizes.
 * Hide HTML comments in rendered Markdown output.
 * Sanitize terminal title, hyperlink, and image control-string payloads.
+* Emit a valid OSC 9;4 terminal progress reset sequence without a trailing parameter separator ([e8a17822d](https://github.com/fleetagent/pi/commit/e8a17822de1076c3048701118a8a5f25c1e98565)).
+* Let keyboard input preempt throttled render timers and coalesce rapid keystrokes into one immediate frame, reducing input latency on Windows ([29d9f087c](https://github.com/fleetagent/pi/commit/29d9f087cc7b9064998f91e97ab5e89e5b67dff7)).
+* Preserve spaces in active searchable-settings queries instead of changing the highlighted value, while retaining Space as the empty-query activation shortcut ([bf4a90d81](https://github.com/fleetagent/pi/commit/bf4a90d81985bd45052eeeae59d84fe13e0bd2c8)).
+* Treat LF, CRLF, and CR as line endings when wrapping terminal text while preserving active ANSI styles across lines ([00b032676](https://github.com/fleetagent/pi/commit/00b032676f12212efe02319c1a9787a4956c931f)).
+* Count visible tabs as three terminal cells, keep tab spans from crossing overlay boundaries, and expand them before output without modifying tabs inside terminal control strings ([13898f048](https://github.com/fleetagent/pi/commit/13898f048fde206d70d54b6307f71f3ed62aa2b6), [5b6058c3a](https://github.com/fleetagent/pi/commit/5b6058c3a7e9669650925683ce4c0380f652bd4d), [1c799cecd](https://github.com/fleetagent/pi/commit/1c799cecd02c6d8245afa39b1684f07d3b96bd3e)).
+* Overwrite the reverse-video fake cursor before restoring the terminal cursor on exit or temporary TUI shutdown ([5f2f7d067](https://github.com/fleetagent/pi/commit/5f2f7d06793738605681dc69e17feea120cba3f9)).
+* Bound colored editor scroll indicators to the available terminal width, including one- and two-column layouts ([37bedb7f0](https://github.com/fleetagent/pi/commit/37bedb7f0b189f2ed0aed4f715c490c791baa01f)).
+* Decode legacy terminal Alt+symbol sequences such as `Alt+,` and `Alt+.` through central key matching and parsing while retaining Kitty protocol disambiguation ([8479bd847](https://github.com/fleetagent/pi/commit/8479bd84743e8889f728acb21a62794102db0529)).
+* Keep large-paste registry entries and counters synchronized when Backspace removes a marker or `setText` clears the editor, and renumber later entries in ascending ID order so submission expands the correct content ([8a2ce5a54](https://github.com/fleetagent/pi/commit/8a2ce5a54024be2eb2b879288212141741afa65e), corrective follow-up [3595e080c](https://github.com/fleetagent/pi/commit/3595e080cb013232c4141cab9976eebcdddcc417)).
+* Restore large-paste content and numbering atomically with editor text during undo, including after marker deletion and `setText` replacement ([3595e080c](https://github.com/fleetagent/pi/commit/3595e080cb013232c4141cab9976eebcdddcc417)).
+* Count terminal-spacing marks and visible consonant continuations inside Indic and Myanmar grapheme clusters without widening ordinary combining marks ([dfe47d3fb](https://github.com/fleetagent/pi/commit/dfe47d3fbd8bf27841becaf8ec042dc0e73804a6)).
+* Close active BEL- or ST-terminated OSC 8 hyperlinks before the SGR reset and ellipsis when width truncation cuts through a clickable label ([b780d20aa](https://github.com/fleetagent/pi/commit/b780d20aa17c4144ace7bff728150993236b88ee)).
+* Correct LaTeX relation, multiplication, named-operator, and script spacing; compose matrices with stacked fractions, limits, adjacent matrices, surrounding spaces, and punctuation; and preserve chained shell-variable paths as source text ([aa601d7ba](https://github.com/fleetagent/pi/commit/aa601d7ba0e64e063d2b16d850d7bf32787b49ab)).
+* Prevent orphan mouse motion and release events from creating phantom fullscreen selections, cancel incomplete selection state on terminal focus loss, and disable terminal focus reporting on shutdown ([upstream `696a828a4`](https://github.com/fleetagent/pi/commit/696a828a4)).
+* Preserve exclusive word-selection boundaries while mapping fullscreen transcript coordinates, preventing double-click highlights from including trailing spaces and word drags from partially highlighting whitespace segments ([upstream `171c6b520`](https://github.com/fleetagent/pi/commit/171c6b520)).
+* Use one-line wheel scrolling by default in fullscreen mode ([upstream `3c5a1b239`](https://github.com/fleetagent/pi/commit/3c5a1b239)).
+* Reduce pointer-motion event volume under tmux, Zellij, and GNU Screen by using button-motion tracking while preserving clicks, wheel scrolling, text selection, and scrollbar dragging ([upstream `fc3554e16`](https://github.com/fleetagent/pi/commit/fc3554e16)).
+* Clip Kitty images at both the upper and lower edges of fullscreen layout viewports so transcript images cannot overwrite a fixed editor/footer dock ([upstream `af187eee4`](https://github.com/fleetagent/pi/commit/af187eee4)).
+* Avoid rendering fixed-basis scroll content during layout measurement and scanning rows outside fullscreen clip bounds during painting, preserving identical viewport output for very large transcripts ([layout portion of upstream `73414d08b`](https://github.com/fleetagent/pi/commit/73414d08b94d7db46d3fa66582c8fe3b02dabf72), follow-up [`4c01c7093`](https://github.com/fleetagent/pi/commit/4c01c709380621c5ff2719162cd7a7973dcb2799)).
+* Keep fullscreen Kitty images stable during scrolling, movement, resize, and reentry by separating payload transmission from placement redraws and retaining a bounded count/encoded/decoded-size cache, while preserving multiplexer restrictions and enabling Kitty images in Warp ([upstream `73414d08b`](https://github.com/fleetagent/pi/commit/73414d08b94d7db46d3fa66582c8fe3b02dabf72), cache follow-up [`a8ee03b81`](https://github.com/fleetagent/pi/commit/a8ee03b8156c2232d67ad2cdb79683b4a5c8fdbe), Warp detection [`7a14325b2`](https://github.com/fleetagent/pi/commit/7a14325b24e91824a57916d5d2d44a8b45cdefd4)).
+* Include decoded iTerm2 payload sizes in OSC 1337 image metadata for xterm.js image-addon validation while retaining terminal-control sanitization ([upstream `2c233a5c0`](https://github.com/fleetagent/pi/commit/2c233a5c04f12ada58e3908c376c5e28bfdb38ef)).
 
 ## [0.1.4](https://github.com/fleetagent/pi/compare/@fleetagent/pi-tui-v0.1.3...@fleetagent/pi-tui-v0.1.4) (2026-06-16)
 
@@ -227,11 +269,11 @@
 
 ### Breaking Changes
 
-- Renamed the npm package scope from `@earendil-works` to `@fleetagent`.
+- Changed the npm package scope to `@fleetagent`.
 
 ### Changed
 
-- Replaced the optional `koffi` dependency for Windows VT input with a tiny vendored native helper, reducing install size while preserving Shift+Tab handling ([#4480](https://github.com/earendil-works/pi/issues/4480)).
+- Replaced the optional `koffi` dependency for Windows VT input with a tiny vendored native helper, reducing install size while preserving Shift+Tab handling ([#4480](https://github.com/fleetagent/pi/issues/4480)).
 
 ## [0.75.4] - 2026-05-20
 
@@ -260,14 +302,14 @@
 
 ### Added
 
-- Added markdown list-item wrapping that preserves indentation for wrapped continuation lines ([#4327](https://github.com/earendil-works/pi-mono/pull/4327) by [@Perlence](https://github.com/Perlence)).
+- Added markdown list-item wrapping that preserves indentation for wrapped continuation lines ([#4327](https://github.com/fleetagent/pi/pull/4327) by [@Perlence](https://github.com/Perlence)).
 
 ### Fixed
 
-- Fixed markdown task-list checkbox rendering ([#4379](https://github.com/earendil-works/pi-mono/pull/4379) by [@Perlence](https://github.com/Perlence)).
-- Fixed markdown rendering robustness for very large markdown files ([#4463](https://github.com/earendil-works/pi-mono/pull/4463) by [@ndanielherrera](https://github.com/ndanielherrera)).
-- Fixed Kitty image placement when the viewport is shorter than the rendered image ([#4461](https://github.com/earendil-works/pi-mono/pull/4461) by [@xu0o0](https://github.com/xu0o0)).
-- Fixed WezTerm Kitty keyboard protocol edge cases so escape handling remains correct ([#4482](https://github.com/earendil-works/pi-mono/pull/4482) by [@Felixoid](https://github.com/Felixoid)).
+- Fixed markdown task-list checkbox rendering ([#4379](https://github.com/fleetagent/pi/pull/4379) by [@Perlence](https://github.com/Perlence)).
+- Fixed markdown rendering robustness for very large markdown files ([#4463](https://github.com/fleetagent/pi/pull/4463) by [@ndanielherrera](https://github.com/ndanielherrera)).
+- Fixed Kitty image placement when the viewport is shorter than the rendered image ([#4461](https://github.com/fleetagent/pi/pull/4461) by [@xu0o0](https://github.com/xu0o0)).
+- Fixed WezTerm Kitty keyboard protocol edge cases so escape handling remains correct ([#4482](https://github.com/fleetagent/pi/pull/4482) by [@Felixoid](https://github.com/Felixoid)).
 - Fixed inline image rendering to cap portrait images by height instead of always scaling them to the configured maximum width.
 
 ## [0.74.0] - 2026-05-07

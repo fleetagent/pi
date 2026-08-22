@@ -3,6 +3,7 @@ import type { Transport } from "@fleetagent/pi-ai";
 import {
 	Container,
 	getCapabilities,
+	type ScrollViewScrollbar,
 	type SelectItem,
 	SelectList,
 	type SelectListLayoutOptions,
@@ -10,9 +11,10 @@ import {
 	SettingsList,
 	Spacer,
 	Text,
+	type TuiMode,
 } from "@fleetagent/pi-tui";
 import { formatHttpIdleTimeoutMs, HTTP_IDLE_TIMEOUT_CHOICES } from "../../../core/http-dispatcher.ts";
-import type { WarningSettings } from "../../../core/settings-manager.ts";
+import type { FullscreenExitOutput, MermaidRenderingMode, WarningSettings } from "../../../core/settings-manager.ts";
 import { getSelectListTheme, getSettingsListTheme, theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyDisplayText } from "./keybinding-hints.ts";
@@ -47,6 +49,7 @@ export interface SettingsConfig {
 	currentTheme: string;
 	availableThemes: string[];
 	hideThinkingBlock: boolean;
+	mermaidRenderingMode: MermaidRenderingMode;
 	collapseChangelog: boolean;
 	enableInstallTelemetry: boolean;
 	doubleEscapeAction: "fork" | "tree" | "none";
@@ -58,6 +61,9 @@ export interface SettingsConfig {
 	quietStartup: boolean;
 	clearOnShrink: boolean;
 	showTerminalProgress: boolean;
+	tuiMode: TuiMode;
+	fullscreenExitOutput: FullscreenExitOutput;
+	fullscreenScrollbar: ScrollViewScrollbar;
 	warnings: WarningSettings;
 }
 
@@ -76,6 +82,7 @@ export interface SettingsCallbacks {
 	onThemeChange: (theme: string) => void;
 	onThemePreview?: (theme: string) => void;
 	onHideThinkingBlockChange: (hidden: boolean) => void;
+	onMermaidRenderingModeChange: (mode: MermaidRenderingMode) => void;
 	onCollapseChangelogChange: (collapsed: boolean) => void;
 	onEnableInstallTelemetryChange: (enabled: boolean) => void;
 	onDoubleEscapeActionChange: (action: "fork" | "tree" | "none") => void;
@@ -87,6 +94,9 @@ export interface SettingsCallbacks {
 	onQuietStartupChange: (enabled: boolean) => void;
 	onClearOnShrinkChange: (enabled: boolean) => void;
 	onShowTerminalProgressChange: (enabled: boolean) => void;
+	onTuiModeChange: (mode: TuiMode) => void;
+	onFullscreenExitOutputChange: (output: FullscreenExitOutput) => void;
+	onFullscreenScrollbarChange: (mode: ScrollViewScrollbar) => void;
 	onWarningsChange: (warnings: WarningSettings) => void;
 	onCancel: () => void;
 }
@@ -257,6 +267,13 @@ export class SettingsSelectorComponent extends Container {
 				description: "Hide thinking blocks in assistant responses",
 				currentValue: config.hideThinkingBlock ? "true" : "false",
 				values: ["true", "false"],
+			},
+			{
+				id: "mermaid-rendering",
+				label: "Mermaid diagrams",
+				description: "Render Mermaid code blocks as Unicode diagrams",
+				currentValue: config.mermaidRenderingMode,
+				values: ["off", "final", "streaming"],
 			},
 			{
 				id: "collapse-changelog",
@@ -469,6 +486,32 @@ export class SettingsSelectorComponent extends Container {
 			values: ["true", "false"],
 		});
 
+		const terminalProgressIndex = items.findIndex((item) => item.id === "terminal-progress");
+		items.splice(terminalProgressIndex + 1, 0, {
+			id: "tui-mode",
+			label: "TUI mode",
+			description: "Interface layout; fullscreen mode is experimental",
+			currentValue: config.tuiMode,
+			values: ["regular", "fullscreen"],
+		});
+
+		const tuiModeIndex = items.findIndex((item) => item.id === "tui-mode");
+		items.splice(tuiModeIndex + 1, 0, {
+			id: "fullscreen-exit-output",
+			label: "Fullscreen exit output",
+			description: "Replay the transcript or restore the previous screen when exiting fullscreen mode",
+			currentValue: config.fullscreenExitOutput,
+			values: ["transcript", "resume-hint"],
+		});
+		const fullscreenExitOutputIndex = items.findIndex((item) => item.id === "fullscreen-exit-output");
+		items.splice(fullscreenExitOutputIndex + 1, 0, {
+			id: "fullscreen-scrollbar",
+			label: "Fullscreen scrollbar",
+			description: "Scrollbar behavior in fullscreen mode; has no effect in regular mode",
+			currentValue: config.fullscreenScrollbar,
+			values: ["auto", "always", "hidden"],
+		});
+
 		// Add borders
 		this.addChild(new DynamicBorder());
 
@@ -515,6 +558,9 @@ export class SettingsSelectorComponent extends Container {
 					case "hide-thinking":
 						callbacks.onHideThinkingBlockChange(newValue === "true");
 						break;
+					case "mermaid-rendering":
+						callbacks.onMermaidRenderingModeChange(newValue as MermaidRenderingMode);
+						break;
 					case "collapse-changelog":
 						callbacks.onCollapseChangelogChange(newValue === "true");
 						break;
@@ -549,6 +595,15 @@ export class SettingsSelectorComponent extends Container {
 						break;
 					case "terminal-progress":
 						callbacks.onShowTerminalProgressChange(newValue === "true");
+						break;
+					case "tui-mode":
+						callbacks.onTuiModeChange(newValue as TuiMode);
+						break;
+					case "fullscreen-exit-output":
+						callbacks.onFullscreenExitOutputChange(newValue as FullscreenExitOutput);
+						break;
+					case "fullscreen-scrollbar":
+						callbacks.onFullscreenScrollbarChange(newValue as ScrollViewScrollbar);
 						break;
 				}
 			},

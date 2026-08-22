@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getModel } from "../src/models.ts";
 import { convertMessages } from "../src/providers/openai-completions.ts";
 import { streamSimple } from "../src/stream.ts";
-import type { AssistantMessage, Model, Tool, ToolResultMessage } from "../src/types.ts";
+import type { AssistantMessage, Message, Model, Tool, ToolResultMessage } from "../src/types.ts";
 
 const mockState = vi.hoisted(() => ({
 	lastParams: undefined as unknown,
@@ -157,7 +157,7 @@ describe("openai-completions tool_choice", () => {
 	});
 
 	it("maps groq qwen3 reasoning levels to default reasoning_effort", async () => {
-		const model = getModel("groq", "qwen/qwen3-32b")!;
+		const model = getModel("groq", "qwen/qwen3.6-27b")!;
 		let payload: unknown;
 
 		await streamSimple(
@@ -213,7 +213,7 @@ describe("openai-completions tool_choice", () => {
 	});
 
 	it("enables tool_stream for supported z.ai models with tools", async () => {
-		const model = getModel("zai", "glm-5.1")!;
+		const model = getModel("zai", "glm-5.2")!;
 		const tools: Tool[] = [
 			{
 				name: "ping",
@@ -250,15 +250,17 @@ describe("openai-completions tool_choice", () => {
 	});
 
 	it("stores z.ai tool_stream support in model compat metadata", () => {
-		expect(getModel("zai", "glm-5.1")?.compat?.zaiToolStream).toBe(true);
-		expect(getModel("zai", "glm-4.7")?.compat?.zaiToolStream).toBe(true);
+		expect(getModel("zai", "glm-5.2")?.compat?.zaiToolStream).toBe(true);
 		expect(getModel("zai", "glm-4.7")?.compat?.zaiToolStream).toBe(true);
 		expect(getModel("zai", "glm-5-turbo")?.compat?.zaiToolStream).toBe(true);
-		expect(getModel("zai", "glm-4.5-air")?.compat?.zaiToolStream).toBeUndefined();
 	});
 
 	it("omits tool_stream for unsupported z.ai models", async () => {
-		const model = getModel("zai", "glm-4.5-air")!;
+		const baseModel = getModel("zai", "glm-4.7")!;
+		const model = {
+			...baseModel,
+			compat: { ...baseModel.compat, zaiToolStream: undefined },
+		} as const;
 		const tools: Tool[] = [
 			{
 				name: "ping",
@@ -295,7 +297,7 @@ describe("openai-completions tool_choice", () => {
 	});
 
 	it("respects explicit z.ai tool_stream compat override", async () => {
-		const baseModel = getModel("zai", "glm-4.5-air")!;
+		const baseModel = getModel("zai", "glm-4.7")!;
 		const model = {
 			...baseModel,
 			compat: {
@@ -339,7 +341,7 @@ describe("openai-completions tool_choice", () => {
 	});
 
 	it("omits tool_stream when no tools are provided", async () => {
-		const model = getModel("zai", "glm-5.1")!;
+		const model = getModel("zai", "glm-5.2")!;
 		let payload: unknown;
 
 		await streamSimple(
@@ -381,7 +383,7 @@ describe("openai-completions tool_choice", () => {
 			},
 		];
 
-		const model = getModel("zai", "glm-5.1")!;
+		const model = getModel("zai", "glm-5.2")!;
 		const response = await streamSimple(
 			model,
 			{
@@ -472,6 +474,55 @@ describe("openai-completions tool_choice", () => {
 
 		expect(response.stopReason).toBe("error");
 		expect(response.errorMessage).toBe("Stream ended without finish_reason");
+	});
+
+	it("ignores empty custom objects on function tool call deltas", async () => {
+		mockState.chunks = [
+			{
+				id: "chatcmpl-empty-custom",
+				choices: [
+					{
+						delta: {
+							tool_calls: [
+								{
+									index: 0,
+									id: "call_1",
+									type: "function",
+									function: { name: "read", arguments: '{"path":"README.md"}' },
+									custom: {},
+								},
+							],
+						},
+						finish_reason: "tool_calls",
+					},
+				],
+			},
+		];
+
+		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
+		const model = { ...baseModel, api: "openai-completions" } as const;
+		const tool: Tool = {
+			name: "read",
+			description: "Read a file",
+			parameters: Type.Object({ path: Type.String() }),
+		};
+		const response = await streamSimple(
+			model,
+			{
+				messages: [{ role: "user", content: "Read README.md", timestamp: Date.now() }],
+				tools: [tool],
+			},
+			{ apiKey: "test" },
+		).result();
+
+		expect(response.content).toEqual([
+			{
+				type: "toolCall",
+				id: "call_1",
+				name: "read",
+				arguments: { path: "README.md" },
+			},
+		]);
 	});
 
 	it("coalesces tool call deltas by stable index when provider mutates ids mid-stream", async () => {
@@ -860,6 +911,65 @@ describe("openai-completions tool_choice", () => {
 
 		const params = payload as { messages?: Array<{ role?: string }> };
 		expect(params.messages?.[0]?.role).toBe("developer");
+	});
+
+	it("normalizes malformed content before token estimation, payload, and tool-history conversion", async () => {
+		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
+		const model = { ...baseModel, api: "openai-completions" } as const;
+		const malformedUser = { role: "user", content: null, timestamp: Date.now() } as unknown as Message;
+		const malformedAssistant = {
+			role: "assistant",
+			content: null,
+			api: "openai-completions",
+			provider: "openai",
+			model: model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: Date.now(),
+		} as unknown as AssistantMessage;
+		const malformedToolResult = {
+			role: "toolResult",
+			toolCallId: "call_1",
+			toolName: "web_search",
+			isError: false,
+			timestamp: Date.now(),
+		} as unknown as Message;
+		let payload: unknown;
+
+		await streamSimple(
+			model,
+			{
+				messages: [
+					malformedUser,
+					malformedAssistant,
+					malformedToolResult,
+					{ role: "user", content: "Hi", timestamp: Date.now() },
+				],
+			},
+			{
+				apiKey: "test",
+				onPayload: (params: unknown) => {
+					payload = params;
+				},
+			},
+		).result();
+
+		const params = payload as { messages?: Array<{ role?: string; content?: unknown }>; tools?: unknown[] };
+		expect(params.messages).toEqual([
+			{ role: "tool", content: "(no tool output)", tool_call_id: "call_1" },
+			{ role: "user", content: "Hi" },
+		]);
+		expect(params.tools).toEqual([]);
+		expect(malformedUser.content).toBeNull();
+		expect(malformedAssistant.content).toBeNull();
+		expect("content" in malformedToolResult).toBe(false);
 	});
 
 	it("stores Xiaomi MiMo reasoning replay compat in built-in metadata", () => {
@@ -1259,5 +1369,110 @@ describe("openai-completions tool_choice", () => {
 		};
 		expect(params.reasoning).toEqual({ effort: "high" });
 		expect(params.reasoning_effort).toBeUndefined();
+	});
+
+	it("sends max_tokens for built-in and custom DeepSeek API models", async () => {
+		const { compat: _compat, ...baseModel } = getModel("deepseek", "deepseek-v4-flash")!;
+		const customModel = {
+			...baseModel,
+			id: "custom-deepseek-model",
+			name: "Custom DeepSeek Model",
+			provider: "custom-deepseek",
+			baseUrl: "https://api.deepseek.com",
+		} satisfies Model<"openai-completions">;
+		const nativeModels = [
+			getModel("deepseek", "deepseek-v4-flash")!,
+			getModel("deepseek", "deepseek-v4-pro")!,
+		] as const;
+		const cases = [...nativeModels, customModel] as const;
+
+		for (const model of nativeModels) {
+			expect(model.compat?.maxTokensField).toBe("max_tokens");
+		}
+
+		for (const model of cases) {
+			let payload: unknown;
+
+			await streamSimple(
+				model,
+				{
+					messages: [{ role: "user", content: "Hi", timestamp: Date.now() }],
+				},
+				{
+					apiKey: "test",
+					maxTokens: 123,
+					onPayload: (params: unknown) => {
+						payload = params;
+					},
+				},
+			).result();
+
+			const params = (payload ?? mockState.lastParams) as { max_tokens?: number; max_completion_tokens?: number };
+			expect(params.max_tokens).toBe(123);
+			expect(params.max_completion_tokens).toBeUndefined();
+		}
+	});
+
+	it("sends max_tokens without changing Z.AI thinking payloads", async () => {
+		const { compat: _compat, ...baseModel } = getModel("zai", "glm-5.2")!;
+		const customModels = [
+			{
+				...baseModel,
+				id: "custom-zai-global",
+				name: "Custom Z.AI Global",
+				provider: "custom-zai",
+				baseUrl: "https://api.z.ai/api/paas/v4",
+			},
+			{
+				...baseModel,
+				id: "custom-zai-cn",
+				name: "Custom Z.AI China",
+				provider: "custom-zai",
+				baseUrl: "https://open.bigmodel.cn/api/paas/v4",
+			},
+			{
+				...baseModel,
+				id: "self-hosted-zai-cn",
+				name: "Self-hosted Z.AI China",
+				provider: "zai-coding-cn",
+				baseUrl: "http://localhost:8000/v1",
+			},
+		] satisfies Model<"openai-completions">[];
+		const nativeModels = [getModel("zai", "glm-4.7")!, getModel("zai", "glm-5.2")!] as const;
+		const cases = [...nativeModels, ...customModels] as const;
+
+		for (const model of nativeModels) {
+			expect(model.compat?.maxTokensField).toBe("max_tokens");
+		}
+
+		for (const model of cases) {
+			let payload: unknown;
+
+			await streamSimple(
+				model,
+				{
+					messages: [{ role: "user", content: "Hi", timestamp: Date.now() }],
+				},
+				{
+					apiKey: "test",
+					maxTokens: 123,
+					reasoning: "high",
+					onPayload: (params: unknown) => {
+						payload = params;
+					},
+				},
+			).result();
+
+			const params = (payload ?? mockState.lastParams) as {
+				max_tokens?: number;
+				max_completion_tokens?: number;
+				thinking?: { type?: string; clear_thinking?: boolean };
+				reasoning_effort?: string;
+			};
+			expect(params.max_tokens).toBe(123);
+			expect(params.max_completion_tokens).toBeUndefined();
+			expect(params.thinking).toEqual({ type: "enabled", clear_thinking: false });
+			expect(params.reasoning_effort).toBeUndefined();
+		}
 	});
 });

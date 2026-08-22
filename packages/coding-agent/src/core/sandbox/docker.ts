@@ -362,14 +362,14 @@ export function buildDockerRunInvocation(
 	const args = [
 		"run",
 		"--detach",
+		"--network",
+		"host",
 		"--name",
 		containerName,
 		"--workdir",
 		config.workspaceMountPath,
 		"--mount",
 		`type=bind,source=${workspaceRoot},target=${config.workspaceMountPath}`,
-		"--publish",
-		`${config.daemonHostBind}::${config.daemonPort}`,
 		"--env",
 		"PI_DAEMON_TOKEN",
 	];
@@ -379,7 +379,7 @@ export function buildDockerRunInvocation(
 		"pi",
 		"--daemon",
 		"--daemon-host",
-		"0.0.0.0",
+		config.daemonHostBind,
 		"--daemon-port",
 		String(config.daemonPort),
 		"--daemon-cwd",
@@ -438,15 +438,14 @@ export class DockerSandboxService {
 		const runResult = await this.runner.run(invocation.command, invocation.args, { env: invocation.env });
 		ensureSuccessful(runResult, invocation.args);
 		const containerId = runResult.stdout.trim();
-		const portArgs = ["port", containerId, `${this.resolveConfig(options).daemonPort}/tcp`];
-		const portResult = await this.runner.run(invocation.command, portArgs);
-		ensureSuccessful(portResult, portArgs);
-		const daemonUrl = parseDockerPortOutput(portResult.stdout);
+		const config = this.resolveConfig(options);
+		const daemonHost = config.daemonHostBind === "0.0.0.0" ? "127.0.0.1" : config.daemonHostBind;
+		const daemonUrl = `ws://${daemonHost}:${config.daemonPort}/pi/workspace`;
 		return {
 			containerId,
 			containerName: invocation.containerName,
 			workspaceRoot: invocation.workspaceRoot,
-			workspaceMountPath: this.resolveConfig(options).workspaceMountPath,
+			workspaceMountPath: config.workspaceMountPath,
 			daemonUrl,
 			daemonUrlRedacted: redactSecrets(daemonUrl),
 			token: invocation.token,

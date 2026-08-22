@@ -171,6 +171,7 @@ export interface RpcSessionState {
 	model?: Model<any>;
 	thinkingLevel: ThinkingLevel;
 	isStreaming: boolean;
+	isIdle: boolean;
 	isCompacting: boolean;
 	steeringMode: "all" | "one-at-a-time";
 	followUpMode: "all" | "one-at-a-time";

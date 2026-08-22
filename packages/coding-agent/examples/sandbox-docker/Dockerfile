@@ -241,6 +241,7 @@ pi --version
 Security model:
 
 - `/workspace` is the host project mount and is intentionally writable.
+- `/tmp` is writable temporary storage. Use it for ad-hoc scripts, generated artifacts, and disposable intermediate files.
 - Host paths outside mounted volumes are not available to agent workspace tools.
 - Do not mount Docker socket, SSH keys, home directories, or extra secrets unless you explicitly want the sandbox to access them.
 EOF
@@ -257,6 +258,8 @@ RUN test -x /opt/pi/pi \
 ENV PI_DAEMON_HOST=0.0.0.0
 ENV PI_DAEMON_PORT=8787
 ENV PI_DAEMON_CWD=/workspace
+ENV PI_DAEMON_TEMP_ROOT=/tmp
+ENV TMPDIR=/tmp
 ENV PI_DAEMON_ALLOW_INSECURE_TRANSPORT=1
 ENV PI_DAEMON_ALLOW_PROCESS_EXEC=1
 ENV PI_DAEMON_LSP_CONFIG=/etc/pi/lsp.json

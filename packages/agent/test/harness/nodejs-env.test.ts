@@ -45,6 +45,16 @@ describe("NodeExecutionEnv", () => {
 		expect(getOrThrow(await env.exists("nested/child/file.txt"))).toBe(false);
 	});
 
+	it("renames files without copying through an intermediate destination", async () => {
+		const root = createTempDir();
+		const env = new NodeExecutionEnv({ cwd: root });
+		getOrThrow(await env.writeFile("source.txt", "complete"));
+		getOrThrow(await env.writeFile("destination.txt", "old"));
+		getOrThrow(await env.renameFile("source.txt", "destination.txt"));
+		expect(getOrThrow(await env.exists("source.txt"))).toBe(false);
+		expect(getOrThrow(await env.readTextFile("destination.txt"))).toBe("complete");
+	});
+
 	it("returns fileInfo for files, directories, and symlinks without following symlinks", async () => {
 		const root = createTempDir();
 		const env = new NodeExecutionEnv({ cwd: root });

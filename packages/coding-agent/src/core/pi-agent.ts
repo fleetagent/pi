@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { Agent, type AgentMessage, type ThinkingLevel } from "@fleetagent/pi-agent-core";
 import {
@@ -9,10 +9,12 @@ import {
 	refreshModelCatalog,
 	streamSimple,
 } from "@fleetagent/pi-ai";
+import type { TuiMode } from "@fleetagent/pi-tui";
 import chalk from "chalk";
 import { getAgentDir } from "../config.ts";
 import { InteractiveMode, runPrintMode, runRpcMode } from "../modes/index.ts";
 import { stopThemeWatcher } from "../modes/interactive/theme/theme.ts";
+import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { AgentSession, getDefaultActiveToolNames } from "./agent-session.ts";
 import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
 import { AuthStorage } from "./auth-storage.ts";
@@ -50,7 +52,13 @@ import { InMemorySettingsStorage, SettingsManager } from "./settings-manager.ts"
 import { isInstallTelemetryEnabled } from "./telemetry.ts";
 import { printTimings, time } from "./timings.ts";
 import { type BorrowedToolOperations, borrowToolOperations, type ToolOperations } from "./tools/index.ts";
-import type { SubagentRunInfo, SubagentRunner, SubagentRunRegistry, SubagentRunRequest } from "./tools/subagent.ts";
+import type {
+	SubagentConfigRegistry,
+	SubagentRunInfo,
+	SubagentRunner,
+	SubagentRunRegistry,
+	SubagentRunRequest,
+} from "./tools/subagent.ts";
 
 export interface PiAgentDiagnostic {
 	type: "info" | "warning" | "error";
@@ -156,6 +164,8 @@ export interface RunPiAgentModeOptions {
 	initialImages?: ImageContent[];
 	initialMessages?: string[];
 	verbose?: boolean;
+	/** Startup-only interactive renderer choice. Defaults to the persisted setting. */
+	tuiMode?: TuiMode;
 	startupBenchmark?: boolean;
 }
 
@@ -443,6 +453,15 @@ export class PiAgent {
 		};
 	}
 
+	private createSubagentConfigRegistry(): SubagentConfigRegistry {
+		const configs = new Map<string, Parameters<SubagentConfigRegistry["upsert"]>[0]>();
+		return {
+			list: () => Array.from(configs.values()).sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
+			upsert: (config) => configs.set(config.name, structuredClone(config)),
+			get: (name) => configs.get(name),
+		};
+	}
+
 	private createEmbeddedSubagentRunner(
 		services: PiAgentServices,
 		toolOperations: ToolOperations | undefined,
@@ -476,10 +495,36 @@ export class PiAgent {
 				settingsStorage.withLock("global", () => JSON.stringify(services.settingsManager.getGlobalSettings()));
 				settingsStorage.withLock("project", () => JSON.stringify(services.settingsManager.getProjectSettings()));
 				const settingsManager = SettingsManager.fromStorage(settingsStorage);
-				const childExcludedTools = new Set(["subagent", "subagent_runs", ...excludedTools]);
-				const tools = (request.tools ?? getDefaultActiveToolNames()).filter(
+				const requestedSkills = request.skills ?? [];
+				const loadedSkills = services.resourceLoader.getSkills().skills;
+				const missingSkills = requestedSkills.filter((name) => !loadedSkills.some((skill) => skill.name === name));
+				if (missingSkills.length > 0) {
+					return { exitCode: 1, stderr: `Unknown subagent skill(s): ${missingSkills.join(", ")}` };
+				}
+				const selectedSkills = requestedSkills
+					.map((name) => loadedSkills.find((skill) => skill.name === name))
+					.filter((skill): skill is (typeof loadedSkills)[number] => skill !== undefined);
+				const skillSystemPromptBlocks: string[] = [];
+				for (const skill of selectedSkills) {
+					try {
+						const content = skill.content ?? readFileSync(skill.filePath, "utf-8");
+						skillSystemPromptBlocks.push(
+							`<preloaded-skill name="${skill.name}" location="${skill.filePath}">\nReferences are relative to ${skill.baseDir}.\n\n${stripFrontmatter(content).trim()}\n</preloaded-skill>`,
+						);
+					} catch (error) {
+						return {
+							exitCode: 1,
+							stderr: `Failed to preload subagent skill ${skill.name}: ${error instanceof Error ? error.message : String(error)}`,
+						};
+					}
+				}
+				const childExcludedTools = new Set(["subagent", "subagent_runs", "create_subagent", ...excludedTools]);
+				const requestedTools = request.tools ?? getDefaultActiveToolNames();
+				const skillTools = selectedSkills.flatMap((skill) => skill.tools ?? []);
+				const tools = Array.from(new Set([...requestedTools, ...skillTools])).filter(
 					(name) => !childExcludedTools.has(name),
 				);
+				const activeToolOperations = request.toolOperations ?? toolOperations;
 				const child = await PiAgent.create({
 					mode: "embedded",
 					cwd: request.cwd,
@@ -492,12 +537,12 @@ export class PiAgent {
 					thinkingLevel: resolvedModel?.thinkingLevel,
 					tools,
 					excludedTools: Array.from(childExcludedTools),
-					toolOperations,
+					toolOperations: activeToolOperations,
 					resourceLoaderOptions: {
-						toolOperations,
+						toolOperations: activeToolOperations,
 						noPromptTemplates: true,
 						noThemes: true,
-						appendSystemPrompt: request.systemPrompt.trim() ? [request.systemPrompt] : undefined,
+						appendSystemPrompt: [request.systemPrompt, ...skillSystemPromptBlocks].filter((part) => part.trim()),
 					},
 				});
 				const session = await child.createAgentSession();
@@ -760,6 +805,14 @@ export class PiAgent {
 				const websocketConnectTimeoutMs =
 					options?.websocketConnectTimeoutMs ?? services.settingsManager.getWebSocketConnectTimeoutMs();
 				const attributionHeaders = getAttributionHeaders(model, services.settingsManager, options?.sessionId);
+				let headers =
+					attributionHeaders || auth.headers || options?.headers
+						? { ...attributionHeaders, ...auth.headers, ...options?.headers }
+						: undefined;
+				const runner = extensionRunnerRef.current;
+				if (runner?.hasHandlers("before_provider_headers")) {
+					headers = await runner.emitBeforeProviderHeaders(headers ?? {});
+				}
 				return streamSimple(model, context, {
 					...options,
 					apiKey: auth.apiKey,
@@ -767,10 +820,7 @@ export class PiAgent {
 					websocketConnectTimeoutMs,
 					maxRetries: options?.maxRetries ?? providerRetrySettings.maxRetries,
 					maxRetryDelayMs: options?.maxRetryDelayMs ?? providerRetrySettings.maxRetryDelayMs,
-					headers:
-						attributionHeaders || auth.headers || options?.headers
-							? { ...attributionHeaders, ...auth.headers, ...options?.headers }
-							: undefined,
+					headers,
 				});
 			},
 			onPayload: async (payload) => {
@@ -816,6 +866,7 @@ export class PiAgent {
 		}
 
 		const subagentRunRegistry = this.createSubagentRunRegistry();
+		const subagentConfigRegistry = this.createSubagentConfigRegistry();
 
 		return {
 			session: new AgentSession({
@@ -838,6 +889,7 @@ export class PiAgent {
 					subagentRunRegistry,
 				),
 				subagentRunRegistry,
+				subagentConfigRegistry,
 				trustProjectAgents: sessionOptions.trustProjectAgents,
 				lspConfiguration: lspResult.configuration,
 				lspConnectionFactories: sessionOptions.lspConnectionFactories,
@@ -1078,7 +1130,8 @@ export class PiAgent {
 		let targetLeafId: string | null;
 		let selectedText: string | undefined;
 
-		const selectedEntry = this.session.session.getEntry(entryId);
+		const activeAgentSession = this.session;
+		const selectedEntry = activeAgentSession.session.getEntry(entryId);
 		if (!selectedEntry) {
 			throw new Error("Invalid entry ID for forking");
 		}
@@ -1093,8 +1146,8 @@ export class PiAgent {
 			selectedText = extractUserMessageText(selectedEntry.message.content);
 		}
 
-		const previousSessionReference = this.session.sessionReference;
-		const activeSession = this.session.session;
+		const previousSessionReference = activeAgentSession.sessionReference;
+		const activeSession = activeAgentSession.session;
 		let nextSession: Session;
 		try {
 			nextSession = await activeSession.forkSubSession(targetLeafId);
@@ -1170,6 +1223,7 @@ export class PiAgent {
 				initialImages: options.initialImages,
 				initialMessages: options.initialMessages,
 				verbose: options.verbose,
+				tuiMode: options.tuiMode,
 			});
 			if (options.startupBenchmark) {
 				await interactiveMode.init();

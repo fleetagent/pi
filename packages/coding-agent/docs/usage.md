@@ -22,6 +22,7 @@ The editor can be replaced temporarily by built-in UI such as `/settings` or by 
 | File reference | Type `@` to fuzzy-search project files |
 | Path completion | Press Tab to complete paths |
 | Multi-line input | Shift+Enter, or Ctrl+Enter on Windows Terminal |
+| Copy response | Ctrl+X copies the last assistant message; in `/tree`, it copies the selected entry |
 | Images | Paste with Ctrl+V, Alt+V on Windows, or drag into the terminal |
 | Shell command | `!command` runs and sends output to the model |
 | Hidden shell command | `!!command` runs without sending output to the model |
@@ -55,7 +56,7 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/changelog` | Display version history |
 | `/quit` | Quit pi |
 
-`/sandbox start|list|stop` is a user-only operator command shown in interactive completion, but not exposed through model-visible command catalogs. It manages local Docker containers and switches workspace tool execution to a container daemon; see [Docker Sandbox](sandbox.md).
+`/sandbox` is the sole user-only interactive backend command and is hidden from model-visible command catalogs. It shows or clears the current backend, configures deferred SSH, attaches a sandbox daemon, and manages local Docker sandbox containers; see [Workspace Sandbox](sandbox.md).
 
 ## Message Queue
 
@@ -99,6 +100,8 @@ Pi loads `AGENTS.md` or `CLAUDE.md` at startup from:
 - `~/.pi/agent/AGENTS.md` for global instructions
 - parent directories, walking up from the current working directory
 - the current directory
+
+If a directory contains `AGENTS.override.md`, Pi loads it instead of `AGENTS.md` or `CLAUDE.md` from that directory. Context files from other directories still layer normally.
 
 Use context files for project conventions, commands, safety rules, and preferences. Disable loading with `--no-context-files` or `-nc`.
 
@@ -198,7 +201,7 @@ LSP servers are external and disabled when no configuration is present. See [Lan
 
 The `subagent` tool runs fresh in-memory agent sessions in single, parallel, or chained mode. Each session has an isolated conversation while sharing parent authentication and model services, avoiding separate process startup. Each task can provide an optional named preset, persona (`systemPrompt`), output contract (`responseFormat`), model, tool allowlist, and working directory. Without a model it inherits the parent model; the parent receives authenticated same-family model metadata including context and token costs. Bundled presets are `explore`, `worker`, and `reviewer`. User definitions in `~/.pi/agent/agents/*.md` override bundled presets; project definitions in `.pi/agents/*.md` are opt-in through `agentScope` and require interactive confirmation by default.
 
-Use `--remote-deferred --remote-cwd <path>` to start without a connected tool backend, then connect from interactive mode with `/remote ssh <user@host[:/path]> [path]` or `/remote daemon <ws://url>`. Connecting reloads project instruction resources from the selected backend.
+Use `--remote-deferred --remote-cwd <path>` to start without a connected tool backend, then connect from interactive mode with `/sandbox ssh <user@host[:/path]> [path]` or `/sandbox --attach <ws://url>`. Connecting reloads project instruction resources from the selected backend.
 
 ### Resource Options
 
@@ -214,7 +217,7 @@ Use `--remote-deferred --remote-cwd <path>` to start without a connected tool ba
 | `--no-prompt-templates` | Disable prompt template discovery |
 | `--theme <path>` | Load a theme; repeatable |
 | `--no-themes` | Disable theme discovery |
-| `--no-context-files`, `-nc` | Disable `AGENTS.md` and `CLAUDE.md` discovery |
+| `--no-context-files`, `-nc` | Disable `AGENTS.override.md`, `AGENTS.md`, and `CLAUDE.md` discovery |
 
 Combine `--no-*` with explicit flags to load exactly what you need, ignoring settings. Example:
 
@@ -222,7 +225,7 @@ Combine `--no-*` with explicit flags to load exactly what you need, ignoring set
 pi --no-extensions -e ./my-extension.ts
 ```
 
-With `--ssh` or `--remote`, project instruction resources are loaded from the tool backend cwd: `.pi/skills`, `.pi/rules`, `.pi/prompts`, ancestor `.agents/skills` and `.agents/rules`, and `AGENTS.md`/`CLAUDE.md`. Extension loading, themes, user resources, and package resources remain local.
+With `--ssh` or `--remote`, project instruction resources are loaded from the tool backend cwd: `.pi/skills`, `.pi/rules`, `.pi/prompts`, ancestor `.agents/skills` and `.agents/rules`, and per-directory `AGENTS.override.md`/`AGENTS.md`/`CLAUDE.md` context. `AGENTS.override.md` replaces the other context candidates only in its own directory. Extension loading, themes, user resources, and package resources remain local.
 
 ### Other Options
 
@@ -230,9 +233,12 @@ With `--ssh` or `--remote`, project instruction resources are loaded from the to
 |--------|-------------|
 | `--system-prompt <text>` | Replace default prompt; context files and skills are still appended |
 | `--append-system-prompt <text>` | Append to system prompt |
+| `--tui-mode <mode>` | TUI mode: `regular` (default) or experimental `fullscreen` |
 | `--verbose` | Force verbose startup |
 | `-h`, `--help` | Show help |
 | `-v`, `--version` | Show version |
+
+In `fullscreen` mode, the transcript scrolls inside the terminal viewport while queued messages, status, extension widgets, editor, and footer remain fixed at the bottom. In `regular` mode, pi uses the terminal main screen and terminal-owned scrollback. Set **TUI mode** in `/settings` to switch immediately and choose the default for future sessions; `--tui-mode` overrides it for one startup. **Fullscreen exit output** controls whether shutdown replays the complete transcript or restores the previous main screen without replaying transcript content, leaving any shell or launcher resume affordance visible.
 
 ### File Arguments
 

@@ -14,9 +14,10 @@ import {
 	type OAuthProviderId,
 } from "@fleetagent/pi-ai";
 import { getOAuthApiKey, getOAuthProvider, getOAuthProviders } from "@fleetagent/pi-ai/oauth";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
+import { setTimeout as sleep } from "timers/promises";
 import { getAgentDir } from "../config.ts";
 import { normalizePath } from "../utils/paths.ts";
 import { resolveConfigValue } from "./resolve-config-value.ts";
@@ -45,6 +46,26 @@ type LockResult<T> = {
 	next?: string;
 };
 
+const AUTH_FILE_WRITE_OPTIONS = { encoding: "utf-8", mode: 0o600 } as const;
+
+type AuthFileReadState = {
+	data: AuthStorageData;
+	generation: number;
+	revision?: string;
+	reload?: Promise<AuthStorageData>;
+};
+
+const sharedAuthFileReadStates = new Map<string, AuthFileReadState>();
+
+function getFileRevision(path: string): string | undefined {
+	try {
+		const stats = statSync(path, { bigint: true });
+		return `${stats.dev}:${stats.ino}:${stats.size}:${stats.mtimeNs}:${stats.ctimeNs}`;
+	} catch {
+		return undefined;
+	}
+}
+
 export interface AuthStorageBackend {
 	withLock<T>(fn: (current: string | undefined) => LockResult<T>): T;
 	withLockAsync<T>(fn: (current: string | undefined) => Promise<LockResult<T>>): Promise<T>;
@@ -66,7 +87,7 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 
 	private ensureFileExists(): void {
 		if (!existsSync(this.authPath)) {
-			writeFileSync(this.authPath, "{}", "utf-8");
+			writeFileSync(this.authPath, "{}", AUTH_FILE_WRITE_OPTIONS);
 			chmodSync(this.authPath, 0o600);
 		}
 	}
@@ -98,6 +119,34 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 		throw (lastError as Error) ?? new Error("Failed to acquire auth storage lock");
 	}
 
+	private async acquireLockAsync(onCompromised: (error: Error) => void): Promise<() => Promise<void>> {
+		const staleMs = 30_000;
+		const maxDelayMs = 2_000;
+		const deadline = Date.now() + staleMs;
+		let retry = 0;
+		while (true) {
+			try {
+				return await lockfile.lock(this.authPath, {
+					realpath: false,
+					retries: 0,
+					stale: staleMs,
+					onCompromised,
+				});
+			} catch (error) {
+				const code =
+					typeof error === "object" && error !== null && "code" in error
+						? String((error as { code?: unknown }).code)
+						: undefined;
+				const remainingMs = deadline - Date.now();
+				if (code !== "ELOCKED" || remainingMs <= 0) throw error;
+				const baseDelayMs = Math.min(10 * 2 ** retry, maxDelayMs / 2);
+				retry++;
+				const delayMs = Math.min(Math.round(baseDelayMs * (1 + Math.random())), remainingMs);
+				await sleep(delayMs);
+			}
+		}
+	}
+
 	withLock<T>(fn: (current: string | undefined) => LockResult<T>): T {
 		this.ensureParentDir();
 		this.ensureFileExists();
@@ -108,7 +157,7 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 			const current = existsSync(this.authPath) ? readFileSync(this.authPath, "utf-8") : undefined;
 			const { result, next } = fn(current);
 			if (next !== undefined) {
-				writeFileSync(this.authPath, next, "utf-8");
+				writeFileSync(this.authPath, next, AUTH_FILE_WRITE_OPTIONS);
 				chmodSync(this.authPath, 0o600);
 			}
 			return result;
@@ -133,19 +182,9 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 		};
 
 		try {
-			release = await lockfile.lock(this.authPath, {
-				retries: {
-					retries: 10,
-					factor: 2,
-					minTimeout: 100,
-					maxTimeout: 10000,
-					randomize: true,
-				},
-				stale: 30000,
-				onCompromised: (err) => {
-					lockCompromised = true;
-					lockCompromisedError = err;
-				},
+			release = await this.acquireLockAsync((err) => {
+				lockCompromised = true;
+				lockCompromisedError = err;
 			});
 
 			throwIfCompromised();
@@ -153,7 +192,7 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 			const { result, next } = await fn(current);
 			throwIfCompromised();
 			if (next !== undefined) {
-				writeFileSync(this.authPath, next, "utf-8");
+				writeFileSync(this.authPath, next, AUTH_FILE_WRITE_OPTIONS);
 				chmodSync(this.authPath, 0o600);
 			}
 			throwIfCompromised();
@@ -194,20 +233,31 @@ export class InMemoryAuthStorageBackend implements AuthStorageBackend {
  * Credential storage backed by a JSON file.
  */
 export class AuthStorage {
-	private data: AuthStorageData = {};
 	private runtimeOverrides: Map<string, string> = new Map();
 	private fallbackResolver?: (provider: string) => string | undefined;
 	private loadError: Error | null = null;
 	private errors: Error[] = [];
 	private storage: AuthStorageBackend;
+	private authPath: string | undefined;
+	private readState: AuthFileReadState;
 
-	private constructor(storage: AuthStorageBackend) {
+	private constructor(storage: AuthStorageBackend, authPath?: string) {
 		this.storage = storage;
+		this.authPath = authPath;
+		this.readState = authPath
+			? (sharedAuthFileReadStates.get(authPath) ?? { data: {}, generation: 0 })
+			: { data: {}, generation: 0 };
+		if (authPath) {
+			sharedAuthFileReadStates.set(authPath, this.readState);
+			const revision = getFileRevision(authPath);
+			if (revision !== undefined && revision === this.readState.revision) return;
+		}
 		this.reload();
 	}
 
-	static create(authPath?: string): AuthStorage {
-		return new AuthStorage(new FileAuthStorageBackend(authPath ?? join(getAgentDir(), "auth.json")));
+	static create(authPath: string = join(getAgentDir(), "auth.json")): AuthStorage {
+		const normalizedAuthPath = normalizePath(authPath);
+		return new AuthStorage(new FileAuthStorageBackend(normalizedAuthPath), normalizedAuthPath);
 	}
 
 	static fromStorage(storage: AuthStorageBackend): AuthStorage {
@@ -255,22 +305,84 @@ export class AuthStorage {
 		return JSON.parse(content) as AuthStorageData;
 	}
 
+	private updateReadState(data: AuthStorageData, revision?: string): void {
+		this.readState.data = data;
+		this.readState.revision = revision;
+		this.readState.generation++;
+	}
+
 	/**
 	 * Reload credentials from storage.
 	 */
 	reload(): void {
 		let content: string | undefined;
+		let revision: string | undefined;
 		try {
 			this.storage.withLock((current) => {
 				content = current;
+				revision = this.authPath ? getFileRevision(this.authPath) : undefined;
 				return { result: undefined };
 			});
-			this.data = this.parseStorageData(content);
+			this.updateReadState(this.parseStorageData(content), revision);
 			this.loadError = null;
 		} catch (error) {
 			this.loadError = error as Error;
 			this.recordError(error);
 		}
+	}
+
+	private async reloadFromStorageAsync(): Promise<AuthStorageData> {
+		const generation = this.readState.generation;
+		let currentData: AuthStorageData = {};
+		let revision: string | undefined;
+		await this.storage.withLockAsync(async (content) => {
+			currentData = this.parseStorageData(content);
+			revision = this.authPath ? getFileRevision(this.authPath) : undefined;
+			return { result: undefined };
+		});
+		if (this.readState.generation !== generation) return this.readState.data;
+		this.updateReadState(currentData, revision);
+		this.loadError = null;
+		return currentData;
+	}
+
+	private async readLatestData(): Promise<AuthStorageData> {
+		if (this.authPath) {
+			const revision = getFileRevision(this.authPath);
+			if (revision !== undefined && revision === this.readState.revision) return this.readState.data;
+		}
+		if (!this.readState.reload) {
+			const reload = this.reloadFromStorageAsync().catch((error: unknown) => {
+				this.loadError = error as Error;
+				this.recordError(error);
+				return this.readState.data;
+			});
+			this.readState.reload = reload;
+			void reload.finally(() => {
+				if (this.readState.reload === reload) this.readState.reload = undefined;
+			});
+		}
+		return this.readState.reload;
+	}
+
+	private readLatestDataSync(): AuthStorageData {
+		if (!this.authPath) return this.readState.data;
+		const revision = getFileRevision(this.authPath);
+		if (revision !== undefined && revision === this.readState.revision) return this.readState.data;
+		if (this.readState.reload && revision !== undefined) {
+			try {
+				const content = readFileSync(this.authPath, "utf-8");
+				if (getFileRevision(this.authPath) !== revision) return this.readState.data;
+				this.updateReadState(this.parseStorageData(content), revision);
+				this.loadError = null;
+			} catch (error) {
+				this.loadError = error as Error;
+				this.recordError(error);
+			}
+			return this.readState.data;
+		}
+		this.reload();
+		return this.readState.data;
 	}
 
 	private persistProviderChange(provider: string, credential: AuthCredential | undefined): AuthStorageData {
@@ -285,7 +397,6 @@ export class AuthStorage {
 			this.recordError(error);
 			throw error;
 		}
-
 		try {
 			let persistedData: AuthStorageData = {};
 			this.storage.withLock((current) => {
@@ -299,6 +410,7 @@ export class AuthStorage {
 				persistedData = merged;
 				return { result: undefined, next: JSON.stringify(merged, null, 2) };
 			});
+			this.updateReadState(persistedData);
 			this.loadError = null;
 			return persistedData;
 		} catch (error) {
@@ -311,35 +423,35 @@ export class AuthStorage {
 	 * Get credential for a provider.
 	 */
 	get(provider: string): AuthCredential | undefined {
-		return this.data[provider] ?? undefined;
+		return this.readLatestDataSync()[provider] ?? undefined;
 	}
 
 	/**
 	 * Set credential for a provider.
 	 */
 	set(provider: string, credential: AuthCredential): void {
-		this.data = this.persistProviderChange(provider, credential);
+		this.persistProviderChange(provider, credential);
 	}
 
 	/**
 	 * Remove credential for a provider.
 	 */
 	remove(provider: string): void {
-		this.data = this.persistProviderChange(provider, undefined);
+		this.persistProviderChange(provider, undefined);
 	}
 
 	/**
 	 * List all providers with credentials.
 	 */
 	list(): string[] {
-		return Object.keys(this.data);
+		return Object.keys(this.readLatestDataSync());
 	}
 
 	/**
 	 * Check if credentials exist for a provider in auth.json.
 	 */
 	has(provider: string): boolean {
-		return provider in this.data;
+		return provider in this.readLatestDataSync();
 	}
 
 	/**
@@ -348,7 +460,7 @@ export class AuthStorage {
 	 */
 	hasAuth(provider: string): boolean {
 		if (this.runtimeOverrides.has(provider)) return true;
-		if (this.data[provider]) return true;
+		if (this.readLatestDataSync()[provider]) return true;
 		if (getEnvApiKey(provider)) return true;
 		if (this.fallbackResolver?.(provider)) return true;
 		return false;
@@ -358,10 +470,9 @@ export class AuthStorage {
 	 * Return auth status without exposing credential values or refreshing tokens.
 	 */
 	getAuthStatus(provider: string): AuthStatus {
-		if (this.data[provider]) {
+		if (this.readLatestDataSync()[provider]) {
 			return { configured: true, source: "stored" };
 		}
-
 		if (this.runtimeOverrides.has(provider)) {
 			return { configured: false, source: "runtime", label: "--api-key" };
 		}
@@ -382,7 +493,7 @@ export class AuthStorage {
 	 * Get all credentials (for passing to getOAuthApiKey).
 	 */
 	getAll(): AuthStorageData {
-		return { ...this.data };
+		return { ...this.readLatestDataSync() };
 	}
 
 	drainErrors(): Error[] {
@@ -423,9 +534,12 @@ export class AuthStorage {
 			return null;
 		}
 
+		let latestData = this.readState.data;
+		let revision: string | undefined;
 		const result = await this.storage.withLockAsync(async (current) => {
 			const currentData = this.parseStorageData(current);
-			this.data = currentData;
+			latestData = currentData;
+			revision = this.authPath ? getFileRevision(this.authPath) : undefined;
 			this.loadError = null;
 
 			const cred = currentData[providerId];
@@ -453,10 +567,11 @@ export class AuthStorage {
 				...currentData,
 				[providerId]: { type: "oauth", ...refreshed.newCredentials },
 			};
-			this.data = merged;
-			this.loadError = null;
+			latestData = merged;
+			revision = undefined;
 			return { result: refreshed, next: JSON.stringify(merged, null, 2) };
 		});
+		this.updateReadState(latestData, revision);
 
 		return result;
 	}
@@ -477,7 +592,7 @@ export class AuthStorage {
 			return runtimeKey;
 		}
 
-		const cred = this.data[providerId];
+		const cred = (await this.readLatestData())[providerId];
 
 		if (cred?.type === "api_key") {
 			return resolveConfigValue(cred.key);
@@ -504,7 +619,7 @@ export class AuthStorage {
 					this.recordError(error);
 					// Refresh failed - re-read file to check if another instance succeeded
 					this.reload();
-					const updatedCred = this.data[providerId];
+					const updatedCred = this.readState.data[providerId];
 
 					if (updatedCred?.type === "oauth" && Date.now() < updatedCred.expires) {
 						// Another instance refreshed successfully, use those credentials

@@ -26,7 +26,10 @@ function safeJsonStringify(value: unknown): string {
 	}
 }
 
-function estimateTextAndImageContentChars(content: string | Array<TextContent | ImageContent>): number {
+function estimateTextAndImageContentChars(
+	content: string | Array<TextContent | ImageContent> | null | undefined,
+): number {
+	if (content == null) return 0;
 	if (typeof content === "string") return content.length;
 
 	let chars = 0;
@@ -48,7 +51,7 @@ export function estimateMessageTokens(message: Message): number {
 	if (message.role === "user") return estimateTextAndImageContentTokens(message.content);
 	if (message.role === "toolResult") return estimateTextAndImageContentTokens(message.content);
 
-	for (const block of message.content) {
+	for (const block of message.content ?? []) {
 		if (block.type === "text") {
 			chars += block.text.length;
 		} else if (block.type === "thinking") {

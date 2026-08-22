@@ -32,6 +32,8 @@ import type {
 	ImageContent,
 	Message,
 	Model,
+	ProviderHeaders,
+	RetryCallbacks,
 	TextContent,
 	Tool,
 	ToolResultMessage,
@@ -111,7 +113,12 @@ import {
 	resolveLspConfiguration,
 	resolveLspConfigurationLayerPaths,
 } from "./lsp/index.ts";
-import { type BashExecutionMessage, type CustomMessage, STRUCTURED_RESPONSE_INTERNAL_CUSTOM_TYPE } from "./messages.ts";
+import {
+	type BashExecutionMessage,
+	type CustomMessage,
+	normalizeMessageContent,
+	STRUCTURED_RESPONSE_INTERNAL_CUSTOM_TYPE,
+} from "./messages.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
@@ -131,9 +138,12 @@ import {
 	type ToolOperations,
 } from "./tools/index.ts";
 import {
+	createCreateSubagentToolDefinition,
 	createSubagentRunsToolDefinition,
 	createSubagentToolDefinition,
 	formatSubagentModelCatalog,
+	type SubagentConfigRegistry,
+	type SubagentModelHint,
 	type SubagentRunner,
 	type SubagentRunRegistry,
 } from "./tools/subagent.ts";
@@ -151,6 +161,7 @@ export const DEFAULT_ACTIVE_TOOL_NAMES = [
 	...LSP_TOOL_NAMES,
 	"subagent",
 	"subagent_runs",
+	"create_subagent",
 ] as const;
 
 export function getDefaultActiveToolNames(): string[] {
@@ -206,8 +217,23 @@ export type AgentSessionEvent =
 			willRetry: boolean;
 			errorMessage?: string;
 	  }
+	| { type: "agent_settled" }
 	| { type: "auto_retry_start"; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
-	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string };
+	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string }
+	| {
+			type: "summarization_retry_scheduled";
+			attempt: number;
+			maxAttempts: number;
+			delayMs: number;
+			errorMessage: string;
+	  }
+	| { type: "summarization_retry_attempt_start"; source: "branchSummary" }
+	| {
+			type: "summarization_retry_attempt_start";
+			source: "compaction";
+			reason: "manual" | "threshold" | "overflow";
+	  }
+	| { type: "summarization_retry_finished" };
 
 /** Listener function for agent session events */
 export type AgentSessionEventListener = (event: AgentSessionEvent) => void;
@@ -249,6 +275,7 @@ export interface AgentSessionConfig {
 	/** Runner used to create isolated subagent sessions. */
 	subagentRunner?: SubagentRunner;
 	subagentRunRegistry?: SubagentRunRegistry;
+	subagentConfigRegistry?: SubagentConfigRegistry;
 	/** Host-controlled trust grant for project-local subagent presets. */
 	trustProjectAgents?: boolean;
 	/** Validated configuration for the AgentSession-owned LSP runtime. */
@@ -356,6 +383,21 @@ interface RuntimeLifecycleOperationToken {
 	active: boolean;
 	children: Set<Promise<unknown>>;
 	childQueue: Promise<void>;
+}
+
+interface SessionActivityToken {
+	active: boolean;
+	kind: string;
+}
+
+interface IdleWaiter {
+	resolve: () => void;
+	reject: (error: Error) => void;
+}
+
+interface BarrierOwnerScope {
+	active: boolean;
+	label: string;
 }
 
 interface StructuredInternalDetails {
@@ -477,6 +519,7 @@ export class AgentSession {
 	private _unsubscribeAgent?: () => void;
 	private _eventListeners: AgentSessionEventListener[] = [];
 	private _disposePromise?: Promise<void>;
+	private _shutdownPreparationPromise?: Promise<void>;
 	private _disposed = false;
 
 	/** Tracks pending steering messages for UI display. Removed when delivered. */
@@ -492,6 +535,7 @@ export class AgentSession {
 	private _autoCompactionAbortController: AbortController | undefined = undefined;
 	private _extensionCompactionQueue: CompactOptions[] = [];
 	private _extensionCompactionTimer: ReturnType<typeof setTimeout> | undefined = undefined;
+	private _extensionCompactionActivity?: SessionActivityToken;
 	private _extensionCompactionRunning = false;
 	private _overflowRecoveryAttempted = false;
 
@@ -503,7 +547,7 @@ export class AgentSession {
 	private _retryAttempt = 0;
 
 	// Bash execution state
-	private _bashAbortController: AbortController | undefined = undefined;
+	private readonly _bashAbortControllers = new Set<AbortController>();
 	private _pendingBashMessages: BashExecutionMessage[] = [];
 
 	// Extension system
@@ -526,6 +570,7 @@ export class AgentSession {
 	private _runtimeToolOperations?: LocalToolOperations;
 	private _subagentRunner?: SubagentRunner;
 	private _subagentRunRegistry?: SubagentRunRegistry;
+	private _subagentConfigRegistry?: SubagentConfigRegistry;
 	private _trustProjectAgents: boolean;
 	private _localResourceToolOperations?: ToolOperations;
 	private _sandboxToolOperations?: DeferredRemoteToolOperations;
@@ -537,6 +582,13 @@ export class AgentSession {
 	private readonly _onLspConfigurationDiagnostics?: (diagnostics: readonly LspConfigurationSourceDiagnostic[]) => void;
 	private _runtimeLifecycleQueue: Promise<void> = Promise.resolve();
 	private readonly _runtimeLifecycleContext = new AsyncLocalStorage<RuntimeLifecycleOperationToken>();
+	private readonly _activities = new Set<SessionActivityToken>();
+	private _activityGeneration = 0;
+	private _activeCycle = false;
+	private _settlementScheduled = false;
+	private _settlementRunning = false;
+	private readonly _idleWaiters = new Set<IdleWaiter>();
+	private readonly _barrierOwnerContext = new AsyncLocalStorage<BarrierOwnerScope>();
 	private _sessionStartEvent: SessionStartEvent;
 	private _extensionUIContext?: ExtensionUIContext;
 	private _extensionCommandContextActions?: ExtensionCommandContextActions;
@@ -577,12 +629,14 @@ export class AgentSession {
 		if (!config.subagentRunner) {
 			this._excludedToolNames.add("subagent");
 			this._excludedToolNames.add("subagent_runs");
+			this._excludedToolNames.add("create_subagent");
 		}
 		this._allowedToolNames = config.allowedToolNames ? new Set(config.allowedToolNames) : undefined;
 		this._baseToolsOverride = config.baseToolsOverride;
 		this._toolOperations = config.toolOperations;
 		this._subagentRunner = config.subagentRunner;
 		this._subagentRunRegistry = config.subagentRunRegistry;
+		this._subagentConfigRegistry = config.subagentConfigRegistry;
 		this._trustProjectAgents = config.trustProjectAgents === true;
 		this._lspConfiguration = structuredClone(config.lspConfiguration ?? { enabled: false, servers: [] });
 		this._lspConnectionFactories = config.lspConnectionFactories ?? {};
@@ -702,72 +756,94 @@ export class AgentSession {
 	async configureRemoteSandbox(
 		options: { type: "ssh"; remote: string; cwd?: string } | { type: "daemon"; url: string; token?: string },
 	): Promise<ToolBackendInfo> {
-		if (!(this._toolOperations instanceof DeferredRemoteToolOperations)) {
-			throw new Error("Remote backend can only be configured when Pi is started with --remote-deferred");
-		}
-		const info =
-			options.type === "ssh"
-				? await this._toolOperations.configure({ remote: options.remote, cwd: options.cwd })
-				: await this._toolOperations.configureRemote(options.url, { token: options.token });
-		await this.applyToolOperationsBackendChange(this._toolOperations);
-		return info;
+		return this._runActivity("remote backend configuration", async () => {
+			if (!(this._toolOperations instanceof DeferredRemoteToolOperations)) {
+				throw new Error("Remote backend can only be configured when Pi is started with --remote-deferred");
+			}
+			const info =
+				options.type === "ssh"
+					? await this._toolOperations.configure({ remote: options.remote, cwd: options.cwd })
+					: await this._toolOperations.configureRemote(options.url, { token: options.token });
+			await this.applyToolOperationsBackendChange(this._toolOperations);
+			return info;
+		});
 	}
 
 	async activateSandboxDaemon(options: { url: string; token: string; expectedCwd: string }): Promise<ToolBackendInfo> {
-		const previousToolOperations = this._toolOperations;
-		const currentDeferred =
-			this._toolOperations instanceof DeferredRemoteToolOperations ? this._toolOperations : undefined;
-		const currentDeferredInfo = currentDeferred?.getBackendInfo();
-		let operations =
-			currentDeferredInfo && "configured" in currentDeferredInfo && currentDeferredInfo.configured
-				? undefined
-				: currentDeferred;
-		let createdForSandbox = false;
-		if (!operations) {
-			operations = new DeferredRemoteToolOperations(options.expectedCwd);
-			createdForSandbox = true;
-		}
-		try {
-			await operations.configureRemote(options.url, { token: options.token, expectedCwd: options.expectedCwd });
-		} catch (error) {
-			if (createdForSandbox) await operations.dispose();
-			throw error;
-		}
-		if (createdForSandbox) {
-			this._preSandboxToolOperations = this._toolOperations;
-			this._toolOperations = operations;
-			this._sandboxToolOperations = operations;
-		}
-		try {
-			await this.applyToolOperationsBackendChange(operations);
-		} catch (error) {
-			await operations.clear().catch(() => {});
-			if (createdForSandbox) {
-				await operations.dispose();
-				this._toolOperations = previousToolOperations;
-				this._sandboxToolOperations = undefined;
-				this._preSandboxToolOperations = undefined;
+		return this._runActivity("sandbox daemon activation", async () => {
+			const previousToolOperations = this._toolOperations;
+			const currentDeferred =
+				this._toolOperations instanceof DeferredRemoteToolOperations ? this._toolOperations : undefined;
+			const currentDeferredInfo = currentDeferred?.getBackendInfo();
+			let operations =
+				currentDeferredInfo && "configured" in currentDeferredInfo && currentDeferredInfo.configured
+					? undefined
+					: currentDeferred;
+			let createdForSandbox = false;
+			if (!operations) {
+				operations = new DeferredRemoteToolOperations(options.expectedCwd);
+				createdForSandbox = true;
 			}
-			throw error;
-		}
-		return operations.getBackendInfo();
+			try {
+				await operations.configureRemote(options.url, { token: options.token, expectedCwd: options.expectedCwd });
+			} catch (error) {
+				if (createdForSandbox) await operations.dispose();
+				throw error;
+			}
+			if (createdForSandbox) {
+				this._preSandboxToolOperations = this._toolOperations;
+				this._toolOperations = operations;
+				this._sandboxToolOperations = operations;
+			}
+			try {
+				await this.applyToolOperationsBackendChange(operations);
+			} catch (error) {
+				await operations.clear().catch(() => {});
+				if (createdForSandbox) {
+					await operations.dispose();
+					this._toolOperations = previousToolOperations;
+					this._sandboxToolOperations = undefined;
+					this._preSandboxToolOperations = undefined;
+				}
+				throw error;
+			}
+			return operations.getBackendInfo();
+		});
 	}
 
 	async clearRemoteSandbox(): Promise<void> {
-		if (!(this._toolOperations instanceof DeferredRemoteToolOperations)) {
-			throw new Error(
-				"Remote backend can only be cleared when Pi is started with --remote-deferred or sandbox mode is active",
-			);
-		}
-		const sandboxOwned = this._sandboxToolOperations === this._toolOperations;
-		const operations = this._toolOperations;
-		await operations.clear();
-		if (sandboxOwned) {
-			await operations.dispose();
-			this._toolOperations = this._preSandboxToolOperations;
-			this._preSandboxToolOperations = undefined;
-		}
-		await this.applyToolOperationsBackendChange(this.getToolOperations());
+		return this._runActivity("remote backend clearing", async () => {
+			if (!(this._toolOperations instanceof DeferredRemoteToolOperations)) {
+				throw new Error(
+					"Remote backend can only be cleared when Pi is started with --remote-deferred or sandbox mode is active",
+				);
+			}
+			const sandboxOwned = this._sandboxToolOperations === this._toolOperations;
+			const operations = this._toolOperations;
+			await operations.clear();
+			if (sandboxOwned) {
+				await operations.dispose();
+				this._toolOperations = this._preSandboxToolOperations;
+				this._preSandboxToolOperations = undefined;
+			}
+			await this.applyToolOperationsBackendChange(this.getToolOperations());
+		});
+	}
+
+	async uploadFile(sourcePath: string, destinationPath: string): Promise<void> {
+		return this._runActivity("remote file upload", async () => {
+			const operations = this.getToolOperations();
+			if (!operations.uploadFile) throw new Error("Active sandbox backend does not support file upload");
+			await operations.uploadFile(sourcePath, destinationPath);
+		});
+	}
+
+	async downloadFile(sourcePath: string, destinationPath: string): Promise<void> {
+		return this._runActivity("remote file download", async () => {
+			const operations = this.getToolOperations();
+			if (!operations.downloadFile) throw new Error("Active sandbox backend does not support file download");
+			await operations.downloadFile(sourcePath, destinationPath);
+		});
 	}
 
 	private async applyToolOperationsBackendChange(operations: ToolOperations): Promise<void> {
@@ -778,7 +854,7 @@ export class AgentSession {
 
 	private async _getRequiredRequestAuth(model: Model<any>): Promise<{
 		apiKey: string;
-		headers?: Record<string, string>;
+		headers?: ProviderHeaders;
 	}> {
 		const result = await this._modelRegistry.getApiKeyAndHeaders(model);
 		if (!result.ok) {
@@ -804,7 +880,7 @@ export class AgentSession {
 
 	private async _getCompactionRequestAuth(model: Model<any>): Promise<{
 		apiKey?: string;
-		headers?: Record<string, string>;
+		headers?: ProviderHeaders;
 	}> {
 		if (this.agent.streamFn === streamSimple) {
 			return this._getRequiredRequestAuth(model);
@@ -877,6 +953,123 @@ export class AgentSession {
 		};
 	}
 
+	private _beginActivity(kind: string): SessionActivityToken {
+		const token: SessionActivityToken = { active: true, kind };
+		this._activities.add(token);
+		this._activityGeneration++;
+		this._activeCycle = true;
+		return token;
+	}
+
+	private _endActivity(token: SessionActivityToken): void {
+		if (!token.active) return;
+		token.active = false;
+		this._activities.delete(token);
+		this._activityGeneration++;
+		this._scheduleSettlementCheck();
+	}
+
+	private _runActivity<T>(kind: string, operation: () => Promise<T>): Promise<T> {
+		if (this._disposed) return Promise.reject(new Error("Agent session is disposed"));
+		const token = this._beginActivity(kind);
+		const owner: BarrierOwnerScope = { active: true, label: kind };
+		return this._barrierOwnerContext.run(owner, async () => {
+			try {
+				return await operation();
+			} finally {
+				owner.active = false;
+				this._endActivity(token);
+			}
+		});
+	}
+
+	private _runSynchronousActivity<T>(kind: string, operation: () => T): T {
+		const token = this._beginActivity(kind);
+		try {
+			return this._runBarrierCallback(kind, operation);
+		} finally {
+			this._endActivity(token);
+		}
+	}
+
+	private _runAsyncBarrierCallback<T>(label: string, callback: () => Promise<T>): Promise<T> {
+		const owner: BarrierOwnerScope = { active: true, label };
+		return this._barrierOwnerContext.run(owner, async () => {
+			try {
+				return await callback();
+			} finally {
+				owner.active = false;
+			}
+		});
+	}
+
+	private _runBarrierCallback<T>(label: string, callback: () => T): T {
+		const owner: BarrierOwnerScope = { active: true, label };
+		return this._barrierOwnerContext.run(owner, () => {
+			try {
+				return callback();
+			} finally {
+				owner.active = false;
+			}
+		});
+	}
+
+	private _isSettledPredicate(): boolean {
+		return (
+			this._activities.size === 0 &&
+			!this.agent.state.isStreaming &&
+			this._retryAbortController === undefined &&
+			this._compactionInFlight === undefined &&
+			this._compactionAbortController === undefined &&
+			this._autoCompactionAbortController === undefined &&
+			this._branchSummaryAbortController === undefined &&
+			this._extensionCompactionQueue.length === 0 &&
+			this._extensionCompactionTimer === undefined &&
+			!this._extensionCompactionRunning &&
+			this._bashAbortControllers.size === 0 &&
+			this._pendingBashMessages.length === 0 &&
+			this._steeringMessages.length === 0 &&
+			this._followUpMessages.length === 0 &&
+			!this.agent.hasQueuedMessages()
+		);
+	}
+
+	private _scheduleSettlementCheck(): void {
+		if (this._settlementScheduled || this._settlementRunning) return;
+		this._settlementScheduled = true;
+		queueMicrotask(() => {
+			this._settlementScheduled = false;
+			void this._drainSettlement();
+		});
+	}
+
+	private async _drainSettlement(): Promise<void> {
+		if (this._settlementRunning) return;
+		this._settlementRunning = true;
+		try {
+			while (this._isSettledPredicate()) {
+				const generation = this._activityGeneration;
+				if (this._activeCycle) {
+					await this._runAsyncBarrierCallback("agent_settled extension handler", () =>
+						this._extensionRunner.emit({ type: "agent_settled" }),
+					);
+					if (!this._isSettledPredicate() || generation !== this._activityGeneration) continue;
+					this._emitAgentSettled();
+					if (!this._isSettledPredicate() || generation !== this._activityGeneration) continue;
+					this._activeCycle = false;
+				}
+				for (const waiter of this._idleWaiters) waiter.resolve();
+				this._idleWaiters.clear();
+				return;
+			}
+		} finally {
+			this._settlementRunning = false;
+			if ((this._activeCycle || this._idleWaiters.size > 0) && this._isSettledPredicate()) {
+				this._scheduleSettlementCheck();
+			}
+		}
+	}
+
 	private _runRuntimeLifecycleOperation<T>(operation: () => Promise<T>): Promise<T> {
 		const token: RuntimeLifecycleOperationToken = {
 			active: true,
@@ -885,7 +1078,7 @@ export class AgentSession {
 		};
 		return this._runtimeLifecycleContext.run(token, async () => {
 			try {
-				return await operation();
+				return await this._runAsyncBarrierCallback("runtime lifecycle operation", operation);
 			} finally {
 				while (token.children.size > 0) {
 					await Promise.allSettled([...token.children]);
@@ -896,6 +1089,7 @@ export class AgentSession {
 	}
 
 	private _enqueueRuntimeLifecycle<T>(operation: () => Promise<T>): Promise<T> {
+		const activity = this._beginActivity("runtime lifecycle");
 		const currentToken = this._runtimeLifecycleContext.getStore();
 		if (currentToken?.active) {
 			const child = currentToken.childQueue.then(() => this._runRuntimeLifecycleOperation(operation));
@@ -905,8 +1099,14 @@ export class AgentSession {
 			);
 			currentToken.children.add(child);
 			void child.then(
-				() => currentToken.children.delete(child),
-				() => currentToken.children.delete(child),
+				() => {
+					currentToken.children.delete(child);
+					this._endActivity(activity);
+				},
+				() => {
+					currentToken.children.delete(child);
+					this._endActivity(activity);
+				},
 			);
 			return child;
 		}
@@ -914,6 +1114,10 @@ export class AgentSession {
 		this._runtimeLifecycleQueue = result.then(
 			() => undefined,
 			() => undefined,
+		);
+		void result.then(
+			() => this._endActivity(activity),
+			() => this._endActivity(activity),
 		);
 		return result;
 	}
@@ -1016,8 +1220,26 @@ export class AgentSession {
 
 	/** Emit an event to all listeners */
 	private _emit(event: AgentSessionEvent): void {
-		for (const l of this._eventListeners) {
-			l(event);
+		this._runBarrierCallback(`public ${event.type} listener`, () => {
+			for (const listener of this._eventListeners) listener(event);
+		});
+	}
+
+	private _emitAgentSettled(): void {
+		for (const listener of [...this._eventListeners]) {
+			try {
+				this._runBarrierCallback("public agent_settled listener", () => listener({ type: "agent_settled" }));
+			} catch (error) {
+				try {
+					this._extensionRunner.emitError({
+						extensionPath: "<session-subscriber>",
+						event: "agent_settled",
+						error: error instanceof Error ? error.message : String(error),
+					});
+				} catch {
+					// Subscriber diagnostics must never prevent settlement or later listeners.
+				}
+			}
 		}
 	}
 
@@ -1057,7 +1279,7 @@ export class AgentSession {
 		}
 
 		// Emit to extensions first
-		await this._emitExtensionEvent(event);
+		await this._runAsyncBarrierCallback(`extension ${event.type} handler`, () => this._emitExtensionEvent(event));
 
 		// Notify all listeners
 		this._emit(event.type === "agent_end" ? { ...event, willRetry: this._willRetryAfterAgentEnd(event) } : event);
@@ -1204,7 +1426,7 @@ export class AgentSession {
 			};
 			const replacement = await this._extensionRunner.emitMessageEnd(extensionEvent);
 			if (replacement) {
-				this._replaceMessageInPlace(event.message, replacement);
+				this._replaceMessageInPlace(event.message, normalizeMessageContent(replacement));
 			}
 		} else if (event.type === "tool_execution_start") {
 			const extensionEvent: ToolExecutionStartEvent = {
@@ -1252,25 +1474,12 @@ export class AgentSession {
 		};
 	}
 
-	/**
-	 * Temporarily disconnect from agent events.
-	 * User listeners are preserved and will receive events again after resubscribe().
-	 * Used internally during operations that need to pause event processing.
-	 */
+	/** Disconnect from agent events during disposal. */
 	private _disconnectFromAgent(): void {
 		if (this._unsubscribeAgent) {
 			this._unsubscribeAgent();
 			this._unsubscribeAgent = undefined;
 		}
-	}
-
-	/**
-	 * Reconnect to agent events after _disconnectFromAgent().
-	 * Preserves all existing listeners.
-	 */
-	private _reconnectToAgent(): void {
-		if (this._unsubscribeAgent) return; // Already connected
-		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);
 	}
 
 	/**
@@ -1283,8 +1492,17 @@ export class AgentSession {
 		return this._disposePromise;
 	}
 
-	private async _dispose(): Promise<void> {
-		await this._runtimeLifecycleQueue;
+	/** Stop new prompt admission, abort active work, and wait for the session boundary. */
+	prepareForShutdown(): Promise<void> {
+		this._disposed = true;
+		this._shutdownPreparationPromise ??= this._prepareForShutdown();
+		return this._shutdownPreparationPromise;
+	}
+
+	private async _prepareForShutdown(): Promise<void> {
+		if (this._steeringMessages.length > 0 || this._followUpMessages.length > 0 || this.agent.hasQueuedMessages()) {
+			this.clearQueue();
+		}
 		for (const abort of [
 			() => this.abortRetry(),
 			() => this.abortCompaction(),
@@ -1295,7 +1513,7 @@ export class AgentSession {
 			try {
 				abort();
 			} catch {
-				// Disposal continues if an abort hook throws.
+				// Shutdown continues if an abort hook throws.
 			}
 		}
 
@@ -1304,6 +1522,17 @@ export class AgentSession {
 			this._extensionCompactionTimer = undefined;
 		}
 		this._extensionCompactionQueue = [];
+		if (this._extensionCompactionActivity) {
+			this._endActivity(this._extensionCompactionActivity);
+			this._extensionCompactionActivity = undefined;
+		}
+		await this._runtimeLifecycleQueue;
+		await this.waitForIdle();
+	}
+
+	private async _dispose(): Promise<void> {
+		await this.prepareForShutdown();
+
 		this._extensionRunner.invalidate(STALE_EXTENSION_CONTEXT_MESSAGE);
 		this._disconnectFromAgent();
 		this._eventListeners = [];
@@ -1318,7 +1547,6 @@ export class AgentSession {
 		this._workspaceToolHost = undefined;
 		this._retiredWorkspaceToolHosts = [];
 		await Promise.allSettled([
-			this._compactionInFlight,
 			Promise.resolve().then(() => localResourceToolOperations?.dispose?.()),
 			Promise.resolve().then(() => lspRuntimeState?.manager.shutdownAll()),
 			Promise.resolve().then(() => workspaceToolHost?.dispose()),
@@ -1345,9 +1573,33 @@ export class AgentSession {
 		return this.agent.state.thinkingLevel;
 	}
 
-	/** Whether agent is currently streaming a response */
+	/** Whether the underlying Agent is currently streaming a response. */
 	get isStreaming(): boolean {
 		return this.agent.state.isStreaming;
+	}
+
+	private get _hasActiveAgentRun(): boolean {
+		if (this.agent.state.isStreaming) return true;
+		for (const activity of this._activities) {
+			if (activity.kind === "agent run") return true;
+		}
+		return false;
+	}
+
+	private _hasPromptAdmission(excluded?: SessionActivityToken): boolean {
+		for (const activity of this._activities) {
+			if (activity !== excluded && activity.kind === "prompt admission") return true;
+		}
+		return false;
+	}
+
+	private get _isAgentRunActive(): boolean {
+		return this._hasActiveAgentRun || this._hasPromptAdmission();
+	}
+
+	/** Whether all session-owned work and settlement callbacks have completed. */
+	get isIdle(): boolean {
+		return this._isSettledPredicate() && !this._activeCycle && !this._settlementRunning && !this._settlementScheduled;
 	}
 
 	/** Current effective system prompt (includes any per-turn extension modifications) */
@@ -1474,6 +1726,10 @@ export class AgentSession {
 	}
 
 	loadSessionTool(name: string): boolean {
+		return this._runSynchronousActivity("lazy tool load", () => this._loadSessionTool(name));
+	}
+
+	private _loadSessionTool(name: string): boolean {
 		if (!this._isToolPermitted(name)) return false;
 		const tool = this._sessionTools.get(name);
 		if (tool) {
@@ -1491,6 +1747,10 @@ export class AgentSession {
 	}
 
 	unloadSessionTool(name: string): boolean {
+		return this._runSynchronousActivity("lazy tool unload", () => this._unloadSessionTool(name));
+	}
+
+	private _unloadSessionTool(name: string): boolean {
 		if (!this._isToolPermitted(name)) return false;
 		const tool = this._sessionTools.get(name);
 		if (tool) {
@@ -1594,6 +1854,7 @@ export class AgentSession {
 	/** Update scoped models for cycling */
 	setScopedModels(scopedModels: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>): void {
 		this._scopedModels = scopedModels;
+		this._refreshModelDependentRuntime();
 	}
 
 	/** File-based prompt templates */
@@ -1697,15 +1958,57 @@ export class AgentSession {
 		this.agent.state.systemPrompt = this._systemPromptOverride ?? this._baseSystemPrompt;
 	}
 
+	private _getSubagentModels(): Model<any>[] {
+		return this._scopedModels.length > 0
+			? this._scopedModels.map((scoped) => scoped.model)
+			: this._modelRegistry.getAvailable();
+	}
+
+	private _resolveSubagentModelHint(hint: SubagentModelHint): string | undefined {
+		const currentModel = this.model;
+		if (!currentModel) return undefined;
+		const formatModel = (model: Model<any>): string => `${model.provider}/${model.id}`;
+		if (hint === "same-as-parent") return formatModel(currentModel);
+		const candidates = this._getSubagentModels().filter((model) => model.provider === currentModel.provider);
+		if (candidates.length === 0) return undefined;
+		const cost = (model: Model<any>): number => model.cost.input + model.cost.output;
+		const byCost = [...candidates].sort((a, b) => cost(a) - cost(b));
+		if (hint === "cheapest" || hint === "fastest") return formatModel(byCost[0]);
+		if (hint === "large-context") {
+			return formatModel([...candidates].sort((a, b) => b.contextWindow - a.contextWindow)[0]);
+		}
+		if (hint === "best-reasoning") {
+			const reasoning = candidates.filter((model) => model.reasoning);
+			return formatModel(
+				(reasoning.length > 0 ? reasoning : candidates).sort(
+					(a, b) => b.contextWindow + b.maxTokens - (a.contextWindow + a.maxTokens),
+				)[0],
+			);
+		}
+		if (hint === "strongest") {
+			return formatModel(
+				[...candidates].sort(
+					(a, b) =>
+						Number(b.reasoning) - Number(a.reasoning) ||
+						b.contextWindow + b.maxTokens - (a.contextWindow + a.maxTokens),
+				)[0],
+			);
+		}
+		const reasoningByCost = byCost.find((model) => model.reasoning);
+		return formatModel(reasoningByCost ?? byCost[0]);
+	}
+
 	private _refreshModelDependentRuntime(): void {
 		if (!this._baseToolsOverride && this._baseToolDefinitions.has("subagent")) {
 			this._baseToolDefinitions.set(
 				"subagent",
 				createSubagentToolDefinition({
 					runner: this._subagentRunner,
-					modelCatalog: formatSubagentModelCatalog(this.model, this._modelRegistry.getAvailable()),
+					modelCatalog: formatSubagentModelCatalog(this.model, this._getSubagentModels()),
+					resolveModelHint: (hint) => this._resolveSubagentModelHint(hint),
 					trustProjectAgents: this._trustProjectAgents,
 					runRegistry: this._subagentRunRegistry,
+					configRegistry: this._subagentConfigRegistry,
 				}) as unknown as ToolDefinition,
 			);
 			this._refreshToolRegistry({ activeToolNames: this.getActiveToolNames() });
@@ -1727,16 +2030,18 @@ export class AgentSession {
 		return true;
 	}
 
-	private async _runAgentPrompt(messages: AgentMessage | AgentMessage[]): Promise<void> {
-		try {
-			await this.agent.prompt(messages);
-			while (await this._handlePostAgentRun()) {
-				if (!(await this._continueAgentIfReady())) break;
+	private _runAgentPrompt(messages: AgentMessage | AgentMessage[]): Promise<void> {
+		return this._runActivity("agent run", async () => {
+			try {
+				await this.agent.prompt(messages);
+				while (await this._handlePostAgentRun()) {
+					if (!(await this._continueAgentIfReady())) break;
+				}
+			} finally {
+				this._systemPromptOverride = undefined;
+				this._flushPendingBashMessages();
 			}
-		} finally {
-			this._systemPromptOverride = undefined;
-			this._flushPendingBashMessages();
-		}
+		});
 	}
 
 	private async _handlePostAgentRun(): Promise<boolean> {
@@ -1769,10 +2074,16 @@ export class AgentSession {
 		return this.agent.hasQueuedMessages();
 	}
 
-	async getStructuredResponse<TSchemaValue extends TSchema>(
+	getStructuredResponse<TSchemaValue extends TSchema>(
 		options: StructuredResponseOptions<TSchemaValue>,
 	): Promise<StructuredResponse<Static<TSchemaValue>>> {
-		if (this.isStreaming) {
+		return this._runActivity("structured response", () => this._getStructuredResponse(options));
+	}
+
+	private async _getStructuredResponse<TSchemaValue extends TSchema>(
+		options: StructuredResponseOptions<TSchemaValue>,
+	): Promise<StructuredResponse<Static<TSchemaValue>>> {
+		if (this._isAgentRunActive) {
 			throw new Error("Agent is already processing. Wait for completion before requesting structured output.");
 		}
 		if (!this.model) {
@@ -2015,168 +2326,197 @@ export class AgentSession {
 
 	/**
 	 * Send a prompt to the agent.
-	 * - Handles extension commands (registered via pi.registerCommand) immediately, even during streaming
+	 * - Handles extension commands (registered via pi.registerCommand) immediately, even during streaming, when no compaction is active
 	 * - Expands file-based prompt templates by default
 	 * - During streaming, queues via steer() or followUp() based on streamingBehavior option
 	 * - Validates model and API key before sending (when not streaming)
 	 * @throws Error if streaming and no streamingBehavior specified
 	 * @throws Error if no model selected or no API key available (when not streaming)
+	 * @throws Error if manual or extension-requested compaction is in progress
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<void> {
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 		const preflightResult = options?.preflightResult;
 		let messages: AgentMessage[] | undefined;
+		let promptActivity: SessionActivityToken | undefined;
+		let queueIntoActiveRun = false;
 
 		try {
-			// Handle extension commands first (execute immediately, even during streaming)
-			// Extension commands manage their own LLM interaction via pi.sendMessage()
-			if (expandPromptTemplates && text.startsWith("/")) {
-				const handled = await this._tryExecuteExtensionCommand(text);
-				if (handled) {
-					// Extension command executed, no prompt to send
-					preflightResult?.(true);
-					return;
-				}
-			}
-
-			// Emit input event for extension interception (before skill/template expansion)
-			let currentText = text;
-			let currentImages = options?.images;
-			if (this._extensionRunner.hasHandlers("input")) {
-				const inputResult = await this._extensionRunner.emitInput(
-					currentText,
-					currentImages,
-					options?.source ?? "interactive",
-					this.isStreaming ? options?.streamingBehavior : undefined,
-				);
-				if (inputResult.action === "handled") {
-					preflightResult?.(true);
-					return;
-				}
-				if (inputResult.action === "transform") {
-					currentText = inputResult.text;
-					currentImages = inputResult.images ?? currentImages;
-				}
-			}
-
-			// Expand skill/rule commands (/skill:name or /rule:name args) and prompt templates (/template args)
-			let expandedText = currentText;
-			if (expandPromptTemplates) {
-				expandedText = this._expandSkillCommand(expandedText);
-				expandedText = this._expandRuleCommand(expandedText);
-				expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
-			}
-
-			// If streaming, queue via steer() or followUp() based on option
-			if (this.isStreaming) {
-				if (!options?.streamingBehavior) {
+			try {
+				if (this._disposed) throw new Error("Agent session is disposed");
+				// Reject every prompt submission, including extension commands, before hooks or message mutation.
+				// _compactionInFlight is set synchronously, before manual compaction aborts an active agent run.
+				if (this._compactionInFlight !== undefined) {
 					throw new Error(
-						"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
+						"Cannot submit a prompt while compaction is in progress. Wait for compaction to finish and retry.",
 					);
 				}
-				if (options.streamingBehavior === "followUp") {
-					await this._queueFollowUp(expandedText, currentImages);
-				} else {
-					await this._queueSteer(expandedText, currentImages);
+				// Handle extension commands immediately when no compaction is active.
+				// Extension commands manage their own LLM interaction via pi.sendMessage()
+				if (expandPromptTemplates && text.startsWith("/")) {
+					const handled = await this._tryExecuteExtensionCommand(text);
+					if (handled) {
+						// Extension command executed, no prompt to send
+						preflightResult?.(true);
+						return;
+					}
 				}
-				preflightResult?.(true);
+				if (this._disposed) throw new Error("Agent session is disposed");
+				queueIntoActiveRun = this._hasActiveAgentRun;
+				if (!queueIntoActiveRun && this._hasPromptAdmission()) {
+					throw new Error("Agent is already processing. Wait for prompt admission to complete.");
+				}
+				promptActivity = this._beginActivity("prompt admission");
+
+				// Emit input event for extension interception (before skill/template expansion)
+				let currentText = text;
+				let currentImages = options?.images;
+				if (this._extensionRunner.hasHandlers("input")) {
+					const inputResult = await this._runAsyncBarrierCallback("extension input handler", () =>
+						this._extensionRunner.emitInput(
+							currentText,
+							currentImages,
+							options?.source ?? "interactive",
+							queueIntoActiveRun ? options?.streamingBehavior : undefined,
+						),
+					);
+					if (inputResult.action === "handled") {
+						preflightResult?.(true);
+						return;
+					}
+					if (inputResult.action === "transform") {
+						currentText = inputResult.text;
+						currentImages = inputResult.images ?? currentImages;
+					}
+				}
+
+				queueIntoActiveRun = this._hasActiveAgentRun;
+				if (!queueIntoActiveRun && this._hasPromptAdmission(promptActivity)) {
+					throw new Error("Agent is already processing. Wait for prompt admission to complete.");
+				}
+				// Expand skill/rule commands (/skill:name or /rule:name args) and prompt templates (/template args)
+				let expandedText = currentText;
+				if (expandPromptTemplates) {
+					expandedText = this._expandSkillCommand(expandedText);
+					expandedText = this._expandRuleCommand(expandedText);
+					expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
+				}
+
+				// If a logical run is active (including retry and compaction gaps), queue instead of racing it.
+				if (queueIntoActiveRun) {
+					if (!options?.streamingBehavior) {
+						throw new Error(
+							"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
+						);
+					}
+					if (options.streamingBehavior === "followUp") {
+						await this._queueFollowUp(expandedText, currentImages);
+					} else {
+						await this._queueSteer(expandedText, currentImages);
+					}
+					preflightResult?.(true);
+					return;
+				}
+
+				// Flush any pending bash messages before the new prompt
+				this._flushPendingBashMessages();
+
+				// Validate model
+				if (!this.model) {
+					throw new Error(formatNoModelSelectedMessage());
+				}
+
+				if (!this._modelRegistry.hasConfiguredAuth(this.model)) {
+					const isOAuth = this._modelRegistry.isUsingOAuth(this.model);
+					if (isOAuth) {
+						throw new Error(
+							`Authentication failed for "${this.model.provider}". ` +
+								`Credentials may have expired or network is unavailable. ` +
+								`Run '/login ${this.model.provider}' to re-authenticate.`,
+						);
+					}
+					throw new Error(formatNoApiKeyFoundMessage(this.model.provider));
+				}
+
+				// Check if we need to compact before sending (catches aborted responses)
+				const lastAssistant = this._findLastAssistantMessage();
+				if (lastAssistant && (await this._checkCompaction(lastAssistant, false))) {
+					try {
+						if (await this._continueAgentIfReady()) {
+							while (await this._handlePostAgentRun()) {
+								if (!(await this._continueAgentIfReady())) break;
+							}
+						}
+					} finally {
+						this._flushPendingBashMessages();
+					}
+				}
+
+				// Build messages array (custom message if any, then user message)
+				messages = [];
+
+				// Add user message
+				const userContent: (TextContent | ImageContent)[] = [{ type: "text", text: expandedText }];
+				if (currentImages) {
+					userContent.push(...currentImages);
+				}
+				messages.push({
+					role: "user",
+					content: userContent,
+					timestamp: Date.now(),
+				});
+
+				// Inject any pending "nextTurn" messages as context alongside the user message
+				for (const msg of this._pendingNextTurnMessages) {
+					messages.push(msg);
+				}
+				this._pendingNextTurnMessages = [];
+
+				// Emit before_agent_start extension event
+				const result = await this._runAsyncBarrierCallback("extension before_agent_start handler", () =>
+					this._extensionRunner.emitBeforeAgentStart(
+						expandedText,
+						currentImages,
+						this._baseSystemPrompt,
+						this._baseSystemPromptOptions,
+					),
+				);
+				// Add all custom messages from extensions
+				if (result?.messages) {
+					for (const msg of result.messages) {
+						messages.push({
+							role: "custom",
+							customType: msg.customType,
+							content: msg.content ?? [],
+							display: msg.display,
+							details: msg.details,
+							timestamp: Date.now(),
+						});
+					}
+				}
+				// Apply extension-modified system prompt, or reset to base
+				if (result?.systemPrompt !== undefined) {
+					this._systemPromptOverride = result.systemPrompt;
+					this.agent.state.systemPrompt = result.systemPrompt;
+				} else {
+					// Ensure we're using the base prompt (in case previous turn had modifications)
+					this._systemPromptOverride = undefined;
+					this.agent.state.systemPrompt = this._baseSystemPrompt;
+				}
+			} catch (error) {
+				preflightResult?.(false);
+				throw error;
+			}
+
+			if (!messages) {
 				return;
 			}
 
-			// Flush any pending bash messages before the new prompt
-			this._flushPendingBashMessages();
-
-			// Validate model
-			if (!this.model) {
-				throw new Error(formatNoModelSelectedMessage());
-			}
-
-			if (!this._modelRegistry.hasConfiguredAuth(this.model)) {
-				const isOAuth = this._modelRegistry.isUsingOAuth(this.model);
-				if (isOAuth) {
-					throw new Error(
-						`Authentication failed for "${this.model.provider}". ` +
-							`Credentials may have expired or network is unavailable. ` +
-							`Run '/login ${this.model.provider}' to re-authenticate.`,
-					);
-				}
-				throw new Error(formatNoApiKeyFoundMessage(this.model.provider));
-			}
-
-			// Check if we need to compact before sending (catches aborted responses)
-			const lastAssistant = this._findLastAssistantMessage();
-			if (lastAssistant && (await this._checkCompaction(lastAssistant, false))) {
-				try {
-					if (await this._continueAgentIfReady()) {
-						while (await this._handlePostAgentRun()) {
-							if (!(await this._continueAgentIfReady())) break;
-						}
-					}
-				} finally {
-					this._flushPendingBashMessages();
-				}
-			}
-
-			// Build messages array (custom message if any, then user message)
-			messages = [];
-
-			// Add user message
-			const userContent: (TextContent | ImageContent)[] = [{ type: "text", text: expandedText }];
-			if (currentImages) {
-				userContent.push(...currentImages);
-			}
-			messages.push({
-				role: "user",
-				content: userContent,
-				timestamp: Date.now(),
-			});
-
-			// Inject any pending "nextTurn" messages as context alongside the user message
-			for (const msg of this._pendingNextTurnMessages) {
-				messages.push(msg);
-			}
-			this._pendingNextTurnMessages = [];
-
-			// Emit before_agent_start extension event
-			const result = await this._extensionRunner.emitBeforeAgentStart(
-				expandedText,
-				currentImages,
-				this._baseSystemPrompt,
-				this._baseSystemPromptOptions,
-			);
-			// Add all custom messages from extensions
-			if (result?.messages) {
-				for (const msg of result.messages) {
-					messages.push({
-						role: "custom",
-						customType: msg.customType,
-						content: msg.content,
-						display: msg.display,
-						details: msg.details,
-						timestamp: Date.now(),
-					});
-				}
-			}
-			// Apply extension-modified system prompt, or reset to base
-			if (result?.systemPrompt !== undefined) {
-				this._systemPromptOverride = result.systemPrompt;
-				this.agent.state.systemPrompt = result.systemPrompt;
-			} else {
-				// Ensure we're using the base prompt (in case previous turn had modifications)
-				this._systemPromptOverride = undefined;
-				this.agent.state.systemPrompt = this._baseSystemPrompt;
-			}
-		} catch (error) {
-			preflightResult?.(false);
-			throw error;
+			preflightResult?.(true);
+			await this._runAgentPrompt(messages);
+		} finally {
+			if (promptActivity) this._endActivity(promptActivity);
 		}
-
-		if (!messages) {
-			return;
-		}
-
-		preflightResult?.(true);
-		await this._runAgentPrompt(messages);
 	}
 
 	/**
@@ -2279,6 +2619,7 @@ export class AgentSession {
 		if (text.startsWith("/")) {
 			this._throwIfExtensionCommand(text);
 		}
+		if (!this._hasActiveAgentRun) throw new Error("Cannot steer while the agent is idle");
 
 		// Expand skill/rule commands and prompt templates
 		let expandedText = this._expandSkillCommand(text);
@@ -2300,6 +2641,7 @@ export class AgentSession {
 		if (text.startsWith("/")) {
 			this._throwIfExtensionCommand(text);
 		}
+		if (!this._hasActiveAgentRun) throw new Error("Cannot queue a follow-up while the agent is idle");
 
 		// Expand skill/rule commands and prompt templates
 		let expandedText = this._expandSkillCommand(text);
@@ -2313,6 +2655,7 @@ export class AgentSession {
 	 * Internal: Queue a steering message (already expanded, no extension command check).
 	 */
 	private async _queueSteer(text: string, images?: ImageContent[]): Promise<void> {
+		if (this._disposed || !this._hasActiveAgentRun) throw new Error("Cannot steer without an active agent run");
 		this._steeringMessages.push(text);
 		this._emitQueueUpdate();
 		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
@@ -2330,6 +2673,9 @@ export class AgentSession {
 	 * Internal: Queue a follow-up message (already expanded, no extension command check).
 	 */
 	private async _queueFollowUp(text: string, images?: ImageContent[]): Promise<void> {
+		if (this._disposed || !this._hasActiveAgentRun) {
+			throw new Error("Cannot queue a follow-up without an active agent run");
+		}
 		this._followUpMessages.push(text);
 		this._emitQueueUpdate();
 		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
@@ -2370,21 +2716,28 @@ export class AgentSession {
 	 * @param options.triggerTurn If true and not streaming, triggers a new LLM turn
 	 * @param options.deliverAs Delivery mode: "steer", "followUp", or "nextTurn"
 	 */
-	async sendCustomMessage<T = unknown>(
+	sendCustomMessage<T = unknown>(
+		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
+		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+	): Promise<void> {
+		return this._runActivity("custom message", () => this._sendCustomMessage(message, options));
+	}
+
+	private async _sendCustomMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
 		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
 	): Promise<void> {
 		const appMessage = {
 			role: "custom" as const,
 			customType: message.customType,
-			content: message.content,
+			content: message.content ?? [],
 			display: message.display,
 			details: message.details,
 			timestamp: Date.now(),
 		} satisfies CustomMessage<T>;
 		if (options?.deliverAs === "nextTurn") {
 			this._pendingNextTurnMessages.push(appMessage);
-		} else if (this.isStreaming) {
+		} else if (this._isAgentRunActive) {
 			if (options?.deliverAs === "followUp") {
 				this.agent.followUp(appMessage);
 			} else {
@@ -2394,7 +2747,12 @@ export class AgentSession {
 			await this._runAgentPrompt(appMessage);
 		} else {
 			this.agent.state.messages.push(appMessage);
-			this.session.appendCustomMessageEntry(message.customType, message.content, message.display, message.details);
+			this.session.appendCustomMessageEntry(
+				appMessage.customType,
+				appMessage.content,
+				appMessage.display,
+				appMessage.details,
+			);
 			await this._emit({ type: "message_start", message: appMessage });
 			await this._emit({ type: "message_end", message: appMessage });
 		}
@@ -2452,6 +2810,8 @@ export class AgentSession {
 		this._followUpMessages = [];
 		this.agent.clearAllQueues();
 		this._emitQueueUpdate();
+		this._activityGeneration++;
+		this._scheduleSettlementCheck();
 		return { steering, followUp };
 	}
 
@@ -2480,7 +2840,28 @@ export class AgentSession {
 	async abort(): Promise<void> {
 		this.abortRetry();
 		this.agent.abort();
+		if (this._barrierOwnerContext.getStore()?.active) return;
+		await this.waitForIdle();
+	}
+
+	private async _abortAgentAndDrain(): Promise<void> {
+		this.abortRetry();
+		this.agent.abort();
 		await this.agent.waitForIdle();
+	}
+
+	/** Wait for the full AgentSession lifecycle to settle. */
+	waitForIdle(): Promise<void> {
+		const owner = this._barrierOwnerContext.getStore();
+		if (owner?.active) {
+			throw new Error(
+				`AgentSession.waitForIdle() cannot be awaited from ${owner.label} because it is part of the same settlement barrier`,
+			);
+		}
+		return new Promise<void>((resolve, reject) => {
+			this._idleWaiters.add({ resolve, reject });
+			this._scheduleSettlementCheck();
+		});
 	}
 
 	// =========================================================================
@@ -2700,10 +3081,9 @@ export class AgentSession {
 
 	/** Queue extension-triggered compaction outside the currently active agent turn. */
 	private _requestExtensionCompaction(options?: CompactOptions): void {
+		this._extensionCompactionActivity ??= this._beginActivity("extension compaction request");
 		this._extensionCompactionQueue.push(options ?? {});
-		if (this.isStreaming) {
-			return;
-		}
+		if (this._isAgentRunActive) return;
 		this._scheduleExtensionCompactions();
 	}
 
@@ -2725,7 +3105,7 @@ export class AgentSession {
 		this._extensionCompactionRunning = true;
 		let compacted = false;
 		try {
-			while (mode === "between-turns" || !this.isStreaming) {
+			while (mode === "between-turns" || !this._isAgentRunActive) {
 				const options = this._extensionCompactionQueue.shift();
 				if (!options) {
 					break;
@@ -2735,8 +3115,15 @@ export class AgentSession {
 		} finally {
 			this._extensionCompactionRunning = false;
 		}
-		if (mode === "idle" && !this.isStreaming) {
-			this._scheduleExtensionCompactions();
+		if (mode === "idle" && !this._isAgentRunActive) this._scheduleExtensionCompactions();
+		if (
+			this._extensionCompactionQueue.length === 0 &&
+			this._extensionCompactionTimer === undefined &&
+			!this._extensionCompactionRunning &&
+			this._extensionCompactionActivity
+		) {
+			this._endActivity(this._extensionCompactionActivity);
+			this._extensionCompactionActivity = undefined;
 		}
 		return compacted;
 	}
@@ -2769,7 +3156,8 @@ export class AgentSession {
 		if (this._compactionInFlight) {
 			throw new Error("Compaction already in progress");
 		}
-		const inFlight = Promise.resolve().then(() => {
+		const inFlight = this._runActivity("compaction", async () => {
+			await Promise.resolve();
 			if (this._disposed) throw new Error("Agent session is disposed");
 			return operation();
 		});
@@ -2779,6 +3167,7 @@ export class AgentSession {
 		} finally {
 			if (this._compactionInFlight === inFlight) {
 				this._compactionInFlight = undefined;
+				this._scheduleSettlementCheck();
 			}
 		}
 	}
@@ -2794,11 +3183,8 @@ export class AgentSession {
 		customInstructions: string | undefined,
 		options: { abortActiveRun: boolean },
 	): Promise<CompactionResult> {
-		let disconnected = false;
 		if (options.abortActiveRun) {
-			this._disconnectFromAgent();
-			disconnected = true;
-			await this.abort();
+			await this._abortAgentAndDrain();
 			if (this._disposed) {
 				throw new Error("Agent session is disposed");
 			}
@@ -2870,6 +3256,8 @@ export class AgentSession {
 					this._compactionAbortController.signal,
 					this.thinkingLevel,
 					this.agent.streamFn,
+					this.settingsManager.getRetrySettings(),
+					this._summarizationRetryCallbacks({ source: "compaction", reason: "manual" }),
 				);
 				summary = result.summary;
 				firstKeptEntryId = result.firstKeptEntryId;
@@ -2905,6 +3293,9 @@ export class AgentSession {
 				tokensBefore,
 				details,
 			};
+			// compaction_end listeners may submit queued prompts, so expose idle state before notifying them.
+			this._compactionAbortController = undefined;
+			this._compactionInFlight = undefined;
 			this._emit({
 				type: "compaction_end",
 				reason: "manual",
@@ -2916,6 +3307,8 @@ export class AgentSession {
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			const aborted = message === "Compaction cancelled" || (error instanceof Error && error.name === "AbortError");
+			this._compactionAbortController = undefined;
+			this._compactionInFlight = undefined;
 			this._emit({
 				type: "compaction_end",
 				reason: "manual",
@@ -2927,9 +3320,6 @@ export class AgentSession {
 			throw error;
 		} finally {
 			this._compactionAbortController = undefined;
-			if (disconnected && !this._disposed) {
-				this._reconnectToAgent();
-			}
 		}
 	}
 
@@ -3065,7 +3455,7 @@ export class AgentSession {
 			}
 
 			let apiKey: string | undefined;
-			let headers: Record<string, string> | undefined;
+			let headers: ProviderHeaders | undefined;
 			if (this.agent.streamFn === streamSimple) {
 				const authResult = await this._modelRegistry.getApiKeyAndHeaders(this.model);
 				if (!authResult.ok || !authResult.apiKey) {
@@ -3149,6 +3539,8 @@ export class AgentSession {
 					this._autoCompactionAbortController.signal,
 					this.thinkingLevel,
 					this.agent.streamFn,
+					this.settingsManager.getRetrySettings(),
+					this._summarizationRetryCallbacks({ source: "compaction", reason }),
 				);
 				summary = compactResult.summary;
 				firstKeptEntryId = compactResult.firstKeptEntryId;
@@ -3236,7 +3628,11 @@ export class AgentSession {
 		return this.settingsManager.getCompactionEnabled();
 	}
 
-	async bindExtensions(bindings: ExtensionBindings): Promise<void> {
+	bindExtensions(bindings: ExtensionBindings): Promise<void> {
+		return this._runActivity("extension binding", () => this._bindExtensions(bindings));
+	}
+
+	private async _bindExtensions(bindings: ExtensionBindings): Promise<void> {
 		if (bindings.uiContext !== undefined) {
 			this._extensionUIContext = bindings.uiContext;
 		}
@@ -3445,7 +3841,7 @@ export class AgentSession {
 			},
 			{
 				getModel: () => this.model,
-				isIdle: () => !this.isStreaming,
+				isIdle: () => this.isIdle,
 				getSignal: () => this.agent.signal,
 				abort: () => {
 					if (this._extensionAbortHandler) {
@@ -3470,12 +3866,18 @@ export class AgentSession {
 					if (runner !== this._extensionRunner) throw new Error(STALE_EXTENSION_CONTEXT_MESSAGE);
 					return this.configureLsp(configuration);
 				},
-				execToolBackend: (command, options) => {
-					const operations = getToolOperations();
-					const prefix = this.settingsManager.getShellCommandPrefix();
-					const resolvedCommand = prefix ? `${prefix}\n${command}` : command;
-					return executeBashWithOperations(resolvedCommand, options?.cwd ?? operations.cwd, operations, options);
-				},
+				execToolBackend: (command, options) =>
+					this._runActivity("extension backend command", async () => {
+						const operations = getToolOperations();
+						const prefix = this.settingsManager.getShellCommandPrefix();
+						const resolvedCommand = prefix ? `${prefix}\n${command}` : command;
+						return executeBashWithOperations(
+							resolvedCommand,
+							options?.cwd ?? operations.cwd,
+							operations,
+							options,
+						);
+					}),
 			},
 			{
 				registerProvider: (name, config) => {
@@ -3821,12 +4223,17 @@ export class AgentSession {
 						) as unknown as ToolDefinition,
 						subagent: createSubagentToolDefinition({
 							runner: this._subagentRunner,
-							modelCatalog: formatSubagentModelCatalog(this.model, this._modelRegistry.getAvailable()),
+							modelCatalog: formatSubagentModelCatalog(this.model, this._getSubagentModels()),
+							resolveModelHint: (hint) => this._resolveSubagentModelHint(hint),
 							trustProjectAgents: this._trustProjectAgents,
 							runRegistry: this._subagentRunRegistry,
+							configRegistry: this._subagentConfigRegistry,
 						}) as unknown as ToolDefinition,
 						subagent_runs: createSubagentRunsToolDefinition(
 							this._subagentRunRegistry,
+						) as unknown as ToolDefinition,
+						create_subagent: createCreateSubagentToolDefinition(
+							this._subagentConfigRegistry,
 						) as unknown as ToolDefinition,
 					};
 			this._baseToolDefinitions = new Map(Object.entries(baseToolDefinitions));
@@ -3989,6 +4396,28 @@ export class AgentSession {
 		return isRetryableAssistantError(message);
 	}
 
+	private _summarizationRetryCallbacks(
+		source: { source: "branchSummary" } | { source: "compaction"; reason: "manual" | "threshold" | "overflow" },
+	): RetryCallbacks {
+		return {
+			onRetryScheduled: (attempt, maxAttempts, delayMs, errorMessage) => {
+				this._emit({
+					type: "summarization_retry_scheduled",
+					attempt,
+					maxAttempts,
+					delayMs,
+					errorMessage,
+				});
+			},
+			onRetryAttemptStart: () => {
+				this._emit({ type: "summarization_retry_attempt_start", ...source });
+			},
+			onRetryFinished: () => {
+				this._emit({ type: "summarization_retry_finished" });
+			},
+		};
+	}
+
 	/**
 	 * Prepare a retryable error for continuation with exponential backoff.
 	 * @returns true if the caller should continue the agent, false otherwise
@@ -4088,31 +4517,32 @@ export class AgentSession {
 		onChunk?: (chunk: string) => void,
 		options?: { excludeFromContext?: boolean; operations?: ToolOperations; record?: boolean; truncate?: boolean },
 	): Promise<BashResult> {
-		this._bashAbortController = new AbortController();
+		return this._runActivity("bash execution", async () => {
+			const abortController = new AbortController();
+			this._bashAbortControllers.add(abortController);
 
-		// Apply command prefix if configured (e.g., "shopt -s expand_aliases" for alias support)
-		const prefix = this.settingsManager.getShellCommandPrefix();
-		const shellPath = this.settingsManager.getShellPath();
-		const resolvedCommand = prefix ? `${prefix}\n${command}` : command;
+			// Apply command prefix if configured (e.g., "shopt -s expand_aliases" for alias support)
+			const prefix = this.settingsManager.getShellCommandPrefix();
+			const shellPath = this.settingsManager.getShellPath();
+			const resolvedCommand = prefix ? `${prefix}\n${command}` : command;
 
-		try {
-			const operations =
-				options?.operations ??
-				this._toolOperations ??
-				createLocalBashOperations({ cwd: this.session.getCwd(), shellPath });
-			const result = await executeBashWithOperations(resolvedCommand, operations.cwd, operations, {
-				onChunk,
-				signal: this._bashAbortController.signal,
-				truncate: options?.truncate,
-			});
+			try {
+				const operations =
+					options?.operations ??
+					this._toolOperations ??
+					createLocalBashOperations({ cwd: this.session.getCwd(), shellPath });
+				const result = await executeBashWithOperations(resolvedCommand, operations.cwd, operations, {
+					onChunk,
+					signal: abortController.signal,
+					truncate: options?.truncate,
+				});
 
-			if (options?.record !== false) {
-				this.recordBashResult(command, result, options);
+				if (options?.record !== false) this._recordBashResult(command, result, options);
+				return result;
+			} finally {
+				this._bashAbortControllers.delete(abortController);
 			}
-			return result;
-		} finally {
-			this._bashAbortController = undefined;
-		}
+		});
 	}
 
 	/**
@@ -4120,6 +4550,11 @@ export class AgentSession {
 	 * Used by executeBash and by extensions that handle bash execution themselves.
 	 */
 	recordBashResult(command: string, result: BashResult, options?: { excludeFromContext?: boolean }): void {
+		if (this._disposed) throw new Error("Agent session is disposed");
+		this._runSynchronousActivity("bash result recording", () => this._recordBashResult(command, result, options));
+	}
+
+	private _recordBashResult(command: string, result: BashResult, options?: { excludeFromContext?: boolean }): void {
 		const bashMessage: BashExecutionMessage = {
 			role: "bashExecution",
 			command,
@@ -4133,7 +4568,7 @@ export class AgentSession {
 		};
 
 		// If agent is streaming, defer adding to avoid breaking tool_use/tool_result ordering
-		if (this.isStreaming) {
+		if (this._isAgentRunActive) {
 			// Queue for later - will be flushed on agent_end
 			this._pendingBashMessages.push(bashMessage);
 		} else {
@@ -4149,12 +4584,12 @@ export class AgentSession {
 	 * Cancel running bash command.
 	 */
 	abortBash(): void {
-		this._bashAbortController?.abort();
+		for (const controller of this._bashAbortControllers) controller.abort();
 	}
 
 	/** Whether a bash command is currently running */
 	get isBashRunning(): boolean {
-		return this._bashAbortController !== undefined;
+		return this._bashAbortControllers.size > 0;
 	}
 
 	/** Whether there are pending bash messages waiting to be flushed */
@@ -4209,7 +4644,14 @@ export class AgentSession {
 	 * @param options.label Label to attach to the branch summary entry
 	 * @returns Result with editorText (if user message) and cancelled status
 	 */
-	async navigateTree(
+	navigateTree(
+		targetId: string,
+		options: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string } = {},
+	): Promise<{ editorText?: string; cancelled: boolean; aborted?: boolean; summaryEntry?: BranchSummaryEntry }> {
+		return this._runActivity("tree navigation", () => this._navigateTree(targetId, options));
+	}
+
+	private async _navigateTree(
 		targetId: string,
 		options: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string } = {},
 	): Promise<{ editorText?: string; cancelled: boolean; aborted?: boolean; summaryEntry?: BranchSummaryEntry }> {
@@ -4294,7 +4736,7 @@ export class AgentSession {
 			let summaryDetails: unknown;
 			if (options.summarize && entriesToSummarize.length > 0 && !extensionSummary) {
 				const model = this.model!;
-				const { apiKey, headers } = await this._getRequiredRequestAuth(model);
+				const { apiKey, headers } = await this._getCompactionRequestAuth(model);
 				const branchSummarySettings = this.settingsManager.getBranchSummarySettings();
 				const result = await generateBranchSummary(entriesToSummarize, {
 					model,
@@ -4304,6 +4746,9 @@ export class AgentSession {
 					customInstructions,
 					replaceInstructions,
 					reserveTokens: branchSummarySettings.reserveTokens,
+					streamFn: this.agent.streamFn,
+					retry: this.settingsManager.getRetrySettings(),
+					callbacks: this._summarizationRetryCallbacks({ source: "branchSummary" }),
 				});
 				if (result.aborted) {
 					return { cancelled: true, aborted: true };

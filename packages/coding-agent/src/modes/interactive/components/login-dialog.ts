@@ -1,6 +1,6 @@
 import { getOAuthProviders, type OAuthDeviceCodeInfo } from "@fleetagent/pi-ai/oauth";
 import { Container, type Focusable, getKeybindings, Input, Spacer, Text, type TUI } from "@fleetagent/pi-tui";
-import { exec } from "child_process";
+import { openBrowser } from "../../../utils/open-browser.ts";
 import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyHint } from "./keybinding-hints.ts";
@@ -102,7 +102,7 @@ export class LoginDialogComponent extends Container implements Focusable {
 		}
 
 		if (options.autoOpenBrowser ?? true) {
-			this.openUrl(url);
+			openBrowser(url);
 		}
 		this.tui.requestRender();
 	}
@@ -124,11 +124,6 @@ export class LoginDialogComponent extends Container implements Focusable {
 
 		// Do not open device-code URLs automatically. These flows need to work in headless environments.
 		this.tui.requestRender();
-	}
-
-	private openUrl(url: string): void {
-		const openCmd = process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
-		exec(`${openCmd} "${url}"`);
 	}
 
 	/**

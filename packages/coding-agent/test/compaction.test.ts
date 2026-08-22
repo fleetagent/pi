@@ -10,14 +10,18 @@ import {
 	compact,
 	DEFAULT_COMPACTION_SETTINGS,
 	estimateContextTokens,
+	estimateTokens,
 	findCutPoint,
 	getLastAssistantUsage,
+	prepareBranchEntries,
 	prepareCompaction,
 	shouldCompact,
 } from "../src/core/compaction/index.ts";
 import {
+	type BranchSummaryEntry,
 	buildSessionContext,
 	type CompactionEntry,
+	type CustomMessageEntry,
 	type ModelChangeEntry,
 	migrateSessionEntries,
 	parseSessionEntries,
@@ -134,6 +138,35 @@ function createThinkingLevelEntry(thinkingLevel: string): ThinkingLevelChangeEnt
 	return entry;
 }
 
+function createCustomMessageEntry(content: string, customType = "test"): CustomMessageEntry {
+	const id = `test-id-${entryCounter++}`;
+	const entry: CustomMessageEntry = {
+		type: "custom_message",
+		id,
+		parentId: lastId,
+		timestamp: new Date().toISOString(),
+		customType,
+		content,
+		display: true,
+	};
+	lastId = id;
+	return entry;
+}
+
+function createBranchSummaryEntry(summary: string): BranchSummaryEntry {
+	const id = `test-id-${entryCounter++}`;
+	const entry: BranchSummaryEntry = {
+		type: "branch_summary",
+		id,
+		parentId: lastId,
+		timestamp: new Date().toISOString(),
+		fromId: lastId ?? "root",
+		summary,
+	};
+	lastId = id;
+	return entry;
+}
+
 function extractText(messages: AgentMessage[]): string {
 	return messages
 		.map((message) => {
@@ -183,6 +216,14 @@ describe("Token calculation", () => {
 	it("should handle zero values", () => {
 		const usage = createMockUsage(0, 0, 0, 0);
 		expect(calculateContextTokens(usage)).toBe(0);
+	});
+
+	it("ignores zero assistant usage and estimates the visible context", () => {
+		const estimate = estimateContextTokens([
+			createUserMessage("x".repeat(4000)),
+			createAssistantMessage("z", createMockUsage(0, 0, 0, 0)),
+		]);
+		expect(estimate).toMatchObject({ tokens: 1001, usageTokens: 0, trailingTokens: 1001, lastUsageIndex: null });
 	});
 });
 
@@ -306,6 +347,127 @@ describe("findCutPoint", () => {
 			expect(result.isSplitTurn).toBe(true);
 			expect(result.turnStartIndex).toBe(2); // Turn 2 starts at index 2
 		}
+	});
+
+	it("budgets context-visible custom messages as turn starts", () => {
+		const entries: SessionEntry[] = [
+			createMessageEntry(createUserMessage("hi")),
+			createMessageEntry(createAssistantMessage("hello")),
+			createCustomMessageEntry("x".repeat(4000)),
+			createMessageEntry(createAssistantMessage("ok")),
+		];
+
+		const tinyBudget = findCutPoint(entries, 0, entries.length, 1);
+		expect(tinyBudget).toEqual({ firstKeptEntryIndex: 3, isSplitTurn: true, turnStartIndex: 2 });
+
+		const customFitsBudget = findCutPoint(entries, 0, entries.length, 2);
+		expect(customFitsBudget).toEqual({ firstKeptEntryIndex: 2, isSplitTurn: false, turnStartIndex: -1 });
+	});
+
+	it("budgets branch summaries as context-visible turn starts", () => {
+		const entries: SessionEntry[] = [
+			createMessageEntry(createUserMessage("hi")),
+			createBranchSummaryEntry("x".repeat(4000)),
+			createMessageEntry(createAssistantMessage("ok")),
+		];
+		expect(findCutPoint(entries, 0, entries.length, 2)).toEqual({
+			firstKeptEntryIndex: 1,
+			isSplitTurn: false,
+			turnStartIndex: -1,
+		});
+	});
+
+	it("ignores provider-hidden structured responses and bash executions", () => {
+		const structuredEntries: SessionEntry[] = [
+			createMessageEntry(createUserMessage("hi")),
+			createCustomMessageEntry("x".repeat(4000), "structured_response_internal"),
+			createMessageEntry(createAssistantMessage("ok")),
+		];
+		expect(findCutPoint(structuredEntries, 0, structuredEntries.length, 2).firstKeptEntryIndex).toBe(0);
+
+		resetEntryCounter();
+		const bashEntries: SessionEntry[] = [
+			createMessageEntry(createUserMessage("hi")),
+			createMessageEntry({
+				role: "bashExecution",
+				command: "x".repeat(4000),
+				output: "",
+				exitCode: 0,
+				cancelled: false,
+				truncated: false,
+				excludeFromContext: true,
+				timestamp: Date.now(),
+			}),
+			createMessageEntry(createAssistantMessage("ok")),
+		];
+		expect(findCutPoint(bashEntries, 0, bashEntries.length, 2).firstKeptEntryIndex).toBe(0);
+	});
+
+	it("counts tool results without selecting them as cut points", () => {
+		const entries: SessionEntry[] = [
+			createMessageEntry(createUserMessage("hi")),
+			createMessageEntry(createAssistantMessage("call")),
+			createMessageEntry({
+				role: "toolResult",
+				toolCallId: "call-1",
+				toolName: "subagent",
+				content: [{ type: "text", text: "x".repeat(4000) }],
+				details: {},
+				isError: false,
+				timestamp: Date.now(),
+			}),
+			createMessageEntry(createAssistantMessage("ok")),
+		];
+		expect(findCutPoint(entries, 0, entries.length, 2).firstKeptEntryIndex).toBe(3);
+	});
+
+	it("keeps a terminal tool result with its nearest assistant call", () => {
+		const entries: SessionEntry[] = [
+			createMessageEntry(createUserMessage("hi")),
+			createMessageEntry(createAssistantMessage("call")),
+			createMessageEntry({
+				role: "toolResult",
+				toolCallId: "call-1",
+				toolName: "subagent",
+				content: [{ type: "text", text: "x".repeat(4000) }],
+				details: {},
+				isError: false,
+				timestamp: Date.now(),
+			}),
+		];
+		expect(findCutPoint(entries, 0, entries.length, 1).firstKeptEntryIndex).toBe(1);
+	});
+
+	it("estimates images in user content", () => {
+		expect(
+			estimateTokens({
+				role: "user",
+				content: [{ type: "image", data: "ignored", mimeType: "image/png" }],
+				timestamp: Date.now(),
+			}),
+		).toBe(1200);
+	});
+});
+
+describe("prepareBranchEntries", () => {
+	it("retains subagent tool results and omits structured-response internals", () => {
+		const assistant = createMessageEntry(createAssistantMessage("delegating"));
+		const subagentResult = createMessageEntry({
+			role: "toolResult",
+			toolCallId: "subagent-1",
+			toolName: "subagent",
+			content: [{ type: "text", text: "child output" }],
+			details: { results: [{ messages: ["private child transcript".repeat(1000)] }] },
+			isError: false,
+			timestamp: Date.now(),
+		});
+		const hidden = createCustomMessageEntry("hidden extraction", "structured_response_internal");
+		const preparation = prepareBranchEntries([assistant, subagentResult, hidden]);
+
+		expect(preparation.messages.map((message) => message.role)).toEqual(["assistant", "toolResult"]);
+		expect(extractText(preparation.messages)).toContain("child output");
+		expect(extractText(preparation.messages)).not.toContain("hidden extraction");
+		expect(preparation.totalTokens).toBe(estimateTokens(assistant.message) + estimateTokens(subagentResult.message));
 	});
 });
 

@@ -42,6 +42,7 @@ import type {
 	ToolResultMessage,
 } from "../types.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
+import { providerHeadersToRecord } from "../utils/headers.ts";
 import { parseStreamingJson } from "../utils/json-parse.ts";
 import { createHttpProxyAgentsForTarget } from "../utils/node-http-proxy.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
@@ -182,8 +183,9 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 
 		try {
 			const client = new BedrockRuntimeClient(config);
-			if (options.headers && Object.keys(options.headers).length > 0) {
-				addCustomHeadersMiddleware(client, options.headers);
+			const customHeaders = providerHeadersToRecord(options.headers);
+			if (customHeaders) {
+				addCustomHeadersMiddleware(client, customHeaders);
 			}
 			const cacheRetention = resolveCacheRetention(options.cacheRetention);
 			const inferenceMaxTokens = options.maxTokens ?? (isAnthropicClaudeModel(model) ? model.maxTokens : undefined);
@@ -247,6 +249,9 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 				throw new Error("Request was aborted");
 			}
 
+			if (output.stopReason === "pending") {
+				throw new Error("Bedrock stream ended without a stop reason");
+			}
 			if (output.stopReason === "error" || output.stopReason === "aborted") {
 				throw new Error("An unknown error occurred");
 			}

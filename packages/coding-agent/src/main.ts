@@ -7,7 +7,7 @@
 
 import { createInterface } from "node:readline";
 import { type ImageContent, modelsAreEqual } from "@fleetagent/pi-ai";
-import { ProcessTerminal, setKeybindings, TUI } from "@fleetagent/pi-tui";
+import { ProcessTerminal, setKeybindings, TuiMainScreen } from "@fleetagent/pi-tui";
 import chalk from "chalk";
 import { type Args, parseArgs, printHelp } from "./cli/args.ts";
 import { processFileArguments } from "./cli/file-processor.ts";
@@ -464,7 +464,7 @@ async function promptForMissingSessionCwd(
 	setKeybindings(KeybindingsManager.create());
 
 	return new Promise((resolve) => {
-		const ui = new TUI(new ProcessTerminal(), settingsManager.getShowHardwareCursor());
+		const ui = new TuiMainScreen(new ProcessTerminal(), settingsManager.getShowHardwareCursor());
 		ui.setClearOnShrink(settingsManager.getClearOnShrink());
 
 		let settled = false;
@@ -656,6 +656,7 @@ export async function main(args: string[], options?: MainOptions) {
 		cliLspInputs.push({ type: "disabled", source: "--no-lsp", scope: "cli" });
 	}
 	const piAgent = await PiAgent.create({
+		toolOperations,
 		ownsToolOperations: toolOperations !== undefined,
 		mode: appMode,
 		cwd: initialSession.getCwd(),
@@ -783,6 +784,7 @@ export async function main(args: string[], options?: MainOptions) {
 		initialImages,
 		initialMessages: parsed.messages,
 		verbose: parsed.verbose,
+		tuiMode: parsed.tuiMode,
 		startupBenchmark: isTruthyEnvFlag(process.env.PI_STARTUP_BENCHMARK),
 	});
 }

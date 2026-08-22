@@ -21,13 +21,16 @@ import { oauthErrorHtml, oauthSuccessHtml } from "./oauth-page.ts";
 import { generatePKCE } from "./pkce.ts";
 import type { OAuthCredentials, OAuthLoginCallbacks, OAuthPrompt, OAuthProviderInterface } from "./types.ts";
 
-const CALLBACK_HOST = process.env.PI_OAUTH_CALLBACK_HOST || "127.0.0.1";
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const AUTHORIZE_URL = "https://auth.openai.com/oauth/authorize";
 const TOKEN_URL = "https://auth.openai.com/oauth/token";
 const REDIRECT_URI = "http://localhost:1455/auth/callback";
 const SCOPE = "openid profile email offline_access";
 const JWT_CLAIM_PATH = "https://api.openai.com/auth";
+
+function getCallbackHost(): string {
+	return typeof process !== "undefined" ? process.env.PI_OAUTH_CALLBACK_HOST || "127.0.0.1" : "127.0.0.1";
+}
 
 type TokenSuccess = { type: "success"; access: string; refresh: string; expires: number };
 type TokenFailure = { type: "failed"; message: string; status?: number };
@@ -136,7 +139,7 @@ async function exchangeAuthorizationCode(
 	};
 }
 
-async function refreshAccessToken(refreshToken: string): Promise<TokenResult> {
+async function refreshAccessToken(refreshToken: string, signal?: AbortSignal): Promise<TokenResult> {
 	try {
 		const response = await fetch(TOKEN_URL, {
 			method: "POST",
@@ -146,6 +149,7 @@ async function refreshAccessToken(refreshToken: string): Promise<TokenResult> {
 				refresh_token: refreshToken,
 				client_id: CLIENT_ID,
 			}),
+			signal,
 		});
 
 		if (!response.ok) {
@@ -261,7 +265,7 @@ function startLocalOAuthServer(state: string): Promise<OAuthServerInfo> {
 
 	return new Promise((resolve) => {
 		server
-			.listen(1455, CALLBACK_HOST, () => {
+			.listen(1455, getCallbackHost(), () => {
 				resolve({
 					close: () => server.close(),
 					cancelWait: () => {
@@ -415,8 +419,8 @@ export async function loginOpenAICodex(options: {
 /**
  * Refresh OpenAI Codex OAuth token
  */
-export async function refreshOpenAICodexToken(refreshToken: string): Promise<OAuthCredentials> {
-	const result = await refreshAccessToken(refreshToken);
+export async function refreshOpenAICodexToken(refreshToken: string, signal?: AbortSignal): Promise<OAuthCredentials> {
+	const result = await refreshAccessToken(refreshToken, signal);
 	if (result.type !== "success") {
 		throw new Error(result.message);
 	}
@@ -448,8 +452,8 @@ export const openaiCodexOAuthProvider: OAuthProviderInterface = {
 		});
 	},
 
-	async refreshToken(credentials: OAuthCredentials): Promise<OAuthCredentials> {
-		return refreshOpenAICodexToken(credentials.refresh);
+	async refreshToken(credentials: OAuthCredentials, signal?: AbortSignal): Promise<OAuthCredentials> {
+		return refreshOpenAICodexToken(credentials.refresh, signal);
 	},
 
 	getApiKey(credentials: OAuthCredentials): string {

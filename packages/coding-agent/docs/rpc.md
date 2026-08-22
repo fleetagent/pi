@@ -176,6 +176,7 @@ Response:
     "model": {...},
     "thinkingLevel": "medium",
     "isStreaming": false,
+    "isIdle": true,
     "isCompacting": false,
     "steeringMode": "all",
     "followUpMode": "one-at-a-time",
@@ -815,7 +816,8 @@ Events are streamed to stdout as JSON lines during agent operation. Events do NO
 | Event | Description |
 |-------|-------------|
 | `agent_start` | Agent begins processing |
-| `agent_end` | Agent completes (includes all generated messages) |
+| `agent_end` | One low-level Agent run completes; `willRetry` reports assistant retry only |
+| `agent_settled` | The full session lifecycle settles after retries, compaction, queued continuations, and session-owned work |
 | `turn_start` | New turn begins |
 | `turn_end` | Turn completes (includes assistant message and tool results) |
 | `message_start` | Message begins |
@@ -829,6 +831,9 @@ Events are streamed to stdout as JSON lines during agent operation. Events do NO
 | `compaction_end` | Compaction completes |
 | `auto_retry_start` | Auto-retry begins (after transient error) |
 | `auto_retry_end` | Auto-retry completes (success or final failure) |
+| `summarization_retry_scheduled` | A compaction or branch summary scheduled a transient-failure retry |
+| `summarization_retry_attempt_start` | The delayed summary retry request is starting |
+| `summarization_retry_finished` | The summary retry loop recovered, exhausted its bound, or was aborted |
 | `extension_error` | Extension threw an error |
 
 ### agent_start
@@ -841,13 +846,22 @@ Emitted when the agent begins processing a prompt.
 
 ### agent_end
 
-Emitted when the agent completes. Contains all messages generated during this run.
+Emitted when one low-level Agent run completes. Pi may still retry, compact, or process queued continuations. `willRetry` reports only the assistant retry decision.
 
 ```json
 {
   "type": "agent_end",
-  "messages": [...]
+  "messages": [...],
+  "willRetry": false
 }
+```
+
+### agent_settled
+
+Emitted through the same ordered JSONL output path when the AgentSession is fully settled and will not continue automatically. RPC clients should use this event, rather than `agent_end`, as the full logical-run completion boundary.
+
+```json
+{"type":"agent_settled"}
 ```
 
 ### turn_start / turn_end
@@ -877,17 +891,15 @@ Emitted when a message begins and completes. The `message` field contains an `Ag
 
 ### message_update (Streaming)
 
-Emitted during streaming of assistant messages. Contains both the partial message and a streaming delta event.
+Emitted during streaming of assistant messages. Contains a delta event without a cumulative message snapshot.
 
 ```json
 {
   "type": "message_update",
-  "message": {...},
   "assistantMessageEvent": {
     "type": "text_delta",
     "contentIndex": 0,
-    "delta": "Hello ",
-    "partial": {...}
+    "delta": "Hello "
   }
 }
 ```
@@ -896,7 +908,6 @@ The `assistantMessageEvent` field contains one of these delta types:
 
 | Type | Description |
 |------|-------------|
-| `start` | Message generation started |
 | `text_start` | Text content block started |
 | `text_delta` | Text content chunk |
 | `text_end` | Text content block ended |
@@ -906,16 +917,20 @@ The `assistantMessageEvent` field contains one of these delta types:
 | `toolcall_start` | Tool call started |
 | `toolcall_delta` | Tool call arguments chunk |
 | `toolcall_end` | Tool call ended (includes full `toolCall` object) |
-| `done` | Message complete (reason: `"stop"`, `"length"`, `"toolUse"`) |
-| `error` | Error occurred (reason: `"aborted"`, `"error"`) |
 
 Example streaming a text response:
 ```json
-{"type":"message_update","message":{...},"assistantMessageEvent":{"type":"text_start","contentIndex":0,"partial":{...}}}
-{"type":"message_update","message":{...},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Hello","partial":{...}}}
-{"type":"message_update","message":{...},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":" world","partial":{...}}}
-{"type":"message_update","message":{...},"assistantMessageEvent":{"type":"text_end","contentIndex":0,"content":"Hello world","partial":{...}}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_start","contentIndex":0}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Hello"}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":" world"}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_end","contentIndex":0,"content":"Hello world"}}
 ```
+
+`message_update` intentionally omits the former cumulative `message` field and
+`assistantMessageEvent.partial`. Clients that need a live partial message must assemble it
+from `message_start` and subsequent events using `contentIndex`. Treat `message_end.message`
+as authoritative. For tool calls, buffer `toolcall_delta.delta`; `toolcall_end.toolCall`
+contains the completed call.
 
 ### tool_execution_start / tool_execution_update / tool_execution_end
 
@@ -1036,6 +1051,10 @@ On final failure (max retries exceeded):
   "finalError": "529 overloaded_error: Overloaded"
 }
 ```
+
+### summarization_retry_scheduled / summarization_retry_attempt_start / summarization_retry_finished
+
+Compaction and branch summarization reuse the configured session retry policy for transient stream failures. The scheduled event includes the retry number, configured retry bound, delay, and provider error. Immediately before the next request, `summarization_retry_attempt_start` identifies either `{"source":"branchSummary"}` or `{"source":"compaction","reason":"manual|threshold|overflow"}`. `summarization_retry_finished` is emitted once after recovery, exhaustion, or cancellation. The surrounding compaction or navigation lifecycle remains active until its normal terminal event.
 
 ### extension_error
 
@@ -1272,6 +1291,7 @@ Source files:
 - [`packages/ai/src/types.ts`](../../ai/src/types.ts) - `Model`, `UserMessage`, `AssistantMessage`, `ToolResultMessage`
 - [`packages/agent/src/types.ts`](../../agent/src/types.ts) - `AgentMessage`, `AgentEvent`
 - [`src/core/messages.ts`](../src/core/messages.ts) - `BashExecutionMessage`
+- [`src/modes/json-event.ts`](../src/modes/json-event.ts) - `JsonAgentSessionEvent`
 - [`src/modes/rpc/rpc-types.ts`](../src/modes/rpc/rpc-types.ts) - RPC command/response types, extension UI request/response types
 
 ### Model
@@ -1412,7 +1432,7 @@ for event in read_events():
         if delta.get("type") == "text_delta":
             print(delta["delta"], end="", flush=True)
     
-    if event.get("type") == "agent_end":
+    if event.get("type") == "agent_settled":
         print()
         break
 ```

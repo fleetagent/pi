@@ -26,7 +26,7 @@ Or start with a deferred backend and connect from inside Pi:
 Then run:
 
 ```text
-/remote daemon ws://127.0.0.1:8787/pi/workspace
+/sandbox --attach ws://127.0.0.1:8787/pi/workspace
 ```
 
 Useful prompts:

@@ -250,7 +250,7 @@ export function convertResponsesMessages<TApi extends Api>(
 
 				output = contentParts;
 			} else {
-				output = sanitizeSurrogates(hasText ? textResult : "(see attached image)");
+				output = sanitizeSurrogates(hasText ? textResult : hasImages ? "(see attached image)" : "(no tool output)");
 			}
 
 			messages.push({
@@ -297,7 +297,14 @@ export async function processResponsesStream<TApi extends Api>(
 	model: Model<TApi>,
 	options?: OpenAIResponsesStreamOptions,
 ): Promise<void> {
+	let sawTerminalResponseEvent = false;
 	const outputSlots = new Map<number, ResponsesOutputSlot>();
+	const reasoningBlocksById = new Map<string, ThinkingContent>();
+	const applyMessagePhaseStopReason = (item: ResponseOutputItem): void => {
+		if (item.type === "message" && item.phase === "final_answer") {
+			output.stopReason = "stop";
+		}
+	};
 	const getSlot = <TType extends ResponsesOutputSlot["type"]>(
 		outputIndex: number,
 		type: TType,
@@ -319,6 +326,7 @@ export async function processResponsesStream<TApi extends Api>(
 			return slot;
 		}
 		if (item.type === "message") {
+			applyMessagePhaseStopReason(item);
 			const block: TextContent = { type: "text", text: "" };
 			output.content.push(block);
 			const slot = { type: "text", block, contentIndex: output.content.length - 1 } satisfies ResponsesOutputSlot;
@@ -348,6 +356,59 @@ export async function processResponsesStream<TApi extends Api>(
 	};
 	const getOrCreateSlot = (outputIndex: number, item: ResponseOutputItem): ResponsesOutputSlot | undefined => {
 		return outputSlots.get(outputIndex) ?? createSlot(outputIndex, item);
+	};
+	// Azure OpenAI can omit reasoning.encrypted_content from response.output_item.done
+	// and provide it only in the terminal response output. Backfill it so store:false
+	// multi-turn replay remains stateless.
+	const backfillReasoningSignatures = (responseOutput: ResponseOutputItem[]): void => {
+		for (const item of responseOutput) {
+			if (item.type !== "reasoning" || !item.encrypted_content) continue;
+			const block = reasoningBlocksById.get(item.id);
+			if (!block?.thinkingSignature) continue;
+
+			const storedItem = JSON.parse(block.thinkingSignature) as ResponseReasoningItem;
+			if (storedItem.encrypted_content) continue;
+			block.thinkingSignature = JSON.stringify({
+				...storedItem,
+				encrypted_content: item.encrypted_content,
+			});
+		}
+	};
+	const finalizeResponse = (
+		response: Extract<ResponseStreamEvent, { type: "response.completed" | "response.incomplete" }>["response"],
+	): void => {
+		sawTerminalResponseEvent = true;
+		backfillReasoningSignatures(response.output ?? []);
+		if (response.id) output.responseId = response.id;
+		if (response.usage) {
+			const inputDetails = response.usage.input_tokens_details as
+				| { cached_tokens?: number; cache_write_tokens?: number }
+				| undefined;
+			const cachedTokens = inputDetails?.cached_tokens || 0;
+			const cacheWriteTokens = inputDetails?.cache_write_tokens || 0;
+			output.usage = {
+				// OpenAI includes cached and cache-write tokens in input_tokens.
+				input: Math.max(0, (response.usage.input_tokens || 0) - cachedTokens - cacheWriteTokens),
+				output: response.usage.output_tokens || 0,
+				cacheRead: cachedTokens,
+				cacheWrite: cacheWriteTokens,
+				reasoning: response.usage.output_tokens_details?.reasoning_tokens || 0,
+				totalTokens: response.usage.total_tokens || 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			};
+		}
+		calculateCost(model, output.usage);
+		if (options?.applyServiceTierPricing) {
+			const serviceTier = options.resolveServiceTier
+				? options.resolveServiceTier(response.service_tier, options.serviceTier)
+				: (response.service_tier ?? options.serviceTier);
+			options.applyServiceTierPricing(output.usage, serviceTier);
+		}
+		output.rawStopReason = response.status;
+		output.stopReason = mapStopReason(response.status);
+		if (output.content.some((block) => block.type === "toolCall") && output.stopReason === "stop") {
+			output.stopReason = "toolUse";
+		}
 	};
 
 	for await (const event of openaiStream) {
@@ -436,6 +497,7 @@ export async function processResponsesStream<TApi extends Api>(
 			}
 		} else if (event.type === "response.output_item.done") {
 			const item = event.item;
+			applyMessagePhaseStopReason(item);
 			const slot = getOrCreateSlot(event.output_index, item);
 
 			if (item.type === "reasoning" && slot?.type === "thinking") {
@@ -443,6 +505,7 @@ export async function processResponsesStream<TApi extends Api>(
 				const contentText = item.content?.map((content) => content.text).join("\n\n") || "";
 				slot.block.thinking = summaryText || contentText || slot.block.thinking;
 				slot.block.thinkingSignature = JSON.stringify(item);
+				reasoningBlocksById.set(item.id, slot.block);
 				stream.push({
 					type: "thinking_end",
 					contentIndex: slot.contentIndex,
@@ -474,36 +537,13 @@ export async function processResponsesStream<TApi extends Api>(
 				});
 				outputSlots.delete(event.output_index);
 			}
-		} else if (event.type === "response.completed") {
-			const response = event.response;
-			if (response?.id) {
-				output.responseId = response.id;
-			}
-			if (response?.usage) {
-				const cachedTokens = response.usage.input_tokens_details?.cached_tokens || 0;
-				output.usage = {
-					input: (response.usage.input_tokens || 0) - cachedTokens,
-					output: response.usage.output_tokens || 0,
-					cacheRead: cachedTokens,
-					cacheWrite: 0,
-					totalTokens: response.usage.total_tokens || 0,
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-				};
-			}
-			calculateCost(model, output.usage);
-			if (options?.applyServiceTierPricing) {
-				const serviceTier = options.resolveServiceTier
-					? options.resolveServiceTier(response?.service_tier, options.serviceTier)
-					: (response?.service_tier ?? options.serviceTier);
-				options.applyServiceTierPricing(output.usage, serviceTier);
-			}
-			output.stopReason = mapStopReason(response?.status);
-			if (output.content.some((block) => block.type === "toolCall") && output.stopReason === "stop") {
-				output.stopReason = "toolUse";
-			}
+		} else if (event.type === "response.completed" || event.type === "response.incomplete") {
+			finalizeResponse(event.response);
 		} else if (event.type === "error") {
 			throw new Error(`Error Code ${event.code}: ${event.message}` || "Unknown error");
 		} else if (event.type === "response.failed") {
+			sawTerminalResponseEvent = true;
+			output.rawStopReason = event.response?.status;
 			const error = event.response?.error;
 			const details = event.response?.incomplete_details;
 			const message = error
@@ -513,6 +553,9 @@ export async function processResponsesStream<TApi extends Api>(
 					: "Unknown error (no error details in response)";
 			throw new Error(message);
 		}
+	}
+	if (!sawTerminalResponseEvent) {
+		throw new Error("OpenAI Responses stream ended before a terminal response event");
 	}
 }
 

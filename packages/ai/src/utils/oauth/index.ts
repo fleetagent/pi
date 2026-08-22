@@ -103,6 +103,37 @@ export function getOAuthProviderInfoList(): OAuthProviderInfo[] {
 // High-level API (uses provider registry)
 // ============================================================================
 
+const DEFAULT_OAUTH_REFRESH_TIMEOUT_MS = 15_000;
+const NEVER_ABORTED_SIGNAL = new AbortController().signal;
+
+async function refreshProviderToken(
+	providerId: OAuthProviderId,
+	provider: OAuthProviderInterface,
+	credentials: OAuthCredentials,
+	signal?: AbortSignal,
+): Promise<OAuthCredentials> {
+	signal?.throwIfAborted();
+	const timeoutSignal = AbortSignal.timeout(DEFAULT_OAUTH_REFRESH_TIMEOUT_MS);
+	const refreshSignal = AbortSignal.any([signal ?? NEVER_ABORTED_SIGNAL, timeoutSignal]);
+
+	try {
+		return await provider.refreshToken(credentials, refreshSignal);
+	} catch (error) {
+		if (signal?.aborted) {
+			throw signal.reason;
+		}
+		if (timeoutSignal.aborted) {
+			throw new Error(
+				`OAuth token refresh timed out after ${DEFAULT_OAUTH_REFRESH_TIMEOUT_MS}ms for ${providerId}`,
+				{
+					cause: timeoutSignal.reason ?? error,
+				},
+			);
+		}
+		const details = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+		throw new Error(`Failed to refresh OAuth token for ${providerId}: ${details}`, { cause: error });
+	}
+}
 /**
  * Refresh token for any OAuth provider.
  * @deprecated Use getOAuthProvider(id).refreshToken() instead
@@ -110,12 +141,13 @@ export function getOAuthProviderInfoList(): OAuthProviderInfo[] {
 export async function refreshOAuthToken(
 	providerId: OAuthProviderId,
 	credentials: OAuthCredentials,
+	signal?: AbortSignal,
 ): Promise<OAuthCredentials> {
 	const provider = getOAuthProvider(providerId);
 	if (!provider) {
 		throw new Error(`Unknown OAuth provider: ${providerId}`);
 	}
-	return provider.refreshToken(credentials);
+	return refreshProviderToken(providerId, provider, credentials, signal);
 }
 
 /**
@@ -128,6 +160,7 @@ export async function refreshOAuthToken(
 export async function getOAuthApiKey(
 	providerId: OAuthProviderId,
 	credentials: Record<string, OAuthCredentials>,
+	signal?: AbortSignal,
 ): Promise<{ newCredentials: OAuthCredentials; apiKey: string } | null> {
 	const provider = getOAuthProvider(providerId);
 	if (!provider) {
@@ -141,11 +174,7 @@ export async function getOAuthApiKey(
 
 	// Refresh if expired
 	if (Date.now() >= creds.expires) {
-		try {
-			creds = await provider.refreshToken(creds);
-		} catch (_error) {
-			throw new Error(`Failed to refresh OAuth token for ${providerId}`);
-		}
+		creds = await refreshProviderToken(providerId, provider, creds, signal);
 	}
 
 	const apiKey = provider.getApiKey(creds);

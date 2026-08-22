@@ -3,9 +3,10 @@ import type { ImageContent, Message, TextContent } from "@fleetagent/pi-ai";
 import type { BashExecutionMessage, CustomMessage } from "../messages.ts";
 import { CURRENT_SESSION_VERSION } from "./constants.ts";
 import { buildSessionContext } from "./context.ts";
-import { createSessionId, generateId } from "./ids.ts";
+import { createSessionId, generateId, validateSessionId } from "./ids.ts";
 import { migrateToCurrentVersion } from "./migrations.ts";
 import type { SessionManager, SessionResult } from "./session-manager.ts";
+import { getJsonlEntryLocations, validateCurrentSessionEntries } from "./stores/jsonl-session-store.ts";
 import type { SessionStore } from "./stores/session-store.ts";
 import type {
 	BranchSummaryEntry,
@@ -25,7 +26,7 @@ import type {
 } from "./types.ts";
 
 export { CURRENT_SESSION_VERSION } from "./constants.ts";
-export { buildSessionContext, getLatestCompactionEntry } from "./context.ts";
+export { buildSessionContext, getLatestCompactionEntry, sessionEntryToContextMessages } from "./context.ts";
 export { migrateSessionEntries, parseSessionEntries } from "./migrations.ts";
 
 export type {
@@ -127,7 +128,7 @@ export abstract class Session {
 					throw new Error(`Session file is not a valid pi session: ${sessionReference}`);
 				}
 				this.newSession();
-				this.store.setSessionReference(sessionReference);
+				this.store.setSessionReference(sessionReference, { allowExistingEmptyFile: true });
 				this.store.saveSnapshot();
 				return;
 			}
@@ -135,9 +136,14 @@ export abstract class Session {
 			const header = this.store.getHeader();
 			this.sessionId = header?.id ?? createSessionId();
 
-			if (migrateToCurrentVersion(this.store.getFileEntries())) {
-				this.store.setEntries(this.store.getFileEntries());
-				this.store.saveSnapshot();
+			const entries = this.store.getFileEntries();
+			if (migrateToCurrentVersion(entries)) {
+				validateCurrentSessionEntries(entries, sessionReference, {
+					phase: "migrate",
+					locations: getJsonlEntryLocations(entries),
+				});
+				this.store.setEntries(entries);
+				this.store.saveSnapshot({ phase: "migrate" });
 			}
 		} else {
 			this.newSession();
@@ -147,6 +153,7 @@ export abstract class Session {
 
 	newSession(options?: NewSessionOptions): string | undefined {
 		this.sessionId = options?.id ?? createSessionId();
+		validateSessionId(this.sessionId);
 		const timestamp = new Date().toISOString();
 		const header: SessionHeader = {
 			type: "session",

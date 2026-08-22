@@ -10,6 +10,7 @@ import {
 	readdir,
 	readFile,
 	realpath,
+	rename,
 	rm,
 	writeFile,
 } from "node:fs/promises";
@@ -108,6 +109,30 @@ function toFileError(error: unknown, path?: string): FileError {
 		}
 	}
 	return new FileError("unknown", cause.message, path, cause);
+}
+
+function nodeErrorPath(error: unknown, fallback: string): string {
+	if (isNodeError(error) && typeof error.path === "string") return error.path;
+	return fallback;
+}
+
+function isWindowsRenameSharingError(error: unknown): boolean {
+	return isNodeError(error) && (error.code === "EPERM" || error.code === "EACCES" || error.code === "EBUSY");
+}
+
+async function waitForRenameRetry(delayMs: number, signal?: AbortSignal): Promise<boolean> {
+	if (signal?.aborted) return false;
+	return await new Promise((resolvePromise) => {
+		const onAbort = () => {
+			clearTimeout(timeout);
+			resolvePromise(false);
+		};
+		const timeout = setTimeout(() => {
+			signal?.removeEventListener("abort", onAbort);
+			resolvePromise(true);
+		}, delayMs);
+		signal?.addEventListener("abort", onAbort, { once: true });
+	});
 }
 
 function abortResult<TValue>(signal: AbortSignal | undefined, path?: string): Result<TValue, FileError> | undefined {
@@ -458,6 +483,27 @@ export class NodeExecutionEnv implements ExecutionEnv {
 		} catch (error) {
 			return err(toFileError(error, resolved));
 		}
+	}
+
+	async renameFile(source: string, destination: string, abortSignal?: AbortSignal): Promise<Result<void, FileError>> {
+		const resolvedSource = resolvePath(this.cwd, source);
+		const resolvedDestination = resolvePath(this.cwd, destination);
+		for (let attempt = 0; attempt < 5; attempt++) {
+			const aborted = abortResult<void>(abortSignal, resolvedDestination);
+			if (aborted) return aborted;
+			try {
+				await rename(resolvedSource, resolvedDestination);
+				return ok(undefined);
+			} catch (error) {
+				if (process.platform !== "win32" || !isWindowsRenameSharingError(error) || attempt === 4) {
+					return err(toFileError(error, nodeErrorPath(error, resolvedDestination)));
+				}
+				if (!(await waitForRenameRetry(10 * 2 ** attempt, abortSignal))) {
+					return err(new FileError("aborted", "aborted", resolvedDestination));
+				}
+			}
+		}
+		return err(new FileError("unknown", "rename failed", resolvedDestination));
 	}
 
 	async fileInfo(path: string): Promise<Result<FileInfo, FileError>> {

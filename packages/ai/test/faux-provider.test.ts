@@ -46,6 +46,49 @@ describe("faux provider", () => {
 		expect(registration.state.callCount).toBe(1);
 	});
 
+	it("normalizes null or missing context content during faux provider conversion", async () => {
+		const registration = registerFauxProvider();
+		registrations.push(registration);
+		registration.setResponses([fauxAssistantMessage("done")]);
+		const malformedMessages = [
+			{ role: "user", content: null, timestamp: Date.now() },
+			{
+				role: "assistant",
+				content: null,
+				api: "faux",
+				provider: "faux",
+				model: "faux-1",
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "stop",
+				timestamp: Date.now(),
+			},
+			{
+				role: "toolResult",
+				toolCallId: "call_1",
+				toolName: "web_search",
+				isError: false,
+				timestamp: Date.now(),
+			},
+		];
+		const context = { messages: malformedMessages } as unknown as Context;
+
+		const response = await complete(registration.getModel(), context);
+
+		const serialized = "user:\n\nassistant:\n\ntoolResult:web_search";
+		expect(response.stopReason).toBe("stop");
+		expect(response.usage.input).toBe(Math.ceil(serialized.length / 4));
+		expect(malformedMessages[0].content).toBeNull();
+		expect(malformedMessages[1].content).toBeNull();
+		expect("content" in malformedMessages[2]).toBe(false);
+	});
+
 	it("supports helper blocks for text, thinking, and tool calls", async () => {
 		const registration = registerFauxProvider();
 		registrations.push(registration);

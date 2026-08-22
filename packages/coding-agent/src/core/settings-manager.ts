@@ -1,4 +1,5 @@
 import type { Transport } from "@fleetagent/pi-ai";
+import type { ScrollViewScrollbar, TuiMode } from "@fleetagent/pi-tui";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
@@ -31,6 +32,8 @@ export interface RetrySettings {
 	provider?: ProviderRetrySettings;
 }
 
+export type FullscreenExitOutput = "transcript" | "resume-hint";
+
 export interface TerminalSettings {
 	showImages?: boolean; // default: true (only relevant if terminal supports images)
 	imageWidthCells?: number; // default: 60 (preferred inline image width in terminal cells)
@@ -50,8 +53,11 @@ export interface ThinkingBudgetsSettings {
 	high?: number;
 }
 
+export type MermaidRenderingMode = "off" | "final" | "streaming";
+
 export interface MarkdownSettings {
 	codeBlockIndent?: string; // default: "  "
+	mermaid?: boolean | MermaidRenderingMode; // boolean values are accepted for fork settings migration
 }
 
 export interface WarningSettings {
@@ -134,6 +140,91 @@ export interface Settings {
 	httpIdleTimeoutMs?: number; // HTTP header/body idle timeout in milliseconds; 0 disables it
 	websocketConnectTimeoutMs?: number; // WebSocket connect/open handshake timeout in milliseconds; 0 disables it
 	sandbox?: SandboxSettings;
+	tuiMode?: TuiMode; // default: "regular"
+	fullscreenExitOutput?: FullscreenExitOutput; // default: "transcript"; no effect in regular TUI mode
+	fullscreenScrollbar?: ScrollViewScrollbar; // default: "auto"; no effect in regular TUI mode
+}
+
+const RECURSIVELY_MERGED_SETTINGS = new Set<keyof Settings>([
+	"compaction",
+	"branchSummary",
+	"retry",
+	"terminal",
+	"images",
+	"thinkingBudgets",
+	"markdown",
+	"warnings",
+	"sandbox",
+]);
+
+function isMergeableObject(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function setOwnValue(target: Record<string, unknown>, key: string, value: unknown): void {
+	Object.defineProperty(target, key, { value, enumerable: true, configurable: true, writable: true });
+}
+
+function deepMergeObjects(base: Record<string, unknown>, overrides: Record<string, unknown>): Record<string, unknown> {
+	const result = { ...base };
+	for (const key of Object.keys(overrides)) {
+		const overrideValue = overrides[key];
+		if (overrideValue === undefined) continue;
+		const baseValue = base[key];
+		setOwnValue(
+			result,
+			key,
+			isMergeableObject(baseValue) && isMergeableObject(overrideValue)
+				? deepMergeObjects(baseValue, overrideValue)
+				: overrideValue,
+		);
+	}
+	return result;
+}
+
+/** Merge settings according to each field's layering policy. */
+function deepMergeSettings(base: Settings, overrides: Settings): Settings {
+	const result: Settings = { ...base };
+	const resultRecord = result as Record<string, unknown>;
+
+	for (const key of Object.keys(overrides) as (keyof Settings)[]) {
+		const overrideValue = overrides[key];
+		const baseValue = base[key];
+
+		// LSP layers are resolved independently with scope-specific trust policy.
+		if (key === "lsp") {
+			setOwnValue(resultRecord, key, overrideValue);
+			continue;
+		}
+
+		// Tool names merge, but each tool's configuration remains a shallow layer.
+		if (key === "tools" && isMergeableObject(overrideValue)) {
+			const mergedTools: ToolSettings = isMergeableObject(baseValue) ? { ...baseValue } : {};
+			for (const [toolName, toolOverride] of Object.entries(overrideValue as ToolSettings)) {
+				const baseTool = mergedTools[toolName];
+				setOwnValue(
+					mergedTools,
+					toolName,
+					isMergeableObject(baseTool) && isMergeableObject(toolOverride)
+						? { ...baseTool, ...toolOverride }
+						: toolOverride,
+				);
+			}
+			result.tools = mergedTools;
+			continue;
+		}
+
+		if (overrideValue === undefined) continue;
+		setOwnValue(
+			resultRecord,
+			key,
+			RECURSIVELY_MERGED_SETTINGS.has(key) && isMergeableObject(baseValue) && isMergeableObject(overrideValue)
+				? deepMergeObjects(baseValue, overrideValue)
+				: overrideValue,
+		);
+	}
+
+	return result;
 }
 
 function parseTimeoutSetting(value: unknown, settingName: string): number | undefined {
@@ -145,55 +236,6 @@ function parseTimeoutSetting(value: unknown, settingName: string): number | unde
 		throw new Error(`Invalid ${settingName} setting: ${String(value)}`);
 	}
 	return undefined;
-}
-
-/** Deep merge settings: project/overrides take precedence, nested objects merge recursively */
-function deepMergeSettings(base: Settings, overrides: Settings): Settings {
-	const result: Settings = { ...base };
-
-	for (const key of Object.keys(overrides) as (keyof Settings)[]) {
-		const overrideValue = overrides[key];
-		const baseValue = base[key];
-
-		if (key === "lsp") {
-			(result as Record<string, unknown>)[key] = overrideValue;
-			continue;
-		}
-
-		if (key === "tools" && overrideValue && typeof overrideValue === "object" && !Array.isArray(overrideValue)) {
-			const mergedTools: ToolSettings = { ...((baseValue as ToolSettings | undefined) ?? {}) };
-			for (const [toolName, toolOverride] of Object.entries(overrideValue as ToolSettings)) {
-				const baseTool = mergedTools[toolName];
-				mergedTools[toolName] =
-					baseTool && toolOverride && typeof baseTool === "object" && typeof toolOverride === "object"
-						? { ...baseTool, ...toolOverride }
-						: toolOverride;
-			}
-			result.tools = mergedTools;
-			continue;
-		}
-
-		if (overrideValue === undefined) {
-			continue;
-		}
-
-		// For nested objects, merge recursively
-		if (
-			typeof overrideValue === "object" &&
-			overrideValue !== null &&
-			!Array.isArray(overrideValue) &&
-			typeof baseValue === "object" &&
-			baseValue !== null &&
-			!Array.isArray(baseValue)
-		) {
-			(result as Record<string, unknown>)[key] = { ...baseValue, ...overrideValue };
-		} else {
-			// For primitives and arrays, override value wins
-			(result as Record<string, unknown>)[key] = overrideValue;
-		}
-	}
-
-	return result;
 }
 
 export type SettingsScope = "global" | "project";
@@ -297,7 +339,8 @@ export class SettingsManager {
 	private storage: SettingsStorage;
 	private globalSettings: Settings;
 	private projectSettings: Settings;
-	private settings: Settings;
+	private runtimeOverrides: Settings = {};
+	private settings: Settings = {};
 	private modifiedFields = new Set<keyof Settings>(); // Track global fields modified during session
 	private modifiedNestedFields = new Map<keyof Settings, Set<string>>(); // Track global nested field modifications
 	private modifiedProjectFields = new Set<keyof Settings>(); // Track project fields modified during session
@@ -321,7 +364,7 @@ export class SettingsManager {
 		this.globalSettingsLoadError = globalLoadError;
 		this.projectSettingsLoadError = projectLoadError;
 		this.errors = [...initialErrors];
-		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		this.recomputeSettings();
 	}
 
 	/** Create a SettingsManager that loads from files */
@@ -488,16 +531,24 @@ export class SettingsManager {
 			this.recordError("project", projectLoad.error);
 		}
 
-		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		this.recomputeSettings();
+	}
+
+	private recomputeSettings(): void {
+		this.settings = deepMergeSettings(
+			deepMergeSettings(this.globalSettings, this.projectSettings),
+			this.runtimeOverrides,
+		);
 	}
 
 	getLoadError(scope: SettingsScope): Error | null {
 		return scope === "global" ? this.globalSettingsLoadError : this.projectSettingsLoadError;
 	}
 
-	/** Apply additional overrides on top of current settings */
+	/** Apply cumulative runtime-only overrides on top of global and project settings */
 	applyOverrides(overrides: Partial<Settings>): void {
-		this.settings = deepMergeSettings(this.settings, overrides);
+		this.runtimeOverrides = deepMergeSettings(this.runtimeOverrides, overrides);
+		this.recomputeSettings();
 	}
 
 	/** Mark a global field as modified during this session */
@@ -589,7 +640,7 @@ export class SettingsManager {
 	}
 
 	private save(): void {
-		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		this.recomputeSettings();
 
 		if (this.globalSettingsLoadError) {
 			return;
@@ -606,7 +657,7 @@ export class SettingsManager {
 
 	private saveProjectSettings(settings: Settings): void {
 		this.projectSettings = structuredClone(settings);
-		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		this.recomputeSettings();
 
 		if (this.projectSettingsLoadError) {
 			return;
@@ -1148,6 +1199,37 @@ export class SettingsManager {
 		this.save();
 	}
 
+	getTuiMode(): TuiMode {
+		return this.settings.tuiMode === "fullscreen" ? "fullscreen" : "regular";
+	}
+
+	setTuiMode(mode: TuiMode): void {
+		this.globalSettings.tuiMode = mode;
+		this.markModified("tuiMode");
+		this.save();
+	}
+
+	getFullscreenExitOutput(): FullscreenExitOutput {
+		return this.settings.fullscreenExitOutput === "resume-hint" ? "resume-hint" : "transcript";
+	}
+
+	setFullscreenExitOutput(output: FullscreenExitOutput): void {
+		this.globalSettings.fullscreenExitOutput = output;
+		this.markModified("fullscreenExitOutput");
+		this.save();
+	}
+
+	getFullscreenScrollbar(): ScrollViewScrollbar {
+		const mode = this.settings.fullscreenScrollbar;
+		return mode === "always" || mode === "hidden" ? mode : "auto";
+	}
+
+	setFullscreenScrollbar(mode: ScrollViewScrollbar): void {
+		this.globalSettings.fullscreenScrollbar = mode;
+		this.markModified("fullscreenScrollbar");
+		this.save();
+	}
+
 	getEditorPaddingX(): number {
 		return this.settings.editorPaddingX ?? 0;
 	}
@@ -1178,8 +1260,24 @@ export class SettingsManager {
 		this.save();
 	}
 
+	getMarkdownSettings(): MarkdownSettings {
+		return { ...(this.settings.markdown ?? {}) };
+	}
+
 	getCodeBlockIndent(): string {
 		return this.settings.markdown?.codeBlockIndent ?? "  ";
+	}
+
+	getMermaidRenderingMode(): MermaidRenderingMode {
+		const mode = this.settings.markdown?.mermaid;
+		return mode === "off" || mode === "final" ? mode : "streaming";
+	}
+
+	setMermaidRenderingMode(mode: MermaidRenderingMode): void {
+		this.globalSettings.markdown ??= {};
+		this.globalSettings.markdown.mermaid = mode;
+		this.markModified("markdown", "mermaid");
+		this.save();
 	}
 
 	getWarnings(): WarningSettings {

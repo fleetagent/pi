@@ -329,6 +329,77 @@ describe("Agent", () => {
 		expect(() => agent.abort()).not.toThrow();
 	});
 
+	it("allows reset before a run and clears transcript and queued messages", () => {
+		const agent = new Agent();
+		agent.state.messages = [{ role: "user", content: "Seed transcript", timestamp: Date.now() }];
+		agent.steer({ role: "user", content: "Queued steering", timestamp: Date.now() });
+		agent.followUp({ role: "user", content: "Queued follow-up", timestamp: Date.now() });
+
+		expect(() => agent.reset()).not.toThrow();
+		expect(agent.state.messages).toEqual([]);
+		expect(agent.state.isStreaming).toBe(false);
+		expect(agent.state.streamingMessage).toBeUndefined();
+		expect(agent.state.pendingToolCalls).toEqual(new Set());
+		expect(agent.state.errorMessage).toBeUndefined();
+		expect(agent.hasQueuedMessages()).toBe(false);
+	});
+
+	it("rejects reset while processing without corrupting the transcript", async () => {
+		const streamStarted = createDeferred();
+		const releaseResponse = createDeferred();
+		const agent = new Agent({
+			streamFn: () => {
+				const stream = new MockAssistantStream();
+				queueMicrotask(async () => {
+					stream.push({ type: "start", partial: createAssistantMessage("") });
+					streamStarted.resolve();
+					await releaseResponse.promise;
+					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("Done") });
+				});
+				return stream;
+			},
+		});
+
+		const promptPromise = agent.prompt("Hello");
+		await streamStarted.promise;
+
+		try {
+			expect(agent.state.isStreaming).toBe(true);
+			expect(agent.state.messages.map((message) => message.role)).toEqual(["user"]);
+			expect(() => agent.reset()).toThrow("Agent is already processing. Wait for completion before resetting.");
+			expect(agent.state.isStreaming).toBe(true);
+			expect(agent.state.messages.map((message) => message.role)).toEqual(["user"]);
+		} finally {
+			releaseResponse.resolve();
+			await promptPromise;
+		}
+
+		expect(agent.state.isStreaming).toBe(false);
+		expect(agent.state.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
+	});
+
+	it("allows reset after a completed run", async () => {
+		const agent = new Agent({
+			streamFn: () => {
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("Done") });
+				});
+				return stream;
+			},
+		});
+		await agent.prompt("Hello");
+		agent.steer({ role: "user", content: "Queued after run", timestamp: Date.now() });
+
+		expect(() => agent.reset()).not.toThrow();
+		expect(agent.state.messages).toEqual([]);
+		expect(agent.state.isStreaming).toBe(false);
+		expect(agent.state.streamingMessage).toBeUndefined();
+		expect(agent.state.pendingToolCalls).toEqual(new Set());
+		expect(agent.state.errorMessage).toBeUndefined();
+		expect(agent.hasQueuedMessages()).toBe(false);
+	});
+
 	it("should throw when prompt() called while streaming", async () => {
 		let abortSignal: AbortSignal | undefined;
 		const agent = new Agent({

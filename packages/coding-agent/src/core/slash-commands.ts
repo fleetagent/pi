@@ -18,8 +18,9 @@ export interface BuiltinSlashCommand {
 export const HIDDEN_BUILTIN_SLASH_COMMAND_NAMES: ReadonlySet<string> = new Set(["sandbox"]);
 
 export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
-	{ name: "sandbox", description: "Manage Docker sandbox for this workspace" },
+	{ name: "sandbox", description: "Configure or manage the workspace tool sandbox" },
 	{ name: "settings", description: "Open settings menu" },
+	{ name: "model", description: "Switch models" },
 	{ name: "scoped-models", description: "Enable/disable models for Ctrl+P cycling" },
 	{ name: "export", description: "Export session (HTML default, or specify path: .html/.jsonl)" },
 	{ name: "import", description: "Import and resume a session from a JSONL file" },
@@ -27,7 +28,6 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "copy", description: "Copy last agent message to clipboard" },
 	{ name: "name", description: "Set session display name" },
 	{ name: "session", description: "Show session info and stats" },
-	{ name: "remote", description: "Configure deferred SSH or daemon tool backend" },
 	{ name: "changelog", description: "Show changelog entries" },
 	{ name: "hotkeys", description: "Show all keyboard shortcuts" },
 	{ name: "fork", description: "Create a new fork from a previous user message" },

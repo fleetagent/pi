@@ -1,11 +1,14 @@
-import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer as createHttpServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { fauxAssistantMessage, fauxToolCall } from "@fleetagent/pi-ai";
+import { fauxAssistantMessage, fauxToolCall, type ProviderHeaders, registerFauxProvider } from "@fleetagent/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { AuthStorage } from "../src/core/auth-storage.ts";
+import { ModelRegistry } from "../src/core/model-registry.ts";
 import { PiAgent } from "../src/core/pi-agent.ts";
+import { InMemorySessionManager, LocalSessionManager } from "../src/core/session-manager.ts";
 import {
 	borrowToolOperations,
 	createRemoteToolOperations,
@@ -15,6 +18,7 @@ import { WorkspaceToolHost } from "../src/core/tools/workspace-tool-host.ts";
 import { parseDaemonCommand } from "../src/daemon/config.ts";
 import { createDaemonServer } from "../src/daemon/server.ts";
 import { createHarness } from "./suite/harness.ts";
+import { createTestExtensionsResult, createTestResourceLoader } from "./utilities.ts";
 
 const temporaryDirectories: string[] = [];
 
@@ -34,7 +38,13 @@ async function reservePort(): Promise<number> {
 	return address.port;
 }
 
-async function createServer(workspaceRoot: string, allowProcessExec = true, token?: string, lspConfigPath?: string) {
+async function createServer(
+	workspaceRoot: string,
+	allowProcessExec = true,
+	token?: string,
+	lspConfigPath?: string,
+	temporaryRoot?: string,
+) {
 	const port = await reservePort();
 	const command = await parseDaemonCommand(
 		[
@@ -47,7 +57,10 @@ async function createServer(workspaceRoot: string, allowProcessExec = true, toke
 			...(lspConfigPath ? ["--daemon-lsp-config", lspConfigPath] : []),
 			...(allowProcessExec ? ["--daemon-allow-process-exec"] : []),
 		],
-		token ? { PI_DAEMON_TOKEN: token } : {},
+		{
+			...(token ? { PI_DAEMON_TOKEN: token } : {}),
+			...(temporaryRoot ? { PI_DAEMON_TEMP_ROOT: temporaryRoot } : {}),
+		},
 		workspaceRoot,
 	);
 	if (!command.configuration) throw new Error("Missing daemon configuration");
@@ -297,14 +310,31 @@ describe("remote canonical workspace tool routing", () => {
 	it("preserves cancellation, canonical errors, confinement, and mutation ordering", async () => {
 		const workspaceRoot = await createTemporaryDirectory();
 		const outside = await createTemporaryDirectory();
-		const { server, address } = await createServer(workspaceRoot);
+		const temporaryRoot = await createTemporaryDirectory();
+		const { server, address } = await createServer(workspaceRoot, true, undefined, undefined, temporaryRoot);
 		const operations = await createRemoteToolOperations(address.url);
 		const host = new WorkspaceToolHost({ cwd: operations.cwd, operations });
+		const temporaryFile = join(temporaryRoot, "scratch.txt");
+		await host.execute("write", {
+			toolCallId: "temporary-write",
+			arguments: { path: temporaryFile, content: "temporary" },
+		});
+		expect(await readFile(temporaryFile, "utf8")).toBe("temporary");
+		expect(
+			text(await host.execute("read", { toolCallId: "temporary-read", arguments: { path: temporaryFile } })),
+		).toContain("temporary");
 
 		await expect(
 			host.execute("read", { toolCallId: "escape", arguments: { path: join(outside, "secret.txt") } }),
 		).rejects.toThrow("Path escapes the daemon workspace");
 		await writeFile(join(outside, "secret.txt"), "secret");
+		await symlink(outside, join(temporaryRoot, "outside-link"));
+		await expect(
+			host.execute("read", {
+				toolCallId: "temporary-symlink-read",
+				arguments: { path: join(temporaryRoot, "outside-link", "secret.txt") },
+			}),
+		).rejects.toThrow("Path escapes the daemon workspace");
 		await symlink(outside, join(workspaceRoot, "outside-link"));
 		await expect(
 			host.execute("read", { toolCallId: "dotdot-escape", arguments: { path: "../secret.txt" } }),
@@ -375,6 +405,60 @@ describe("remote canonical workspace tool routing", () => {
 		await sandboxExpected.dispose();
 		await server.close();
 	});
+	it("does not expose an authenticated daemon bearer token to provider header hooks", async () => {
+		const workspaceRoot = await createTemporaryDirectory();
+		const token = "provider-header-secret-0123456789abcdef";
+		const { server, address } = await createServer(workspaceRoot, false, token);
+		const operations = await createRemoteToolOperations(address.url, { token });
+		const faux = registerFauxProvider();
+		const model = faux.getModel();
+		let observedHeaders: ProviderHeaders | undefined;
+		let providerHeaders: ProviderHeaders | undefined;
+		faux.setResponses([
+			(_context, options) => {
+				providerHeaders = { ...options?.headers };
+				return fauxAssistantMessage("done");
+			},
+		]);
+		const extensionsResult = await createTestExtensionsResult(
+			[
+				(pi) => {
+					pi.on("before_provider_headers", (event) => {
+						observedHeaders = { ...event.headers };
+						event.headers["x-correlation-id"] = "daemon-safe";
+					});
+				},
+			],
+			workspaceRoot,
+		);
+		const authStorage = AuthStorage.inMemory();
+		authStorage.setRuntimeApiKey(model.provider, "model-provider-key");
+		const modelRegistry = ModelRegistry.inMemory(authStorage);
+		const pi = await PiAgent.create({
+			cwd: workspaceRoot,
+			model,
+			authStorage,
+			modelRegistry,
+			sessionManager: new InMemorySessionManager(workspaceRoot),
+			resourceLoader: createTestResourceLoader({ extensionsResult }),
+			toolOperations: operations,
+		});
+
+		try {
+			const session = await pi.createAgentSession();
+			await session.prompt("trace safely");
+			await session.waitForIdle();
+			const serializedHeaders = JSON.stringify({ observedHeaders, providerHeaders });
+			expect(serializedHeaders).not.toContain(token);
+			expect(observedHeaders).not.toHaveProperty("authorization");
+			expect(providerHeaders).toMatchObject({ "x-correlation-id": "daemon-safe" });
+		} finally {
+			await pi.dispose();
+			await operations.dispose();
+			await server.close();
+			faux.unregister();
+		}
+	});
 
 	it("keeps deferred daemon connections owned across host replacement and disposes them once", async () => {
 		const workspaceRoot = await createTemporaryDirectory();
@@ -422,5 +506,44 @@ describe("remote canonical workspace tool routing", () => {
 		await Promise.all([piAgent.dispose(), piAgent.dispose()]);
 		expect(disposeCalls).toBe(1);
 		await server.close();
+	});
+	it("keeps JSONL sessions local while daemon tools mutate only the remote workspace", async () => {
+		const workspaceRoot = await createTemporaryDirectory();
+		const localSessionDir = await createTemporaryDirectory();
+		const { server, address } = await createServer(workspaceRoot, false);
+		const operations = await createRemoteToolOperations(address.url);
+		const faux = registerFauxProvider();
+		const model = faux.getModel();
+		faux.setResponses([
+			fauxAssistantMessage([fauxToolCall("write", { path: "daemon-only.txt", content: "remote" })], {
+				stopReason: "toolUse",
+			}),
+			fauxAssistantMessage("done"),
+		]);
+		const authStorage = AuthStorage.inMemory();
+		authStorage.setRuntimeApiKey(model.provider, "model-provider-key");
+		const pi = await PiAgent.create({
+			cwd: workspaceRoot,
+			model,
+			authStorage,
+			modelRegistry: ModelRegistry.inMemory(authStorage),
+			sessionManager: new LocalSessionManager({ cwd: workspaceRoot, sessionDir: localSessionDir }),
+			resourceLoader: createTestResourceLoader(),
+			toolOperations: operations,
+		});
+		try {
+			const session = await pi.createAgentSession();
+			await session.prompt("write through daemon");
+			await session.waitForIdle();
+			expect(await readFile(join(workspaceRoot, "daemon-only.txt"), "utf8")).toBe("remote");
+			const localFiles = await readdir(localSessionDir);
+			expect(localFiles.filter((file) => file.endsWith(".jsonl"))).toHaveLength(1);
+			expect((await readdir(workspaceRoot)).some((file) => file.endsWith(".jsonl"))).toBe(false);
+		} finally {
+			await pi.dispose();
+			await operations.dispose();
+			await server.close();
+			faux.unregister();
+		}
 	});
 });

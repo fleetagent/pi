@@ -5,17 +5,11 @@
  * a summary of the branch being left so context isn't lost.
  */
 
-import type { AgentMessage } from "@fleetagent/pi-agent-core";
-import type { Model } from "@fleetagent/pi-ai";
-import { completeSimple } from "@fleetagent/pi-ai";
-import {
-	convertToLlm,
-	createBranchSummaryMessage,
-	createCompactionSummaryMessage,
-	createCustomMessage,
-} from "../messages.ts";
-import type { ReadonlySession, SessionEntry } from "../session-manager.ts";
-import { estimateTokens } from "./compaction.ts";
+import type { AgentMessage, StreamFn } from "@fleetagent/pi-agent-core";
+import type { Model, ProviderHeaders, RetryCallbacks, RetryPolicy, SimpleStreamOptions } from "@fleetagent/pi-ai";
+import { convertToLlm } from "../messages.ts";
+import { type ReadonlySession, type SessionEntry, sessionEntryToContextMessages } from "../session-manager.ts";
+import { completeSummarization, estimateTokens } from "./compaction.ts";
 import {
 	computeFileLists,
 	createFileOps,
@@ -66,9 +60,9 @@ export interface GenerateBranchSummaryOptions {
 	/** Model to use for summarization */
 	model: Model<any>;
 	/** API key for the model */
-	apiKey: string;
+	apiKey?: string;
 	/** Request headers for the model */
-	headers?: Record<string, string>;
+	headers?: ProviderHeaders;
 	/** Abort signal for cancellation */
 	signal: AbortSignal;
 	/** Optional custom instructions for summarization */
@@ -77,6 +71,11 @@ export interface GenerateBranchSummaryOptions {
 	replaceInstructions?: boolean;
 	/** Tokens reserved for prompt + LLM response (default 16384) */
 	reserveTokens?: number;
+	/** Session stream function, preserving custom provider behavior without Agent state/events. */
+	streamFn?: StreamFn;
+	/** Retry transient summary failures using the session retry policy. */
+	retry?: RetryPolicy;
+	callbacks?: RetryCallbacks;
 }
 
 // ============================================================================
@@ -139,34 +138,9 @@ export function collectEntriesForBranchSummary(
 // Entry to Message Conversion
 // ============================================================================
 
-/**
- * Extract AgentMessage from a session entry.
- * Similar to getMessageFromEntry in compaction.ts but also handles compaction entries.
- */
-function getMessageFromEntry(entry: SessionEntry): AgentMessage | undefined {
-	switch (entry.type) {
-		case "message":
-			// Skip tool results - context is in assistant's tool call
-			if (entry.message.role === "toolResult") return undefined;
-			return entry.message;
-
-		case "custom_message":
-			return createCustomMessage(entry.customType, entry.content, entry.display, entry.details, entry.timestamp);
-
-		case "branch_summary":
-			return createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp);
-
-		case "compaction":
-			return createCompactionSummaryMessage(entry.summary, entry.tokensBefore, entry.timestamp);
-
-		// These don't contribute to conversation content
-		case "thinking_level_change":
-		case "model_change":
-		case "custom":
-		case "label":
-		case "session_info":
-			return undefined;
-	}
+/** Project an entry into messages visible to the summary provider. */
+function getVisibleContextMessages(entry: SessionEntry): AgentMessage[] {
+	return sessionEntryToContextMessages(entry).filter((message) => convertToLlm([message]).length > 0);
 }
 
 /**
@@ -208,28 +182,22 @@ export function prepareBranchEntries(entries: SessionEntry[], tokenBudget: numbe
 	// Second pass: walk from newest to oldest, adding messages until token budget
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const entry = entries[i];
-		const message = getMessageFromEntry(entry);
-		if (!message) continue;
+		const entryMessages = getVisibleContextMessages(entry);
+		if (entryMessages.length === 0) continue;
 
-		// Extract file ops from assistant messages (tool calls)
-		extractFileOpsFromMessage(message, fileOps);
+		for (const message of entryMessages) extractFileOpsFromMessage(message, fileOps);
+		const tokens = entryMessages.reduce((sum, message) => sum + estimateTokens(message), 0);
 
-		const tokens = estimateTokens(message);
-
-		// Check budget before adding
 		if (tokenBudget > 0 && totalTokens + tokens > tokenBudget) {
-			// If this is a summary entry, try to fit it anyway as it's important context
-			if (entry.type === "compaction" || entry.type === "branch_summary") {
-				if (totalTokens < tokenBudget * 0.9) {
-					messages.unshift(message);
-					totalTokens += tokens;
-				}
+			// Existing summaries retain priority when most of the budget is still free.
+			if ((entry.type === "compaction" || entry.type === "branch_summary") && totalTokens < tokenBudget * 0.9) {
+				messages.unshift(...entryMessages);
+				totalTokens += tokens;
 			}
-			// Stop - we've hit the budget
 			break;
 		}
 
-		messages.unshift(message);
+		messages.unshift(...entryMessages);
 		totalTokens += tokens;
 	}
 
@@ -284,7 +252,18 @@ export async function generateBranchSummary(
 	entries: SessionEntry[],
 	options: GenerateBranchSummaryOptions,
 ): Promise<BranchSummaryResult> {
-	const { model, apiKey, headers, signal, customInstructions, replaceInstructions, reserveTokens = 16384 } = options;
+	const {
+		model,
+		apiKey,
+		headers,
+		signal,
+		customInstructions,
+		replaceInstructions,
+		reserveTokens = 16384,
+		streamFn,
+		retry,
+		callbacks,
+	} = options;
 
 	// Token budget = context window minus reserved space for prompt + response
 	const contextWindow = model.contextWindow || 128000;
@@ -320,12 +299,10 @@ export async function generateBranchSummary(
 		},
 	];
 
-	// Call LLM for summarization
-	const response = await completeSimple(
-		model,
-		{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
-		{ apiKey, headers, signal, maxTokens: 2048 },
-	);
+	// Keep summary calls detached from Agent state/events while preserving the active stream implementation.
+	const context = { systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages };
+	const requestOptions: SimpleStreamOptions = { apiKey, headers, signal, maxTokens: 2048 };
+	const response = await completeSummarization(model, context, requestOptions, streamFn, retry, callbacks);
 
 	// Check if aborted or errored
 	if (response.stopReason === "aborted") {

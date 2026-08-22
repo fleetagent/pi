@@ -12,7 +12,8 @@ type FakeExtensionRunner = {
 
 type FakeSession = {
 	session: { getHeader: () => object | undefined };
-	agent: { waitForIdle: () => Promise<void> };
+	agent: { waitForIdle: () => Promise<void>; subscribe: ReturnType<typeof vi.fn> };
+	waitForIdle: () => Promise<void>;
 	state: { messages: AssistantMessage[] };
 	extensionRunner: FakeExtensionRunner;
 	bindExtensions: ReturnType<typeof vi.fn>;
@@ -65,7 +66,8 @@ function createRuntimeHost(assistantMessage: AssistantMessage): FakeRuntimeHost 
 
 	const session: FakeSession = {
 		session: { getHeader: () => undefined },
-		agent: { waitForIdle: async () => {} },
+		agent: { waitForIdle: async () => {}, subscribe: vi.fn(() => vi.fn()) },
+		waitForIdle: vi.fn(async () => {}),
 		state,
 		extensionRunner,
 		bindExtensions: vi.fn(async () => {}),
@@ -91,6 +93,31 @@ afterEach(() => {
 });
 
 describe("runPrintMode", () => {
+	it("keeps LaTeX and Mermaid source unchanged in text output", async () => {
+		const source = "$\\frac{1}{2}$\n\n```mermaid\nflowchart LR\nA --> B\n```";
+		const runtimeHost = createRuntimeHost(createAssistantMessage({ text: source }));
+		const writes: string[] = [];
+		const stdoutWrite = vi.spyOn(process.stdout, "write").mockImplementation(((
+			chunk: string | Uint8Array,
+			encodingOrCallback?: BufferEncoding | ((error?: Error | null) => void),
+			callback?: (error?: Error | null) => void,
+		): boolean => {
+			writes.push(String(chunk));
+			const done = typeof encodingOrCallback === "function" ? encodingOrCallback : callback;
+			done?.();
+			return true;
+		}) as typeof process.stdout.write);
+
+		const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
+			mode: "text",
+		});
+
+		expect(exitCode).toBe(0);
+		expect(writes.join("")).toBe(`${source}\n`);
+		expect(writes.join("")).not.toContain("┌");
+		stdoutWrite.mockRestore();
+	});
+
 	it("emits session_shutdown in text mode", async () => {
 		const runtimeHost = createRuntimeHost(createAssistantMessage({ text: "done" }));
 		const { session } = runtimeHost;
@@ -104,6 +131,8 @@ describe("runPrintMode", () => {
 
 		expect(exitCode).toBe(0);
 		expect(session.prompt).toHaveBeenCalledWith("Say done", { images });
+		expect(session.waitForIdle).toHaveBeenCalled();
+		expect(session.agent.subscribe).not.toHaveBeenCalled();
 		expect(session.extensionRunner.emit).toHaveBeenCalledTimes(1);
 		expect(session.extensionRunner.emit).toHaveBeenCalledWith({ type: "session_shutdown", reason: "quit" });
 	});
@@ -119,6 +148,9 @@ describe("runPrintMode", () => {
 
 		expect(exitCode).toBe(0);
 		expect(session.prompt).toHaveBeenCalledWith("hello");
+		expect(session.waitForIdle).toHaveBeenCalled();
+		expect(session.agent.subscribe).toHaveBeenCalledTimes(1);
+		expect(session.agent.subscribe.mock.results[0]?.value).toHaveBeenCalledTimes(1);
 		expect(session.extensionRunner.emit).toHaveBeenCalledTimes(1);
 		expect(session.extensionRunner.emit).toHaveBeenCalledWith({ type: "session_shutdown", reason: "quit" });
 	});

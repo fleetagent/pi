@@ -1,9 +1,10 @@
+import type { JsonlErrorPhase } from "../jsonl-errors.ts";
 import type { FileEntry, SessionEntry, SessionHeader, SessionTreeNode } from "../types.ts";
 
 export interface SessionStore {
 	isPersisted(): boolean;
 	getSessionReference(): string | undefined;
-	setSessionReference(reference: string): void;
+	setSessionReference(reference: string, options?: { allowExistingEmptyFile?: boolean }): void;
 	exists(path: string): boolean;
 	ensureDir(path: string): void;
 	load(filePath: string): FileEntry[];
@@ -14,7 +15,7 @@ export interface SessionStore {
 	getEntryIndex(): Map<string, SessionEntry>;
 	has(id: string): boolean;
 	appendEntry(entry: SessionEntry): void;
-	saveSnapshot(): void;
+	saveSnapshot(options?: { phase?: JsonlErrorPhase }): void;
 	commitSnapshot(): void;
 	getLeafId(): string | null;
 	setLeafId(leafId: string | null): void;

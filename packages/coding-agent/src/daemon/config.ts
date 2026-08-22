@@ -19,6 +19,7 @@ export interface DaemonConfiguration {
 	readonly host: string;
 	readonly port: number;
 	readonly workspaceRoot: string;
+	readonly temporaryRoot?: string;
 	readonly token?: string;
 	readonly allowedOrigins: readonly string[];
 	readonly tls?: DaemonTlsConfiguration;
@@ -216,7 +217,7 @@ function parseEnvironmentNames(values: readonly string[]): string[] {
 	return names;
 }
 
-async function resolveWorkspaceRoot(value: string, startupCwd: string): Promise<string> {
+async function resolveConfinedRoot(value: string, startupCwd: string, label: string): Promise<string> {
 	const candidate = isAbsolute(value) ? value : resolve(startupCwd, value);
 	let canonical: string;
 	try {
@@ -224,7 +225,7 @@ async function resolveWorkspaceRoot(value: string, startupCwd: string): Promise<
 		if (!(await stat(canonical)).isDirectory()) throw new Error("not a directory");
 	} catch (error) {
 		throw new DaemonConfigurationError(
-			`Daemon workspace root must be an existing directory: ${candidate} (${error instanceof Error ? error.message : String(error)})`,
+			`Daemon ${label} must be an existing directory: ${candidate} (${error instanceof Error ? error.message : String(error)})`,
 		);
 	}
 	return canonical;
@@ -280,7 +281,14 @@ export async function parseDaemonCommand(
 			"Refusing to run the workspace daemon as root; use --daemon-allow-root only inside an intentional OS sandbox",
 		);
 	}
-	const workspaceRoot = await resolveWorkspaceRoot(inputs.cwd ?? environment.PI_DAEMON_CWD ?? startupCwd, startupCwd);
+	const workspaceRoot = await resolveConfinedRoot(
+		inputs.cwd ?? environment.PI_DAEMON_CWD ?? startupCwd,
+		startupCwd,
+		"workspace root",
+	);
+	const temporaryRoot = environment.PI_DAEMON_TEMP_ROOT
+		? await resolveConfinedRoot(environment.PI_DAEMON_TEMP_ROOT, startupCwd, "temporary root")
+		: undefined;
 	const token = validateToken(environment.PI_DAEMON_TOKEN);
 	const allowedOrigins = [
 		...(environment.PI_DAEMON_ORIGINS?.split(",")
@@ -423,6 +431,7 @@ export async function parseDaemonCommand(
 			host,
 			port,
 			workspaceRoot,
+			temporaryRoot,
 			token,
 			allowedOrigins: Object.freeze(allowedOrigins),
 			tls,

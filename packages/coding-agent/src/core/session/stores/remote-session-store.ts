@@ -1,3 +1,4 @@
+import { JsonlSessionError } from "../jsonl-errors.ts";
 import type { RemoteSessionClient, RemoteSessionSnapshot } from "../remote-session-client.ts";
 import { formatRemoteSessionReference, parseRemoteSessionId } from "../remote-session-client.ts";
 import type { FileEntry, SessionEntry } from "../types.ts";
@@ -28,6 +29,7 @@ export class RemoteSessionStore extends InMemorySessionStore {
 	private pendingSync: Promise<void> = Promise.resolve();
 	private dirtyEntries: FileEntry[] = [];
 	private lastSyncError: unknown;
+	private syncFenced = false;
 	private snapshot: RemoteSessionSnapshot | undefined;
 
 	constructor(options: RemoteSessionStoreOptions) {
@@ -101,22 +103,43 @@ export class RemoteSessionStore extends InMemorySessionStore {
 
 	private queueAppend(entries: FileEntry[]): void {
 		this.dirtyEntries.push(...entries);
+		if (this.syncFenced) return;
 		this.pendingSync = this.pendingSync
 			.then(() => this.flushDirtyEntries())
 			.catch((error: unknown) => {
-				this.lastSyncError = error;
+				this.fenceSynchronization(error);
 			});
 	}
 
 	private queueReplaceSnapshot(): void {
+		if (this.syncFenced) return;
 		this.pendingSync = this.pendingSync
 			.then(() => this.replaceSnapshot())
 			.catch((error: unknown) => {
-				this.lastSyncError = error;
+				this.fenceSynchronization(error);
 			});
 	}
 
+	private fenceSynchronization(error: unknown): void {
+		if (this.syncFenced) return;
+		const cause = error instanceof Error ? error : new Error(String(error));
+		this.syncFenced = true;
+		this.lastSyncError = new JsonlSessionError({
+			code: "fenced",
+			reference: this.reference ?? "remote:unknown",
+			phase: "sync",
+			message: `Remote session synchronization is fenced: ${cause.message}`,
+			outcome: "unknown",
+			cause,
+		});
+	}
+
+	private assertSynchronizationWritable(): void {
+		if (this.syncFenced) throw this.lastSyncError;
+	}
+
 	private async flushDirtyEntries(): Promise<void> {
+		this.assertSynchronizationWritable();
 		if (this.dirtyEntries.length === 0) return;
 		if (!this.reference) {
 			throw new Error("Cannot synchronize remote session entries without a session reference");
@@ -133,16 +156,16 @@ export class RemoteSessionStore extends InMemorySessionStore {
 					`Remote session append accepted ${response.accepted} of ${entries.length} entries without valid progress`,
 				);
 			}
-			this.etag = response.etag ?? this.etag;
+			this.etag = response.etag;
 			this.dirtyEntries = this.dirtyEntries.slice(response.accepted);
 			if (this.dirtyEntries.length > 0 && !response.etag) {
 				throw new Error("Remote session append partially accepted entries without returning an updated ETag");
 			}
 		}
-		this.lastSyncError = undefined;
 	}
 
 	private async replaceSnapshot(): Promise<void> {
+		this.assertSynchronizationWritable();
 		if (!this.reference) return;
 
 		const entries = this.getFileEntries();
@@ -151,8 +174,7 @@ export class RemoteSessionStore extends InMemorySessionStore {
 			baseEtag: this.etag,
 			entries,
 		});
-		this.etag = response.etag ?? this.etag;
+		this.etag = response.etag;
 		this.dirtyEntries = this.dirtyEntries.slice(dirtyEntryCount);
-		this.lastSyncError = undefined;
 	}
 }

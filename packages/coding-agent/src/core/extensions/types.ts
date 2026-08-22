@@ -24,6 +24,7 @@ import type {
 	Model,
 	OAuthCredentials,
 	OAuthLoginCallbacks,
+	ProviderHeaders,
 	SimpleStreamOptions,
 	TextContent,
 	ToolResultMessage,
@@ -335,7 +336,7 @@ export interface ExtensionContext {
 	modelRegistry: ModelRegistry;
 	/** Current model (may be undefined) */
 	model: Model<any> | undefined;
-	/** Whether the agent is idle (not streaming) */
+	/** Whether all AgentSession-owned work and settlement callbacks have completed. */
 	isIdle(): boolean;
 	/** The current abort signal, or undefined when the agent is not streaming. */
 	signal: AbortSignal | undefined;
@@ -358,7 +359,7 @@ export interface ExtensionContext {
  * Includes session control methods only safe in user-initiated commands.
  */
 export interface ExtensionCommandContext extends ExtensionContext {
-	/** Wait for the agent to finish streaming */
+	/** Wait for retries, compaction, queued continuations, and other session-owned work to settle. */
 	waitForIdle(): Promise<void>;
 
 	/** Start a new session, optionally with initialization. */
@@ -657,6 +658,16 @@ export interface BeforeProviderRequestEvent {
 	payload: unknown;
 }
 
+/**
+ * Fired after model-provider headers are assembled, before provider dispatch.
+ * Handlers mutate `headers` in place; return values are ignored.
+ * Set a value to null to suppress that provider/API header.
+ */
+export interface BeforeProviderHeadersEvent {
+	type: "before_provider_headers";
+	headers: ProviderHeaders;
+}
+
 /** Fired after a provider response is received and before the response stream is consumed. */
 export interface AfterProviderResponseEvent {
 	type: "after_provider_response";
@@ -686,6 +697,11 @@ export interface AgentStartEvent {
 export interface AgentEndEvent {
 	type: "agent_end";
 	messages: AgentMessage[];
+}
+
+/** Fired after retries, compaction, and queued continuations have settled. */
+export interface AgentSettledEvent {
+	type: "agent_settled";
 }
 
 /** Fired at the start of each turn */
@@ -1031,10 +1047,12 @@ export type ExtensionEvent =
 	| SessionEvent
 	| ContextEvent
 	| BeforeProviderRequestEvent
+	| BeforeProviderHeadersEvent
 	| AfterProviderResponseEvent
 	| BeforeAgentStartEvent
 	| AgentStartEvent
 	| AgentEndEvent
+	| AgentSettledEvent
 	| TurnStartEvent
 	| TurnEndEvent
 	| MessageStartEvent
@@ -1064,6 +1082,11 @@ export interface ToolCallEventResult {
 	/** Block tool execution. To modify arguments, mutate `event.input` in place instead. */
 	block?: boolean;
 	reason?: string;
+	/**
+	 * Hint that the agent should stop after the current tool batch when this call is blocked.
+	 * Early termination only happens when every finalized tool result in the batch sets this to true.
+	 */
+	terminate?: boolean;
 }
 
 /** Result from user_bash event handler */
@@ -1122,6 +1145,14 @@ export interface SessionBeforeTreeResult {
 // ============================================================================
 // Message Rendering
 // ============================================================================
+
+export interface MarkdownTransformContext {
+	messageType: "user" | "assistant" | "assistant-thinking";
+	isStreaming: boolean;
+	availableWidth: number;
+}
+
+export type MarkdownTransformer = (markdown: string, context: MarkdownTransformContext) => string;
 
 export interface MessageRenderOptions {
 	expanded: boolean;
@@ -1213,10 +1244,12 @@ export interface ExtensionAPI {
 		event: "before_provider_request",
 		handler: ExtensionHandler<BeforeProviderRequestEvent, BeforeProviderRequestEventResult>,
 	): void;
+	on(event: "before_provider_headers", handler: ExtensionHandler<BeforeProviderHeadersEvent>): void;
 	on(event: "after_provider_response", handler: ExtensionHandler<AfterProviderResponseEvent>): void;
 	on(event: "before_agent_start", handler: ExtensionHandler<BeforeAgentStartEvent, BeforeAgentStartEventResult>): void;
 	on(event: "agent_start", handler: ExtensionHandler<AgentStartEvent>): void;
 	on(event: "agent_end", handler: ExtensionHandler<AgentEndEvent>): void;
+	on(event: "agent_settled", handler: ExtensionHandler<AgentSettledEvent>): void;
 	on(event: "turn_start", handler: ExtensionHandler<TurnStartEvent>): void;
 	on(event: "turn_end", handler: ExtensionHandler<TurnEndEvent>): void;
 	on(event: "message_start", handler: ExtensionHandler<MessageStartEvent>): void;
@@ -1301,6 +1334,9 @@ export interface ExtensionAPI {
 
 	/** Register a custom renderer for CustomMessageEntry. */
 	registerMessageRenderer<T = unknown>(customType: string, renderer: MessageRenderer<T>): void;
+
+	/** Register one display-only transformer for user and assistant Markdown in the interactive transcript. */
+	registerMarkdownTransformer(transformer: MarkdownTransformer): void;
 
 	// =========================================================================
 	// Actions
@@ -1459,7 +1495,7 @@ export interface ProviderConfig {
 	/** Optional streamSimple handler for custom APIs. */
 	streamSimple?: (model: Model<Api>, context: Context, options?: SimpleStreamOptions) => AssistantMessageEventStream;
 	/** Custom headers to include in requests. */
-	headers?: Record<string, string>;
+	headers?: ProviderHeaders;
 	/** If true, adds Authorization: Bearer header with the resolved API key. */
 	authHeader?: boolean;
 	/** Models to register. If provided, replaces all existing models for this provider. */
@@ -1502,7 +1538,7 @@ export interface ProviderModelConfig {
 	/** Maximum output tokens. */
 	maxTokens: number;
 	/** Custom headers for this model. */
-	headers?: Record<string, string>;
+	headers?: ProviderHeaders;
 	/** OpenAI compatibility settings. */
 	compat?: Model<Api>["compat"];
 }
@@ -1599,6 +1635,8 @@ export interface ExtensionRuntimeState {
 	assertActive: () => void;
 	/** Marks this extension instance as stale after runtime replacement or reload. */
 	invalidate: (message?: string) => void;
+	/** Retain an event-bus subscription until this runtime is invalidated. */
+	trackEventBusSubscription: (unsubscribe: () => void) => () => void;
 	/**
 	 * Register or unregister a provider.
 	 *
@@ -1696,6 +1734,7 @@ export interface Extension {
 	handlers: Map<string, HandlerFn[]>;
 	tools: Map<string, RegisteredTool>;
 	messageRenderers: Map<string, MessageRenderer>;
+	markdownTransformer?: MarkdownTransformer;
 	commands: Map<string, RegisteredCommand>;
 	skills: Map<string, Skill>;
 	rules: Map<string, Rule>;

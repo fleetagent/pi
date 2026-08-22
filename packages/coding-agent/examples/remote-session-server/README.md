@@ -2,6 +2,8 @@
 
 Example Hono server for pi remote sessions. It stores each session as a JSONL file for easy inspection and uses a static bearer token.
 
+This server is for protocol development only. It does not provide atomic publication, process-safe concurrency, tenant isolation, TLS, or power-loss durability and must not be used to certify a production remote session service. The client supports services with optional ETags, but a service that omits ETags has only a single-client consistency assumption.
+
 ## Run
 
 ```bash
@@ -49,7 +51,10 @@ const sessionManager = new RemoteSessionManager({
 });
 
 const pi = await PiAgent.create({ sessionManager });
-await pi.prompt("hello from a remote session");
+const session = await pi.createAgentSession();
+await session.prompt("hello from a remote session");
+await session.waitForIdle();
+await pi.dispose();
 ```
 
 Sessions are stored as `<session-id>.jsonl` under `PI_REMOTE_SESSION_DIR`.

@@ -21,11 +21,20 @@ type SandboxHandlerContext = {
 			configured: true;
 			workspace: { id: string; root: string; pathFlavor: "posix" };
 		}>;
+		configureRemoteSandbox: (options: { type: "ssh"; remote: string; cwd?: string }) => Promise<{
+			type: "ssh";
+			remote: string;
+			cwd: string;
+			configured: true;
+		}>;
+		getToolBackendInfo: () => { type: "local"; cwd: string } | { type: "remote"; cwd: string; configured: false };
 		clearRemoteSandbox: () => Promise<void>;
 	};
 	activeSession: { getCwd: () => string };
 	activeSandboxContainerId?: string;
+	activeSandboxBackendConnected?: boolean;
 	createDockerSandboxService: () => {
+		resolveConfig: () => { workspaceMountPath: string };
 		start: (options: { workspaceRoot: string; image?: string }) => Promise<ReturnType<typeof createStartResult>>;
 		list: (options: { workspaceRoot: string }) => Promise<ReturnType<typeof createContainer>[]>;
 		stop: (options: { workspaceRoot: string; target?: string; currentContainerId?: string }) => Promise<{
@@ -116,6 +125,22 @@ function createContainer() {
 
 describe("hidden sandbox command", () => {
 	it("parses supported user-only sandbox commands and rejects unsupported arguments", () => {
+		expect(parseSandboxUserCommand("/sandbox")).toEqual({ subcommand: "status" });
+		expect(parseSandboxUserCommand("/sandbox status")).toEqual({ subcommand: "status" });
+		expect(parseSandboxUserCommand("/sandbox clear")).toEqual({ subcommand: "clear" });
+		expect(parseSandboxUserCommand("/sandbox ssh user@host:/srv/workspace")).toEqual({
+			subcommand: "ssh",
+			target: "user@host:/srv/workspace",
+		});
+		expect(parseSandboxUserCommand("/sandbox ssh user@host /srv/workspace")).toEqual({
+			subcommand: "ssh",
+			target: "user@host",
+			cwd: "/srv/workspace",
+		});
+		expect(parseSandboxUserCommand("/sandbox --attach ws://127.0.0.1:8787/pi/workspace")).toEqual({
+			subcommand: "attach",
+			url: "ws://127.0.0.1:8787/pi/workspace",
+		});
 		expect(parseSandboxUserCommand("/sandbox start")).toEqual({ subcommand: "start" });
 		expect(parseSandboxUserCommand('/sandbox start --image "pi sandbox:test"')).toEqual({
 			subcommand: "start",
@@ -123,6 +148,10 @@ describe("hidden sandbox command", () => {
 		});
 		expect(parseSandboxUserCommand("/sandbox list")).toEqual({ subcommand: "list" });
 		expect(parseSandboxUserCommand("/sandbox stop abc123")).toEqual({ subcommand: "stop", target: "abc123" });
+		expect(() => parseSandboxUserCommand("/sandbox --attach")).toThrow("Usage: /sandbox --attach");
+		expect(() => parseSandboxUserCommand("/sandbox --attach one two")).toThrow("Usage: /sandbox --attach");
+		expect(() => parseSandboxUserCommand("/sandbox ssh")).toThrow("Usage: /sandbox ssh");
+		expect(() => parseSandboxUserCommand("/sandbox status extra")).toThrow("Usage: /sandbox status");
 		expect(() => parseSandboxUserCommand("/sandbox start --token secret")).toThrow(
 			"Unsupported /sandbox start argument",
 		);
@@ -192,6 +221,10 @@ describe("hidden sandbox command", () => {
 		expect(context.pendingUserInputs).toEqual([]);
 		expect(context.flushPendingBashComponents).not.toHaveBeenCalled();
 		expect(context.session.prompt).not.toHaveBeenCalled();
+
+		await context.defaultEditor.onSubmit?.("/remote status");
+		expect(context.handleSandboxCommand).toHaveBeenCalledOnce();
+		expect(context.pendingUserInputs).toEqual(["/remote status"]);
 	});
 
 	it("dispatches start, list, and stop to the sandbox service and renders output", async () => {
@@ -209,9 +242,19 @@ describe("hidden sandbox command", () => {
 		const clearRemoteSandbox = vi.fn(async () => {});
 		const showStatus = vi.fn();
 		const context: SandboxHandlerContext = {
-			session: { activateSandboxDaemon, clearRemoteSandbox },
+			session: {
+				activateSandboxDaemon,
+				configureRemoteSandbox: vi.fn(),
+				getToolBackendInfo: () => ({ type: "local", cwd: "/host/project" }),
+				clearRemoteSandbox,
+			},
 			activeSession: { getCwd: () => "/host/project" },
-			createDockerSandboxService: () => ({ start, list, stop }),
+			createDockerSandboxService: () => ({
+				resolveConfig: () => ({ workspaceMountPath: "/workspace" }),
+				start,
+				list,
+				stop,
+			}),
 			refreshUiAfterBackendChange: vi.fn(),
 			updateToolBackendStatus: vi.fn(),
 			formatToolBackendStatus: (info) => `tools: ${info.type} ${info.cwd}`,
@@ -242,8 +285,112 @@ describe("hidden sandbox command", () => {
 		expect(clearRemoteSandbox).toHaveBeenCalledOnce();
 	});
 
+	it("moves deferred SSH, status, and clear operations under /sandbox", async () => {
+		const configureRemoteSandbox = vi.fn(async () => ({
+			type: "ssh" as const,
+			remote: "user@host",
+			cwd: "/srv/workspace",
+			configured: true as const,
+		}));
+		const clearRemoteSandbox = vi.fn(async () => {});
+		const showStatus = vi.fn();
+		const context: SandboxHandlerContext = {
+			session: {
+				activateSandboxDaemon: vi.fn(),
+				configureRemoteSandbox,
+				getToolBackendInfo: () => ({ type: "local", cwd: "/host/project" }),
+				clearRemoteSandbox,
+			},
+			activeSession: { getCwd: () => "/host/project" },
+			createDockerSandboxService: () => ({
+				resolveConfig: () => ({ workspaceMountPath: "/workspace" }),
+				start: vi.fn(),
+				list: vi.fn(),
+				stop: vi.fn(),
+			}),
+			refreshUiAfterBackendChange: vi.fn(),
+			updateToolBackendStatus: vi.fn(),
+			formatToolBackendStatus: (info) => `tools: ${info.type} ${info.cwd}`,
+			showStatus,
+			showWarning: vi.fn(),
+			showError: vi.fn(),
+		};
+
+		await interactiveModePrototype.handleSandboxCommand.call(context, "/sandbox status");
+		await interactiveModePrototype.handleSandboxCommand.call(context, "/sandbox ssh user@host:/srv/workspace");
+		await interactiveModePrototype.handleSandboxCommand.call(context, "/sandbox clear");
+
+		expect(configureRemoteSandbox).toHaveBeenCalledWith({
+			type: "ssh",
+			remote: "user@host",
+			cwd: "/srv/workspace",
+		});
+		expect(clearRemoteSandbox).toHaveBeenCalledOnce();
+		expect(showStatus.mock.calls.map((call) => call[0]).join("\n")).toContain("tools: local /host/project");
+		expect(showStatus.mock.calls.map((call) => call[0]).join("\n")).toContain("tools: ssh /srv/workspace");
+		expect(showStatus.mock.calls.map((call) => call[0]).join("\n")).toContain("Sandbox backend cleared");
+	});
+
+	it("attaches and detaches an existing sandbox daemon without using Docker lifecycle commands", async () => {
+		const start = vi.fn(async () => createStartResult());
+		const list = vi.fn(async () => [createContainer()]);
+		const stop = vi.fn(async () => ({ status: "stopped" as const, container: createContainer() }));
+		const activateSandboxDaemon = vi.fn(async () => ({
+			type: "remote" as const,
+			cwd: "/workspace",
+			url: "ws://127.0.0.1:49153/pi/workspace",
+			protocol: "ws" as const,
+			configured: true as const,
+			workspace: { id: "workspace-id", root: "/workspace", pathFlavor: "posix" as const },
+		}));
+		const clearRemoteSandbox = vi.fn(async () => {});
+		const showStatus = vi.fn();
+		const context: SandboxHandlerContext = {
+			session: {
+				activateSandboxDaemon,
+				configureRemoteSandbox: vi.fn(),
+				getToolBackendInfo: () => ({
+					type: "remote" as const,
+					cwd: "/custom-workspace",
+					configured: false as const,
+				}),
+				clearRemoteSandbox,
+			},
+			activeSession: { getCwd: () => "/host/project" },
+			createDockerSandboxService: () => ({
+				resolveConfig: () => ({ workspaceMountPath: "/workspace" }),
+				start,
+				list,
+				stop,
+			}),
+			refreshUiAfterBackendChange: vi.fn(),
+			updateToolBackendStatus: vi.fn(),
+			formatToolBackendStatus: (info) => `tools: ${info.type} ${info.cwd}`,
+			showStatus,
+			showWarning: vi.fn(),
+			showError: vi.fn(),
+		};
+
+		await interactiveModePrototype.handleSandboxCommand.call(
+			context,
+			"/sandbox --attach ws://127.0.0.1:49153/pi/workspace",
+		);
+		await interactiveModePrototype.handleSandboxCommand.call(context, "/sandbox stop");
+
+		expect(activateSandboxDaemon).toHaveBeenCalledWith({
+			url: "ws://127.0.0.1:49153/pi/workspace",
+			token: process.env.PI_REMOTE_TOKEN ?? "",
+			expectedCwd: "/custom-workspace",
+		});
+		expect(stop).not.toHaveBeenCalled();
+		expect(clearRemoteSandbox).toHaveBeenCalledOnce();
+		expect(showStatus.mock.calls.map((call) => call[0]).join("\n")).toContain("Sandbox attached");
+		expect(showStatus.mock.calls.map((call) => call[0]).join("\n")).toContain("Sandbox detached");
+	});
+
 	it("shows /sandbox in user autocomplete but not model-visible command, prompt, or tool catalogs", () => {
 		expect(BUILTIN_SLASH_COMMANDS.map((command) => command.name)).toContain("sandbox");
+		expect(BUILTIN_SLASH_COMMANDS.map((command) => command.name)).not.toContain("remote");
 		expect(HIDDEN_BUILTIN_SLASH_COMMAND_NAMES.has("sandbox")).toBe(true);
 		expect(getDefaultActiveToolNames()).not.toContain("sandbox");
 		expect(buildSystemPrompt({ cwd: process.cwd(), selectedTools: getDefaultActiveToolNames() })).not.toContain(

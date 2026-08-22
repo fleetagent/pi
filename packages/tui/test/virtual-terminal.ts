@@ -2,6 +2,24 @@ import type { Terminal as XtermTerminalType } from "@xterm/headless";
 import xterm from "@xterm/headless";
 import type { Terminal } from "../src/terminal.ts";
 
+export interface VirtualTerminalCell {
+	chars: string;
+	width: number;
+	fgColorMode: number;
+	bgColorMode: number;
+	fgColor: number;
+	bgColor: number;
+	bold: number;
+	italic: number;
+	dim: number;
+	underline: number;
+	blink: number;
+	inverse: number;
+	invisible: number;
+	strikethrough: number;
+	overline: number;
+}
+
 // Extract Terminal class from the module
 const XtermTerminal = xterm.Terminal;
 
@@ -141,6 +159,40 @@ export class VirtualTerminal implements Terminal {
 	async flushAndGetViewport(): Promise<string[]> {
 		await this.flush();
 		return this.getViewport();
+	}
+
+	/** Snapshot every visible cell, including width, color, and style state. */
+	getCellSnapshot(): VirtualTerminalCell[][] {
+		const buffer = this.xterm.buffer.active;
+		const reusableCell = buffer.getNullCell();
+		const rows: VirtualTerminalCell[][] = [];
+		for (let row = 0; row < this.xterm.rows; row++) {
+			const line = buffer.getLine(buffer.viewportY + row);
+			const cells: VirtualTerminalCell[] = [];
+			for (let column = 0; column < this.xterm.cols; column++) {
+				const cell = line?.getCell(column, reusableCell);
+				if (!cell) throw new Error(`missing terminal cell at ${column},${row}`);
+				cells.push({
+					chars: cell.getChars(),
+					width: cell.getWidth(),
+					fgColorMode: cell.getFgColorMode(),
+					bgColorMode: cell.getBgColorMode(),
+					fgColor: cell.getFgColor(),
+					bgColor: cell.getBgColor(),
+					bold: cell.isBold(),
+					italic: cell.isItalic(),
+					dim: cell.isDim(),
+					underline: cell.isUnderline(),
+					blink: cell.isBlink(),
+					inverse: cell.isInverse(),
+					invisible: cell.isInvisible(),
+					strikethrough: cell.isStrikethrough(),
+					overline: cell.isOverline(),
+				});
+			}
+			rows.push(cells);
+		}
+		return rows;
 	}
 
 	/**

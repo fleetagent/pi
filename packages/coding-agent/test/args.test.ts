@@ -287,6 +287,18 @@ describe("parseArgs", () => {
 			expect(result.remoteCwd).toBe("/workspace");
 		});
 
+		test("directs deferred backend configuration to /sandbox", () => {
+			const log = vi.spyOn(console, "log").mockImplementation(() => {});
+			try {
+				printHelp();
+				const help = String(log.mock.calls[0]?.[0]);
+				expect(help).toContain("configure later with /sandbox");
+				expect(help).not.toContain("configure later with /remote");
+			} finally {
+				log.mockRestore();
+			}
+		});
+
 		test("rejects removed ssh deferred flags", () => {
 			const result = parseArgs(["--ssh-deferred", "--ssh-cwd", "/workspace"]);
 			expect(result.remoteDeferred).toBeUndefined();
@@ -328,6 +340,35 @@ describe("parseArgs", () => {
 		test("parses -nc shorthand", () => {
 			const result = parseArgs(["-nc"]);
 			expect(result.noContextFiles).toBe(true);
+		});
+	});
+
+	describe("--tui-mode flag", () => {
+		test.each(["regular", "fullscreen"] as const)("parses %s mode", (mode) => {
+			const result = parseArgs(["--tui-mode", mode]);
+			expect(result.tuiMode).toBe(mode);
+		});
+
+		test("rejects invalid modes", () => {
+			const result = parseArgs(["--tui-mode", "other"]);
+			expect(result.diagnostics).toEqual([
+				{ type: "error", message: 'Invalid TUI mode "other". Valid values: regular, fullscreen' },
+			]);
+		});
+
+		test("requires a mode", () => {
+			const result = parseArgs(["--tui-mode"]);
+			expect(result.diagnostics).toEqual([{ type: "error", message: "--tui-mode requires regular or fullscreen" }]);
+		});
+
+		test("leaves obsolete UI flags unrecognized", () => {
+			const uiMode = parseArgs(["--ui-mode", "fullscreen"]);
+			expect(uiMode.tuiMode).toBeUndefined();
+			expect(uiMode.unknownFlags.get("ui-mode")).toBe("fullscreen");
+
+			const alt = parseArgs(["--alt"]);
+			expect(alt.tuiMode).toBeUndefined();
+			expect(alt.unknownFlags.get("alt")).toBe(true);
 		});
 	});
 

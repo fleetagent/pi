@@ -6,13 +6,17 @@ import assert from "node:assert";
 import { describe, it } from "node:test";
 import { Image } from "../src/components/image.ts";
 import {
+	cropKittyImageLine,
 	deleteAllKittyImages,
+	deleteAllKittyPlacements,
 	deleteKittyImage,
 	detectCapabilities,
 	encodeITerm2,
 	encodeKitty,
+	getKittyImagePlacement,
 	hyperlink,
 	isImageLine,
+	registerKittyImageMetadata,
 	renderImage,
 	resetCapabilitiesCache,
 	setCapabilities,
@@ -31,6 +35,8 @@ const ENV_KEYS = [
 	"ITERM_SESSION_ID",
 	"WT_SESSION",
 	"CMUX_WORKSPACE_ID",
+	"WARP_SESSION_ID",
+	"WARP_TERMINAL_SESSION_UUID",
 ] as const;
 
 function withEnv(overrides: Record<string, string | undefined>, fn: () => void): void {
@@ -265,9 +271,11 @@ describe("detectCapabilities", () => {
 		});
 	});
 
-	it("enables hyperlinks for WezTerm", () => {
+	it("enables Kitty images and hyperlinks for WezTerm", () => {
 		withEnv({ WEZTERM_PANE: "0" }, () => {
 			const caps = detectCapabilities();
+			assert.strictEqual(caps.images, "kitty");
+			assert.strictEqual(caps.trueColor, true);
 			assert.strictEqual(caps.hyperlinks, true);
 		});
 	});
@@ -275,6 +283,29 @@ describe("detectCapabilities", () => {
 	it("enables hyperlinks for iTerm2", () => {
 		withEnv({ TERM_PROGRAM: "iterm.app" }, () => {
 			const caps = detectCapabilities();
+			assert.strictEqual(caps.hyperlinks, true);
+		});
+	});
+
+	it("enables images and hyperlinks for Warp via supported environment markers", () => {
+		for (const environment of [
+			{ TERM_PROGRAM: "WarpTerminal" },
+			{ WARP_SESSION_ID: "some-session-id" },
+			{ WARP_TERMINAL_SESSION_UUID: "d0e1a2e5-7ca7-44cd-9037-ac7222011161" },
+		]) {
+			withEnv(environment, () => {
+				const caps = detectCapabilities();
+				assert.strictEqual(caps.images, "kitty");
+				assert.strictEqual(caps.trueColor, true);
+				assert.strictEqual(caps.hyperlinks, true);
+			});
+		}
+	});
+
+	it("keeps Warp images disabled inside tmux", () => {
+		withEnv({ TERM_PROGRAM: "WarpTerminal", TMUX: "/tmp/tmux-1000/default,1234,0", TERM: "tmux-256color" }, () => {
+			const caps = detectCapabilities(() => true);
+			assert.strictEqual(caps.images, null);
 			assert.strictEqual(caps.hyperlinks, true);
 		});
 	});
@@ -323,6 +354,13 @@ describe("detectCapabilities", () => {
 	});
 });
 
+describe("iTerm2 image encoding", () => {
+	it("includes the decoded payload size in OSC 1337 metadata", () => {
+		const sequence = encodeITerm2("AAAA", { width: 2, height: "auto" });
+		assert.strictEqual(sequence, "\x1b]1337;File=inline=1;size=3;width=2;height=auto:AAAA\x07");
+	});
+});
+
 describe("Kitty image cursor movement", () => {
 	it("can request no terminal-side cursor movement", () => {
 		const sequence = encodeKitty("AAAA", { columns: 2, rows: 2, moveCursor: false });
@@ -333,12 +371,31 @@ describe("Kitty image cursor movement", () => {
 		const kitty = encodeKitty("AAAA\x1b\\\x07\x9cBBBB");
 		assert.strictEqual(kitty, "\x1b_Ga=T,f=100,q=2;AAAA\\BBBB\x1b\\");
 		const iterm = encodeITerm2("AAAA\x1b\\\x07\x9cBBBB", { width: "2\x07\x1b]0;owned" });
-		assert.strictEqual(iterm, "\x1b]1337;File=inline=1;width=2]0;owned:AAAA\\BBBB\x07");
+		assert.strictEqual(iterm, "\x1b]1337;File=inline=1;size=6;width=2]0;owned:AAAA\\BBBB\x07");
 	});
 
 	it("suppresses Kitty replies for delete commands", () => {
 		assert.strictEqual(deleteKittyImage(42), "\x1b_Ga=d,d=I,i=42,q=2\x1b\\");
 		assert.strictEqual(deleteAllKittyImages(), "\x1b_Ga=d,d=A,q=2\x1b\\");
+		assert.strictEqual(deleteAllKittyPlacements(), "\x1b_Ga=d,d=a,q=2\x1b\\");
+	});
+
+	it("creates placement-only commands for uploaded and cropped images", () => {
+		registerKittyImageMetadata({ imageId: 42, columns: 3, rows: 3, widthPx: 100, heightPx: 100 });
+		const transmission = encodeKitty("A".repeat(8192), {
+			columns: 3,
+			rows: 3,
+			imageId: 42,
+			moveCursor: false,
+		});
+		const line = `left ${cropKittyImageLine(transmission, 2, 1)} right`;
+		const placement = getKittyImagePlacement(line);
+		assert.ok(placement);
+		assert.strictEqual(placement.transmissionBytes, line.length - "left ".length - " right".length);
+		assert.strictEqual(placement.estimatedDecodedBytes, 100 * 100 * 4);
+		assert.strictEqual(placement.sequence, "\x1b_Ga=p,q=2,C=1,c=3,i=42,y=66,h=34,r=1\x1b\\");
+		assert.strictEqual(placement.replacementLine, `left ${placement.sequence} right`);
+		assert.ok(!placement.replacementLine.includes("AAAA"));
 	});
 
 	it("preserves renderImage's default terminal-side cursor movement", () => {

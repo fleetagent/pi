@@ -59,6 +59,7 @@ describe("config value env var syntax migration", () => {
 			string,
 			Record<string, unknown>
 		>;
+		expect(fs.statSync(path.join(agentDir, "auth.json")).mode & 0o777).toBe(0o600);
 		expect(migrated.anthropic.key).toBe("$ANTHROPIC_API_KEY");
 		expect(migrated.openai.key).toBe("$OPENAI_API_KEY");
 		expect(migrated.opencode.key).toBe("public");

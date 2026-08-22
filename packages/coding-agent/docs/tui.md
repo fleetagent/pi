@@ -4,7 +4,7 @@
 
 Extensions and custom tools can render custom TUI components for interactive user interfaces. This page covers the component system and available building blocks.
 
-**Source:** [`@fleetagent/pi-tui`](https://github.com/earendil-works/pi-mono/tree/main/packages/tui)
+**Source:** [`@fleetagent/pi-tui`](https://github.com/fleetagent/pi/tree/main/packages/tui)
 
 ## Component Interface
 
@@ -248,7 +248,7 @@ md.setText("Updated markdown");
 
 ### Image
 
-Renders images in supported terminals (Kitty, iTerm2, Ghostty, WezTerm).
+Renders images in supported terminals (Kitty, iTerm2, Ghostty, WezTerm, Warp).
 
 ```typescript
 const image = new Image(

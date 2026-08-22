@@ -229,7 +229,7 @@ export function resetModelCatalog(): void {
 
 /**
  * Fetch an upstream model catalog index, cache the selected revision, and overlay it on generated models.
- * The upstream format matches the catalog published by earendil-works/pi's publish-model-catalog workflow.
+ * The upstream format matches the catalog produced by the publish-model-catalog workflow.
  */
 export async function refreshModelCatalog(
 	options: ModelCatalogRefreshOptions = {},

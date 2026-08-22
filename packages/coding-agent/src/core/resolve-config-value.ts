@@ -3,6 +3,7 @@
  * Used by auth-storage.ts and model-registry.ts.
  */
 
+import type { ProviderHeaders } from "@fleetagent/pi-ai";
 import { execSync, spawnSync } from "child_process";
 import { getShellConfig } from "../utils/shell.ts";
 
@@ -256,10 +257,14 @@ export function resolveConfigValueOrThrow(config: string, description: string): 
 /**
  * Resolve all header values using the same resolution logic as API keys.
  */
-export function resolveHeaders(headers: Record<string, string> | undefined): Record<string, string> | undefined {
+export function resolveHeaders(headers: ProviderHeaders | undefined): ProviderHeaders | undefined {
 	if (!headers) return undefined;
-	const resolved: Record<string, string> = {};
+	const resolved: ProviderHeaders = {};
 	for (const [key, value] of Object.entries(headers)) {
+		if (value === null) {
+			resolved[key] = null;
+			continue;
+		}
 		const resolvedValue = resolveConfigValue(value);
 		if (resolvedValue) {
 			resolved[key] = resolvedValue;
@@ -269,13 +274,13 @@ export function resolveHeaders(headers: Record<string, string> | undefined): Rec
 }
 
 export function resolveHeadersOrThrow(
-	headers: Record<string, string> | undefined,
+	headers: ProviderHeaders | undefined,
 	description: string,
-): Record<string, string> | undefined {
+): ProviderHeaders | undefined {
 	if (!headers) return undefined;
-	const resolved: Record<string, string> = {};
+	const resolved: ProviderHeaders = {};
 	for (const [key, value] of Object.entries(headers)) {
-		resolved[key] = resolveConfigValueOrThrow(value, `${description} header "${key}"`);
+		resolved[key] = value === null ? null : resolveConfigValueOrThrow(value, `${description} header "${key}"`);
 	}
 	return Object.keys(resolved).length > 0 ? resolved : undefined;
 }

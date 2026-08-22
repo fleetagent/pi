@@ -1,7 +1,12 @@
 import type { AgentMessage } from "@fleetagent/pi-agent-core";
 import type { AssistantMessage, Model } from "@fleetagent/pi-ai";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { type CompactionPreparation, compact, generateSummary } from "../src/core/compaction/index.ts";
+import {
+	type CompactionPreparation,
+	compact,
+	completeSummarization,
+	generateSummary,
+} from "../src/core/compaction/index.ts";
 
 const { completeSimpleMock } = vi.hoisted(() => ({
 	completeSimpleMock: vi.fn(),
@@ -130,5 +135,45 @@ describe("generateSummary reasoning options", () => {
 		await compact(preparation, createModel(false, 128000), "test-key");
 
 		expect(completeSimpleMock.mock.calls.map((call) => call[2]?.maxTokens)).toEqual([128000, 128000]);
+	});
+
+	it("isolates one summary operation while preserving request options across retries", async () => {
+		const transient = { ...mockSummaryResponse, stopReason: "error" as const, errorMessage: "terminated" };
+		completeSimpleMock.mockResolvedValueOnce(transient).mockResolvedValueOnce(mockSummaryResponse);
+		const controller = new AbortController();
+		const context = {
+			systemPrompt: "summary",
+			messages: [
+				{ role: "user" as const, content: [{ type: "text" as const, text: "summarize" }], timestamp: Date.now() },
+			],
+		};
+
+		await completeSummarization(
+			createModel(false),
+			context,
+			{
+				apiKey: "test-key",
+				headers: { "x-test": "preserved" },
+				signal: controller.signal,
+				maxTokens: 1234,
+				reasoning: "low",
+			},
+			undefined,
+			{ enabled: true, maxRetries: 1, baseDelayMs: 0 },
+		);
+
+		expect(completeSimpleMock).toHaveBeenCalledTimes(2);
+		const firstOptions = completeSimpleMock.mock.calls[0][2];
+		const secondOptions = completeSimpleMock.mock.calls[1][2];
+		expect(firstOptions).toMatchObject({
+			apiKey: "test-key",
+			headers: { "x-test": "preserved" },
+			signal: controller.signal,
+			maxTokens: 1234,
+			reasoning: "low",
+			cacheRetention: "none",
+		});
+		expect(firstOptions.sessionId).toMatch(/^[0-9a-f-]+$/);
+		expect(secondOptions).toEqual(firstOptions);
 	});
 });

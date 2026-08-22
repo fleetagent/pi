@@ -174,6 +174,7 @@ function runCommand(
 export class ConfinedDaemonToolOperations implements ToolOperations {
 	readonly cwd: string;
 	private readonly local: LocalToolOperations;
+	private readonly allowedRoots: readonly string[];
 	private readonly allowProcessExec: boolean;
 	private readonly environment: NodeJS.ProcessEnv;
 	private readonly maxBufferedOutputBytes: number;
@@ -181,6 +182,10 @@ export class ConfinedDaemonToolOperations implements ToolOperations {
 	constructor(configuration: DaemonConfiguration) {
 		this.cwd = configuration.workspaceRoot;
 		this.local = new LocalToolOperations(this.cwd);
+		this.allowedRoots = Object.freeze([
+			this.cwd,
+			...(configuration.temporaryRoot ? [configuration.temporaryRoot] : []),
+		]);
 		this.allowProcessExec = configuration.allowProcessExec;
 		this.maxBufferedOutputBytes = configuration.maxBufferedOutputBytes;
 		const localeNames = Object.keys(process.env).filter((name) => /^LC_/iu.test(name));
@@ -204,11 +209,15 @@ export class ConfinedDaemonToolOperations implements ToolOperations {
 		}
 		return environment;
 	}
+	private isWithinAllowedRoot(candidate: string, root: string): boolean {
+		const pathRelative = relative(root, candidate);
+		return pathRelative !== ".." && !pathRelative.startsWith(`..${sep}`) && !isAbsolute(pathRelative);
+	}
+
 	private lexicalPath(path: string): string {
 		const candidate = resolve(this.cwd, path);
-		const pathRelative = relative(this.cwd, candidate);
-		if (pathRelative === ".." || pathRelative.startsWith(`..${sep}`) || isAbsolute(pathRelative)) {
-			throw new Error(`Path escapes the daemon workspace: ${path}`);
+		if (!this.allowedRoots.some((root) => this.isWithinAllowedRoot(candidate, root))) {
+			throw new Error(`Path escapes the daemon workspace and allowed temporary root: ${path}`);
 		}
 		return candidate;
 	}

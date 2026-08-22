@@ -1402,6 +1402,87 @@ describe("openai-codex streaming", () => {
 		});
 	});
 
+	it("retries a websocket once when the backend loses its continuation", async () => {
+		const token = mockToken();
+		const sentBodies: unknown[] = [];
+		let connections = 0;
+
+		class MockWebSocket {
+			static OPEN = 1;
+			readyState = MockWebSocket.OPEN;
+			private readonly connectionId = ++connections;
+			private listeners = new Map<string, Set<(event: unknown) => void>>();
+
+			constructor() {
+				queueMicrotask(() => this.dispatch("open", {}));
+			}
+
+			addEventListener(type: string, listener: (event: unknown) => void): void {
+				let listeners = this.listeners.get(type);
+				if (!listeners) {
+					listeners = new Set();
+					this.listeners.set(type, listeners);
+				}
+				listeners.add(listener);
+			}
+
+			removeEventListener(type: string, listener: (event: unknown) => void): void {
+				this.listeners.get(type)?.delete(listener);
+			}
+
+			send(data: string): void {
+				sentBodies.push(JSON.parse(data));
+				const event =
+					this.connectionId === 1
+						? {
+								type: "error",
+								error: {
+									code: "previous_response_not_found",
+									message: "Previous response was not found",
+								},
+							}
+						: {
+								type: "response.completed",
+								response: {
+									id: "resp_recovered",
+									status: "completed",
+									usage: { input_tokens: 5, output_tokens: 3, total_tokens: 8 },
+								},
+							};
+				queueMicrotask(() => this.dispatch("message", { data: JSON.stringify(event) }));
+			}
+
+			close(): void {
+				this.readyState = 3;
+			}
+
+			private dispatch(type: string, event: unknown): void {
+				for (const listener of this.listeners.get(type) ?? []) listener(event);
+			}
+		}
+
+		vi.stubGlobal("WebSocket", MockWebSocket);
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => new Response("unexpected SSE fallback", { status: 500 })),
+		);
+		const events: string[] = [];
+		const resultStream = streamOpenAICodexResponses(
+			createCodexModel(),
+			{ systemPrompt: "You are helpful.", messages: [{ role: "user", content: "Hello", timestamp: 1 }] },
+			{ apiKey: token, sessionId: "missing-continuation", transport: "websocket-cached" },
+		);
+		for await (const event of resultStream) events.push(event.type);
+		const result = await resultStream.result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(result.responseId).toBe("resp_recovered");
+		expect(connections).toBe(2);
+		expect(sentBodies).toHaveLength(2);
+		expect(events.filter((type) => type === "start")).toHaveLength(1);
+		expect(global.fetch).not.toHaveBeenCalled();
+	});
+
 	it.each([
 		["retry-after-ms", () => ({ "content-type": "application/json", "retry-after-ms": "1500" }), 1500],
 		["retry-after seconds", () => ({ "content-type": "application/json", "retry-after": "60" }), 60_000],
@@ -1556,5 +1637,45 @@ describe("openai-codex streaming", () => {
 		const result = await resultPromise;
 		expect(result.content.find((content) => content.type === "text")?.text).toBe("Hello");
 		expect(codexRequests).toBe(4);
+	});
+
+	it.each([429, 503])("fails immediately when a %i retry delay exceeds the limit", async (status) => {
+		const token = mockToken();
+		const fetchMock = vi.fn(
+			async () =>
+				new Response(JSON.stringify({ error: { code: "temporarily_unavailable", message: "retry later" } }), {
+					status,
+					headers: { "content-type": "application/json", "retry-after": "2" },
+				}),
+		);
+		vi.stubGlobal("fetch", fetchMock);
+
+		const model: Model<"openai-codex-responses"> = {
+			id: "gpt-5.1-codex",
+			name: "GPT-5.1 Codex",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400000,
+			maxTokens: 128000,
+		};
+		const context: Context = {
+			systemPrompt: "You are a helpful assistant.",
+			messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }],
+		};
+
+		const result = await streamOpenAICodexResponses(model, context, {
+			apiKey: token,
+			transport: "sse",
+			maxRetries: 3,
+			maxRetryDelayMs: 1000,
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toBe("Server requested 2s retry delay (max: 1s)");
+		expect(fetchMock).toHaveBeenCalledTimes(1);
 	});
 });

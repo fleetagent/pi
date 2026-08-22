@@ -14,7 +14,7 @@ Extensions are TypeScript modules that extend pi's behavior. They can subscribe 
 - **Custom commands** - Register commands like `/mycommand` via `pi.registerCommand()`
 - **Session persistence** - Store state that survives restarts via `pi.appendEntry()`
 - **Custom rendering** - Control how tool calls/results and messages appear in TUI
-
+- **Markdown transformation** - Transform interactive user and assistant Markdown before terminal rendering
 **Example use cases:**
 - Permission gates (confirm before `rm -rf`, `sudo`, etc.)
 - Git checkpointing (stash at each turn, restore on branch)
@@ -288,6 +288,7 @@ user sends prompt ────────────────────�
   │   │                                            │       │
   │   ├─► turn_start                               │       │
   │   ├─► context (can modify messages)            │       │
+  │   ├─► before_provider_headers (can mutate model-provider headers)
   │   ├─► before_provider_request (can inspect or replace payload)
   │   ├─► after_provider_response (status + headers, before stream consume)
   │   │                                            │       │
@@ -300,9 +301,10 @@ user sends prompt ────────────────────�
   │   │                                            │       │
   │   └─► turn_end                                 │       │
   │                                                        │
-  └─► agent_end                                            │
-                                                           │
-user sends another prompt ◄────────────────────────────────┘
+  ├─► agent_end (one low-level run; may retry/compact/continue) │
+  └─► agent_settled (no automatic continuation remains)       │
+                                                            │
+user sends another prompt ◄─────────────────────────────────┘
 
 /new (new session) or /resume (switch session)
   ├─► session_before_switch (can cancel)
@@ -505,15 +507,19 @@ The `systemPromptOptions` field gives extensions access to the same structured d
 
 Inside `before_agent_start`, `event.systemPrompt` and `ctx.getSystemPrompt()` both reflect the chained system prompt as of the current handler. Later `before_agent_start` handlers can still modify it again.
 
-#### agent_start / agent_end
+#### agent_start / agent_end / agent_settled
 
-Fired once per user prompt.
+`agent_start` and `agent_end` describe a low-level Agent run. Pi may still retry, compact, or process queued follow-ups after `agent_end`. `agent_settled` is the AgentSession-level boundary after all automatic continuation and session-owned work has completed.
 
 ```typescript
 pi.on("agent_start", async (_event, ctx) => {});
 
 pi.on("agent_end", async (event, ctx) => {
-  // event.messages - messages from this prompt
+  // event.messages - messages from this low-level run
+});
+
+pi.on("agent_settled", async (_event, ctx) => {
+  // Safe for status integrations that need the full logical-run boundary.
 });
 ```
 
@@ -603,6 +609,23 @@ pi.on("context", async (event, ctx) => {
 });
 ```
 
+#### before_provider_headers
+
+Fired after model-provider headers are assembled from attribution, provider/model configuration, and per-request options. Use it to add tracing, session-correlation, or tenant-routing headers, override existing values, or suppress a provider/API default.
+
+Handlers share and mutate `event.headers` in extension load order. Set a key to a string to add or override it, or to `null` to delete it. Handler return values are ignored, so returning a replacement object cannot accidentally discard authentication or attribution headers.
+
+```typescript
+pi.on("before_provider_headers", (event, ctx) => {
+  event.headers["x-session-id"] = ctx.session.getSessionId();
+  event.headers["X-OpenRouter-Title"] = null;
+});
+```
+
+The event contains only headers destined for the model provider. Tool-backend transport state and credentials—including SSH connection state and daemon/remote bearer tokens—are never copied into it. A model API key remains a separate stream option unless that model/provider configuration explicitly creates an HTTP header such as `authHeader`.
+
+The hook runs once for each coding-agent provider stream invocation. Session-level retries and separate compaction/branch requests invoke it again for their new request; provider-internal retries reuse the already-mutated headers.
+
 #### before_provider_request
 
 Fired after the provider-specific payload is built, right before the request is sent. Handlers run in extension load order. Returning `undefined` keeps the payload unchanged. Returning any other value replaces the payload for later handlers and for the actual request.
@@ -690,7 +713,8 @@ Behavior guarantees:
 - Mutations to `event.input` affect the actual tool execution
 - Later `tool_call` handlers see mutations made by earlier handlers
 - No re-validation is performed after your mutation
-- Return values from `tool_call` only control blocking via `{ block: true, reason?: string }`
+- Return values from `tool_call` control blocking via `{ block: true, reason?: string, terminate?: boolean }`
+- `terminate` only applies to a blocked call; the agent stops early only when every finalized result in the batch is terminating
 
 ```typescript
 import { isToolCallEventType } from "@fleetagent/pi-coding-agent";
@@ -706,7 +730,7 @@ pi.on("tool_call", async (event, ctx) => {
     event.input.command = `source ~/.profile\n${event.input.command}`;
 
     if (event.input.command.includes("rm -rf")) {
-      return { block: true, reason: "Dangerous command" };
+      return { block: true, reason: "Dangerous command", terminate: true };
     }
   }
 
@@ -989,7 +1013,7 @@ pi.on("tool_result", async (event, ctx) => {
 
 ### ctx.isIdle() / ctx.abort() / ctx.hasPendingMessages()
 
-Control flow helpers.
+`ctx.isIdle()` is true only after Agent work, retries, compaction, queued continuations, pending bash, runtime/LSP synchronization, awaited remote operations, and blocking child subagent calls have settled. It remains false while settled callbacks are being delivered.
 
 ### ctx.shutdown()
 
@@ -1058,16 +1082,18 @@ Command handlers receive `ExtensionCommandContext`, which extends `ExtensionCont
 
 ### ctx.waitForIdle()
 
-Wait for the agent to finish streaming:
+Wait for the full AgentSession lifecycle to settle, including retries, compaction, queued continuations, pending bash, runtime synchronization, and callback-started work:
 
 ```typescript
 pi.registerCommand("my-cmd", {
   handler: async (args, ctx) => {
     await ctx.waitForIdle();
-    // Agent is now idle, safe to modify session
+    // Session-owned work and settlement callbacks are complete.
   },
 });
 ```
+
+Do not await the same session's idle barrier from an event, tool, compaction, lifecycle, or settled callback that is itself part of that barrier. Pi rejects such same-barrier waits instead of deadlocking; start work and return, or schedule the wait after the callback returns.
 
 ### ctx.newSession(options?)
 
@@ -1551,6 +1577,31 @@ mode and would not execute if sent via `prompt`.
 
 Register a custom TUI renderer for messages with your `customType`. See [Custom UI](#custom-ui).
 
+### pi.registerMarkdownTransformer(transformer)
+
+Register one synchronous, display-only Markdown transformer for this extension. Registering again replaces that extension's previous transformer.
+
+```typescript
+pi.registerMarkdownTransformer((markdown, context) => {
+  if (context.messageType === "assistant" && !context.isStreaming) {
+    return markdown.replaceAll("TODO", "**TODO**");
+  }
+  return markdown;
+});
+```
+
+The context contains:
+
+- `messageType`: `"user"`, `"assistant"`, or `"assistant-thinking"`
+- `isStreaming`: whether the assistant message is still streaming
+- `availableWidth`: the exact terminal content width after Markdown horizontal padding
+
+Transformers run only for ordinary interactive transcript user, assistant, and visible assistant-thinking Markdown, including restored messages and the user portion of skill invocations. They do not mutate messages or affect model context, sessions, custom messages, summaries, print/JSON/RPC output, or HTML export.
+
+Ordering is fixed: Pi's built-in Mermaid transformer runs first, then extension transformers run in extension load order, then tab normalization, Marked parsing (including LaTeX), and terminal wrapping. Each extension receives the previous transformer's string. Throws and non-string results are ignored without stopping later transformers. Width, streaming/final state, settings, theme, reload, and session changes invalidate or rebuild transcript rendering as needed.
+
+Captured extension APIs become stale after reload or session replacement; calling `registerMarkdownTransformer()` on a stale API throws under the same lifecycle rules as other registration methods.
+
 ### pi.registerShortcut(shortcut, options)
 
 Register a keyboard shortcut. See [keybindings.md](keybindings.md) for the shortcut format and built-in keybindings.
@@ -1958,13 +2009,13 @@ See [examples/extensions/tool-override.ts](../examples/extensions/tool-override.
 **Your implementation must match the exact result shape**, including the `details` type. The UI and session logic depend on these shapes for rendering and state tracking.
 
 Built-in tool implementations:
-- [read.ts](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/src/core/tools/read.ts) - `ReadToolDetails`
-- [bash.ts](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/src/core/tools/bash.ts) - `BashToolDetails`
-- [edit.ts](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/src/core/tools/edit.ts)
-- [write.ts](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/src/core/tools/write.ts)
-- [grep.ts](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/src/core/tools/grep.ts) - `GrepToolDetails`
-- [find.ts](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/src/core/tools/find.ts) - `FindToolDetails`
-- [ls.ts](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/src/core/tools/ls.ts) - `LsToolDetails`
+- [read.ts](https://github.com/fleetagent/pi/blob/main/packages/coding-agent/src/core/tools/read.ts) - `ReadToolDetails`
+- [bash.ts](https://github.com/fleetagent/pi/blob/main/packages/coding-agent/src/core/tools/bash.ts) - `BashToolDetails`
+- [edit.ts](https://github.com/fleetagent/pi/blob/main/packages/coding-agent/src/core/tools/edit.ts)
+- [write.ts](https://github.com/fleetagent/pi/blob/main/packages/coding-agent/src/core/tools/write.ts)
+- [grep.ts](https://github.com/fleetagent/pi/blob/main/packages/coding-agent/src/core/tools/grep.ts) - `GrepToolDetails`
+- [find.ts](https://github.com/fleetagent/pi/blob/main/packages/coding-agent/src/core/tools/find.ts) - `FindToolDetails`
+- [ls.ts](https://github.com/fleetagent/pi/blob/main/packages/coding-agent/src/core/tools/ls.ts) - `LsToolDetails`
 
 ### Remote Execution
 
@@ -2012,10 +2063,10 @@ const bashTool = createBashTool(cwd, {
   }),
 });
 ```
-Remote execution is built in. Use `pi --remote ws://host:port` for a streaming remote commander backend, `pi --ssh user@host:/path` to run built-in tools over SSH, or `pi --remote-deferred --remote-cwd /path` and configure the target later via RPC, `/remote ssh <user@host[:/path]> [path]`, or `/remote daemon <ws://url>`. Connecting a deferred backend reloads project instruction resources from that backend.
+Remote execution is built in. Use `pi --remote ws://host:port` for a daemon backend, `pi --ssh user@host:/path` to run built-in tools over SSH, or `pi --remote-deferred --remote-cwd /path` and configure the target later via RPC, `/sandbox ssh <user@host[:/path]> [path]`, or `/sandbox --attach <ws://url>`. Connecting a deferred backend reloads project instruction resources from that backend.
 
 Extensions always load in the orchestrating Pi process. `pi --daemon` does not discover or execute user, package, or project Pi extensions and does not provide a reduced or fake `ExtensionContext`. Local extension hooks still wrap remote tool calls once, and backend-aware extension code can use `ctx.toolOperations` or `ctx.execToolBackend()` against the borrowed daemon connection. Direct Node filesystem or process APIs remain local.
-Remote execution is built in. Use `pi --remote ws://host:port` for a streaming remote commander backend, `pi --ssh user@host:/path` to run built-in tools over SSH, or `pi --remote-deferred --remote-cwd /path` and configure the target later via RPC, `/remote ssh <user@host[:/path]> [path]`, or `/remote daemon <ws://url>`. Connecting a deferred backend reloads project instruction resources from that backend.
+Remote execution is built in. Use `pi --remote ws://host:port` for a daemon backend, `pi --ssh user@host:/path` to run built-in tools over SSH, or `pi --remote-deferred --remote-cwd /path` and configure the target later via RPC, `/sandbox ssh <user@host[:/path]> [path]`, or `/sandbox --attach <ws://url>`. Connecting a deferred backend reloads project instruction resources from that backend.
 
 ### Output Truncation
 
@@ -2089,7 +2140,7 @@ export default function (pi: ExtensionAPI) {
 
 ### Custom Rendering
 
-Tools can provide `renderCall` and `renderResult` for custom TUI display. See [tui.md](tui.md) for the full component API and [tool-execution.ts](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/src/modes/interactive/components/tool-execution.ts) for how tool rows are composed.
+Tools can provide `renderCall` and `renderResult` for custom TUI display. See [tui.md](tui.md) for the full component API and [tool-execution.ts](https://github.com/fleetagent/pi/blob/main/packages/coding-agent/src/modes/interactive/components/tool-execution.ts) for how tool rows are composed.
 
 By default, tool output is wrapped in a `Box` that handles padding and background. A defined `renderCall` or `renderResult` must return a `Component`. If a slot renderer is not defined, `tool-execution.ts` uses fallback rendering for that slot.
 

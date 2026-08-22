@@ -6,13 +6,16 @@ import { dirnamePortablePath, joinPortablePath, pathComparisonValue } from "../l
 import type { ToolOperations } from "./operations.ts";
 
 export type AgentScope = "user" | "project" | "both";
-export type AgentSource = "bundled" | "user" | "project";
+export type AgentSource = "bundled" | "user" | "project" | "session";
 
 export interface AgentConfig {
 	name: string;
 	description: string;
 	tools?: string[];
 	model?: string;
+	modelHint?: string;
+	skills?: string[];
+	cwd?: string;
 	systemPrompt: string;
 	source: AgentSource;
 	filePath: string;
@@ -73,7 +76,7 @@ Report files reviewed, critical issues, warnings, suggestions, and a concise sum
 function parseAgentConfig(
 	content: string,
 	filePath: string,
-	source: Exclude<AgentSource, "bundled">,
+	source: Exclude<AgentSource, "bundled" | "session">,
 ): AgentConfig | undefined {
 	const { frontmatter, body } = parseFrontmatter<Record<string, string>>(content);
 	if (!frontmatter.name || !frontmatter.description) return undefined;
@@ -81,18 +84,25 @@ function parseAgentConfig(
 		?.split(",")
 		.map((tool) => tool.trim())
 		.filter(Boolean);
+	const skills = frontmatter.skills
+		?.split(",")
+		.map((skill) => skill.trim())
+		.filter(Boolean);
 	return {
 		name: frontmatter.name,
 		description: frontmatter.description,
 		tools: tools && tools.length > 0 ? tools : undefined,
 		model: frontmatter.model,
+		modelHint: frontmatter.modelHint,
+		skills: skills && skills.length > 0 ? skills : undefined,
+		cwd: frontmatter.cwd,
 		systemPrompt: body,
 		source,
 		filePath,
 	};
 }
 
-function loadAgentsFromDir(dir: string, source: Exclude<AgentSource, "bundled">): AgentConfig[] {
+function loadAgentsFromDir(dir: string, source: Exclude<AgentSource, "bundled" | "session">): AgentConfig[] {
 	const agents: AgentConfig[] = [];
 	if (!fs.existsSync(dir)) return agents;
 

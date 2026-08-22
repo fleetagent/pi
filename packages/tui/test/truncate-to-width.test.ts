@@ -20,6 +20,51 @@ describe("truncateToWidth", () => {
 		assert.strictEqual(truncated.endsWith("\x1b[0m…\x1b[0m"), true);
 	});
 
+	it("keeps plain, SGR, and non-hyperlink OSC truncation output unchanged", () => {
+		const reset = "\x1b[0m";
+		const title = "\x1b]0;terminal title\x07";
+		const cases = [
+			["abcdefghijklmnop", `abcdefg${reset}...${reset}`],
+			["\x1b[31mabcdefghijklmnop", `\x1b[31mabcdefg${reset}...${reset}`],
+			[`${title}abcdefghijklmnop`, `${title}abcdefg${reset}...${reset}`],
+		] as const;
+
+		for (const [text, expected] of cases) {
+			assert.strictEqual(truncateToWidth(text, 10), expected);
+		}
+	});
+
+	it("closes a BEL-terminated OSC 8 link when truncating its label", () => {
+		const open = "\x1b]8;;https://example.com\x07";
+		const close = "\x1b]8;;\x07";
+		const text = `${open}some-longer-label-here${close}`;
+
+		assert.strictEqual(truncateToWidth(text, 15), `${open}some-longer-${close}\x1b[0m...\x1b[0m`);
+	});
+
+	it("closes an ST-terminated OSC 8 link independently from nested SGR state", () => {
+		const open = "\x1b]8;id=docs;https://example.com\x1b\\";
+		const close = "\x1b]8;;\x1b\\";
+		const text = `${open}\x1b[31msome-\x1b[0mlonger-label-here${close}`;
+
+		assert.strictEqual(truncateToWidth(text, 15), `${open}\x1b[31msome-\x1b[0mlonger-${close}\x1b[0m...\x1b[0m`);
+	});
+
+	it("does not duplicate an OSC 8 close already retained before truncation", () => {
+		const open = "\x1b]8;;https://example.com\x07";
+		const close = "\x1b]8;;\x07";
+		const text = `${open}link${close}-plain-content-long`;
+
+		assert.strictEqual(truncateToWidth(text, 15), `${open}link${close}-plain-c\x1b[0m...\x1b[0m`);
+	});
+
+	it("closes an active OSC 8 link when truncating without an ellipsis", () => {
+		const open = "\x1b]8;;https://example.com\x07";
+		const close = "\x1b]8;;\x07";
+
+		assert.strictEqual(truncateToWidth(`${open}abcdefghijk`, 8, ""), `${open}abcdefgh${close}\x1b[0m`);
+	});
+
 	it("handles malformed ANSI escape prefixes without hanging", () => {
 		const text = `abc\x1bnot-ansi ${"🙂".repeat(1000)}`;
 		const truncated = truncateToWidth(text, 20, "…");
@@ -58,6 +103,58 @@ describe("truncateToWidth", () => {
 describe("visibleWidth", () => {
 	it("counts tabs inline and skips ANSI inline", () => {
 		assert.strictEqual(visibleWidth("\t\x1b[31m界\x1b[0m"), 5);
+	});
+
+	it("counts Indic conjunct spacing code points within grapheme clusters", () => {
+		assert.strictEqual(visibleWidth("र्क"), 2);
+		assert.strictEqual(visibleWidth("नेटवर्क"), 5);
+		assert.strictEqual(visibleWidth("सर्वाधिकार सुरक्षित। ऑर्डर पर क्लिक करें"), 33);
+		assert.strictEqual(visibleWidth("র্ক"), 2);
+		assert.strictEqual(visibleWidth("ર્ક"), 2);
+		assert.strictEqual(visibleWidth("ର୍କ"), 2);
+		assert.strictEqual(visibleWidth("ర్క"), 2);
+		assert.strictEqual(visibleWidth("ര്‍ക"), 2);
+	});
+
+	it("counts standalone terminal-spacing marks and preserves zero-width exceptions", () => {
+		assert.strictEqual(visibleWidth("\u093e"), 1);
+		assert.strictEqual(visibleWidth("\u065f"), 1);
+		assert.strictEqual(visibleWidth("\u0f7f"), 1);
+		assert.strictEqual(visibleWidth("\u102b\u102c"), 2);
+		assert.strictEqual(visibleWidth("\u1734"), 0);
+		assert.strictEqual(visibleWidth("\u302e\u302f"), 0);
+	});
+
+	it("keeps ordinary combining marks zero-width", () => {
+		assert.strictEqual(visibleWidth("e\u0301"), 1);
+		assert.strictEqual(visibleWidth("čřžůú"), 5);
+		assert.strictEqual(visibleWidth("שָׁ"), 1);
+		assert.strictEqual(visibleWidth("بّ"), 1);
+		assert.strictEqual(visibleWidth("རྐ"), 1);
+		assert.strictEqual(visibleWidth("ᜠ᜴"), 1);
+		assert.strictEqual(visibleWidth("가〮"), 2);
+		assert.strictEqual(visibleWidth("가〯"), 2);
+	});
+
+	it("keeps CJK and Japanese width accounting unchanged", () => {
+		assert.strictEqual(visibleWidth("网络"), 4);
+		assert.strictEqual(visibleWidth("ネットワーク"), 12);
+		assert.strictEqual(visibleWidth("が"), 2);
+		assert.strictEqual(visibleWidth("か\u3099"), 2);
+	});
+
+	it("counts Myanmar marks that terminals allocate cells for", () => {
+		assert.strictEqual(visibleWidth("ကာ"), 2);
+		assert.strictEqual(visibleWidth("ကေ"), 2);
+		assert.strictEqual(visibleWidth("က်"), 2);
+		assert.strictEqual(visibleWidth("ကျ"), 2);
+		assert.strictEqual(visibleWidth("ကြ"), 2);
+		assert.strictEqual(visibleWidth("ကဳ"), 2);
+		assert.strictEqual(visibleWidth("ကဴ"), 2);
+		assert.strictEqual(visibleWidth("ကဵ"), 2);
+		assert.strictEqual(visibleWidth("ကး"), 2);
+		assert.strictEqual(visibleWidth("ကို"), 1);
+		assert.strictEqual(visibleWidth("က္"), 1);
 	});
 
 	it("keeps Thai and Lao AM clusters at their normal cell width", () => {

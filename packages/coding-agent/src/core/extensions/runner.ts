@@ -3,7 +3,7 @@
  */
 
 import type { AgentMessage } from "@fleetagent/pi-agent-core";
-import type { ImageContent, Model } from "@fleetagent/pi-ai";
+import type { ImageContent, Model, ProviderHeaders } from "@fleetagent/pi-ai";
 import type { KeyId } from "@fleetagent/pi-tui";
 import { type Theme, theme } from "../../modes/interactive/theme/theme.ts";
 import { executeBashWithOperations } from "../bash-executor.ts";
@@ -15,6 +15,7 @@ import type { BuildSystemPromptOptions } from "../system-prompt.ts";
 import type {
 	BeforeAgentStartEvent,
 	BeforeAgentStartEventResult,
+	BeforeProviderHeadersEvent,
 	BeforeProviderRequestEvent,
 	CompactOptions,
 	ContextEvent,
@@ -35,6 +36,7 @@ import type {
 	InputEvent,
 	InputEventResult,
 	InputSource,
+	MarkdownTransformer,
 	MessageEndEvent,
 	MessageEndEventResult,
 	MessageRenderer,
@@ -72,6 +74,7 @@ const RESERVED_KEYBINDINGS_FOR_EXTENSION_CONFLICTS = [
 	"app.tools.expand",
 	"app.thinking.toggle",
 	"app.editor.external",
+	"app.message.copy",
 	"app.message.followUp",
 	"tui.input.submit",
 	"tui.select.confirm",
@@ -139,6 +142,7 @@ type RunnerEmitEvent = Exclude<
 	| UserBashEvent
 	| ContextEvent
 	| BeforeProviderRequestEvent
+	| BeforeProviderHeadersEvent
 	| BeforeAgentStartEvent
 	| MessageEndEvent
 	| ResourcesDiscoverEvent
@@ -584,6 +588,12 @@ export class ExtensionRunner {
 		return undefined;
 	}
 
+	getMarkdownTransformers(): MarkdownTransformer[] {
+		return this.extensions.flatMap((extension) =>
+			extension.markdownTransformer ? [extension.markdownTransformer] : [],
+		);
+	}
+
 	private resolveRegisteredCommands(): ResolvedCommand[] {
 		const commands: RegisteredCommand[] = [];
 		const counts = new Map<string, number>();
@@ -1020,6 +1030,32 @@ export class ExtensionRunner {
 		}
 
 		return currentPayload;
+	}
+
+	async emitBeforeProviderHeaders(headers: ProviderHeaders): Promise<ProviderHeaders> {
+		const ctx = this.createContext();
+
+		for (const ext of this.extensions) {
+			const handlers = ext.handlers.get("before_provider_headers");
+			if (!handlers || handlers.length === 0) continue;
+
+			for (const handler of handlers) {
+				try {
+					// Handlers share one mutable map; their return values are intentionally ignored.
+					const event: BeforeProviderHeadersEvent = { type: "before_provider_headers", headers };
+					await handler(event, ctx);
+				} catch (err) {
+					this.emitError({
+						extensionPath: ext.path,
+						event: "before_provider_headers",
+						error: err instanceof Error ? err.message : String(err),
+						stack: err instanceof Error ? err.stack : undefined,
+					});
+				}
+			}
+		}
+
+		return headers;
 	}
 
 	async emitBeforeAgentStart(

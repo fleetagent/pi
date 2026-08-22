@@ -6,14 +6,17 @@ import {
 	type AssistantMessage,
 	createAssistantMessageEventStream,
 	type Model,
+	type ProviderHeaders,
 	type SimpleStreamOptions,
 } from "@fleetagent/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
+import type { ExtensionFactory } from "../src/core/extensions/types.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
 import { PiAgent } from "../src/core/pi-agent.ts";
 import { InMemorySessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
+import { createTestExtensionsResult, createTestResourceLoader } from "./utilities.ts";
 
 describe("PiAgent OpenRouter attribution headers", () => {
 	let tempDir: string;
@@ -84,11 +87,13 @@ describe("PiAgent OpenRouter attribution headers", () => {
 		model: Model<Api>,
 		options: {
 			telemetryEnabled?: boolean;
-			providerHeaders?: Record<string, string>;
-			requestHeaders?: Record<string, string>;
+			providerHeaders?: ProviderHeaders;
+			requestHeaders?: ProviderHeaders;
+			authHeader?: boolean;
+			extensionFactories?: ExtensionFactory[];
 			sessionId?: string;
 		} = {},
-	): Promise<Record<string, string> | undefined> {
+	): Promise<ProviderHeaders | undefined> {
 		const settingsManager = SettingsManager.create(cwd, agentDir);
 		if (options.telemetryEnabled === false) {
 			settingsManager.setEnableInstallTelemetry(false);
@@ -108,10 +113,16 @@ describe("PiAgent OpenRouter attribution headers", () => {
 			},
 		});
 
-		if (options.providerHeaders) {
-			modelRegistry.registerProvider(model.provider, { headers: options.providerHeaders });
+		if (options.providerHeaders || options.authHeader) {
+			modelRegistry.registerProvider(model.provider, {
+				headers: options.providerHeaders,
+				authHeader: options.authHeader,
+			});
 			registeredProviders.push(model.provider);
 		}
+		const extensionsResult = options.extensionFactories
+			? await createTestExtensionsResult(options.extensionFactories, cwd)
+			: undefined;
 
 		const sessionManager = new InMemorySessionManager(cwd).create(
 			options.sessionId ? { id: options.sessionId } : undefined,
@@ -123,6 +134,7 @@ describe("PiAgent OpenRouter attribution headers", () => {
 			authStorage,
 			modelRegistry,
 			settingsManager,
+			resourceLoader: createTestResourceLoader(extensionsResult ? { extensionsResult } : undefined),
 			sessionManager: new InMemorySessionManager(cwd),
 		});
 		const session = await pi.createAgentSession({ session: sessionManager });
@@ -185,6 +197,66 @@ describe("PiAgent OpenRouter attribution headers", () => {
 		expect(headers?.["HTTP-Referer"]).toBe("https://provider.example");
 		expect(headers?.["X-OpenRouter-Title"]).toBe("request-title");
 		expect(headers?.["X-OpenRouter-Categories"]).toBe("provider-category");
+	});
+	it("runs before_provider_headers after model auth and request-header assembly", async () => {
+		const model = {
+			...createModel("openrouter", "https://openrouter.ai/api/v1"),
+			headers: { "x-model": "model" },
+		};
+		let observed: ProviderHeaders | undefined;
+		const headers = await captureHeaders(model, {
+			providerHeaders: { "x-provider": "provider", "x-provider-remove": null },
+			requestHeaders: { "X-OpenRouter-Title": "request-title", "x-explicit": "explicit" },
+			authHeader: true,
+			extensionFactories: [
+				(pi) => {
+					pi.on("before_provider_headers", (event) => {
+						observed = { ...event.headers };
+						event.headers["x-correlation-id"] = "trace-123";
+						event.headers["X-OpenRouter-Title"] = null;
+					});
+				},
+			],
+		});
+
+		expect(observed).toMatchObject({
+			"HTTP-Referer": "https://pi.dev",
+			"X-OpenRouter-Title": "request-title",
+			"x-model": "model",
+			"x-provider": "provider",
+			"x-provider-remove": null,
+			"x-explicit": "explicit",
+			Authorization: "Bearer test-api-key",
+		});
+		expect(headers).toMatchObject({
+			"x-correlation-id": "trace-123",
+			"x-provider-remove": null,
+			"X-OpenRouter-Title": null,
+			Authorization: "Bearer test-api-key",
+		});
+		expect(headers).not.toHaveProperty("ignored");
+	});
+	it("exposes Cloudflare gateway auth after assembly and preserves hook deletion markers", async () => {
+		let observed: ProviderHeaders | undefined;
+		const headers = await captureHeaders(
+			createModel("cloudflare-ai-gateway", "https://gateway.ai.cloudflare.com/v1/account/gateway/compat"),
+			{
+				extensionFactories: [
+					(pi) => {
+						pi.on("before_provider_headers", (event) => {
+							observed = { ...event.headers };
+							event.headers["cf-aig-authorization"] = null;
+						});
+					},
+				],
+			},
+		);
+
+		expect(observed).toMatchObject({
+			Authorization: null,
+			"cf-aig-authorization": "Bearer test-api-key",
+		});
+		expect(headers).toMatchObject({ Authorization: null, "cf-aig-authorization": null });
 	});
 
 	it("adds OpenCode session headers", async () => {

@@ -41,14 +41,7 @@ export function canonicalizePath(path: string): string {
 export function isLocalPath(value: string): boolean {
 	const trimmed = value.trim();
 	// Known non-local prefixes. file: URLs are local paths and are intentionally resolved by resolvePath().
-	if (
-		trimmed.startsWith("npm:") ||
-		trimmed.startsWith("git:") ||
-		trimmed.startsWith("github:") ||
-		trimmed.startsWith("http:") ||
-		trimmed.startsWith("https:") ||
-		trimmed.startsWith("ssh:")
-	) {
+	if (/^(?:npm|git|github|https?|ssh):/i.test(trimmed)) {
 		return false;
 	}
 	return true;

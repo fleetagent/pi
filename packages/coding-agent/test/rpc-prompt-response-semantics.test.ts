@@ -275,6 +275,45 @@ describe("RPC prompt response semantics", () => {
 		}
 	});
 
+	it("emits delta-only message updates on the RPC wire", async () => {
+		const streamFn: StreamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				const initial = createAssistantMessage("");
+				const partialStart = createAssistantContentMessage([{ type: "text", text: "" }]);
+				const partialDelta = createAssistantMessage("hello");
+				stream.push({ type: "start", partial: initial });
+				stream.push({ type: "text_start", contentIndex: 0, partial: partialStart });
+				stream.push({ type: "text_delta", contentIndex: 0, delta: "hello", partial: partialDelta });
+				stream.push({ type: "text_end", contentIndex: 0, content: "hello", partial: partialDelta });
+				stream.push({ type: "done", reason: "stop", message: partialDelta });
+			});
+			return stream;
+		};
+		const { lineHandler, cleanup } = await startRpcMode({ withAuth: true, responseDelayMs: 0, streamFn });
+
+		try {
+			lineHandler(JSON.stringify({ id: "linear", type: "prompt", message: "Hello" }));
+			await vi.waitFor(() =>
+				expect(parseOutputLines(rpcIo.outputLines).some((record) => record.type === "message_end")).toBe(true),
+			);
+
+			const updates = parseOutputLines(rpcIo.outputLines).filter((record) => record.type === "message_update");
+			expect(updates).toHaveLength(3);
+			for (const update of updates) {
+				expect(update).not.toHaveProperty("message");
+				expect(update.assistantMessageEvent).not.toHaveProperty("partial");
+			}
+			expect(updates.map((update) => update.assistantMessageEvent)).toEqual([
+				{ type: "text_start", contentIndex: 0 },
+				{ type: "text_delta", contentIndex: 0, delta: "hello" },
+				{ type: "text_end", contentIndex: 0, content: "hello" },
+			]);
+		} finally {
+			await cleanup();
+		}
+	});
+
 	it("emits one success response when prompt is queued during streaming", async () => {
 		const { lineHandler, cleanup } = await startRpcMode({ withAuth: true, responseDelayMs: 100 });
 

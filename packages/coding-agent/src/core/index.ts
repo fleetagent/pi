@@ -18,6 +18,7 @@ export { createEventBus, type EventBus, type EventBusController } from "./event-
 // Extensions system
 export {
 	type AgentEndEvent,
+	type AgentSettledEvent,
 	type AgentStartEvent,
 	type AgentToolResult,
 	type AgentToolUpdateCallback,
