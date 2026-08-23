@@ -6,7 +6,7 @@ import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { PiAgent } from "../../../src/core/pi-agent.ts";
 import { DefaultResourceLoader } from "../../../src/core/resource-loader.ts";
-import { InMemorySessionManager } from "../../../src/core/session-manager.ts";
+import { InMemorySessionManager } from "../../../src/core/session/in-memory-session-manager.ts";
 import { SettingsManager } from "../../../src/core/settings-manager.ts";
 
 describe("regression #2835: tool allowlists filter extension tools", () => {

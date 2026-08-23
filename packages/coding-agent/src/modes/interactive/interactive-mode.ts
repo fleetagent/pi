@@ -61,6 +61,7 @@ import {
 	APP_TITLE,
 	getAgentDir,
 	getAuthPath,
+	getChangelogPath,
 	getDebugLogPath,
 	getDocsPath,
 	getShareViewerUrl,
@@ -69,17 +70,17 @@ import {
 } from "../../config.ts";
 import { type AgentSession, type AgentSessionEvent, parseSkillBlock } from "../../core/agent-session.ts";
 import { executeBashWithOperations } from "../../core/bash-executor.ts";
+import type { ExtensionRunner } from "../../core/extensions/runner.ts";
 import type {
 	AutocompleteProviderFactory,
 	EditorFactory,
 	ExtensionCommandContext,
 	ExtensionContext,
-	ExtensionRunner,
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
 	ExtensionWidgetOptions,
 	MarkdownTransformer,
-} from "../../core/extensions/index.ts";
+} from "../../core/extensions/types.ts";
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
 import { createCompactionSummaryMessage } from "../../core/messages.ts";
@@ -98,16 +99,17 @@ import {
 	formatSandboxStopResult,
 	parseSandboxUserCommand,
 } from "../../core/sandbox/command.ts";
-import { DockerSandboxService, redactSecrets } from "../../core/sandbox/docker.ts";
+import { DockerSandboxService, type ManagedSandboxContainer, redactSecrets } from "../../core/sandbox/docker.ts";
+import { LocalSessionManager } from "../../core/session/local-session-manager.ts";
+import type { SessionContext } from "../../core/session/types.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
-import { LocalSessionManager, type SessionContext } from "../../core/session-manager.ts";
 import type { FullscreenExitOutput } from "../../core/settings-manager.ts";
 import { BUILTIN_SLASH_COMMANDS, HIDDEN_BUILTIN_SLASH_COMMAND_NAMES } from "../../core/slash-commands.ts";
 import { getSourceBackendIcon, type SourceInfo } from "../../core/source-info.ts";
 import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
-import type { ToolBackendInfo } from "../../core/tools/index.ts";
+import type { ToolBackendInfo } from "../../core/tools/operations.ts";
 import type { TruncationResult } from "../../core/tools/truncate.ts";
-import { getChangelogPath, getNewEntries, parseChangelog } from "../../utils/changelog.ts";
+import { getNewEntries, parseChangelog } from "../../utils/changelog.ts";
 import { copyToClipboard, readClipboardText } from "../../utils/clipboard.ts";
 import { extensionForImageMimeType, readClipboardImage } from "../../utils/clipboard-image.ts";
 import { parseGitUrl } from "../../utils/git.ts";
@@ -194,6 +196,20 @@ type CompactionQueuedMessage = {
 	text: string;
 	mode: "steer" | "followUp";
 };
+
+type SessionSandboxState =
+	| { type: "ssh"; remote: string; cwd?: string }
+	| {
+			type: "daemon";
+			url: string;
+			token: string;
+			expectedCwd: string;
+			containerId?: string;
+	  };
+
+function getSessionSandboxKey(session: { getCwd(): string; getSessionId(): string }): string {
+	return `${session.getCwd()}\0${session.getSessionId()}`;
+}
 
 const DEAD_TERMINAL_ERROR_CODES = new Set(["EIO", "EPIPE", "ENOTCONN"]);
 
@@ -371,6 +387,8 @@ export class InteractiveMode {
 	private toolOutputExpanded = false;
 	private activeSandboxContainerId: string | undefined;
 	private activeSandboxBackendConnected = false;
+	private readonly sessionSandboxStates = new Map<string, SessionSandboxState>();
+	private readonly managedSandboxContainers = new Map<string, ManagedSandboxContainer>();
 
 	// Thinking block visibility state
 	private hideThinkingBlock = false;
@@ -462,6 +480,7 @@ export class InteractiveMode {
 			this.resetExtensionUI();
 		});
 		this.runtimeHost.setRebindSession(async () => {
+			await this.restoreCurrentSessionSandbox();
 			await this.rebindCurrentSession();
 		});
 		this.version = VERSION;
@@ -3691,9 +3710,10 @@ export class InteractiveMode {
 			// terminal. If the terminal is gone, the restore writes below emit EIO,
 			// which the stdout/stderr error handler turns into emergencyTerminalExit;
 			// the render loop is already idle, so this cannot hot-spin (see #4144).
-			await this.runtimeHost.dispose();
+			const shutdownErrors = await this.disposeRuntimeResources();
 			await this.ui.terminal.drainInput(1000);
 			this.stop(this.settingsManager.getFullscreenExitOutput());
+			for (const error of shutdownErrors) console.error("Pi shutdown cleanup failed:", error);
 			process.exit(0);
 		}
 
@@ -3705,7 +3725,8 @@ export class InteractiveMode {
 		await this.ui.terminal.drainInput(1000);
 
 		this.stop(this.settingsManager.getFullscreenExitOutput());
-		await this.runtimeHost.dispose();
+		const shutdownErrors = await this.disposeRuntimeResources();
+		for (const error of shutdownErrors) console.error("Pi shutdown cleanup failed:", error);
 		process.exit(0);
 	}
 
@@ -4549,7 +4570,7 @@ export class InteractiveMode {
 		if (this.anthropicSubscriptionWarningShown) {
 			return;
 		}
-		if (!model || model.provider !== "anthropic") {
+		if (model?.provider !== "anthropic") {
 			return;
 		}
 
@@ -5687,7 +5708,53 @@ export class InteractiveMode {
 		this.showLoadedResources({ force: true, showDiagnosticsWhenQuiet: true });
 	}
 	private createDockerSandboxService(): DockerSandboxService {
-		return new DockerSandboxService({ settingsManager: this.settingsManager });
+		return new DockerSandboxService({
+			settingsManager: this.settingsManager,
+			managedContainers: this.managedSandboxContainers,
+		});
+	}
+
+	private async disposeRuntimeResources(): Promise<Error[]> {
+		const sandboxService = this.createDockerSandboxService();
+		const errors: Error[] = [];
+		try {
+			await this.runtimeHost.dispose();
+		} catch (error) {
+			errors.push(error instanceof Error ? error : new Error(String(error)));
+		}
+		try {
+			await sandboxService.stopManagedContainers();
+		} catch (error) {
+			errors.push(error instanceof Error ? error : new Error(String(error)));
+		}
+		return errors;
+	}
+
+	private async restoreCurrentSessionSandbox(): Promise<void> {
+		this.activeSandboxContainerId = undefined;
+		this.activeSandboxBackendConnected = false;
+		const state = this.sessionSandboxStates.get(getSessionSandboxKey(this.activeSession));
+		if (!state) return;
+		if (state.type === "daemon") this.activeSandboxContainerId = state.containerId;
+		try {
+			if (state.type === "ssh") {
+				await this.session.configureRemoteSandbox({ type: "ssh", remote: state.remote, cwd: state.cwd });
+			} else {
+				await this.session.activateSandboxDaemon({
+					url: state.url,
+					token: state.token,
+					expectedCwd: state.expectedCwd,
+				});
+			}
+			this.activeSandboxBackendConnected = true;
+		} catch (error) {
+			if (state.type !== "daemon" || !state.containerId) {
+				this.sessionSandboxStates.delete(getSessionSandboxKey(this.activeSession));
+			}
+			this.showWarning(
+				`Could not restore this session's sandbox: ${redactSecrets(error instanceof Error ? error.message : String(error))}`,
+			);
+		}
 	}
 
 	private async handleSandboxCommand(text: string): Promise<void> {
@@ -5701,13 +5768,21 @@ export class InteractiveMode {
 
 		const service = this.createDockerSandboxService();
 		const workspaceRoot = this.activeSession.getCwd();
+		const sessionKey = getSessionSandboxKey(this.activeSession);
 		try {
 			if (command.subcommand === "status") {
 				this.showStatus(this.formatToolBackendStatus(this.session.getToolBackendInfo()));
 				return;
 			}
 			if (command.subcommand === "clear") {
+				if (!this.activeSandboxBackendConnected && this.sessionSandboxStates.has(sessionKey)) {
+					this.sessionSandboxStates.delete(sessionKey);
+					this.activeSandboxContainerId = undefined;
+					this.showStatus("Stale sandbox state cleared");
+					return;
+				}
 				await this.session.clearRemoteSandbox();
+				this.sessionSandboxStates.delete(sessionKey);
 				this.activeSandboxBackendConnected = false;
 				this.refreshUiAfterBackendChange();
 				this.updateToolBackendStatus();
@@ -5716,10 +5791,15 @@ export class InteractiveMode {
 			}
 			if (
 				(command.subcommand === "attach" || command.subcommand === "ssh" || command.subcommand === "start") &&
-				this.activeSandboxBackendConnected
+				(this.activeSandboxBackendConnected ||
+					this.activeSandboxContainerId !== undefined ||
+					[...this.managedSandboxContainers.values()].some(
+						(container) => container.ownerId === this.activeSession.getSessionId(),
+					) ||
+					this.sessionSandboxStates.has(sessionKey))
 			) {
 				this.showWarning(
-					"A sandbox backend is already active. Run /sandbox stop before starting or attaching another.",
+					"A sandbox backend is already active or awaiting cleanup. Run /sandbox stop before starting or attaching another.",
 				);
 				return;
 			}
@@ -5734,6 +5814,7 @@ export class InteractiveMode {
 				});
 				this.activeSandboxContainerId = undefined;
 				this.activeSandboxBackendConnected = true;
+				this.sessionSandboxStates.set(sessionKey, { type: "ssh", remote, cwd });
 				this.refreshUiAfterBackendChange();
 				this.updateToolBackendStatus();
 				this.showStatus(this.formatToolBackendStatus(info));
@@ -5745,13 +5826,20 @@ export class InteractiveMode {
 					currentBackend.type === "remote" && !currentBackend.configured
 						? currentBackend.cwd
 						: service.resolveConfig().workspaceMountPath;
+				const token = process.env.PI_REMOTE_TOKEN ?? "";
 				const info = await this.session.activateSandboxDaemon({
 					url: command.url,
-					token: process.env.PI_REMOTE_TOKEN ?? "",
+					token,
 					expectedCwd,
 				});
 				this.activeSandboxContainerId = undefined;
 				this.activeSandboxBackendConnected = true;
+				this.sessionSandboxStates.set(sessionKey, {
+					type: "daemon",
+					url: command.url,
+					token,
+					expectedCwd,
+				});
 				this.refreshUiAfterBackendChange();
 				this.updateToolBackendStatus();
 				this.showStatus(
@@ -5774,7 +5862,11 @@ export class InteractiveMode {
 					this.ui.requestRender();
 				}
 				try {
-					const result = await service.start({ workspaceRoot, image: command.image });
+					const result = await service.start({
+						workspaceRoot,
+						image: command.image,
+						sessionId: this.activeSession.getSessionId(),
+					});
 					this.activeSandboxContainerId = result.containerId;
 					let info: Awaited<ReturnType<typeof this.session.activateSandboxDaemon>> | undefined;
 					let lastActivationError: unknown;
@@ -5809,6 +5901,13 @@ export class InteractiveMode {
 						throw activationError;
 					}
 					this.activeSandboxBackendConnected = true;
+					this.sessionSandboxStates.set(sessionKey, {
+						type: "daemon",
+						url: result.daemonUrl,
+						token: result.token,
+						expectedCwd: result.workspaceMountPath,
+						containerId: result.containerId,
+					});
 					this.refreshUiAfterBackendChange();
 					this.updateToolBackendStatus();
 					this.showStatus([formatSandboxStartResult(result), this.formatToolBackendStatus(info)].join("\n"));
@@ -5828,6 +5927,7 @@ export class InteractiveMode {
 			}
 			if (this.activeSandboxBackendConnected && !this.activeSandboxContainerId) {
 				await this.session.clearRemoteSandbox();
+				this.sessionSandboxStates.delete(sessionKey);
 				this.activeSandboxBackendConnected = false;
 				this.refreshUiAfterBackendChange();
 				this.updateToolBackendStatus();
@@ -5839,7 +5939,27 @@ export class InteractiveMode {
 				target: command.target,
 				currentContainerId: this.activeSandboxContainerId,
 			});
-			if (result.status !== "not-found") {
+			if (result.status === "not-found" && this.activeSandboxContainerId) {
+				if (this.activeSandboxBackendConnected) {
+					await this.session.clearRemoteSandbox();
+					this.refreshUiAfterBackendChange();
+					this.updateToolBackendStatus();
+				}
+				this.sessionSandboxStates.delete(sessionKey);
+				this.activeSandboxContainerId = undefined;
+				this.activeSandboxBackendConnected = false;
+			} else if (result.status !== "not-found") {
+				for (const [key, state] of this.sessionSandboxStates) {
+					if (
+						state.type === "daemon" &&
+						state.containerId &&
+						(result.container.id === state.containerId ||
+							result.container.id.startsWith(state.containerId) ||
+							state.containerId.startsWith(result.container.id))
+					) {
+						this.sessionSandboxStates.delete(key);
+					}
+				}
 				const activeContainerId = this.activeSandboxContainerId;
 				const stoppedActiveSandbox =
 					activeContainerId !== undefined &&

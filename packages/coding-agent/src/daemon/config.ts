@@ -4,7 +4,7 @@ import {
 	DEFAULT_REMOTE_WORKSPACE_PROTOCOL_LIMITS,
 	type RemoteWorkspaceProtocolLimits,
 	validateRemoteWorkspaceProtocolLimits,
-} from "../core/remote-workspace-protocol/index.ts";
+} from "../core/remote-workspace-protocol/contract.ts";
 
 export const DAEMON_WEBSOCKET_PATH = "/pi/workspace";
 export const DAEMON_WEBSOCKET_PROTOCOL = "pi.workspace.v1";

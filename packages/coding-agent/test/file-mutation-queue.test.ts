@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createEditTool } from "../src/core/tools/edit.ts";
 import { withFileMutationQueue } from "../src/core/tools/file-mutation-queue.ts";
 import { initHasher, lineHashes } from "../src/core/tools/hashline/hash.ts";
-import { LocalToolOperations } from "../src/core/tools/index.ts";
+import { LocalToolOperations } from "../src/core/tools/operations.ts";
 import { createWriteTool } from "../src/core/tools/write.ts";
 
 function delay(ms: number): Promise<void> {

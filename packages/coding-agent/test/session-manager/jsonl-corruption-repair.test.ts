@@ -11,8 +11,9 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { loadEntriesFromFile } from "../../src/core/session/jsonl-helpers.ts";
+import { LocalSessionManager } from "../../src/core/session/local-session-manager.ts";
 import { findMostRecent, list, listAll, load } from "../../src/core/session/stores/jsonl-session-store.ts";
-import { LocalSessionManager, loadEntriesFromFile } from "../../src/core/session-manager.ts";
 import { JsonlDecodeError, JsonlSessionError } from "../../src/index.ts";
 
 const createdDirs: string[] = [];

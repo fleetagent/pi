@@ -29,24 +29,22 @@ import { exportFromFile } from "./core/export-html/index.ts";
 import type { ExtensionFactory } from "./core/extensions/types.ts";
 import { configureHttpDispatcher } from "./core/http-dispatcher.ts";
 import { KeybindingsManager } from "./core/keybindings.ts";
-import type { LspConfigurationInput } from "./core/lsp/index.ts";
+import type { LspConfigurationInput } from "./core/lsp/config-loader.ts";
 import type { ModelRegistry } from "./core/model-registry.ts";
 import { resolveCliModel, resolveModelScope, type ScopedModel } from "./core/model-resolver.ts";
 import type { PiAgentAppMode, PiAgentDiagnostic, PiAgentSessionOptions } from "./core/pi-agent.ts";
 import { isFatalPiAgentDiagnostic, PiAgent } from "./core/pi-agent.ts";
+import { InMemorySessionManager } from "./core/session/in-memory-session-manager.ts";
+import { LocalSessionManager } from "./core/session/local-session-manager.ts";
+import { RemoteSessionManager } from "./core/session/remote-session-manager.ts";
+import type { Session } from "./core/session/session.ts";
+import type { SessionManager } from "./core/session/session-manager.ts";
 import {
 	formatMissingSessionCwdPrompt,
 	getMissingSessionCwdIssue,
 	MissingSessionCwdError,
 	type SessionCwdIssue,
 } from "./core/session-cwd.ts";
-import {
-	InMemorySessionManager,
-	LocalSessionManager,
-	RemoteSessionManager,
-	type Session,
-	type SessionManager,
-} from "./core/session-manager.ts";
 import { SettingsManager } from "./core/settings-manager.ts";
 import { resetTimings, time } from "./core/timings.ts";
 import {
@@ -54,7 +52,7 @@ import {
 	createSshToolOperations,
 	DeferredRemoteToolOperations,
 	type ToolOperations,
-} from "./core/tools/index.ts";
+} from "./core/tools/operations.ts";
 import { runDaemonCommand } from "./daemon/command.ts";
 import { isDaemonCommand } from "./daemon/config.ts";
 import { runMigrations, showDeprecationWarnings } from "./migrations.ts";

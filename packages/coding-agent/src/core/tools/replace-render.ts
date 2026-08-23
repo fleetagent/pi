@@ -1,6 +1,6 @@
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import type { ReplaceDetails, ReqParams } from "./edit.ts";
-import type { HTEdit } from "./hashline/index.ts";
+import type { HTEdit } from "./hashline/resolve.ts";
 import { isRec } from "./hashline-utils.ts";
 import { normReq } from "./replace-normalize.ts";
 

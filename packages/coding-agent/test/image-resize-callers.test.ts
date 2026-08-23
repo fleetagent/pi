@@ -9,7 +9,7 @@ vi.mock("../src/utils/image-resize.ts", () => ({
 }));
 
 import { processFileArguments } from "../src/cli/file-processor.ts";
-import { LocalToolOperations } from "../src/core/tools/index.ts";
+import { LocalToolOperations } from "../src/core/tools/operations.ts";
 import { createReadTool } from "../src/core/tools/read.ts";
 import { resizeImage } from "../src/utils/image-resize.ts";
 

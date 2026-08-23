@@ -25,31 +25,6 @@ import type {
 	ThinkingLevelChangeEntry,
 } from "./types.ts";
 
-export { CURRENT_SESSION_VERSION } from "./constants.ts";
-export { buildSessionContext, getLatestCompactionEntry, sessionEntryToContextMessages } from "./context.ts";
-export { migrateSessionEntries, parseSessionEntries } from "./migrations.ts";
-
-export type {
-	BranchSummaryEntry,
-	CompactionEntry,
-	CustomEntry,
-	CustomMessageEntry,
-	FileEntry,
-	LabelEntry,
-	ModelChangeEntry,
-	NewSessionOptions,
-	SessionContext,
-	SessionEntry,
-	SessionEntryBase,
-	SessionHeader,
-	SessionInfo,
-	SessionInfoEntry,
-	SessionListProgress,
-	SessionMessageEntry,
-	SessionTreeNode,
-	ThinkingLevelChangeEntry,
-} from "./types.ts";
-
 export type ReadonlySession = Pick<
 	Session,
 	| "getCwd"
@@ -66,8 +41,6 @@ export type ReadonlySession = Pick<
 	| "getTree"
 	| "getSessionName"
 >;
-
-export { findMostRecentSession, getDefaultSessionDir, loadEntriesFromFile } from "./jsonl-helpers.ts";
 
 /**
  * Represents one active conversation session as an append-only tree.

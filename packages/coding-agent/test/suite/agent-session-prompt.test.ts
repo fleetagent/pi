@@ -5,7 +5,7 @@ import type { AgentTool } from "@fleetagent/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall, type Model } from "@fleetagent/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { InputEvent } from "../../src/core/extensions/index.ts";
+import type { InputEvent } from "../../src/core/extensions/types.ts";
 import type { PromptTemplate } from "../../src/core/prompt-templates.ts";
 import { createSyntheticSourceInfo } from "../../src/core/source-info.ts";
 import { createTestResourceLoader } from "../utilities.ts";

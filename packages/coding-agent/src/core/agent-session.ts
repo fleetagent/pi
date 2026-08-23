@@ -14,7 +14,7 @@
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { basename, dirname, sep } from "node:path";
 import type {
 	Agent,
@@ -57,62 +57,67 @@ import { canonicalizePath, resolvePath } from "../utils/paths.ts";
 import { sleep } from "../utils/sleep.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
+import { collectEntriesForBranchSummary, generateBranchSummary } from "./compaction/branch-summarization.ts";
 import {
 	type CompactionResult,
 	calculateContextTokens,
-	collectEntriesForBranchSummary,
 	compact,
 	estimateContextTokens,
-	generateBranchSummary,
 	prepareCompaction,
 	shouldCompact,
-} from "./compaction/index.ts";
+} from "./compaction/compaction.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
 import {
-	type CompactOptions,
-	type ContextUsage,
-	type ExtensionCommandContextActions,
 	type ExtensionErrorListener,
 	ExtensionRunner,
-	type ExtensionUIContext,
-	type InputSource,
-	type MessageEndEvent,
-	type MessageStartEvent,
-	type MessageUpdateEvent,
-	type ReplacedSessionContext,
-	type SessionBeforeCompactResult,
-	type SessionBeforeTreeResult,
-	type SessionStartEvent,
+	emitSessionShutdownEvent,
 	type ShutdownHandler,
-	type ToolDefinition,
-	type ToolExecutionEndEvent,
-	type ToolExecutionStartEvent,
-	type ToolExecutionUpdateEvent,
-	type ToolInfo,
-	type TreePreparation,
-	type TurnEndEvent,
-	type TurnStartEvent,
-	wrapRegisteredTools,
-} from "./extensions/index.ts";
-import { emitSessionShutdownEvent } from "./extensions/runner.ts";
+} from "./extensions/runner.ts";
+import type {
+	CompactOptions,
+	ContextUsage,
+	ExtensionCommandContextActions,
+	ExtensionUIContext,
+	InputSource,
+	MessageEndEvent,
+	MessageStartEvent,
+	MessageUpdateEvent,
+	ReplacedSessionContext,
+	SessionBeforeCompactResult,
+	SessionBeforeTreeResult,
+	SessionStartEvent,
+	ToolDefinition,
+	ToolExecutionEndEvent,
+	ToolExecutionStartEvent,
+	ToolExecutionUpdateEvent,
+	ToolInfo,
+	TreePreparation,
+	TurnEndEvent,
+	TurnStartEvent,
+} from "./extensions/types.ts";
+import { wrapRegisteredTools } from "./extensions/wrapper.ts";
 import {
-	createLspRuntimeState,
-	createLspToolDefinitions,
-	formatAutoDiagnosticsForChangedFile,
-	type LoadLspConfigurationResult,
-	LSP_TOOL_NAMES,
 	type LspConfigurationLayer,
-	type LspConfigurationSourceDiagnostic,
-	type LspConnectionFactoryRegistry,
-	type LspRuntimeState,
-	type LspSessionStatus,
 	parseLspConfiguration,
 	type ResolvedLspConfiguration,
 	resolveLspConfiguration,
+} from "./lsp/config.ts";
+import {
+	type LoadLspConfigurationResult,
+	type LspConfigurationSourceDiagnostic,
 	resolveLspConfigurationLayerPaths,
-} from "./lsp/index.ts";
+} from "./lsp/config-loader.ts";
+import { formatAutoDiagnosticsForChangedFile } from "./lsp/diagnostics.ts";
+import {
+	createLspRuntimeState,
+	createLspToolDefinitions,
+	LSP_TOOL_NAMES,
+	type LspRuntimeState,
+	type LspSessionStatus,
+} from "./lsp/integration.ts";
+import type { LspConnectionFactoryRegistry } from "./lsp/transport.ts";
 import {
 	type BashExecutionMessage,
 	type CustomMessage,
@@ -123,8 +128,10 @@ import type { ModelRegistry } from "./model-registry.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
 import type { Rule } from "./rules.ts";
-import type { BranchSummaryEntry, CompactionEntry, Session } from "./session-manager.ts";
-import { CURRENT_SESSION_VERSION, getLatestCompactionEntry, type SessionHeader } from "./session-manager.ts";
+import { CURRENT_SESSION_VERSION } from "./session/constants.ts";
+import { getLatestCompactionEntry } from "./session/context.ts";
+import type { Session } from "./session/session.ts";
+import type { BranchSummaryEntry, CompactionEntry, SessionHeader } from "./session/types.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import type { Skill } from "./skills.ts";
 import { HIDDEN_BUILTIN_SLASH_COMMAND_NAMES, type SlashCommandInfo } from "./slash-commands.ts";
@@ -136,7 +143,9 @@ import {
 	LocalToolOperations,
 	type ToolBackendInfo,
 	type ToolOperations,
-} from "./tools/index.ts";
+} from "./tools/operations.ts";
+import type { ReadToolOperationsSelection } from "./tools/read.ts";
+import { createSessionEntryGetToolDefinition, createSessionSearchToolDefinition } from "./tools/session-history.ts";
 import {
 	createCreateSubagentToolDefinition,
 	createSubagentRunsToolDefinition,
@@ -156,8 +165,10 @@ import { WORKSPACE_TOOL_NAMES, WorkspaceToolHost } from "./tools/workspace-tool-
 // ============================================================================
 
 const CORE_DEFAULT_TOOL_NAMES = ["read", "bash", "edit", "write", "websearch"] as const;
+const SESSION_HISTORY_TOOL_NAMES = ["session_search", "session_entry_get"] as const;
 export const DEFAULT_ACTIVE_TOOL_NAMES = [
 	...CORE_DEFAULT_TOOL_NAMES,
+	...SESSION_HISTORY_TOOL_NAMES,
 	...LSP_TOOL_NAMES,
 	"subagent",
 	"subagent_runs",
@@ -581,6 +592,7 @@ export class AgentSession {
 	private readonly _resolveLspConfiguration?: () => Promise<LoadLspConfigurationResult>;
 	private readonly _onLspConfigurationDiagnostics?: (diagnostics: readonly LspConfigurationSourceDiagnostic[]) => void;
 	private _runtimeLifecycleQueue: Promise<void> = Promise.resolve();
+	private _sandboxTransitionQueue: Promise<void> = Promise.resolve();
 	private readonly _runtimeLifecycleContext = new AsyncLocalStorage<RuntimeLifecycleOperationToken>();
 	private readonly _activities = new Set<SessionActivityToken>();
 	private _activityGeneration = 0;
@@ -718,7 +730,10 @@ export class AgentSession {
 		return this._localResourceToolOperations;
 	}
 
-	private _getReadOperationsForPath(absolutePath: string, shellPath?: string): ToolOperations | undefined {
+	private _getReadOperationsForPath(
+		absolutePath: string,
+		shellPath?: string,
+	): ReadToolOperationsSelection | undefined {
 		const isSameOrChild = (target: string, root: string): boolean => {
 			const normalizedRoot = resolvePath(root);
 			if (target === normalizedRoot) return true;
@@ -742,13 +757,25 @@ export class AgentSession {
 				sourceInfo: prompt.sourceInfo,
 			})),
 		];
+		let canonicalTarget: string;
+		try {
+			canonicalTarget = realpathSync(absolutePath);
+		} catch {
+			return undefined;
+		}
 		for (const resource of resources) {
 			if (getSourceBackend(resource.sourceInfo) !== "local") continue;
-			const resourcePath = resolvePath(resource.path);
-			const baseDir = resolvePath(resource.baseDir);
-			if (absolutePath === resourcePath || isSameOrChild(absolutePath, baseDir)) {
-				return this._getLocalResourceToolOperations(shellPath);
-			}
+			try {
+				const resourcePath = realpathSync(resource.path);
+				const baseDir = realpathSync(resource.baseDir);
+				if (canonicalTarget === resourcePath || isSameOrChild(canonicalTarget, baseDir)) {
+					return {
+						kind: "selection",
+						operations: this._getLocalResourceToolOperations(shellPath),
+						path: canonicalTarget,
+					};
+				}
+			} catch {}
 		}
 		return undefined;
 	}
@@ -756,78 +783,107 @@ export class AgentSession {
 	async configureRemoteSandbox(
 		options: { type: "ssh"; remote: string; cwd?: string } | { type: "daemon"; url: string; token?: string },
 	): Promise<ToolBackendInfo> {
-		return this._runActivity("remote backend configuration", async () => {
-			if (!(this._toolOperations instanceof DeferredRemoteToolOperations)) {
-				throw new Error("Remote backend can only be configured when Pi is started with --remote-deferred");
-			}
-			const info =
-				options.type === "ssh"
-					? await this._toolOperations.configure({ remote: options.remote, cwd: options.cwd })
-					: await this._toolOperations.configureRemote(options.url, { token: options.token });
-			await this.applyToolOperationsBackendChange(this._toolOperations);
-			return info;
-		});
+		return this._runActivity("remote backend configuration", () =>
+			this._enqueueSandboxTransition(async () => {
+				if (!(this._toolOperations instanceof DeferredRemoteToolOperations) || this._sandboxToolOperations) {
+					throw new Error("Remote backend can only be configured when Pi is started with --remote-deferred");
+				}
+				const currentInfo = this._toolOperations.getBackendInfo();
+				if (currentInfo.type !== "remote" || currentInfo.configured) {
+					throw new Error("Remote backend is already configured");
+				}
+				return this._activateSessionRemoteOperations(currentInfo.cwd, (operations) =>
+					options.type === "ssh"
+						? operations.configure({ remote: options.remote, cwd: options.cwd })
+						: operations.configureRemote(options.url, { token: options.token }),
+				);
+			}),
+		);
 	}
 
 	async activateSandboxDaemon(options: { url: string; token: string; expectedCwd: string }): Promise<ToolBackendInfo> {
-		return this._runActivity("sandbox daemon activation", async () => {
-			const previousToolOperations = this._toolOperations;
-			const currentDeferred =
-				this._toolOperations instanceof DeferredRemoteToolOperations ? this._toolOperations : undefined;
-			const currentDeferredInfo = currentDeferred?.getBackendInfo();
-			let operations =
-				currentDeferredInfo && "configured" in currentDeferredInfo && currentDeferredInfo.configured
-					? undefined
-					: currentDeferred;
-			let createdForSandbox = false;
-			if (!operations) {
-				operations = new DeferredRemoteToolOperations(options.expectedCwd);
-				createdForSandbox = true;
-			}
+		return this._runActivity("sandbox daemon activation", () =>
+			this._enqueueSandboxTransition(() =>
+				this._activateSessionRemoteOperations(options.expectedCwd, (operations) =>
+					operations.configureRemote(options.url, { token: options.token, expectedCwd: options.expectedCwd }),
+				),
+			),
+		);
+	}
+
+	private async _activateSessionRemoteOperations(
+		expectedCwd: string,
+		configure: (operations: DeferredRemoteToolOperations) => Promise<ToolBackendInfo>,
+	): Promise<ToolBackendInfo> {
+		if (this._sandboxToolOperations) throw new Error("A session sandbox backend is already active");
+		const previousToolOperations = this._toolOperations;
+		const operations = new DeferredRemoteToolOperations(expectedCwd);
+		try {
+			await configure(operations);
+		} catch (error) {
+			await operations.dispose();
+			throw error;
+		}
+		this._preSandboxToolOperations = previousToolOperations;
+		this._toolOperations = operations;
+		this._sandboxToolOperations = operations;
+		try {
+			await this.applyToolOperationsBackendChange(operations);
+		} catch (error) {
+			this._toolOperations = previousToolOperations;
+			this._sandboxToolOperations = undefined;
+			this._preSandboxToolOperations = undefined;
+			let rollbackError: unknown;
 			try {
-				await operations.configureRemote(options.url, { token: options.token, expectedCwd: options.expectedCwd });
-			} catch (error) {
-				if (createdForSandbox) await operations.dispose();
-				throw error;
+				await this.applyToolOperationsBackendChange(this.getToolOperations());
+			} catch (caught) {
+				rollbackError = caught;
 			}
-			if (createdForSandbox) {
-				this._preSandboxToolOperations = this._toolOperations;
-				this._toolOperations = operations;
-				this._sandboxToolOperations = operations;
+			await operations.dispose();
+			if (rollbackError) {
+				throw new AggregateError([error, rollbackError], "Sandbox activation and backend rollback both failed");
 			}
-			try {
-				await this.applyToolOperationsBackendChange(operations);
-			} catch (error) {
-				await operations.clear().catch(() => {});
-				if (createdForSandbox) {
-					await operations.dispose();
-					this._toolOperations = previousToolOperations;
-					this._sandboxToolOperations = undefined;
-					this._preSandboxToolOperations = undefined;
-				}
-				throw error;
-			}
-			return operations.getBackendInfo();
-		});
+			throw error;
+		}
+		return operations.getBackendInfo();
 	}
 
 	async clearRemoteSandbox(): Promise<void> {
-		return this._runActivity("remote backend clearing", async () => {
-			if (!(this._toolOperations instanceof DeferredRemoteToolOperations)) {
-				throw new Error(
-					"Remote backend can only be cleared when Pi is started with --remote-deferred or sandbox mode is active",
-				);
-			}
-			const sandboxOwned = this._sandboxToolOperations === this._toolOperations;
-			const operations = this._toolOperations;
-			await operations.clear();
-			if (sandboxOwned) {
-				await operations.dispose();
-				this._toolOperations = this._preSandboxToolOperations;
+		return this._runActivity("remote backend clearing", () =>
+			this._enqueueSandboxTransition(async () => {
+				const operations = this._sandboxToolOperations;
+				if (!operations || operations !== this._toolOperations) {
+					throw new Error("No session sandbox backend is active");
+				}
+				const previousToolOperations = this._preSandboxToolOperations;
+				this._toolOperations = previousToolOperations;
+				this._sandboxToolOperations = undefined;
 				this._preSandboxToolOperations = undefined;
-			}
-			await this.applyToolOperationsBackendChange(this.getToolOperations());
-		});
+				try {
+					await this.applyToolOperationsBackendChange(this.getToolOperations());
+				} catch (error) {
+					this._toolOperations = operations;
+					this._sandboxToolOperations = operations;
+					this._preSandboxToolOperations = previousToolOperations;
+					try {
+						await this.applyToolOperationsBackendChange(operations);
+					} catch (rollbackError) {
+						throw new AggregateError([error, rollbackError], "Sandbox clearing and backend rollback both failed");
+					}
+					throw error;
+				}
+				await operations.dispose();
+			}),
+		);
+	}
+
+	private _enqueueSandboxTransition<T>(operation: () => Promise<T>): Promise<T> {
+		const result = this._sandboxTransitionQueue.then(operation, operation);
+		this._sandboxTransitionQueue = result.then(
+			() => undefined,
+			() => undefined,
+		);
+		return result;
 	}
 
 	async uploadFile(sourcePath: string, destinationPath: string): Promise<void> {
@@ -1532,6 +1588,7 @@ export class AgentSession {
 
 	private async _dispose(): Promise<void> {
 		await this.prepareForShutdown();
+		await this._sandboxTransitionQueue;
 
 		this._extensionRunner.invalidate(STALE_EXTENSION_CONTEXT_MESSAGE);
 		this._disconnectFromAgent();
@@ -1542,14 +1599,18 @@ export class AgentSession {
 		const lspRuntimeState = this._lspRuntimeState;
 		const workspaceToolHost = this._workspaceToolHost;
 		const retiredWorkspaceToolHosts = this._retiredWorkspaceToolHosts;
+		const sandboxToolOperations = this._sandboxToolOperations;
 		this._localResourceToolOperations = undefined;
 		this._lspRuntimeState = undefined;
 		this._workspaceToolHost = undefined;
 		this._retiredWorkspaceToolHosts = [];
+		this._sandboxToolOperations = undefined;
+		this._preSandboxToolOperations = undefined;
 		await Promise.allSettled([
 			Promise.resolve().then(() => localResourceToolOperations?.dispose?.()),
 			Promise.resolve().then(() => lspRuntimeState?.manager.shutdownAll()),
 			Promise.resolve().then(() => workspaceToolHost?.dispose()),
+			Promise.resolve().then(() => sandboxToolOperations?.dispose()),
 			...retiredWorkspaceToolHosts.map((host) => Promise.resolve().then(() => host.dispose())),
 		]);
 	}
@@ -4218,6 +4279,8 @@ export class AgentSession {
 					)
 				: {
 						...Object.fromEntries(workspaceToolHost?.getDefinitions() ?? []),
+						session_search: createSessionSearchToolDefinition(this.session) as unknown as ToolDefinition,
+						session_entry_get: createSessionEntryGetToolDefinition(this.session) as unknown as ToolDefinition,
 						websearch: createWebsearchToolDefinition(
 							parseWebsearchToolOptions(this.settingsManager.getToolSettings("websearch")),
 						) as unknown as ToolDefinition,

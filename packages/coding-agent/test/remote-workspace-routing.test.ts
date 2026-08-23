@@ -8,7 +8,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
 import { PiAgent } from "../src/core/pi-agent.ts";
-import { InMemorySessionManager, LocalSessionManager } from "../src/core/session-manager.ts";
+import { InMemorySessionManager } from "../src/core/session/in-memory-session-manager.ts";
+import { LocalSessionManager } from "../src/core/session/local-session-manager.ts";
 import {
 	borrowToolOperations,
 	createRemoteToolOperations,
@@ -404,6 +405,35 @@ describe("remote canonical workspace tool routing", () => {
 		expect(sandboxExpected.getBackendInfo()).toMatchObject({ type: "remote", cwd: workspaceRoot, configured: true });
 		await sandboxExpected.dispose();
 		await server.close();
+	});
+	it("keeps sandbox overlays session-local across new sessions", async () => {
+		const workspaceRoot = await createTemporaryDirectory();
+		const { server, address } = await createServer(workspaceRoot, false);
+		const deferred = new DeferredRemoteToolOperations(workspaceRoot);
+		const pi = await PiAgent.create({
+			cwd: workspaceRoot,
+			toolOperations: deferred,
+			sessionManager: new InMemorySessionManager(workspaceRoot),
+		});
+		try {
+			const first = await pi.createAgentSession();
+			const activations = await Promise.allSettled([
+				first.activateSandboxDaemon({ url: address.url, token: "", expectedCwd: workspaceRoot }),
+				first.activateSandboxDaemon({ url: address.url, token: "", expectedCwd: workspaceRoot }),
+			]);
+			expect(activations.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+			expect(activations.filter((result) => result.status === "rejected")).toHaveLength(1);
+			expect(first.getToolBackendInfo()).toMatchObject({ type: "remote", configured: true });
+			expect(deferred.getBackendInfo()).toEqual({ type: "remote", cwd: workspaceRoot, configured: false });
+
+			await pi.newSession();
+			expect(pi.session.getToolBackendInfo()).toEqual({ type: "remote", cwd: workspaceRoot, configured: false });
+			expect(deferred.getBackendInfo()).toEqual({ type: "remote", cwd: workspaceRoot, configured: false });
+		} finally {
+			await pi.dispose();
+			await deferred.dispose();
+			await server.close();
+		}
 	});
 	it("does not expose an authenticated daemon bearer token to provider header hooks", async () => {
 		const workspaceRoot = await createTemporaryDirectory();

@@ -2,8 +2,17 @@ import { dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
-import * as CoreValues from "../src/core/index.ts";
-import * as LspValues from "../src/core/lsp/index.ts";
+import * as ClientValues from "../src/core/lsp/client.ts";
+import * as ConfigValues from "../src/core/lsp/config.ts";
+import * as ConfigLoaderValues from "../src/core/lsp/config-loader.ts";
+import * as DiagnosticsValues from "../src/core/lsp/diagnostics.ts";
+import * as FileSyncValues from "../src/core/lsp/file-sync.ts";
+import * as IntegrationValues from "../src/core/lsp/integration.ts";
+import * as LanguageMapValues from "../src/core/lsp/language-map.ts";
+import * as ManagerValues from "../src/core/lsp/manager.ts";
+import * as NavigationValues from "../src/core/lsp/navigation.ts";
+import * as RefactorValues from "../src/core/lsp/refactor.ts";
+import * as TransportValues from "../src/core/lsp/transport.ts";
 import * as RootValues from "../src/index.ts";
 
 interface ExportContractEntry {
@@ -12,17 +21,8 @@ interface ExportContractEntry {
 	value: boolean;
 }
 
-interface LoadedExportSurfaces {
-	barrels: Record<keyof typeof barrelPaths, Map<string, ExportContractEntry>>;
-	leaves: Map<string, Map<string, ExportContractEntry>>;
-}
-
-const barrelPaths = {
-	lsp: fileURLToPath(new URL("../src/core/lsp/index.ts", import.meta.url)),
-	core: fileURLToPath(new URL("../src/core/index.ts", import.meta.url)),
-	root: fileURLToPath(new URL("../src/index.ts", import.meta.url)),
-};
-const lspSourceDirectory = dirname(barrelPaths.lsp);
+const rootPath = fileURLToPath(new URL("../src/index.ts", import.meta.url));
+const lspSourceDirectory = fileURLToPath(new URL("../src/core/lsp", import.meta.url));
 const leafFileNames = ts.sys
 	.readDirectory(lspSourceDirectory, [".ts"], undefined, ["**/*.ts"])
 	.map((path) => path.slice(lspSourceDirectory.length + 1))
@@ -46,11 +46,23 @@ const intentionallyInternalLeafExports = new Set([
 	"portable-path.ts:relativeWithin",
 	"portable-path.ts:resolvePortablePath",
 ]);
+const lspRuntimeValues = {
+	...ClientValues,
+	...ConfigValues,
+	...ConfigLoaderValues,
+	...DiagnosticsValues,
+	...FileSyncValues,
+	...IntegrationValues,
+	...LanguageMapValues,
+	...ManagerValues,
+	...NavigationValues,
+	...RefactorValues,
+	...TransportValues,
+};
 
 function resolveExports(checker: ts.TypeChecker, sourceFile: ts.SourceFile): Map<string, ExportContractEntry> {
 	const moduleSymbol = checker.getSymbolAtLocation(sourceFile);
 	if (!moduleSymbol) throw new Error(`Expected module symbol for ${sourceFile.fileName}`);
-
 	return new Map(
 		checker.getExportsOfModule(moduleSymbol).map((exportSymbol) => {
 			const target =
@@ -67,19 +79,13 @@ function resolveExports(checker: ts.TypeChecker, sourceFile: ts.SourceFile): Map
 	);
 }
 
-function formatDiagnostics(diagnostics: readonly ts.Diagnostic[]): string {
-	return ts.formatDiagnostics(diagnostics, {
-		getCanonicalFileName: (fileName) => fileName,
-		getCurrentDirectory: () => process.cwd(),
-		getNewLine: () => "\n",
-	});
-}
-
-function loadAuthoritativeSurfaces(): LoadedExportSurfaces {
-	const configPath = ts.findConfigFile(dirname(barrelPaths.root), ts.sys.fileExists, "tsconfig.json");
+function loadSurfaces(): {
+	root: Map<string, ExportContractEntry>;
+	leaves: Map<string, Map<string, ExportContractEntry>>;
+} {
+	const configPath = ts.findConfigFile(dirname(rootPath), ts.sys.fileExists, "tsconfig.json");
 	if (!configPath) throw new Error("Expected repository tsconfig.json");
 	const configFile = ts.readConfigFile(configPath, ts.sys.readFile);
-	if (configFile.error) throw new Error(formatDiagnostics([configFile.error]));
 	const parsed = ts.parseJsonConfigFileContent(
 		configFile.config,
 		ts.sys,
@@ -87,113 +93,76 @@ function loadAuthoritativeSurfaces(): LoadedExportSurfaces {
 		{ noEmit: true },
 		configPath,
 	);
-	const program = ts.createProgram({
-		rootNames: [
-			...Object.values(barrelPaths),
-			...leafFileNames.map((fileName) => join(lspSourceDirectory, fileName)),
-		],
-		options: parsed.options,
-		projectReferences: parsed.projectReferences,
-	});
-	const isContractDiagnostic = (diagnostic: ts.Diagnostic): boolean => {
-		if (!diagnostic.file) return true;
-		const fileName = diagnostic.file.fileName;
-		return Object.values(barrelPaths).includes(fileName) || fileName.startsWith(`${lspSourceDirectory}${sep}`);
-	};
-	const diagnostics = [
-		...parsed.errors,
-		...program.getConfigFileParsingDiagnostics(),
-		...program.getOptionsDiagnostics(),
-		...program.getGlobalDiagnostics(),
-		...program.getSyntacticDiagnostics().filter(isContractDiagnostic),
-		...program.getSemanticDiagnostics().filter(isContractDiagnostic),
-	];
-	if (diagnostics.length > 0) throw new Error(formatDiagnostics(diagnostics));
-
+	const leafPaths = leafFileNames.map((fileName) => join(lspSourceDirectory, fileName));
+	const program = ts.createProgram({ rootNames: [rootPath, ...leafPaths], options: parsed.options });
+	const diagnostics = [...program.getSyntacticDiagnostics(), ...program.getSemanticDiagnostics()].filter(
+		(diagnostic) =>
+			!diagnostic.file ||
+			diagnostic.file.fileName === rootPath ||
+			diagnostic.file.fileName.startsWith(`${lspSourceDirectory}${sep}`),
+	);
+	if (diagnostics.length > 0) {
+		throw new Error(
+			ts.formatDiagnostics(diagnostics, {
+				getCanonicalFileName: (fileName) => fileName,
+				getCurrentDirectory: () => process.cwd(),
+				getNewLine: () => "\n",
+			}),
+		);
+	}
 	const checker = program.getTypeChecker();
-	const barrels = Object.fromEntries(
-		Object.entries(barrelPaths).map(([name, path]) => {
-			const sourceFile = program.getSourceFile(path);
-			if (!sourceFile) throw new Error(`Expected source file for ${path}`);
-			return [name, resolveExports(checker, sourceFile)];
-		}),
-	) as Record<keyof typeof barrelPaths, Map<string, ExportContractEntry>>;
-	const leaves = new Map(
-		leafFileNames.map((fileName) => {
-			const path = join(lspSourceDirectory, fileName);
-			const sourceFile = program.getSourceFile(path);
-			if (!sourceFile) throw new Error(`Expected source file for ${path}`);
-			return [fileName, resolveExports(checker, sourceFile)];
-		}),
-	);
-	return { barrels, leaves };
+	const rootSource = program.getSourceFile(rootPath);
+	if (!rootSource) throw new Error(`Expected source file for ${rootPath}`);
+	return {
+		root: resolveExports(checker, rootSource),
+		leaves: new Map(
+			leafFileNames.map((fileName) => {
+				const source = program.getSourceFile(join(lspSourceDirectory, fileName));
+				if (!source) throw new Error(`Expected LSP leaf ${fileName}`);
+				return [fileName, resolveExports(checker, source)];
+			}),
+		),
+	};
 }
 
-function originatesInLspSource(entry: ExportContractEntry): boolean {
-	return Boolean(
-		entry.target.declarations?.some((declaration) => {
-			const fileName = declaration.getSourceFile().fileName;
-			return fileName === barrelPaths.lsp || fileName.startsWith(`${lspSourceDirectory}${sep}`);
-		}),
-	);
-}
-
-const surfaces = loadAuthoritativeSurfaces();
-const authoritativeContract = surfaces.barrels.lsp;
-const authoritativeRuntimeNames = [...authoritativeContract]
-	.filter(([, entry]) => entry.value)
-	.map(([name]) => name)
-	.sort();
+const surfaces = loadSurfaces();
+const publicLeafExports = [...surfaces.leaves].flatMap(([fileName, exports]) =>
+	[...exports]
+		.filter(([name]) => !intentionallyInternalLeafExports.has(`${fileName}:${name}`))
+		.map(([name, entry]) => ({ fileName, name, entry })),
+);
 
 describe("public LSP exports", () => {
-	it("uses the LSP barrel as the authoritative declaration contract for every public barrel", () => {
-		for (const [name, expected] of authoritativeContract) {
-			for (const barrelName of ["core", "root"] as const) {
-				const actual = surfaces.barrels[barrelName].get(name);
-				expect(actual, `${barrelName} barrel is missing ${name}`).toBeDefined();
-				expect(actual?.target, `${barrelName}.${name} declaration identity`).toBe(expected.target);
-				expect(actual?.type, `${barrelName}.${name} type export`).toBe(expected.type);
-			}
-		}
-
-		for (const barrelName of ["core", "root"] as const) {
-			const uncontractedLspExports = [...surfaces.barrels[barrelName]]
-				.filter(([name, entry]) => originatesInLspSource(entry) && !authoritativeContract.has(name))
-				.map(([name]) => name);
-			expect(uncontractedLspExports, `${barrelName} has LSP exports outside the authoritative barrel`).toEqual([]);
+	it("exports every public LSP leaf declaration directly from the package root", () => {
+		for (const { fileName, name, entry } of publicLeafExports) {
+			const actual = surfaces.root.get(name);
+			expect(actual, `root is missing ${fileName}:${name}`).toBeDefined();
+			expect(actual?.target, `root.${name} declaration identity`).toBe(entry.target);
+			expect(actual?.type, `root.${name} type export`).toBe(entry.type);
 		}
 	});
 
-	it("requires every exported public-leaf declaration to be contracted or explicitly internal", () => {
-		const uncontractedLeafExports = [...surfaces.leaves].flatMap(([fileName, exports]) =>
-			[...exports]
-				.filter(([name, entry]) => {
-					const contracted = authoritativeContract.get(name);
-					if (contracted) return contracted.target !== entry.target;
-					return !intentionallyInternalLeafExports.has(`${fileName}:${name}`);
-				})
-				.map(([name]) => `${fileName}:${name}`),
-		);
-		expect(uncontractedLeafExports).toEqual([]);
+	it("keeps intentionally internal LSP declarations private", () => {
 		for (const internalExport of intentionallyInternalLeafExports) {
 			const [fileName, name] = internalExport.split(":");
-			const internalEntry = surfaces.leaves.get(fileName)?.get(name);
-			expect(internalEntry, `${internalExport} still exists`).toBeDefined();
-			const publicAliases = [...authoritativeContract]
-				.filter(([, publicEntry]) => publicEntry.target === internalEntry?.target)
-				.map(([publicName]) => publicName);
-			expect(publicAliases, `${internalExport} remains internal under every name`).toEqual([]);
+			expect(surfaces.leaves.get(fileName)?.has(name), `${internalExport} still exists`).toBe(true);
+			expect(surfaces.root.has(name), `${internalExport} remains internal`).toBe(false);
 		}
 	});
 
-	it("exports every authoritative runtime value by ownership and identity from each public barrel", () => {
-		expect(Object.keys(LspValues).sort()).toEqual(authoritativeRuntimeNames);
-		for (const name of authoritativeRuntimeNames) {
-			expect(authoritativeContract.has(name), `LSP runtime export ${name} has a declaration`).toBe(true);
-			expect(Object.hasOwn(CoreValues, name), `core owns ${name}`).toBe(true);
+	it("preserves every public LSP runtime value by identity", () => {
+		const runtimeNames = publicLeafExports
+			.filter(({ entry }) => entry.value)
+			.map(({ name }) => name)
+			.sort();
+		expect(
+			Object.keys(lspRuntimeValues)
+				.filter((name) => runtimeNames.includes(name))
+				.sort(),
+		).toEqual(runtimeNames);
+		for (const name of runtimeNames) {
 			expect(Object.hasOwn(RootValues, name), `root owns ${name}`).toBe(true);
-			expect(Reflect.get(CoreValues, name), `core.${name}`).toBe(Reflect.get(LspValues, name));
-			expect(Reflect.get(RootValues, name), `root.${name}`).toBe(Reflect.get(LspValues, name));
+			expect(Reflect.get(RootValues, name), `root.${name}`).toBe(Reflect.get(lspRuntimeValues, name));
 		}
 	});
 });

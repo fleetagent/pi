@@ -5,8 +5,8 @@ import { Container, type Terminal, Text, TuiMainScreen } from "@fleetagent/pi-tu
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { ExtensionContext } from "../src/core/extensions/types.ts";
 import { createEditToolDefinition, type EditToolInput } from "../src/core/tools/edit.ts";
-import { initHasher, lineHashes } from "../src/core/tools/hashline/index.ts";
-import { LocalToolOperations } from "../src/core/tools/index.ts";
+import { initHasher, lineHashes } from "../src/core/tools/hashline/hash.ts";
+import { LocalToolOperations } from "../src/core/tools/operations.ts";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 

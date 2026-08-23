@@ -11,11 +11,13 @@ import { getOAuthApiKey } from "@fleetagent/pi-ai/oauth";
 import { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { createEventBus } from "../src/core/event-bus.ts";
-import type { Extension, ExtensionFactory, LoadExtensionsResult } from "../src/core/extensions/index.ts";
 import { createExtensionRuntime, loadExtensionFromFactory } from "../src/core/extensions/loader.ts";
+import type { Extension, ExtensionFactory, LoadExtensionsResult } from "../src/core/extensions/types.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
 import type { ResourceLoader } from "../src/core/resource-loader.ts";
-import { InMemorySessionManager, LocalSessionManager, type Session } from "../src/core/session-manager.ts";
+import { InMemorySessionManager } from "../src/core/session/in-memory-session-manager.ts";
+import { LocalSessionManager } from "../src/core/session/local-session-manager.ts";
+import type { Session } from "../src/core/session/session.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { createCodingTools, LocalToolOperations } from "../src/index.ts";
 

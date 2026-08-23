@@ -29,10 +29,12 @@ import {
 	parseRemoteWorkspaceToolResult,
 	type RemoteLspStatus,
 	type RemoteWorkspaceClientMessage,
+} from "../remote-workspace-protocol/contract.ts";
+import {
 	RemoteWorkspaceClientProtocol,
 	type RemoteWorkspaceProtocolCloseReason,
 	RemoteWorkspaceRequestError,
-} from "../remote-workspace-protocol/index.ts";
+} from "../remote-workspace-protocol/session.ts";
 import type { WorkspaceIdentity } from "../workspace-identity.ts";
 
 export type ToolAccessMode = "exists" | "read" | "write" | "readwrite";

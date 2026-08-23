@@ -10,7 +10,8 @@ import { getLanguageFromPath, highlightCode, type Theme } from "../../modes/inte
 import { processImage } from "../../utils/image-process.ts";
 import { formatPathRelativeToCwdOrAbsolute } from "../../utils/paths.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
-import { fmtRegion, HASH_SEP, initHasher, lineHashes } from "./hashline/index.ts";
+import { fmtRegion } from "./hashline/apply.ts";
+import { HASH_SEP, initHasher, lineHashes } from "./hashline/hash.ts";
 import { visLines as hashlineVisLines } from "./hashline-utils.ts";
 import type { ToolOperations } from "./operations.ts";
 import { resolveReadPathAsync, resolveToCwd } from "./path-utils.ts";
@@ -37,11 +38,27 @@ interface CompactReadClassification {
 
 const COMPACT_RESOURCE_FILE_NAMES = new Set(["AGENTS.override.md", "AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"]);
 
+export interface ReadToolOperationsSelection {
+	kind: "selection";
+	operations: ToolOperations;
+	path: string;
+}
+
+export type ReadToolOperations = ToolOperations | ReadToolOperationsSelection;
+
 export interface ReadToolOptions {
 	/** Whether to auto-resize images to 2000x2000 max. Default: true */
 	autoResizeImages?: boolean;
-	/** Select a backend for a resolved absolute path. Defaults to the tool backend. */
-	operationsForPath?: (absolutePath: string) => ToolOperations | undefined;
+	/** Select a backend, and optionally a canonical path, for a resolved absolute path. Defaults to the tool backend. */
+	operationsForPath?: (absolutePath: string) => ReadToolOperations | undefined;
+}
+
+function isReadToolOperationsSelection(value: ReadToolOperations): value is ReadToolOperationsSelection {
+	return "kind" in value && value.kind === "selection";
+}
+
+function getReadToolOperations(value: ReadToolOperations | undefined): ToolOperations | undefined {
+	return value && isReadToolOperationsSelection(value) ? value.operations : value;
 }
 
 type ReadRenderArgs = { path?: string; file_path?: string; offset?: number; limit?: number };
@@ -230,20 +247,23 @@ export function createReadToolDefinition(
 					(async () => {
 						try {
 							const absolutePath = await resolveReadPathAsync(path, cwd);
-							const readOps = operationsForPath?.(absolutePath) ?? ops;
+							const selection = operationsForPath?.(absolutePath);
+							const readOps = getReadToolOperations(selection) ?? ops;
+							const readPath =
+								selection && isReadToolOperationsSelection(selection) ? selection.path : absolutePath;
 							if (aborted) return;
 							// Check if file exists and is readable.
-							await readOps.access(absolutePath, "read");
+							await readOps.access(readPath, "read");
 							if (aborted) return;
 							const mimeType = readOps.detectImageMimeType
-								? await readOps.detectImageMimeType(absolutePath)
+								? await readOps.detectImageMimeType(readPath)
 								: undefined;
 							let content: (TextContent | ImageContent)[];
 							let details: ReadToolDetails | undefined;
 							const nonVisionImageNote = getNonVisionImageNote(ctx?.model);
 							if (mimeType) {
 								// Read image as binary.
-								const buffer = await readOps.readFile(absolutePath);
+								const buffer = await readOps.readFile(readPath);
 								const processed = await processImage(buffer, mimeType, { autoResizeImages });
 								if (!processed.ok) {
 									let textNote = `Read image file [${mimeType}]\n${processed.message}`;
@@ -261,7 +281,7 @@ export function createReadToolDefinition(
 							} else {
 								// Read text content with hashline anchors.
 								await initHasher();
-								const buffer = await readOps.readFile(absolutePath);
+								const buffer = await readOps.readFile(readPath);
 								const textContent = buffer.toString("utf-8").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 								const allLines = hashlineVisLines(textContent);
 								const totalFileLines = allLines.length;
@@ -271,7 +291,7 @@ export function createReadToolDefinition(
 									if (startLineDisplay !== 1) {
 										throw new Error(`Offset ${offset} is beyond end of file (0 lines total)`);
 									}
-									const emptyHash = (await lineHashes(textContent, absolutePath))[0] ?? "";
+									const emptyHash = (await lineHashes(textContent, readPath))[0] ?? "";
 									content = [
 										{
 											type: "text",
@@ -284,7 +304,7 @@ export function createReadToolDefinition(
 									}
 									const endLine =
 										limit !== undefined ? Math.min(startLine + limit, totalFileLines) : totalFileLines;
-									const allHashes = await lineHashes(textContent, absolutePath);
+									const allHashes = await lineHashes(textContent, readPath);
 									const selectedContent = fmtRegion(
 										allHashes.slice(startLine, endLine),
 										allLines.slice(startLine, endLine),
@@ -332,7 +352,9 @@ export function createReadToolDefinition(
 			const classification = !context.expanded ? getCompactReadClassification(args, context.cwd) : undefined;
 			const renderArgs = args as ReadRenderArgs | undefined;
 			const rawPath = str(renderArgs?.file_path ?? renderArgs?.path);
-			const displayOps = rawPath ? (operationsForPath?.(resolveToCwd(rawPath, cwd)) ?? ops) : ops;
+			const displayOps = rawPath
+				? (getReadToolOperations(operationsForPath?.(resolveToCwd(rawPath, cwd))) ?? ops)
+				: ops;
 			text.setText(
 				formatBackendIcon(displayOps.getBackendInfo?.(), theme) +
 					(classification ? formatCompactReadCall(classification, args, theme) : formatReadCall(args, theme)),

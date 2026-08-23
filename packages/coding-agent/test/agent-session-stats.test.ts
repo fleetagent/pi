@@ -4,7 +4,8 @@ import { describe, expect, it } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
-import { InMemorySessionManager, type Session } from "../src/core/session-manager.ts";
+import { InMemorySessionManager } from "../src/core/session/in-memory-session-manager.ts";
+import type { Session } from "../src/core/session/session.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { createTestResourceLoader } from "./utilities.ts";
 

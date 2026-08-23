@@ -540,7 +540,7 @@ export class RemoteWorkspaceClientProtocol {
 			return;
 		}
 		if (message.type === "catalog_changed") {
-			if (!this.negotiated || !this.negotiated.capabilities.includes("catalog_refresh")) {
+			if (!this.negotiated?.capabilities.includes("catalog_refresh")) {
 				await this.protocolFailure(new Error("Unnegotiated catalog event"));
 				return;
 			}

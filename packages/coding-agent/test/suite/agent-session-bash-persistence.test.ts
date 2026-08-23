@@ -3,7 +3,7 @@ import type { AgentTool } from "@fleetagent/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@fleetagent/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
-import { LocalToolOperations } from "../../src/core/tools/index.ts";
+import { LocalToolOperations } from "../../src/core/tools/operations.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
 function getEntryTypes(harness: Harness): string[] {

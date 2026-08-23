@@ -4,7 +4,7 @@
 
 import { ProcessTerminal, setKeybindings, TuiMainScreen } from "@fleetagent/pi-tui";
 import { KeybindingsManager } from "../core/keybindings.ts";
-import type { SessionInfo, SessionListProgress } from "../core/session-manager.ts";
+import type { SessionInfo, SessionListProgress } from "../core/session/types.ts";
 import { SessionSelectorComponent } from "../modes/interactive/components/session-selector.ts";
 
 type SessionsLoader = (onProgress?: SessionListProgress) => Promise<SessionInfo[]>;

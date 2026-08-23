@@ -4,8 +4,8 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ExtensionContext } from "../src/core/extensions/types.ts";
 import { createEditToolDefinition } from "../src/core/tools/edit.ts";
-import { initHasher, lineHashes } from "../src/core/tools/hashline/index.ts";
-import { LocalToolOperations } from "../src/core/tools/index.ts";
+import { initHasher, lineHashes } from "../src/core/tools/hashline/hash.ts";
+import { LocalToolOperations } from "../src/core/tools/operations.ts";
 
 const tempDirs: string[] = [];
 

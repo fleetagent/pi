@@ -10,7 +10,7 @@ import { executeBashWithOperations } from "../bash-executor.ts";
 import type { ResourceDiagnostic } from "../diagnostics.ts";
 import type { KeybindingsConfig } from "../keybindings.ts";
 import type { ModelRegistry } from "../model-registry.ts";
-import type { Session } from "../session-manager.ts";
+import type { Session } from "../session/session.ts";
 import type { BuildSystemPromptOptions } from "../system-prompt.ts";
 import type {
 	BeforeAgentStartEvent,
@@ -442,14 +442,14 @@ export class ExtensionRunner {
 
 	loadRegisteredTool(toolName: string): boolean {
 		const tool = this.getFirstRegisteredTool(toolName);
-		if (!tool || tool.lazy !== true) return false;
+		if (tool?.lazy !== true) return false;
 		tool.loaded = true;
 		return true;
 	}
 
 	unloadRegisteredTool(toolName: string): boolean {
 		const tool = this.getFirstRegisteredTool(toolName);
-		if (!tool || tool.lazy !== true) return false;
+		if (tool?.lazy !== true) return false;
 		tool.loaded = false;
 		return true;
 	}

@@ -10,12 +10,11 @@ import type { ImageContent, Model } from "@fleetagent/pi-ai";
 import type { TSchema } from "typebox";
 import type { SessionStats, StructuredResponse } from "../../core/agent-session.ts";
 import type { BashResult } from "../../core/bash-executor.ts";
-import type { CompactionResult } from "../../core/compaction/index.ts";
-import type { ToolDefinition, ToolInfo } from "../../core/extensions/index.ts";
-import type { ExtensionInstructionRegistration } from "../../core/extensions/types.ts";
+import type { CompactionResult } from "../../core/compaction/compaction.ts";
+import type { ExtensionInstructionRegistration, ToolDefinition, ToolInfo } from "../../core/extensions/types.ts";
 import type { SessionEntry, SessionInfo, SessionTreeNode } from "../../core/session/types.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
-import type { ToolBackendInfo } from "../../core/tools/index.ts";
+import type { ToolBackendInfo } from "../../core/tools/operations.ts";
 
 // ============================================================================
 // RPC Commands (stdin)

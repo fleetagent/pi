@@ -5,14 +5,11 @@ import type { AgentMessage, AgentToolResult } from "@fleetagent/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@fleetagent/pi-ai";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
-import { prepareBranchEntries, prepareCompaction } from "../../../src/core/compaction/index.ts";
-import {
-	buildSessionContext,
-	type CustomMessageEntry,
-	LocalSessionManager,
-	type SessionEntry,
-	type SessionMessageEntry,
-} from "../../../src/core/session-manager.ts";
+import { prepareBranchEntries } from "../../../src/core/compaction/branch-summarization.ts";
+import { prepareCompaction } from "../../../src/core/compaction/compaction.ts";
+import { buildSessionContext } from "../../../src/core/session/context.ts";
+import { LocalSessionManager } from "../../../src/core/session/local-session-manager.ts";
+import type { CustomMessageEntry, SessionEntry, SessionMessageEntry } from "../../../src/core/session/types.ts";
 import type { ExtensionFactory } from "../../../src/index.ts";
 import { createHarness } from "../harness.ts";
 

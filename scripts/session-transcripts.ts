@@ -14,7 +14,8 @@ import { spawn } from "child_process";
 import { createInterface } from "node:readline";
 import { homedir } from "os";
 import { join, resolve } from "path";
-import { parseSessionEntries, type SessionMessageEntry } from "../packages/coding-agent/src/core/session-manager.ts";
+import { parseSessionEntries } from "../packages/coding-agent/src/core/session/migrations.ts";
+import type { SessionMessageEntry } from "../packages/coding-agent/src/core/session/types.ts";
 import chalk from "chalk";
 
 const MAX_CHARS_PER_FILE = 100_000; // ~20k tokens, leaving room for prompt + analysis + output

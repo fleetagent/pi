@@ -3,7 +3,7 @@ import type { AssistantMessage, ToolResultMessage, Usage } from "@fleetagent/pi-
 import { Container, Text, type TUI } from "@fleetagent/pi-tui";
 import { beforeAll, describe, expect, test, vi } from "vitest";
 import type { AgentSessionEvent } from "../../../src/core/agent-session.ts";
-import type { SessionContext } from "../../../src/core/session-manager.ts";
+import type { SessionContext } from "../../../src/core/session/types.ts";
 import type { ToolExecutionComponent } from "../../../src/modes/interactive/components/tool-execution.ts";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../../../src/modes/interactive/theme/theme.ts";

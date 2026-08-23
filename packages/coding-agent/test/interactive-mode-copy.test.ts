@@ -9,7 +9,7 @@ vi.mock("../src/utils/clipboard.ts", () => ({
 	readClipboardText: vi.fn(async () => null),
 }));
 
-import type { SessionTreeNode } from "../src/core/session-manager.ts";
+import type { SessionTreeNode } from "../src/core/session/types.ts";
 import type { TreeSelectorComponent } from "../src/modes/interactive/components/tree-selector.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";

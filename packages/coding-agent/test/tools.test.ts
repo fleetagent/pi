@@ -5,8 +5,8 @@ import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { executeBashWithOperations } from "../src/core/bash-executor.ts";
 import { createBashTool, createLocalBashOperations } from "../src/core/tools/bash.ts";
-import { initHasher, lineHashes } from "../src/core/tools/hashline/index.ts";
-import { DeferredRemoteToolOperations, LocalToolOperations } from "../src/core/tools/index.ts";
+import { initHasher, lineHashes } from "../src/core/tools/hashline/hash.ts";
+import { DeferredRemoteToolOperations, LocalToolOperations } from "../src/core/tools/operations.ts";
 import {
 	createEditTool,
 	createFindTool,

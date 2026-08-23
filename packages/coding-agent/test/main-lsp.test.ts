@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PiAgent } from "../src/core/pi-agent.ts";
-import { LocalSessionManager } from "../src/core/session-manager.ts";
+import { LocalSessionManager } from "../src/core/session/local-session-manager.ts";
 import { main } from "../src/main.ts";
 
 const LSP_TOOL_NAMES = [

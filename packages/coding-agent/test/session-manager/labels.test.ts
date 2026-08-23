@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { InMemorySessionManager, type LabelEntry } from "../../src/core/session-manager.ts";
+import { InMemorySessionManager } from "../../src/core/session/in-memory-session-manager.ts";
+import type { LabelEntry } from "../../src/core/session/types.ts";
 
 describe("SessionManager labels", () => {
 	it("sets and gets labels", () => {

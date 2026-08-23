@@ -65,6 +65,7 @@
 * Add authenticated remote project-resource provenance, remote subagent preset discovery, and operator-owned colocated LSP tools/status for daemon workspaces.
 * Add integrated `pi --daemon` documentation and a Docker example that runs the packaged Pi CLI.
 * Add hidden user-only `/sandbox start|list|stop` documentation, settings references, and a Docker base-image guide for `pi --daemon` sandbox containers.
+* Add host-owned `session_search` and `session_entry_get` tools for bounded regex searching of finalized active-session history across compaction boundaries and fetching exact model-visible entries by ID without routing session data through workspace backends.
 * Allow extension `tool_call` policies to mark blocked calls as terminating, skipping the follow-up model call when every finalized batch result terminates ([upstream `1eb988cfe`](https://github.com/fleetagent/pi/commit/1eb988cfe88fb0ff740ff62583d2f16359f7b6b0)).
 * Add an authoritative AgentSession `waitForIdle()` boundary and additive extension/RPC `agent_settled` event after retries, compaction, queued continuations, runtime synchronization, remote operations, and child subagent calls settle ([upstream `e9fa5a68a`](https://github.com/fleetagent/pi/commit/e9fa5a68a1967f42a90a1c07f512bc8af63517a9)).
 * Add per-directory `AGENTS.override.md` context files that replace `AGENTS.md` or `CLAUDE.md` only in the same directory across local, SSH, and daemon instruction discovery, while preserving ancestor layering ([upstream `8ecf8a988`](https://github.com/fleetagent/pi/commit/8ecf8a9883d1cb7c78d07c0fd64d32d6a1fd2c4c)).
@@ -93,6 +94,8 @@
 * Retire daemon file-transfer and resource-limit work from the separate package into the integrated, bounded `pi --daemon` protocol.
 ### Fixed
 
+* Keep registered host-local skills, rules, prompts, and their referenced assets readable after SSH, remote, or sandbox workspace tools switch to canonical remote execution.
+* Keep sandbox backends session-local, allocate non-conflicting daemon ports for concurrent session containers, restore sandboxes when returning to their sessions, stop all process-owned sandbox containers during graceful Pi shutdown, and confine subagents to the parent's active workspace backend.
 * Preserve extension and custom TUI method wrappers without recursive self-calls while routing captured methods to the active renderer after runtime mode switches ([upstream `666d8972f`](https://github.com/fleetagent/pi/commit/666d8972ff0b6da5067e05973249760964194769), [#7731](https://github.com/fleetagent/pi/issues/7731)).
 * Paste Windows clipboard text into the currently focused fullscreen component on unmodified right-click, using bracketed-paste input and dropping asynchronous results after focus changes ([upstream `c96bfaccd`](https://github.com/fleetagent/pi/commit/c96bfaccd)).
 * Show configurable copy-shortcut confirmation as a transient fullscreen flash without adding a transcript status entry, while explicit `/copy` and regular mode retain status output ([upstream `ebf33c0c2`](https://github.com/fleetagent/pi/commit/ebf33c0c2282fb8c027174d3d2b53519d8f564e3)).

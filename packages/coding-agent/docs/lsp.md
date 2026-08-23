@@ -426,7 +426,7 @@ export default function (pi: ExtensionAPI) {
 
 ## Public API exports
 
-`core/lsp/index.ts` is the authoritative LSP API surface. Its public runtime values and types are re-exported through both the core and package-root barrels, including configuration, client, routing, synchronization, lifecycle, and transport APIs. Import public APIs from `@fleetagent/pi-coding-agent`; deep internal helpers are not part of the contract.
+The package root curates the public LSP runtime values and types directly from the modules under `core/lsp/`, including configuration, client, routing, synchronization, lifecycle, and transport APIs. Import public APIs from `@fleetagent/pi-coding-agent`; deep internal helpers are not part of the contract.
 
 ## Migration
 

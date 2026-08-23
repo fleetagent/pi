@@ -19,7 +19,7 @@ import type {
 	ExtensionUIDialogOptions,
 	ExtensionWidgetOptions,
 	WorkingIndicatorOptions,
-} from "../../core/extensions/index.ts";
+} from "../../core/extensions/types.ts";
 import {
 	flushRawStdout,
 	takeOverStdout,

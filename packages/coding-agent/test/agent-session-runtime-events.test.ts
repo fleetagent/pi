@@ -5,7 +5,7 @@ import { fauxAssistantMessage, registerFauxProvider } from "@fleetagent/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { PiAgent } from "../src/core/pi-agent.ts";
-import { LocalSessionManager } from "../src/core/session-manager.ts";
+import { LocalSessionManager } from "../src/core/session/local-session-manager.ts";
 import type {
 	ExtensionFactory,
 	SessionBeforeForkEvent,

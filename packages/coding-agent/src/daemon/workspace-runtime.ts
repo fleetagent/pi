@@ -3,12 +3,8 @@ import { randomUUID } from "node:crypto";
 import { mkdir as fsMkdir, lstat, open, readFile, realpath, rename, rm } from "node:fs/promises";
 import { basename, isAbsolute, relative, resolve, sep } from "node:path";
 import type { AgentToolResult } from "@fleetagent/pi-agent-core";
-import {
-	createLspRuntimeState,
-	createLspToolDefinitions,
-	type LspRuntimeState,
-	type LspServerStatus,
-} from "../core/lsp/index.ts";
+import { createLspRuntimeState, createLspToolDefinitions, type LspRuntimeState } from "../core/lsp/integration.ts";
+import type { LspServerStatus } from "../core/lsp/manager.ts";
 import { createManagedStdioConnectionFactory, resolveLspConnectionFactory } from "../core/lsp/transport.ts";
 import {
 	hashRemoteWorkspaceJson,
@@ -17,9 +13,11 @@ import {
 	type RemoteWorkspaceIdentity,
 	type RemoteWorkspaceMethod,
 	type RemoteWorkspaceOperationKind,
+} from "../core/remote-workspace-protocol/contract.ts";
+import {
 	RemoteWorkspaceRequestError,
 	type RemoteWorkspaceServerHandler,
-} from "../core/remote-workspace-protocol/index.ts";
+} from "../core/remote-workspace-protocol/session.ts";
 import { withFileMutationQueue } from "../core/tools/file-mutation-queue.ts";
 import {
 	LocalToolOperations,

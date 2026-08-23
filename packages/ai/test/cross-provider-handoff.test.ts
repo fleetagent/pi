@@ -25,8 +25,9 @@
 import { writeFileSync } from "fs";
 import { Type } from "typebox";
 import { beforeAll, describe, expect, it } from "vitest";
+import { getEnvApiKey } from "../src/env-api-keys.ts";
 import { getModel } from "../src/models.ts";
-import { completeSimple, getEnvApiKey } from "../src/stream.ts";
+import { completeSimple } from "../src/stream.ts";
 import type { Api, AssistantMessage, Message, Model, Tool, ToolResultMessage } from "../src/types.ts";
 import { hasAzureOpenAICredentials } from "./azure-utils.ts";
 import { hasCloudflareAiGatewayCredentials, hasCloudflareWorkersAICredentials } from "./cloudflare-utils.ts";
@@ -261,7 +262,7 @@ async function generateContext(
 	}
 
 	const toolCall = assistantResponse.content.find((c) => c.type === "toolCall");
-	if (!toolCall || toolCall.type !== "toolCall") {
+	if (toolCall?.type !== "toolCall") {
 		console.log(`  No tool call in response (stopReason: ${assistantResponse.stopReason})`);
 		return {
 			messages: [userMessage, assistantResponse],

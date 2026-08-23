@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { getModel } from "@fleetagent/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { PiAgent } from "../src/core/pi-agent.ts";
-import { InMemorySession, InMemorySessionManager } from "../src/core/session-manager.ts";
+import { InMemorySession } from "../src/core/session/in-memory-session.ts";
+import { InMemorySessionManager } from "../src/core/session/in-memory-session-manager.ts";
 
 describe("PiAgent session manager defaults", () => {
 	let tempDir: string;

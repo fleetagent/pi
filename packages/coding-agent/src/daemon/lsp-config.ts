@@ -6,8 +6,8 @@ import {
 	parseLspConfiguration,
 	type ResolvedLspConfiguration,
 	resolveLspConfiguration,
-	resolveLspConfigurationLayerPaths,
-} from "../core/lsp/index.ts";
+} from "../core/lsp/config.ts";
+import { resolveLspConfigurationLayerPaths } from "../core/lsp/config-loader.ts";
 import { relativeWithin } from "../core/lsp/portable-path.ts";
 import { type DaemonConfiguration, DaemonConfigurationError } from "./config.ts";
 

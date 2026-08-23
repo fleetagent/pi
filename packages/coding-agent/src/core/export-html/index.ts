@@ -5,8 +5,9 @@ import { APP_NAME, getExportTemplateDir } from "../../config.ts";
 import { getResolvedThemeColors, getThemeExportColors } from "../../modes/interactive/theme/theme.ts";
 import { normalizePath, resolvePath } from "../../utils/paths.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
-import type { SessionEntry } from "../session-manager.ts";
-import { LocalSessionManager, type Session } from "../session-manager.ts";
+import { LocalSessionManager } from "../session/local-session-manager.ts";
+import type { Session } from "../session/session.ts";
+import type { SessionEntry } from "../session/types.ts";
 
 /**
  * Interface for rendering custom tools to HTML.

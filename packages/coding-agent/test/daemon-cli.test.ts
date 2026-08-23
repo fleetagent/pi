@@ -15,8 +15,8 @@ import {
 	DEFAULT_REMOTE_WORKSPACE_PROTOCOL_LIMITS,
 	REMOTE_WORKSPACE_CAPABILITIES,
 	REMOTE_WORKSPACE_PROTOCOL_VERSIONS,
-} from "../src/core/remote-workspace-protocol/index.ts";
-import { LocalSessionManager } from "../src/core/session-manager.ts";
+} from "../src/core/remote-workspace-protocol/contract.ts";
+import { LocalSessionManager } from "../src/core/session/local-session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { runDaemonCommand } from "../src/daemon/command.ts";
 import { DAEMON_WEBSOCKET_PROTOCOL, type DaemonConfiguration, parseDaemonCommand } from "../src/daemon/config.ts";

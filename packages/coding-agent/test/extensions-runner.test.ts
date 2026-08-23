@@ -18,9 +18,10 @@ import type {
 } from "../src/core/extensions/types.ts";
 import { KeybindingsManager, type KeyId } from "../src/core/keybindings.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
-import { InMemorySessionManager, type Session } from "../src/core/session-manager.ts";
+import { InMemorySessionManager } from "../src/core/session/in-memory-session-manager.ts";
+import type { Session } from "../src/core/session/session.ts";
 import { createSyntheticSourceInfo } from "../src/core/source-info.ts";
-import { LocalToolOperations } from "../src/core/tools/index.ts";
+import { LocalToolOperations } from "../src/core/tools/operations.ts";
 
 describe("ExtensionRunner", () => {
 	let tempDir: string;

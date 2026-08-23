@@ -12,25 +12,27 @@ import {
 	REMOTE_WORKSPACE_PROTOCOL_VERSIONS,
 	type RemoteWorkspaceCatalog,
 	type RemoteWorkspaceClientMessage,
-	RemoteWorkspaceClientProtocol,
-	RemoteWorkspaceDisconnectedError,
 	type RemoteWorkspaceHandshake,
 	type RemoteWorkspaceIdentity,
 	type RemoteWorkspaceMethod,
 	RemoteWorkspaceNegotiationError,
-	type RemoteWorkspaceProtocolCloseReason,
 	type RemoteWorkspaceProtocolLimits,
-	type RemoteWorkspaceProtocolTransport,
-	RemoteWorkspaceRequestError,
-	type RemoteWorkspaceServerHandler,
 	type RemoteWorkspaceServerMessage,
-	RemoteWorkspaceServerProtocol,
-	type RemoteWorkspaceServerRequestContext,
-	RemoteWorkspaceTerminationError,
 	type RemoteWorkspaceVersionRange,
 	validateRemoteWorkspaceCatalog,
 	validateRemoteWorkspaceHandshakeAck,
-} from "../src/core/remote-workspace-protocol/index.ts";
+} from "../src/core/remote-workspace-protocol/contract.ts";
+import {
+	RemoteWorkspaceClientProtocol,
+	RemoteWorkspaceDisconnectedError,
+	type RemoteWorkspaceProtocolCloseReason,
+	type RemoteWorkspaceProtocolTransport,
+	RemoteWorkspaceRequestError,
+	type RemoteWorkspaceServerHandler,
+	RemoteWorkspaceServerProtocol,
+	type RemoteWorkspaceServerRequestContext,
+	RemoteWorkspaceTerminationError,
+} from "../src/core/remote-workspace-protocol/session.ts";
 
 const workspace: RemoteWorkspaceIdentity = {
 	id: "workspace_fixture_1234",
@@ -1073,7 +1075,7 @@ describe("remote workspace protocol sessions", () => {
 		const pending = inbound.client.request("workspace.stat", { path: "a" });
 		await waitForCondition(() => inbound.clientMessages.some((message) => message.type === "request"));
 		const request = inbound.clientMessages.find((message) => message.type === "request");
-		if (!request || request.type !== "request") throw new Error("Missing request");
+		if (request?.type !== "request") throw new Error("Missing request");
 		const first = inbound.client.receive(
 			JSON.stringify({ type: "update", id: request.id, sequence: 0, update: { text: "a".repeat(5000) } }),
 		);
@@ -1190,7 +1192,7 @@ describe("remote workspace protocol sessions", () => {
 		const starting = client.start();
 		await waitForCondition(() => sent.length > 0);
 		const offer = sent[0];
-		if (!offer || offer.type !== "handshake") throw new Error("Missing handshake");
+		if (offer?.type !== "handshake") throw new Error("Missing handshake");
 		await client.receive(
 			JSON.stringify({
 				type: "handshake_ack",
@@ -1275,7 +1277,7 @@ describe("remote workspace protocol sessions", () => {
 		const starting = client.start();
 		await waitForCondition(() => sent.length > 0);
 		const offer = sent[0];
-		if (!offer || offer.type !== "handshake") throw new Error("Missing handshake offer");
+		if (offer?.type !== "handshake") throw new Error("Missing handshake offer");
 		await client.receive(
 			JSON.stringify({
 				type: "handshake_ack",
@@ -1293,7 +1295,7 @@ describe("remote workspace protocol sessions", () => {
 		const request = client.request("workspace.stat", { path: "a" }, { onUpdate: () => undefined });
 		await waitForCondition(() => sent.some((message) => message.type === "request"));
 		const requestMessage = sent.find((message) => message.type === "request");
-		if (!requestMessage || requestMessage.type !== "request") throw new Error("Missing request");
+		if (requestMessage?.type !== "request") throw new Error("Missing request");
 		await client.receive(JSON.stringify({ type: "update", id: requestMessage.id, sequence: 1, update: {} }));
 		await expect(request).rejects.toBeInstanceOf(RemoteWorkspaceDisconnectedError);
 		expect(closes.at(-1)?.code).toBe("protocol_error");

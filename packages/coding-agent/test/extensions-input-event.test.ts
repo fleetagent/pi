@@ -6,7 +6,7 @@ import { AuthStorage } from "../src/core/auth-storage.ts";
 import { discoverAndLoadExtensions } from "../src/core/extensions/loader.ts";
 import { ExtensionRunner } from "../src/core/extensions/runner.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
-import { InMemorySessionManager } from "../src/core/session-manager.ts";
+import { InMemorySessionManager } from "../src/core/session/in-memory-session-manager.ts";
 
 describe("Input Event", () => {
 	let tempDir: string;

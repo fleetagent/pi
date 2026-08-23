@@ -1,9 +1,9 @@
 {
-	"$schema": "https://biomejs.dev/schemas/2.3.5/schema.json",
+	"$schema": "https://biomejs.dev/schemas/2.5.10/schema.json",
 	"linter": {
 		"enabled": true,
 		"rules": {
-			"recommended": true,
+			"preset": "recommended",
 			"style": {
 				"noNonNullAssertion": "off",
 				"useConst": "error",
@@ -13,6 +13,9 @@
 				"noExplicitAny": "off",
 				"noControlCharactersInRegex": "off",
 				"noEmptyInterface": "off"
+			},
+			"performance": {
+				"noBarrelFile": "error"
 			}
 		}
 	},
@@ -35,5 +38,24 @@
 			"!packages/mom/data/**/*",
 			"!!**/node_modules"
 		]
-	}
+	},
+	"overrides": [
+		{
+			"includes": [
+				"packages/agent/src/index.ts",
+				"packages/agent/src/node.ts",
+				"packages/ai/src/index.ts",
+				"packages/ai/src/oauth.ts",
+				"packages/coding-agent/src/index.ts",
+				"packages/tui/src/index.ts"
+			],
+			"linter": {
+				"rules": {
+					"performance": {
+						"noBarrelFile": "off"
+					}
+				}
+			}
+		}
+	]
 }

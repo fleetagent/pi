@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { type CustomEntry, InMemorySessionManager } from "../../src/core/session-manager.ts";
+import { InMemorySessionManager } from "../../src/core/session/in-memory-session-manager.ts";
+import type { CustomEntry } from "../../src/core/session/types.ts";
 
 describe("SessionManager.saveCustomEntry", () => {
 	it("saves custom entries and includes them in tree traversal", () => {

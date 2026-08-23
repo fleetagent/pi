@@ -3,7 +3,8 @@ import { closeSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync, wr
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { findMostRecentSession, LocalSessionManager, loadEntriesFromFile } from "../../src/core/session-manager.ts";
+import { findMostRecentSession, loadEntriesFromFile } from "../../src/core/session/jsonl-helpers.ts";
+import { LocalSessionManager } from "../../src/core/session/local-session-manager.ts";
 
 const HEADER_SCAN_LIMIT_BYTES = 1024 * 1024;
 describe("loadEntriesFromFile", () => {

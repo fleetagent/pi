@@ -2,7 +2,9 @@ import { existsSync, mkdirSync, readFileSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { describe, expect, it } from "vitest";
-import { type CustomEntry, InMemorySessionManager, LocalSessionManager } from "../../src/core/session-manager.ts";
+import { InMemorySessionManager } from "../../src/core/session/in-memory-session-manager.ts";
+import { LocalSessionManager } from "../../src/core/session/local-session-manager.ts";
+import type { CustomEntry } from "../../src/core/session/types.ts";
 import { assistantMsg, userMsg } from "../utilities.ts";
 
 describe("SessionManager append and tree traversal", () => {

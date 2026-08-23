@@ -1,6 +1,6 @@
 # Workspace Sandbox
 
-`/sandbox` is the single interactive command for workspace tool backends. It can show or clear the active backend, connect a deferred SSH backend, attach an existing sandbox daemon, or manage a Pi-owned Docker container. Local Pi remains the orchestrator: provider credentials, model calls, prompts, session history, extensions, subagents, RPC, and UI stay in the local process.
+`/sandbox` is the single interactive command for workspace tool backends. It can show or clear the active backend, connect a deferred SSH backend, attach an existing sandbox daemon, or manage a Pi-owned Docker container. Sandbox connections are session-local: a new session starts on its underlying backend, returning to an earlier session reconnects its remembered sandbox while Pi remains running, and multiple session sandboxes may coexist. Local Pi remains the orchestrator: provider credentials, model calls, session history, extensions, RPC, and UI stay in the local process; subagent workspace tools inherit the parent session's active sandbox.
 
 The command is user-only. It is shown in interactive slash-command completion, but it is not exposed through RPC `get_commands`, extension-visible command catalogs, system prompts, tool definitions, prompt templates, skills, or rules. This only hides the Pi operator command from LLM-visible catalogs; it does not prevent a model that has shell access from invoking Docker directly through normal shell tools.
 
@@ -50,10 +50,10 @@ Defaults:
 | Container workspace | `/workspace` |
 | Daemon command | `pi --daemon` |
 | Docker network mode | `host` |
-| Daemon bind and endpoint | `127.0.0.1:8787` |
+| Daemon preferred bind and endpoint | `127.0.0.1:8787` |
 | Daemon token | generated per start |
 
-The mounted workspace is read/write. Any process in the container can modify files in the mounted host directory. Paths reported by the daemon use the container workspace root (`/workspace`), while local Pi keeps session and UI state on the host. The container uses Docker host networking, so services bound to host loopback are directly reachable from the sandbox and the daemon occupies its configured port on the host. The default image also configures `/tmp` as an additional confined temporary root, so workspace tools can use disposable scratch files without exposing another host mount.
+The mounted workspace is read/write. Any process in the container can modify files in the mounted host directory. Paths reported by the daemon use the container workspace root (`/workspace`), while local Pi keeps session and UI state on the host. The container uses Docker host networking, so services bound to host loopback are directly reachable from the sandbox. Pi uses the configured daemon port when available and otherwise selects an available host port, allowing separate sessions to keep concurrent sandbox containers. The default image also configures `/tmp` as an additional confined temporary root, so workspace tools can use disposable scratch files without exposing another host mount.
 
 `/sandbox start` generates a bearer token and passes it to Docker through the container environment as `PI_DAEMON_TOKEN`. Pi uses that token in memory to connect to the daemon. Tokens are not put in Docker argv, image layers, container names, labels, URLs, or user-facing status. Status, list output, and errors redact secrets.
 
@@ -127,15 +127,16 @@ See [`../examples/sandbox-docker/README.md`](../examples/sandbox-docker/README.m
 
 Pi labels sandbox containers and filters list/stop operations by those labels, not by name alone. Labels include sandbox ownership, workspace hash, workspace mount target, daemon port, owner uid when available, Pi version, and a session id. Labels do not contain tokens.
 
-Container names use the configured prefix plus a sanitized workspace name, workspace hash, and per-start session suffix so stopped containers do not block a later `/sandbox start`. `/sandbox list` reports id/name, state/status, image, workspace mount target, and daemon endpoint when Docker inspect data is available. `/sandbox stop` only targets containers matching Pi sandbox labels; it does not stop unrelated containers with similar names.
+Container names use the configured prefix plus a sanitized workspace name, workspace hash, and per-start session suffix so stopped containers do not block a later `/sandbox start`. Daemon ports are allocated per start, preferring `sandbox.daemonPort` and falling back to an available host port when needed. `/sandbox list` reports id/name, state/status, image, workspace mount target, and daemon endpoint when Docker inspect data is available. `/sandbox stop` only targets containers matching Pi sandbox labels; it does not stop unrelated containers with similar names.
 
-Stopping the active sandbox clears the active remote tool backend and returns the session to the previous non-sandbox backend or local tool execution. If Pi was started in deferred remote mode, stop leaves the deferred backend unconfigured.
+Stopping the active sandbox clears the current session's remote tool backend and returns it to the previous non-sandbox backend or local tool execution. If Pi was started in deferred remote mode, stop leaves that session's deferred backend unconfigured. Switching sessions disconnects the old live client without stopping its managed container; returning to that session reconnects it from memory. On graceful Pi shutdown, all Docker sandboxes started by that Pi process are stopped or removed according to `sandbox.cleanup`. Tokens are never persisted to session files, so sandboxes are not restored after Pi exits.
 
 ## Security boundaries
 
 Docker sandbox mode is not a complete security sandbox.
 
 - The current working directory is mounted read/write into the container.
+- Subagents inherit the active workspace backend. Sandboxed subagents reject host cwd overrides, do not load host project context or extensions, treat custom system prompts as literal text, and cannot continue an older run after the parent backend changes.
 - Container processes can read, write, delete, or chmod files in that mount as the container user.
 - Files created by the default image are owned by uid `1000` unless Docker/user policy changes it.
 - `/tmp` is writable container-local scratch storage and is removed with the container; it is not mounted from the host by default.
@@ -153,7 +154,7 @@ Use trusted images, avoid mounting the Docker socket, avoid privileged container
 - Docker missing: install Docker or set `PI_SANDBOX_DOCKER` / `sandbox.dockerBinary` to the correct executable.
 - Permission denied connecting to Docker: add the user to the appropriate Docker group, start Docker Desktop, or run Pi where Docker is accessible. Treat Docker group membership as host-level administrative power.
 - Image pull/build failure: verify the image name, registry authentication, network access, and local build command. For local images, build with the local release directory as context; do not use `--skip-install` for the sandbox Dockerfile.
-- Port conflict: host networking requires the configured daemon port (default `8787`) to be free on the host. Stop the conflicting process or stale sandbox, or change `sandbox.daemonPort`. Docker Desktop requires host networking to be enabled in Settings > Resources > Network.
+- Port conflict: Pi prefers the configured daemon port (default `8787`) and automatically selects an available port when it is occupied. A remaining bind failure can indicate an invalid `sandbox.daemonHostBind`, exhausted local resources, or a race with another process. Docker Desktop requires host networking to be enabled in Settings > Resources > Network.
 - Start succeeds but daemon activation fails: the container may still be running. Use `/sandbox list` and `/sandbox stop <id-or-name>` to clean it up.
 - `/sandbox list` is empty: it only lists Pi-labeled sandbox containers for the current workspace by default. Check that you are in the same host workspace and that the container was created by `/sandbox start`.
 - `/sandbox stop` says no sandbox was found: pass the listed id or name, or switch to the workspace that owns the sandbox.

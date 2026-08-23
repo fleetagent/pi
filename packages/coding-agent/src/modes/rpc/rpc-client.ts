@@ -10,10 +10,10 @@ import type { ImageContent } from "@fleetagent/pi-ai";
 import type { Static, TSchema } from "typebox";
 import type { SessionStats, StructuredResponse } from "../../core/agent-session.ts";
 import type { BashResult } from "../../core/bash-executor.ts";
-import type { CompactionResult } from "../../core/compaction/index.ts";
-import type { ToolInfo } from "../../core/extensions/index.ts";
+import type { CompactionResult } from "../../core/compaction/compaction.ts";
+import type { ToolInfo } from "../../core/extensions/types.ts";
 import type { SessionEntry, SessionInfo, SessionTreeNode } from "../../core/session/types.ts";
-import type { ToolBackendInfo } from "../../core/tools/index.ts";
+import type { ToolBackendInfo } from "../../core/tools/operations.ts";
 import type { JsonAgentSessionEvent } from "../json-event.ts";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
 import type {

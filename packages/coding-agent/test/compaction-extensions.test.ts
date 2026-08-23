@@ -10,15 +10,15 @@ import { getModel } from "@fleetagent/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
-import {
-	createExtensionRuntime,
-	type Extension,
-	type SessionBeforeCompactEvent,
-	type SessionCompactEvent,
-	type SessionEvent,
-} from "../src/core/extensions/index.ts";
+import { createExtensionRuntime } from "../src/core/extensions/loader.ts";
+import type {
+	Extension,
+	SessionBeforeCompactEvent,
+	SessionCompactEvent,
+	SessionEvent,
+} from "../src/core/extensions/types.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
-import { LocalSessionManager } from "../src/core/session-manager.ts";
+import { LocalSessionManager } from "../src/core/session/local-session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { createSyntheticSourceInfo } from "../src/core/source-info.ts";
 import { createCodingTools, LocalToolOperations } from "../src/index.ts";

@@ -11,10 +11,11 @@ import type { FauxModelDefinition, FauxProviderRegistration, FauxResponseStep, M
 import { registerFauxProvider } from "@fleetagent/pi-ai";
 import { AgentSession, type AgentSessionEvent } from "../../src/core/agent-session.ts";
 import { AuthStorage } from "../../src/core/auth-storage.ts";
-import type { ExtensionRunner } from "../../src/core/extensions/index.ts";
+import type { ExtensionRunner } from "../../src/core/extensions/runner.ts";
 import { convertToLlm } from "../../src/core/messages.ts";
 import { ModelRegistry } from "../../src/core/model-registry.ts";
-import { InMemorySessionManager, type Session } from "../../src/core/session-manager.ts";
+import { InMemorySessionManager } from "../../src/core/session/in-memory-session-manager.ts";
+import type { Session } from "../../src/core/session/session.ts";
 import type { Settings } from "../../src/core/settings-manager.ts";
 import { SettingsManager } from "../../src/core/settings-manager.ts";
 import type { ToolOperations } from "../../src/core/tools/operations.ts";

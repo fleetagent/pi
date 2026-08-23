@@ -17,7 +17,7 @@ import { getModel, Type } from "@fleetagent/pi-ai";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
 import { PiAgent } from "../src/core/pi-agent.ts";
-import { InMemorySessionManager } from "../src/core/session-manager.ts";
+import { InMemorySessionManager } from "../src/core/session/in-memory-session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 
 const model = getModel("openai-codex", "gpt-5.5");

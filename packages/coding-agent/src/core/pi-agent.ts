@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join, posix, resolve, win32 } from "node:path";
 import { Agent, type AgentMessage, type ThinkingLevel } from "@fleetagent/pi-agent-core";
 import {
 	clampThinkingLevel,
@@ -12,46 +12,51 @@ import {
 import type { TuiMode } from "@fleetagent/pi-tui";
 import chalk from "chalk";
 import { getAgentDir } from "../config.ts";
-import { InteractiveMode, runPrintMode, runRpcMode } from "../modes/index.ts";
+import { InteractiveMode } from "../modes/interactive/interactive-mode.ts";
 import { stopThemeWatcher } from "../modes/interactive/theme/theme.ts";
+import { runPrintMode } from "../modes/print-mode.ts";
+import { runRpcMode } from "../modes/rpc/rpc-mode.ts";
 import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { AgentSession, getDefaultActiveToolNames } from "./agent-session.ts";
 import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
 import { AuthStorage } from "./auth-storage.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
+import type { ExtensionRunner } from "./extensions/runner.ts";
+import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import type {
-	ExtensionRunner,
 	ReplacedSessionContext,
 	SessionShutdownEvent,
 	SessionStartEvent,
 	ToolDefinition,
-} from "./extensions/index.ts";
-import { emitSessionShutdownEvent } from "./extensions/runner.ts";
+} from "./extensions/types.ts";
 import {
 	type LspConfigurationInput,
 	type LspConfigurationSourceDiagnostic,
-	type LspConnectionFactoryRegistry,
 	loadLspConfiguration,
-} from "./lsp/index.ts";
+} from "./lsp/config-loader.ts";
+import type { LspConnectionFactoryRegistry } from "./lsp/transport.ts";
 import { convertToLlm } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import { findInitialModel, resolveCliModel } from "./model-resolver.ts";
 import { restoreStdout, takeOverStdout } from "./output-guard.ts";
 import { DefaultResourceLoader, type DefaultResourceLoaderOptions, type ResourceLoader } from "./resource-loader.ts";
+import { InMemorySessionManager } from "./session/in-memory-session-manager.ts";
+import { getDefaultSessionDir } from "./session/jsonl-helpers.ts";
+import { LocalSessionManager } from "./session/local-session-manager.ts";
+import type { Session } from "./session/session.ts";
+import type { SessionManager } from "./session/session-manager.ts";
+import type { SessionInfo, SessionListProgress } from "./session/types.ts";
 import { assertSessionCwdExists } from "./session-cwd.ts";
-import {
-	getDefaultSessionDir,
-	InMemorySessionManager,
-	LocalSessionManager,
-	type Session,
-	type SessionInfo,
-	type SessionListProgress,
-	type SessionManager,
-} from "./session-manager.ts";
 import { InMemorySettingsStorage, SettingsManager } from "./settings-manager.ts";
+import { getSourceBackend } from "./source-info.ts";
 import { isInstallTelemetryEnabled } from "./telemetry.ts";
 import { printTimings, time } from "./timings.ts";
-import { type BorrowedToolOperations, borrowToolOperations, type ToolOperations } from "./tools/index.ts";
+import {
+	type BorrowedToolOperations,
+	borrowToolOperations,
+	type ToolBackendInfo,
+	type ToolOperations,
+} from "./tools/operations.ts";
 import type {
 	SubagentConfigRegistry,
 	SubagentRunInfo,
@@ -204,6 +209,20 @@ export class SessionImportFileNotFoundError extends Error {
 		this.name = "SessionImportFileNotFoundError";
 		this.filePath = filePath;
 	}
+}
+
+function isSubagentCwdConfined(cwd: string, operations: ToolOperations, backend: ToolBackendInfo | undefined): boolean {
+	if (backend?.type === "local") return true;
+	if (backend?.type === "ssh" || backend === undefined) {
+		return posix.normalize(cwd) === posix.normalize(operations.cwd);
+	}
+	const pathApi =
+		backend?.type === "remote" && backend.configured && backend.workspace.pathFlavor === "windows" ? win32 : posix;
+	const relative = pathApi.relative(pathApi.normalize(operations.cwd), pathApi.normalize(cwd));
+	return (
+		relative === "" ||
+		(relative !== ".." && !relative.startsWith(`..${pathApi.sep}`) && !pathApi.isAbsolute(relative))
+	);
 }
 
 function extractUserMessageText(content: string | Array<{ type: string; text?: string }>): string {
@@ -464,12 +483,20 @@ export class PiAgent {
 
 	private createEmbeddedSubagentRunner(
 		services: PiAgentServices,
-		toolOperations: ToolOperations | undefined,
 		excludedTools: string[],
 		registry: ReturnType<PiAgent["createSubagentRunRegistry"]>,
 	): SubagentRunner {
 		let nextRunNumber = 1;
-		const children = new Map<string, { child: PiAgent; session: AgentSession; run: SubagentRunInfo }>();
+		const children = new Map<
+			string,
+			{
+				child: PiAgent;
+				session: AgentSession;
+				run: SubagentRunInfo;
+				toolOperations: ToolOperations;
+				backendIdentity: string;
+			}
+		>();
 		const cleanup = async (): Promise<void> => {
 			for (const { child } of children.values()) await child.dispose();
 			children.clear();
@@ -483,10 +510,40 @@ export class PiAgent {
 				return { exitCode: 1, stderr: resolvedModel.error };
 			}
 
+			const activeToolOperations = request.toolOperations;
+			if (!activeToolOperations) {
+				return { exitCode: 1, stderr: "Subagents require explicit workspace tool operations" };
+			}
+			const activeBackendInfo = activeToolOperations.getBackendInfo?.();
+			if (activeBackendInfo?.type === "remote" && !activeBackendInfo.configured) {
+				return { exitCode: 1, stderr: "Subagents cannot run with an unconfigured remote backend" };
+			}
+			if (!isSubagentCwdConfined(request.cwd, activeToolOperations, activeBackendInfo)) {
+				return {
+					exitCode: 1,
+					stderr: `Sandboxed subagent cwd must stay within the sandbox workspace root: ${activeToolOperations.cwd}`,
+				};
+			}
+			const backendIdentity = JSON.stringify(
+				activeBackendInfo ?? { type: "unknown", cwd: activeToolOperations.cwd },
+			);
 			let runId = request.continueSession;
 			let childState = runId ? children.get(runId) : undefined;
 			if (request.continueSession && !childState) {
 				return { exitCode: 1, stderr: `Unknown subagent run id: ${request.continueSession}` };
+			}
+			if (
+				childState &&
+				(childState.toolOperations !== activeToolOperations || childState.backendIdentity !== backendIdentity)
+			) {
+				await childState.child.dispose();
+				children.delete(childState.run.runId);
+				childState.run = { ...childState.run, status: "failed", updatedAt: new Date().toISOString() };
+				registry.upsert(childState.run);
+				return {
+					exitCode: 1,
+					stderr: "The parent workspace backend changed; start a new subagent instead of continuing this run",
+				};
 			}
 
 			if (!childState) {
@@ -507,7 +564,17 @@ export class PiAgent {
 				const skillSystemPromptBlocks: string[] = [];
 				for (const skill of selectedSkills) {
 					try {
-						const content = skill.content ?? readFileSync(skill.filePath, "utf-8");
+						let content = skill.content;
+						if (content === undefined) {
+							if (activeBackendInfo?.type === "local") {
+								content = readFileSync(skill.filePath, "utf-8");
+							} else {
+								if (getSourceBackend(skill.sourceInfo) === "local") {
+									throw new Error("local skill files are unavailable to a sandboxed subagent");
+								}
+								content = (await activeToolOperations.readFile(skill.filePath)).toString("utf-8");
+							}
+						}
 						skillSystemPromptBlocks.push(
 							`<preloaded-skill name="${skill.name}" location="${skill.filePath}">\nReferences are relative to ${skill.baseDir}.\n\n${stripFrontmatter(content).trim()}\n</preloaded-skill>`,
 						);
@@ -524,7 +591,6 @@ export class PiAgent {
 				const tools = Array.from(new Set([...requestedTools, ...skillTools])).filter(
 					(name) => !childExcludedTools.has(name),
 				);
-				const activeToolOperations = request.toolOperations ?? toolOperations;
 				const child = await PiAgent.create({
 					mode: "embedded",
 					cwd: request.cwd,
@@ -540,9 +606,16 @@ export class PiAgent {
 					toolOperations: activeToolOperations,
 					resourceLoaderOptions: {
 						toolOperations: activeToolOperations,
+						noExtensions: true,
+						noSkills: true,
+						noRules: true,
 						noPromptTemplates: true,
 						noThemes: true,
-						appendSystemPrompt: [request.systemPrompt, ...skillSystemPromptBlocks].filter((part) => part.trim()),
+						noContextFiles: true,
+						systemPrompt: "",
+						appendSystemPrompt: [],
+						systemPromptOverride: () => undefined,
+						appendSystemPromptOverride: () => [request.systemPrompt, ...skillSystemPromptBlocks],
 					},
 				});
 				const session = await child.createAgentSession();
@@ -558,7 +631,7 @@ export class PiAgent {
 					createdAt: now,
 					updatedAt: now,
 				};
-				childState = { child, session, run };
+				childState = { child, session, run, toolOperations: activeToolOperations, backendIdentity };
 				children.set(runId, childState);
 				registry.upsert(run);
 			} else {
@@ -884,7 +957,6 @@ export class PiAgent {
 				allowedToolNames,
 				subagentRunner: this.createEmbeddedSubagentRunner(
 					services,
-					sessionOptions.toolOperations,
 					sessionOptions.excludedTools ?? [],
 					subagentRunRegistry,
 				),

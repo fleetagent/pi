@@ -14,7 +14,7 @@ import { AuthStorage } from "../src/core/auth-storage.ts";
 import type { ExtensionFactory } from "../src/core/extensions/types.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
 import { PiAgent } from "../src/core/pi-agent.ts";
-import { InMemorySessionManager } from "../src/core/session-manager.ts";
+import { InMemorySessionManager } from "../src/core/session/in-memory-session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { createTestExtensionsResult, createTestResourceLoader } from "./utilities.ts";
 

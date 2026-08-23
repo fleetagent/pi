@@ -6,7 +6,7 @@ import { createExtensionRuntime, loadExtensionFromFactory } from "../src/core/ex
 import { ExtensionRunner } from "../src/core/extensions/runner.ts";
 import type { ExtensionAPI, MarkdownTransformer } from "../src/core/extensions/types.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
-import { InMemorySessionManager } from "../src/core/session-manager.ts";
+import { InMemorySessionManager } from "../src/core/session/in-memory-session-manager.ts";
 import { InMemorySettingsStorage, SettingsManager } from "../src/core/settings-manager.ts";
 import {
 	type SettingsCallbacks,

@@ -1,7 +1,8 @@
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
+import { getEnvApiKey } from "../src/env-api-keys.ts";
 import { getModel } from "../src/models.ts";
-import { complete, getEnvApiKey } from "../src/stream.ts";
+import { complete } from "../src/stream.ts";
 import type { AssistantMessage, Context, Message, Tool, ToolCall } from "../src/types.ts";
 
 const testToolSchema = Type.Object({
@@ -47,7 +48,7 @@ describe.skipIf(!process.env.OPENAI_API_KEY || !process.env.ANTHROPIC_API_KEY)(
 			const thinkingBlock = assistantResponse.content.find(
 				(block) => block.type === "thinking" && block.thinkingSignature,
 			);
-			if (!thinkingBlock || thinkingBlock.type !== "thinking") {
+			if (thinkingBlock?.type !== "thinking") {
 				throw new Error("Missing thinking signature from OpenAI Responses");
 			}
 

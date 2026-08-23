@@ -1,5 +1,5 @@
 import * as Diff from "diff";
-import { _lineHashesPure, ANCHOR_LEN, HASH_SEP } from "./hashline/index.ts";
+import { _lineHashesPure, ANCHOR_LEN, HASH_SEP } from "./hashline/hash.ts";
 
 export function detectEnding(content: string): "\r\n" | "\n" {
 	const crlfIdx = content.indexOf("\r\n");

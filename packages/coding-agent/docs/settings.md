@@ -190,8 +190,8 @@ Global and project `tools` settings merge per tool name, so a project can overri
 | `sandbox.dockerBinary` | string | `"docker"` | Docker executable |
 | `sandbox.workspaceMountPath` | string | `"/workspace"` | Container path for the mounted current workspace |
 | `sandbox.containerNamePrefix` | string | `"pi-sandbox"` | Prefix for generated container names |
-| `sandbox.daemonPort` | number | `8787` | Container daemon port |
-| `sandbox.daemonHostBind` | string | `"127.0.0.1"` | Host bind address for the published daemon port |
+| `sandbox.daemonPort` | number | `8787` | Preferred host-network daemon port; an available port is selected when occupied |
+| `sandbox.daemonHostBind` | string | `"127.0.0.1"` | Host-network daemon bind address |
 | `sandbox.cleanup` | string | `"stop"` | Stop behavior: `"stop"` or `"remove"` |
 
 ```json

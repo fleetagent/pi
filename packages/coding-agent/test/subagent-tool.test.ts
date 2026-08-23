@@ -3,13 +3,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall, getModel, registerFauxProvider } from "@fleetagent/pi-ai";
 import { Type } from "typebox";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_ACTIVE_TOOL_NAMES } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import type { ExtensionContext } from "../src/core/extensions/types.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
 import { PiAgent } from "../src/core/pi-agent.ts";
-import { InMemorySessionManager } from "../src/core/session-manager.ts";
+import { InMemorySessionManager } from "../src/core/session/in-memory-session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { createAllToolDefinitions } from "../src/core/tools/index.ts";
 import { LocalToolOperations } from "../src/core/tools/operations.ts";
@@ -64,9 +64,28 @@ describe("native subagent tool", () => {
 			{ task: "inspect" },
 			undefined,
 			undefined,
-			{ cwd, hasUI: false } as unknown as ExtensionContext,
+			{ cwd, toolOperations: new LocalToolOperations(cwd), hasUI: false } as unknown as ExtensionContext,
 		);
 		expect(result.content).toEqual([{ type: "text", text: "Subagent runner is not configured for this session." }]);
+	});
+
+	it("fails closed before discovery when workspace operations are missing", async () => {
+		const cwd = createTempDir("pi-subagent-missing-operations-");
+		mkdirSync(join(cwd, ".pi", "agents"), { recursive: true });
+		writeFileSync(
+			join(cwd, ".pi", "agents", "escape.md"),
+			"---\nname: escape\ndescription: Must not load\n---\nHost instructions.",
+		);
+		const runner = vi.fn();
+		const result = await createSubagentToolDefinition({ runner }).execute(
+			"call-missing-operations",
+			{ task: "inspect", agentScope: "project", agent: "escape" },
+			undefined,
+			undefined,
+			{ cwd, hasUI: false } as unknown as ExtensionContext,
+		);
+		expect(result.content).toEqual([{ type: "text", text: "Subagents require explicit workspace tool operations." }]);
+		expect(runner).not.toHaveBeenCalled();
 	});
 
 	it("discovers daemon project presets through the borrowed workspace backend", async () => {
@@ -100,6 +119,28 @@ describe("native subagent tool", () => {
 				systemPrompt: "Remote instructions.",
 				tools: ["read"],
 			}),
+		]);
+	});
+
+	it("discovers SSH project presets through SSH operations instead of the host cwd", async () => {
+		const remoteCwd = createTempDir("pi-subagent-ssh-remote-");
+		mkdirSync(join(remoteCwd, ".pi", "agents"), { recursive: true });
+		writeFileSync(
+			join(remoteCwd, ".pi", "agents", "remote.md"),
+			"---\nname: remote\ndescription: SSH preset\n---\nSSH instructions.",
+		);
+		const operations = new LocalToolOperations(remoteCwd);
+		Object.defineProperty(operations, "getBackendInfo", {
+			value: () => ({ type: "ssh" as const, cwd: remoteCwd, remote: "sandbox.test", configured: true as const }),
+		});
+		const discovery = await discoverAgentsWithOperations(
+			createTempDir("pi-subagent-ssh-host-"),
+			"project",
+			operations,
+		);
+		expect(discovery.projectAgentsDir).toBe(join(remoteCwd, ".pi", "agents"));
+		expect(discovery.agents).toEqual([
+			expect.objectContaining({ name: "remote", systemPrompt: "SSH instructions." }),
 		]);
 	});
 
@@ -190,6 +231,7 @@ describe("native subagent tool", () => {
 			},
 		}).execute("run-builder", { agent: "builder", task: "run checks" }, undefined, undefined, {
 			cwd,
+			toolOperations: new LocalToolOperations(cwd),
 			hasUI: false,
 		} as unknown as ExtensionContext);
 		expect(subagentResult.content).toEqual([{ type: "text", text: "built" }]);
@@ -217,7 +259,7 @@ describe("native subagent tool", () => {
 			{ agentScope: "project", agent: "project", task: "inspect" },
 			undefined,
 			undefined,
-			{ cwd, hasUI: false } as unknown as ExtensionContext,
+			{ cwd, toolOperations: new LocalToolOperations(cwd), hasUI: false } as unknown as ExtensionContext,
 		);
 		expect(untrustedResult.content[0]).toMatchObject({
 			type: "text",
@@ -233,6 +275,7 @@ describe("native subagent tool", () => {
 			undefined,
 			{
 				cwd,
+				toolOperations: new LocalToolOperations(cwd),
 				hasUI: true,
 				ui: {
 					confirm: async () => {
@@ -250,7 +293,7 @@ describe("native subagent tool", () => {
 			{ agentScope: "project", agent: "project", task: "inspect" },
 			undefined,
 			undefined,
-			{ cwd, hasUI: false } as unknown as ExtensionContext,
+			{ cwd, toolOperations: new LocalToolOperations(cwd), hasUI: false } as unknown as ExtensionContext,
 		);
 		expect(runnerCalls).toBe(2);
 		expect(trustedResult.content[0]).toMatchObject({ type: "text", text: "(no output)" });
@@ -274,7 +317,7 @@ describe("native subagent tool", () => {
 			{ task: "Inspect auth", model: "openai-codex/gpt-5.6-luna", tools: ["read"] },
 			undefined,
 			undefined,
-			{ cwd, hasUI: false, model } as unknown as ExtensionContext,
+			{ cwd, toolOperations: new LocalToolOperations(cwd), hasUI: false, model } as unknown as ExtensionContext,
 		);
 
 		expect(receivedPrompt).toBe("<task>\nInspect auth\n</task>");
@@ -295,6 +338,7 @@ describe("native subagent tool", () => {
 		});
 		const result = await definition.execute("call-presentation", { task: "respond" }, undefined, undefined, {
 			cwd,
+			toolOperations: new LocalToolOperations(cwd),
 			hasUI: false,
 		} as unknown as ExtensionContext);
 
@@ -325,7 +369,7 @@ describe("native subagent tool", () => {
 			{ tasks: [{ task: "one" }, { task: "two" }] },
 			undefined,
 			undefined,
-			{ cwd, hasUI: false } as unknown as ExtensionContext,
+			{ cwd, toolOperations: new LocalToolOperations(cwd), hasUI: false } as unknown as ExtensionContext,
 		);
 
 		expect(result.details.results).toHaveLength(2);
@@ -351,6 +395,7 @@ describe("native subagent tool", () => {
 		const tasks = Array.from({ length: 8 }, (_, index) => ({ task: `task ${index}` }));
 		const result = await definition.execute("call-abort", { tasks }, controller.signal, undefined, {
 			cwd,
+			toolOperations: new LocalToolOperations(cwd),
 			hasUI: false,
 		} as unknown as ExtensionContext);
 
@@ -550,6 +595,17 @@ describe("native subagent tool", () => {
 			expect(secondDetails?.results[0].runId).toBe("subagent:1");
 			expect(second.content[0]).toMatchObject({ type: "text", text: "second output" });
 			expect(childUserTexts).toEqual(["<task>\nFirst task\n</task>", "<task>\nFollow up\n</task>"]);
+			const changedBackend = await subagent.execute(
+				"subagent-3",
+				{ continueSession: "subagent:1", task: "Attempt escape" },
+				undefined,
+				undefined,
+				{ ...ctx, toolOperations: new LocalToolOperations(cwd) } as never,
+			);
+			expect(changedBackend.content[0]).toMatchObject({
+				type: "text",
+				text: expect.stringContaining("parent workspace backend changed"),
+			});
 		} finally {
 			await pi.dispose();
 			faux.unregister();
@@ -595,7 +651,16 @@ describe("native subagent tool", () => {
 				workspace: { id: "sandbox-workspace", root: remoteCwd, pathFlavor: "posix" as const },
 			}),
 		});
-		faux.setResponses([fauxAssistantMessage("child output")]);
+		const hostPromptPath = join(localCwd, "host-secret.txt");
+		writeFileSync(hostPromptPath, "HOST SECRET MUST NOT BE LOADED");
+		let childSystemPrompt = "";
+		faux.setResponses([
+			(context) => {
+				childSystemPrompt = context.systemPrompt ?? "";
+				return fauxAssistantMessage("child output");
+			},
+			fauxAssistantMessage("subdir output"),
+		]);
 		const pi = await PiAgent.create({
 			cwd: localCwd,
 			agentDir,
@@ -609,20 +674,50 @@ describe("native subagent tool", () => {
 			const session = await pi.createAgentSession();
 			const result = await session
 				.getToolDefinition("subagent")!
-				.execute("subagent-sandbox", { task: "Return child output" }, undefined, undefined, {
+				.execute(
+					"subagent-sandbox",
+					{ task: "Return child output", systemPrompt: hostPromptPath },
+					undefined,
+					undefined,
+					{
+						cwd: localCwd,
+						toolOperations: operations,
+						model,
+						hasUI: false,
+					} as never,
+				);
+			expect(result.content).toEqual([{ type: "text", text: "child output" }]);
+			expect(childSystemPrompt).toContain(hostPromptPath);
+			expect(childSystemPrompt).not.toContain("HOST SECRET MUST NOT BE LOADED");
+			const subdirectoryResult = await session
+				.getToolDefinition("subagent")!
+				.execute(
+					"subagent-sandbox-subdir",
+					{ task: "work in subdir", cwd: join(remoteCwd, "subdir") },
+					undefined,
+					undefined,
+					{ cwd: localCwd, toolOperations: operations, model, hasUI: false } as never,
+				);
+			expect(subdirectoryResult.content).toEqual([{ type: "text", text: "subdir output" }]);
+			const mismatchedCwd = await session
+				.getToolDefinition("subagent")!
+				.execute("subagent-sandbox-cwd", { task: "escape", cwd: localCwd }, undefined, undefined, {
 					cwd: localCwd,
 					toolOperations: operations,
 					model,
 					hasUI: false,
 				} as never);
-			expect(result.content).toEqual([{ type: "text", text: "child output" }]);
-			expect(faux.state.callCount).toBe(1);
+			expect(mismatchedCwd.content[0]).toMatchObject({
+				type: "text",
+				text: expect.stringContaining("Sandboxed subagent cwd must stay within"),
+			});
+			expect(faux.state.callCount).toBe(2);
 		} finally {
 			await pi.dispose();
 			faux.unregister();
 		}
 	});
-	it("runs parent-driven subagents with remote cwd values that do not exist on the host", async () => {
+	it("fails closed instead of starting subagents on an unconfigured remote backend", async () => {
 		const localCwd = createTempDir("pi-subagent-parent-remote-local-");
 		const remoteCwd = join(tmpdir(), "pi-subagent-parent-remote-workspace-does-not-exist");
 		rmSync(remoteCwd, { recursive: true, force: true });
@@ -681,9 +776,9 @@ describe("native subagent tool", () => {
 							.map((part) => part.text)
 							.join("\n")
 					: "";
-			expect(toolText).toBe("child output");
+			expect(toolText).toContain("Subagents cannot run with an unconfigured remote backend");
 			expect(session.messages.at(-1)).toMatchObject({ role: "assistant" });
-			expect(faux.state.callCount).toBe(3);
+			expect(faux.state.callCount).toBe(2);
 		} finally {
 			await pi.dispose();
 			faux.unregister();
@@ -712,6 +807,19 @@ describe("native subagent tool", () => {
 		expect(chainDescription).toContain("openai-codex/gpt-5.6-luna");
 	});
 
+	it("does not discover host project presets for operations without backend identity", async () => {
+		const hostCwd = createTempDir("pi-subagent-unknown-host-");
+		mkdirSync(join(hostCwd, ".pi", "agents"), { recursive: true });
+		writeFileSync(
+			join(hostCwd, ".pi", "agents", "escape.md"),
+			"---\nname: escape\ndescription: Host preset\n---\nHost instructions.",
+		);
+		const operations = new LocalToolOperations(createTempDir("pi-subagent-unknown-backend-"));
+		Object.defineProperty(operations, "getBackendInfo", { value: undefined });
+		const discovery = await discoverAgentsWithOperations(hostCwd, "project", operations);
+		expect(discovery).toEqual({ agents: [], projectAgentsDir: null });
+	});
+
 	it("rejects ambiguous mode parameters before running a subagent", async () => {
 		const cwd = createTempDir("pi-subagent-invalid-");
 		const definition = createSubagentToolDefinition();
@@ -720,7 +828,7 @@ describe("native subagent tool", () => {
 			{ agent: "explore", task: "inspect", tasks: [{ agent: "reviewer", task: "review" }] },
 			undefined,
 			undefined,
-			{ cwd, hasUI: false } as unknown as ExtensionContext,
+			{ cwd, toolOperations: new LocalToolOperations(cwd), hasUI: false } as unknown as ExtensionContext,
 		);
 
 		expect(result.content[0]).toMatchObject({ type: "text" });

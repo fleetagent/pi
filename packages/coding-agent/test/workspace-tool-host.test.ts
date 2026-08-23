@@ -7,20 +7,19 @@ import { afterEach, describe, expect, it } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
-import { InMemorySessionManager } from "../src/core/session-manager.ts";
+import { InMemorySessionManager } from "../src/core/session/in-memory-session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
+import type { BashToolDetails } from "../src/core/tools/bash.ts";
 import {
-	type BashToolDetails,
-	createReadToolDefinition,
-	DEFAULT_MAX_BYTES,
 	LocalToolOperations,
 	type ToolExecOptions,
 	type ToolGlobOptions,
 	type ToolGrepOptions,
 	type ToolGrepResult,
-	WORKSPACE_TOOL_NAMES,
-	WorkspaceToolHost,
-} from "../src/core/tools/index.ts";
+} from "../src/core/tools/operations.ts";
+import { createReadToolDefinition } from "../src/core/tools/read.ts";
+import { DEFAULT_MAX_BYTES } from "../src/core/tools/truncate.ts";
+import { WORKSPACE_TOOL_NAMES, WorkspaceToolHost } from "../src/core/tools/workspace-tool-host.ts";
 import { createTestResourceLoader } from "./utilities.ts";
 
 const model = getModel("anthropic", "claude-sonnet-4-5")!;
@@ -159,6 +158,8 @@ describe("WorkspaceToolHost", () => {
 			expect(host.getCatalog().map((entry) => entry.name)).toEqual(WORKSPACE_TOOL_NAMES);
 			expect(host.getDefinition("subagent")).toBeUndefined();
 			expect(host.getDefinition("load_tool")).toBeUndefined();
+			expect(host.getDefinition("session_search")).toBeUndefined();
+			expect(host.getDefinition("session_entry_get")).toBeUndefined();
 			expect(host.getDefinition("lsp_diagnostics")).toBeUndefined();
 			expect(() => host.prepareArguments("subagent", {})).toThrow("Unknown or non-workspace tool");
 		} finally {

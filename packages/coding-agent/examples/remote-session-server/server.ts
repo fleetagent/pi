@@ -195,7 +195,7 @@ function extractText(value: unknown): string {
 
 function sessionInfo(sessionId: string, entries: FileEntry[], modified: Date): SessionInfo | null {
 	const header = entries[0];
-	if (!header || header.type !== "session") return null;
+	if (header?.type !== "session") return null;
 
 	let name: string | undefined;
 	let messageCount = 0;

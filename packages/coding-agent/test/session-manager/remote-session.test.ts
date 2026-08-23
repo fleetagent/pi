@@ -2,13 +2,14 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import type { FileEntry, RemoteSessionInfo, SessionHeader } from "../../src/core/session-manager.ts";
+import type { RemoteSessionInfo } from "../../src/core/session/remote-session-client.ts";
 import {
 	formatRemoteSessionReference,
 	parseRemoteSessionId,
 	RemoteSessionClient,
-	RemoteSessionManager,
-} from "../../src/core/session-manager.ts";
+} from "../../src/core/session/remote-session-client.ts";
+import { RemoteSessionManager } from "../../src/core/session/remote-session-manager.ts";
+import type { FileEntry, SessionHeader } from "../../src/core/session/types.ts";
 
 function header(id: string): SessionHeader {
 	return {

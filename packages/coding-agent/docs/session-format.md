@@ -29,7 +29,9 @@ Existing sessions are automatically migrated to the current version (v3) when lo
 ## Source Files
 
 Source on GitHub ([pi-mono](https://github.com/fleetagent/pi)):
-- [`packages/coding-agent/src/core/session-manager.ts`](https://github.com/fleetagent/pi/blob/main/packages/coding-agent/src/core/session-manager.ts) - Session entry types, `Session`, and `SessionManager`
+- [`packages/coding-agent/src/core/session/manager.ts`](https://github.com/fleetagent/pi/blob/main/packages/coding-agent/src/core/session/manager.ts) - Session lifecycle and discovery
+- [`packages/coding-agent/src/core/session/session.ts`](https://github.com/fleetagent/pi/blob/main/packages/coding-agent/src/core/session/session.ts) - Active conversation state and tree operations
+- [`packages/coding-agent/src/core/session/types.ts`](https://github.com/fleetagent/pi/blob/main/packages/coding-agent/src/core/session/types.ts) - Session entry types
 - [`packages/coding-agent/src/core/messages.ts`](https://github.com/fleetagent/pi/blob/main/packages/coding-agent/src/core/messages.ts) - Extended message types (BashExecutionMessage, CustomMessage, etc.)
 - [`packages/ai/src/types.ts`](https://github.com/fleetagent/pi/blob/main/packages/ai/src/types.ts) - Base message types (UserMessage, AssistantMessage, ToolResultMessage)
 - [`packages/agent/src/types.ts`](https://github.com/fleetagent/pi/blob/main/packages/agent/src/types.ts) - AgentMessage union type

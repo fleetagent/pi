@@ -1,6 +1,7 @@
 import { Box, type Component, Container, getCapabilities, Image, Spacer, Text, type TUI } from "@fleetagent/pi-tui";
 import type { ToolDefinition, ToolRenderContext } from "../../../core/extensions/types.ts";
-import { createAllToolDefinitions, LocalToolOperations, type ToolName } from "../../../core/tools/index.ts";
+import { createAllToolDefinitions, type ToolName } from "../../../core/tools/index.ts";
+import { LocalToolOperations } from "../../../core/tools/operations.ts";
 import { getTextOutput as getRenderedTextOutput } from "../../../core/tools/render-utils.ts";
 import { convertToPng } from "../../../utils/image-convert.ts";
 import { theme } from "../theme/theme.ts";

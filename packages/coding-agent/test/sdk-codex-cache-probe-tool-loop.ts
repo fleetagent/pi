@@ -31,7 +31,7 @@ import type { ToolDefinition } from "../src/core/extensions/types.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
 import { PiAgent } from "../src/core/pi-agent.ts";
 import type { ResourceLoader } from "../src/core/resource-loader.ts";
-import { LocalSessionManager } from "../src/core/session-manager.ts";
+import { LocalSessionManager } from "../src/core/session/local-session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 
 type Transport = "sse" | "websocket" | "websocket-cached" | "auto";

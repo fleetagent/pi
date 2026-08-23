@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import mergeAndResolve from "../examples/extensions/git-merge-and-resolve.ts";
-import type { ExecResult, ExtensionAPI, ExtensionContext } from "../src/core/extensions/index.ts";
+import type { ExecResult, ExtensionAPI, ExtensionContext } from "../src/core/extensions/types.ts";
 
 type AgentEndHandler = (event: { type: "agent_end" }, ctx: ExtensionContext) => Promise<undefined>;
 

@@ -350,5 +350,5 @@ createManagedStdioConnectionFactory, createTcpConnectionFactory
 registerStandaloneLspLifecycleHandlers
 ```
 
-`core/lsp/index.ts` defines the authoritative public LSP type and runtime-value surface, and the core and package-root barrels re-export that same contract. `createSubagentTool` requires a `SubagentRunner` in its options. `PiAgent` configures the embedded runner automatically; standalone tool construction must provide its own in-process runner.
+The package root curates the public LSP API directly from the modules under `core/lsp/`. `createSubagentTool` requires a `SubagentRunner` in its options. `PiAgent` configures the embedded runner automatically; standalone tool construction must provide its own in-process runner.
 For extension types, see [extensions.md](extensions.md). For LSP configuration, lifecycle, transport, routing, status, and public type exports, see [Language Server Protocol](lsp.md).

@@ -901,12 +901,28 @@ export function createSubagentToolDefinition(
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const agentScope: AgentScope = params.agentScope ?? "user";
 			const workspaceOperations = ctx.toolOperations;
+			const hasChain = (params.chain?.length ?? 0) > 0;
+			const hasTasks = (params.tasks?.length ?? 0) > 0;
+			const mode = hasChain ? "chain" : hasTasks ? "parallel" : "single";
+			if (!workspaceOperations) {
+				return {
+					content: [{ type: "text", text: "Subagents require explicit workspace tool operations." }],
+					details: { mode, agentScope, projectAgentsDir: null, results: [] },
+					isError: true,
+				};
+			}
+			const backendInfo = workspaceOperations?.getBackendInfo?.();
+			if (backendInfo?.type === "remote" && !backendInfo.configured) {
+				return {
+					content: [{ type: "text", text: "Subagents cannot run with an unconfigured remote backend." }],
+					details: { mode, agentScope, projectAgentsDir: null, results: [] },
+					isError: true,
+				};
+			}
 			const workspaceCwd = workspaceOperations?.cwd ?? ctx.cwd;
 			const discovery = await discoverAgentsWithOperations(workspaceCwd, agentScope, workspaceOperations);
 			const agents = mergeSessionAgents(discovery.agents, options.configRegistry?.list() ?? []);
 			const inheritedModel = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
-			const hasChain = (params.chain?.length ?? 0) > 0;
-			const hasTasks = (params.tasks?.length ?? 0) > 0;
 			const hasSingle = Boolean(params.task);
 			const modeCount = Number(hasChain) + Number(hasTasks) + Number(hasSingle);
 
@@ -936,6 +952,28 @@ export function createSubagentToolDefinition(
 				return {
 					content: [
 						{ type: "text", text: "Invalid parameters. continueSession requires a single follow-up task." },
+					],
+					details: makeDetails(hasChain ? "chain" : hasTasks ? "parallel" : "single")([]),
+					isError: true,
+				};
+			}
+			if (
+				params.continueSession &&
+				(params.agent !== undefined ||
+					params.systemPrompt !== undefined ||
+					params.model !== undefined ||
+					params.modelHint !== undefined ||
+					params.tools !== undefined ||
+					params.skills !== undefined ||
+					params.cwd !== undefined ||
+					params.agentScope !== undefined)
+			) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: "Invalid parameters. A continued subagent may only specify task and responseFormat.",
+						},
 					],
 					details: makeDetails("single")([]),
 					isError: true,

@@ -29,8 +29,8 @@ import { createLspDefinitionTool, createLspHoverTool, createLspReferencesTool } 
 import { createLspCodeActionsTool, createLspRenameTool } from "../src/core/lsp/refactor.ts";
 import type { LspConnectionFactory } from "../src/core/lsp/transport.ts";
 import { PiAgent } from "../src/core/pi-agent.ts";
-import { LocalSessionManager } from "../src/core/session-manager.ts";
-import { LocalToolOperations, type ToolBackendInfo, type ToolOperations } from "../src/core/tools/index.ts";
+import { LocalSessionManager } from "../src/core/session/local-session-manager.ts";
+import { LocalToolOperations, type ToolBackendInfo, type ToolOperations } from "../src/core/tools/operations.ts";
 
 const tempDirs: string[] = [];
 

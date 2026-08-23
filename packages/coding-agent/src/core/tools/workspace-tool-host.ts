@@ -1,3 +1,4 @@
+import { isAbsolute } from "node:path";
 import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@fleetagent/pi-agent-core";
 import { validateToolArguments } from "@fleetagent/pi-ai";
 import type { Static, TSchema } from "typebox";
@@ -8,7 +9,8 @@ import { createFindToolDefinition, type FindToolOptions } from "./find.ts";
 import { createGrepToolDefinition, type GrepToolOptions } from "./grep.ts";
 import { createLsToolDefinition, type LsToolOptions } from "./ls.ts";
 import { LocalToolOperations, type ToolOperations, type WorkspaceToolRemoteInvocation } from "./operations.ts";
-import { createReadToolDefinition, type ReadToolOptions } from "./read.ts";
+import { resolveToCwd } from "./path-utils.ts";
+import { createReadToolDefinition, type ReadToolOperations, type ReadToolOptions } from "./read.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 import { createWriteToolDefinition, type WriteToolOptions } from "./write.ts";
 
@@ -299,8 +301,24 @@ export class WorkspaceToolHost {
 		const combinedSignal = signal
 			? AbortSignal.any([signal, this.disposeController.signal])
 			: this.disposeController.signal;
+		if (combinedSignal.aborted) throw new Error("Operation aborted");
 		let execution: Promise<AgentToolResult<TDetails>>;
-		if (this.remoteToolNames.has(name)) {
+		let selectedReadOperations: ReadToolOperations | undefined;
+		let executeRemotely = this.remoteToolNames.has(name);
+		if (
+			executeRemotely &&
+			name === "read" &&
+			this.toolOptions?.read?.operationsForPath &&
+			(params as unknown as { path?: unknown }).path !== undefined
+		) {
+			const readPath = (params as unknown as { path: unknown }).path;
+			if (typeof readPath === "string" && isAbsolute(readPath)) {
+				const absolutePath = resolveToCwd(readPath, this.operations.cwd);
+				selectedReadOperations = this.toolOptions.read.operationsForPath(absolutePath);
+				if (selectedReadOperations) executeRemotely = false;
+			}
+		}
+		if (executeRemotely) {
 			if (!this.operations.executeWorkspaceTool)
 				throw new Error(`Remote workspace executor is unavailable: ${name}`);
 			execution = Promise.resolve().then(
@@ -314,10 +332,13 @@ export class WorkspaceToolHost {
 					})) as AgentToolResult<TDetails>,
 			);
 		} else {
-			if (executionOptions?.imageAutoResize !== undefined && name === "read") {
+			if (name === "read" && (selectedReadOperations || executionOptions?.imageAutoResize !== undefined)) {
 				definition = createReadToolDefinition(this.operations, {
 					...this.toolOptions?.read,
-					autoResizeImages: executionOptions.imageAutoResize,
+					...(executionOptions?.imageAutoResize === undefined
+						? {}
+						: { autoResizeImages: executionOptions.imageAutoResize }),
+					...(selectedReadOperations ? { operationsForPath: () => selectedReadOperations } : {}),
 				}) as unknown as ToolDefinition<TParams, TDetails>;
 			} else if (executionOptions?.shellCommandPrefix !== undefined && name === "bash") {
 				definition = createBashToolDefinition(this.operations, {

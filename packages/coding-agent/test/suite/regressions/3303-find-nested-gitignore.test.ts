@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createFindToolDefinition } from "../../../src/core/tools/find.ts";
-import { LocalToolOperations } from "../../../src/core/tools/index.ts";
+import { LocalToolOperations } from "../../../src/core/tools/operations.ts";
 
 /**
  * Regression test for https://github.com/fleetagent/pi/issues/3303

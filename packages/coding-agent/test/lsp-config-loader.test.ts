@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { LspConfigurationLayer, LspConfiguredServer } from "../src/core/lsp/config.ts";
 import { loadLspConfiguration, resolveLspConfigurationLayerPaths } from "../src/core/lsp/config-loader.ts";
 import { isFatalPiAgentDiagnostic, PiAgent } from "../src/core/pi-agent.ts";
-import { LocalSessionManager } from "../src/core/session-manager.ts";
+import { LocalSessionManager } from "../src/core/session/local-session-manager.ts";
 import { InMemorySettingsStorage, SettingsManager } from "../src/core/settings-manager.ts";
 
 const tempDirs: string[] = [];

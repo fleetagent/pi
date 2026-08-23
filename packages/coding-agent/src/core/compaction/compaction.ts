@@ -18,12 +18,8 @@ import type {
 } from "@fleetagent/pi-ai";
 import { completeSimple, retryAssistantCall } from "@fleetagent/pi-ai";
 import { convertToLlm } from "../messages.ts";
-import {
-	buildSessionContext,
-	type CompactionEntry,
-	type SessionEntry,
-	sessionEntryToContextMessages,
-} from "../session-manager.ts";
+import { buildSessionContext, sessionEntryToContextMessages } from "../session/context.ts";
+import type { CompactionEntry, SessionEntry } from "../session/types.ts";
 import {
 	computeFileLists,
 	createFileOps,

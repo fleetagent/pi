@@ -1,5 +1,8 @@
 import { createHash, randomBytes } from "node:crypto";
-import { basename, resolve } from "node:path";
+import { open, readFile, stat, unlink } from "node:fs/promises";
+import { createConnection, createServer } from "node:net";
+import { tmpdir } from "node:os";
+import { basename, join, resolve } from "node:path";
 import { VERSION } from "../../config.ts";
 import { spawnProcess } from "../../utils/child-process.ts";
 import type { SandboxSettings, SettingsManager } from "../settings-manager.ts";
@@ -16,6 +19,74 @@ export const SANDBOX_LABEL_DAEMON_PORT = `${SANDBOX_LABEL_PREFIX}.daemon-port`;
 export const SANDBOX_LABEL_OWNER_UID = `${SANDBOX_LABEL_PREFIX}.owner-uid`;
 export const SANDBOX_LABEL_VERSION = `${SANDBOX_LABEL_PREFIX}.version`;
 export const SANDBOX_LABEL_SESSION = `${SANDBOX_LABEL_PREFIX}.session`;
+
+const reservedSandboxDaemonPorts = new Set<number>();
+const sandboxPortLockPath = join(tmpdir(), `fleetagent-pi-sandbox-port-${process.getuid?.() ?? "user"}.lock`);
+let sandboxStartQueue: Promise<void> = Promise.resolve();
+
+function isProcessAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		return error instanceof Error && "code" in error && error.code === "EPERM";
+	}
+}
+
+async function acquireSandboxPortLock(): Promise<() => Promise<void>> {
+	const token = `${process.pid}:${randomBytes(16).toString("hex")}`;
+	const deadline = Date.now() + 30_000;
+	while (Date.now() < deadline) {
+		try {
+			const handle = await open(sandboxPortLockPath, "wx", 0o600);
+			await handle.writeFile(JSON.stringify({ pid: process.pid, token }));
+			return async () => {
+				await handle.close();
+				try {
+					const current = JSON.parse(await readFile(sandboxPortLockPath, "utf8")) as { token?: unknown };
+					if (current.token === token) await unlink(sandboxPortLockPath);
+				} catch {}
+			};
+		} catch (error) {
+			if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) throw error;
+			let stale = false;
+			try {
+				const owner = JSON.parse(await readFile(sandboxPortLockPath, "utf8")) as { pid?: unknown };
+				stale = typeof owner.pid === "number" && !isProcessAlive(owner.pid);
+			} catch {
+				try {
+					stale = Date.now() - (await stat(sandboxPortLockPath)).mtimeMs > 10_000;
+				} catch {}
+			}
+			if (stale) {
+				await unlink(sandboxPortLockPath).catch(() => undefined);
+				continue;
+			}
+			await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+		}
+	}
+	throw new Error("Timed out waiting for the sandbox daemon port allocation lock");
+}
+
+async function withSandboxStartLock<T>(operation: () => Promise<T>): Promise<T> {
+	const previous = sandboxStartQueue;
+	let release!: () => void;
+	sandboxStartQueue = new Promise<void>((resolveQueue) => {
+		release = resolveQueue;
+	});
+	await previous;
+	let releaseFileLock: (() => Promise<void>) | undefined;
+	try {
+		releaseFileLock = await acquireSandboxPortLock();
+		return await operation();
+	} finally {
+		try {
+			await releaseFileLock?.();
+		} finally {
+			release();
+		}
+	}
+}
 
 export type SandboxCleanupBehavior = "stop" | "remove";
 
@@ -117,12 +188,20 @@ export interface DockerCommandResult {
 export interface DockerRunner {
 	run(command: string, args: string[], options?: { env?: Record<string, string> }): Promise<DockerCommandResult>;
 }
+export interface ManagedSandboxContainer {
+	workspaceRoot: string;
+	daemonPort: number;
+	ownerId?: string;
+}
 
 export interface DockerSandboxServiceOptions {
 	settingsManager?: Pick<SettingsManager, "getSandboxSettings">;
 	env?: SandboxEnvironment;
 	runner?: DockerRunner;
 	tokenGenerator?: () => string;
+	portAllocator?: (host: string, preferredPort: number) => Promise<number>;
+	readinessWaiter?: (host: string, port: number) => Promise<void>;
+	managedContainers?: Map<string, ManagedSandboxContainer>;
 }
 
 interface DockerPsRecord {
@@ -239,6 +318,53 @@ function getOwnerUid(): string | undefined {
 
 function generateToken(): string {
 	return randomBytes(32).toString("base64url");
+}
+
+async function tryReservePort(host: string, port: number): Promise<number | undefined> {
+	return new Promise((resolvePort) => {
+		const server = createServer();
+		server.unref();
+		server.once("error", () => resolvePort(undefined));
+		server.listen({ host, port, exclusive: true }, () => {
+			const address = server.address();
+			const selectedPort = typeof address === "object" && address ? address.port : undefined;
+			server.close(() => resolvePort(selectedPort));
+		});
+	});
+}
+
+export async function allocateSandboxDaemonPort(host: string, preferredPort: number): Promise<number> {
+	const preferred = await tryReservePort(host, preferredPort);
+	if (preferred !== undefined) return preferred;
+	const fallback = await tryReservePort(host, 0);
+	if (fallback === undefined) throw new Error(`Unable to allocate a sandbox daemon port on ${host}`);
+	return fallback;
+}
+
+async function canConnect(host: string, port: number): Promise<boolean> {
+	return new Promise((resolveConnection) => {
+		const socket = createConnection({ host, port });
+		let settled = false;
+		const finish = (connected: boolean): void => {
+			if (settled) return;
+			settled = true;
+			socket.destroy();
+			resolveConnection(connected);
+		};
+		socket.setTimeout(250, () => finish(false));
+		socket.once("connect", () => finish(true));
+		socket.once("error", () => finish(false));
+	});
+}
+
+async function waitForSandboxDaemonPort(host: string, port: number): Promise<void> {
+	const connectHost = host === "0.0.0.0" ? "127.0.0.1" : host;
+	const deadline = Date.now() + 15_000;
+	while (Date.now() < deadline) {
+		if (await canConnect(connectHost, port)) return;
+		await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
+	}
+	throw new Error(`Sandbox daemon did not bind ${connectHost}:${port} within 15 seconds`);
 }
 
 function ensureSuccessful(result: DockerCommandResult, args: string[]): void {
@@ -404,12 +530,18 @@ export class DockerSandboxService {
 	private readonly env: SandboxEnvironment;
 	private readonly runner: DockerRunner;
 	private readonly tokenGenerator: () => string;
+	private readonly portAllocator: (host: string, preferredPort: number) => Promise<number>;
+	private readonly readinessWaiter: (host: string, port: number) => Promise<void>;
+	private readonly managedContainers: Map<string, ManagedSandboxContainer>;
 
 	constructor(options: DockerSandboxServiceOptions = {}) {
 		this.settingsManager = options.settingsManager;
 		this.env = options.env ?? process.env;
 		this.runner = options.runner ?? new ProcessDockerRunner();
 		this.tokenGenerator = options.tokenGenerator ?? generateToken;
+		this.portAllocator = options.portAllocator ?? allocateSandboxDaemonPort;
+		this.readinessWaiter = options.readinessWaiter ?? waitForSandboxDaemonPort;
+		this.managedContainers = options.managedContainers ?? new Map();
 	}
 
 	resolveConfig(overrides: SandboxConfigOverrides = {}): SandboxConfig {
@@ -433,24 +565,65 @@ export class DockerSandboxService {
 	}
 
 	async start(options: SandboxStartOptions): Promise<SandboxStartResult> {
-		const invocation = this.buildStartInvocation(options);
-		await this.checkDockerAvailable(this.resolveConfig(options));
-		const runResult = await this.runner.run(invocation.command, invocation.args, { env: invocation.env });
-		ensureSuccessful(runResult, invocation.args);
-		const containerId = runResult.stdout.trim();
-		const config = this.resolveConfig(options);
-		const daemonHost = config.daemonHostBind === "0.0.0.0" ? "127.0.0.1" : config.daemonHostBind;
-		const daemonUrl = `ws://${daemonHost}:${config.daemonPort}/pi/workspace`;
-		return {
-			containerId,
-			containerName: invocation.containerName,
-			workspaceRoot: invocation.workspaceRoot,
-			workspaceMountPath: config.workspaceMountPath,
-			daemonUrl,
-			daemonUrlRedacted: redactSecrets(daemonUrl),
-			token: invocation.token,
-			labels: invocation.labels,
-		};
+		return withSandboxStartLock(async () => {
+			const configured = this.resolveConfig(options);
+			let daemonPort: number | undefined;
+			for (let attempt = 0; attempt < 16; attempt++) {
+				const preferredPort = reservedSandboxDaemonPorts.has(configured.daemonPort) ? 0 : configured.daemonPort;
+				const candidate = await this.portAllocator(configured.daemonHostBind, preferredPort);
+				if (!reservedSandboxDaemonPorts.has(candidate)) {
+					daemonPort = candidate;
+					break;
+				}
+			}
+			if (daemonPort === undefined) throw new Error("Unable to reserve a unique sandbox daemon port");
+			reservedSandboxDaemonPorts.add(daemonPort);
+			try {
+				const effectiveOptions = { ...options, daemonPort };
+				const config = this.resolveConfig(effectiveOptions);
+				const invocation = buildDockerRunInvocation(config, effectiveOptions, this.tokenGenerator());
+				await this.checkDockerAvailable(config);
+				const runResult = await this.runner.run(invocation.command, invocation.args, { env: invocation.env });
+				ensureSuccessful(runResult, invocation.args);
+				const containerId = runResult.stdout.trim();
+				this.managedContainers.set(containerId, {
+					workspaceRoot: invocation.workspaceRoot,
+					daemonPort: config.daemonPort,
+					ownerId: options.sessionId,
+				});
+				try {
+					await this.readinessWaiter(config.daemonHostBind, config.daemonPort);
+				} catch (error) {
+					const cleanupArgs = ["rm", "--force", containerId];
+					const cleanupResult = await this.runner.run(config.dockerBinary, cleanupArgs);
+					if (cleanupResult.exitCode !== 0) {
+						const cleanupError = new Error(
+							cleanupResult.stderr.trim() || cleanupResult.stdout.trim() || "Failed to remove unready sandbox",
+						);
+						throw new AggregateError([error, cleanupError], "Sandbox readiness and cleanup both failed");
+					}
+					this.managedContainers.delete(containerId);
+					throw error;
+				}
+				const daemonHost = config.daemonHostBind === "0.0.0.0" ? "127.0.0.1" : config.daemonHostBind;
+				const daemonUrl = `ws://${daemonHost}:${config.daemonPort}/pi/workspace`;
+				return {
+					containerId,
+					containerName: invocation.containerName,
+					workspaceRoot: invocation.workspaceRoot,
+					workspaceMountPath: config.workspaceMountPath,
+					daemonUrl,
+					daemonUrlRedacted: redactSecrets(daemonUrl),
+					token: invocation.token,
+					labels: invocation.labels,
+				};
+			} catch (error) {
+				if (![...this.managedContainers.values()].some((container) => container.daemonPort === daemonPort)) {
+					reservedSandboxDaemonPorts.delete(daemonPort);
+				}
+				throw error;
+			}
+		});
 	}
 
 	async list(options: SandboxListOptions): Promise<SandboxContainer[]> {
@@ -472,13 +645,30 @@ export class DockerSandboxService {
 		const rows = parseJsonLines<DockerPsRecord>(result.stdout);
 		return rows.filter((row) => row.ID || row.Names).map((row) => this.containerFromPsRecord(row));
 	}
+	private forgetManagedContainer(reference: string, workspaceRoot: string): void {
+		const canonicalWorkspaceRoot = resolve(workspaceRoot);
+		for (const [containerId, container] of this.managedContainers) {
+			if (container.workspaceRoot === canonicalWorkspaceRoot && containerIdsMatch(containerId, reference)) {
+				this.managedContainers.delete(containerId);
+				reservedSandboxDaemonPorts.delete(container.daemonPort);
+			}
+		}
+	}
 
 	async stop(options: SandboxStopOptions): Promise<SandboxStopResult> {
 		const containers = await this.list({ workspaceRoot: options.workspaceRoot });
 		const selected = selectStopTarget(containers, options.target, options.currentContainerId);
-		if (!selected) return { status: "not-found", message: "No matching Pi sandbox container found" };
-		if (selected.state && selected.state !== "running") return { status: "already-stopped", container: selected };
+		if (!selected) {
+			const requestedId = options.currentContainerId ?? options.target;
+			if (requestedId) this.forgetManagedContainer(requestedId, options.workspaceRoot);
+			return { status: "not-found", message: "No matching Pi sandbox container found" };
+		}
 		const config = this.resolveConfig();
+		if (selected.state && selected.state !== "running" && config.cleanup === "stop") {
+			this.forgetManagedContainer(selected.id, options.workspaceRoot);
+			if (selected.daemonPort !== undefined) reservedSandboxDaemonPorts.delete(selected.daemonPort);
+			return { status: "already-stopped", container: selected };
+		}
 		const args = [
 			config.cleanup === "remove" ? "rm" : "stop",
 			...(config.cleanup === "remove" ? ["--force"] : []),
@@ -487,11 +677,36 @@ export class DockerSandboxService {
 		const result = await this.runner.run(config.dockerBinary, args);
 		if (result.exitCode !== 0) {
 			const output = `${result.stderr}\n${result.stdout}`;
-			if (/No such container|not found/i.test(output))
+			if (/No such container|not found/i.test(output)) {
+				this.forgetManagedContainer(selected.id, options.workspaceRoot);
+				if (selected.daemonPort !== undefined) reservedSandboxDaemonPorts.delete(selected.daemonPort);
 				return { status: "not-found", message: "Sandbox container no longer exists" };
+			}
 			ensureSuccessful(result, args);
 		}
+		this.forgetManagedContainer(selected.id, options.workspaceRoot);
+		if (selected.daemonPort !== undefined) reservedSandboxDaemonPorts.delete(selected.daemonPort);
 		return { status: config.cleanup === "remove" ? "removed" : "stopped", container: selected };
+	}
+
+	async stopManagedContainers(): Promise<void> {
+		await withSandboxStartLock(async () => {
+			const failures: unknown[] = [];
+			for (const [containerId, container] of [...this.managedContainers]) {
+				try {
+					await this.stop({
+						workspaceRoot: container.workspaceRoot,
+						target: containerId,
+						currentContainerId: containerId,
+					});
+					this.managedContainers.delete(containerId);
+					reservedSandboxDaemonPorts.delete(container.daemonPort);
+				} catch (error) {
+					failures.push(error);
+				}
+			}
+			if (failures.length > 0) throw new AggregateError(failures, "Failed to stop managed sandbox containers");
+		});
 	}
 
 	private containerFromPsRecord(row: DockerPsRecord): SandboxContainer {
@@ -548,6 +763,9 @@ export function parseDockerInspectContainers(
 		};
 	});
 }
+function containerIdsMatch(left: string, right: string): boolean {
+	return left === right || left.startsWith(right) || right.startsWith(left);
+}
 
 function selectStopTarget(
 	containers: SandboxContainer[],
@@ -555,21 +773,10 @@ function selectStopTarget(
 	currentContainerId: string | undefined,
 ): SandboxContainer | undefined {
 	if (target) {
-		return containers.find(
-			(container) =>
-				container.id === target ||
-				container.id.startsWith(target) ||
-				target.startsWith(container.id) ||
-				container.name === target,
-		);
+		return containers.find((container) => containerIdsMatch(container.id, target) || container.name === target);
 	}
 	if (currentContainerId) {
-		const current = containers.find(
-			(container) =>
-				container.id === currentContainerId ||
-				container.id.startsWith(currentContainerId) ||
-				currentContainerId.startsWith(container.id),
-		);
+		const current = containers.find((container) => containerIdsMatch(container.id, currentContainerId));
 		if (current) return current;
 	}
 	return containers.length === 1 ? containers[0] : undefined;

@@ -6,7 +6,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { AuthStorage } from "../../src/core/auth-storage.ts";
 import type { LspConnectionFactory } from "../../src/core/lsp/transport.ts";
 import { PiAgent, type PiAgentSessionOptions } from "../../src/core/pi-agent.ts";
-import { InMemorySessionManager, LocalSessionManager } from "../../src/core/session-manager.ts";
+import { InMemorySessionManager } from "../../src/core/session/in-memory-session-manager.ts";
+import { LocalSessionManager } from "../../src/core/session/local-session-manager.ts";
 import type {
 	ExtensionAPI,
 	ExtensionFactory,

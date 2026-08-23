@@ -15,7 +15,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { PiAgent } from "../src/core/pi-agent.ts";
-import { InMemorySessionManager, LocalSessionManager, type Session } from "../src/core/session-manager.ts";
+import { InMemorySessionManager } from "../src/core/session/in-memory-session-manager.ts";
+import { LocalSessionManager } from "../src/core/session/local-session-manager.ts";
+import type { Session } from "../src/core/session/session.ts";
 import { API_KEY } from "./utilities.ts";
 
 describe.skipIf(!API_KEY)("AgentSession forking", () => {

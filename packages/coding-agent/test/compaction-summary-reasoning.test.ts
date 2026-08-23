@@ -6,7 +6,7 @@ import {
 	compact,
 	completeSummarization,
 	generateSummary,
-} from "../src/core/compaction/index.ts";
+} from "../src/core/compaction/compaction.ts";
 
 const { completeSimpleMock } = vi.hoisted(() => ({
 	completeSimpleMock: vi.fn(),

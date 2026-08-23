@@ -1,14 +1,13 @@
 import { describe, expect, it } from "vitest";
-import {
-	type BranchSummaryEntry,
-	buildSessionContext,
-	type CompactionEntry,
-	type ModelChangeEntry,
-	type SessionEntry,
-	type SessionMessageEntry,
-	sessionEntryToContextMessages,
-	type ThinkingLevelChangeEntry,
-} from "../../src/core/session-manager.ts";
+import { buildSessionContext, sessionEntryToContextMessages } from "../../src/core/session/context.ts";
+import type {
+	BranchSummaryEntry,
+	CompactionEntry,
+	ModelChangeEntry,
+	SessionEntry,
+	SessionMessageEntry,
+	ThinkingLevelChangeEntry,
+} from "../../src/core/session/types.ts";
 
 function msg(id: string, parentId: string | null, role: "user" | "assistant", text: string): SessionMessageEntry {
 	const base = { type: "message" as const, id, parentId, timestamp: "2025-01-01T00:00:00Z" };

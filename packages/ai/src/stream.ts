@@ -12,8 +12,6 @@ import type {
 	StreamOptions,
 } from "./types.ts";
 
-export { getEnvApiKey } from "./env-api-keys.ts";
-
 function resolveApiProvider(api: Api) {
 	const provider = getApiProvider(api);
 	if (!provider) {

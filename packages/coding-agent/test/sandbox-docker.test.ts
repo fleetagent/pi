@@ -1,11 +1,14 @@
 import { readFileSync } from "node:fs";
+import { createServer } from "node:net";
 import { describe, expect, it } from "vitest";
 import {
+	allocateSandboxDaemonPort,
 	buildDockerRunInvocation,
 	DEFAULT_SANDBOX_IMAGE,
 	type DockerCommandResult,
 	type DockerRunner,
 	DockerSandboxService,
+	type ManagedSandboxContainer,
 	parseDockerInspectContainers,
 	parseDockerPortOutput,
 	redactSecrets,
@@ -125,22 +128,143 @@ describe("Docker sandbox core", () => {
 		expect(invocation.labels[SANDBOX_LABEL_DAEMON_PORT]).toBe("8787");
 	});
 
-	it("starts a host-networked container and uses the configured daemon port directly", async () => {
-		const runner = new FakeDockerRunner([ok("29.3.1\n"), ok("container123\n")]);
+	it("allocates distinct host-network daemon ports for concurrent session sandboxes", async () => {
+		const runner = new FakeDockerRunner([ok("29.3.1\n"), ok("container123\n"), ok("29.3.1\n"), ok("container456\n")]);
 		const service = new DockerSandboxService({
 			runner,
 			env: {},
 			tokenGenerator: () => "generated-token-012345678901234567890123456789",
+			portAllocator: async (_host, preferredPort) => (preferredPort === 0 ? 49153 : preferredPort),
+			readinessWaiter: async () => {},
 		});
 
-		const result = await service.start({ workspaceRoot: "/tmp/workspace", image: "pi-sandbox:test" });
+		const [first, second] = await Promise.all([
+			service.start({ workspaceRoot: "/tmp/workspace", image: "pi-sandbox:test" }),
+			service.start({ workspaceRoot: "/tmp/workspace", image: "pi-sandbox:test" }),
+		]);
 
-		expect(result.containerId).toBe("container123");
-		expect(result.daemonUrl).toBe("ws://127.0.0.1:8787/pi/workspace");
-		expect(runner.calls).toHaveLength(2);
-		expect(runner.calls[1].args).toContain("pi-sandbox:test");
+		expect(first).toMatchObject({
+			containerId: "container123",
+			daemonUrl: "ws://127.0.0.1:8787/pi/workspace",
+		});
+		expect(second).toMatchObject({
+			containerId: "container456",
+			daemonUrl: "ws://127.0.0.1:49153/pi/workspace",
+		});
+		expect(runner.calls).toHaveLength(4);
+		expect(runner.calls[1].args).toContain("8787");
+		expect(runner.calls[3].args).toContain("49153");
 		expect(runner.calls[1].args.join(" ")).not.toContain("generated-token");
 		expect(runner.calls[1].env?.PI_DAEMON_TOKEN).toBe("generated-token-012345678901234567890123456789");
+	});
+
+	it("removes stopped containers started by another service during managed shutdown", async () => {
+		const runningRow = JSON.stringify({
+			ID: "managed",
+			Names: "pi-sandbox-workspace-hash",
+			Image: "pi-sandbox:test",
+			State: "exited",
+			Labels: `${SANDBOX_LABEL_ENABLED}=true,${SANDBOX_LABEL_DAEMON_PORT}=49200`,
+		});
+		const runner = new FakeDockerRunner([
+			ok("29.3.1\n"),
+			ok("managed123\n"),
+			ok(`${runningRow}\n`),
+			ok("managed123\n"),
+		]);
+		const managedContainers = new Map<string, ManagedSandboxContainer>();
+		const service = new DockerSandboxService({
+			runner,
+			env: {},
+			portAllocator: async () => 49200,
+			readinessWaiter: async () => {},
+			managedContainers,
+		});
+		const shutdownService = new DockerSandboxService({
+			runner,
+			env: { PI_SANDBOX_CLEANUP: "remove" },
+			managedContainers,
+		});
+
+		await service.start({ workspaceRoot: "/tmp/managed-workspace", image: "pi-sandbox:test" });
+		await shutdownService.stopManagedContainers();
+		await shutdownService.stopManagedContainers();
+
+		expect(runner.calls).toHaveLength(4);
+		expect(runner.calls[2].args.some((arg) => arg.startsWith(`label=${SANDBOX_LABEL_WORKSPACE_HASH}=`))).toBe(true);
+		expect(runner.calls[3].args).toEqual(["rm", "--force", "managed"]);
+	});
+
+	it("forgets missing managed containers only within the requested workspace", async () => {
+		const runner = new FakeDockerRunner([ok(""), ok("")]);
+		const managedContainers = new Map<string, ManagedSandboxContainer>([
+			["missing123", { workspaceRoot: "/tmp/other-workspace", daemonPort: 49400 }],
+		]);
+		const service = new DockerSandboxService({ runner, env: {}, managedContainers });
+
+		await service.stop({ workspaceRoot: "/tmp/current-workspace", target: "missing123" });
+		expect(managedContainers.size).toBe(1);
+		await service.stop({ workspaceRoot: "/tmp/other-workspace", target: "missing123" });
+
+		expect(managedContainers.size).toBe(0);
+		expect(runner.calls).toHaveLength(2);
+	});
+
+	it("retains failed-readiness ports until the surviving container is cleaned up", async () => {
+		const runningRow = JSON.stringify({
+			ID: "failed123",
+			Names: "pi-sandbox-workspace-hash",
+			Image: "pi-sandbox:test",
+			State: "running",
+			Labels: `${SANDBOX_LABEL_ENABLED}=true,${SANDBOX_LABEL_DAEMON_PORT}=49300`,
+		});
+		const runner = new FakeDockerRunner([
+			ok("29.3.1\n"),
+			ok("failed123\n"),
+			fail("cleanup failed"),
+			ok(`${runningRow}\n`),
+			ok("failed123\n"),
+		]);
+		const managedContainers = new Map<string, ManagedSandboxContainer>();
+		const preferredPorts: number[] = [];
+		const service = new DockerSandboxService({
+			runner,
+			env: {},
+			managedContainers,
+			portAllocator: async (_host, preferredPort) => {
+				preferredPorts.push(preferredPort);
+				if (preferredPorts.length > 1) throw new Error("stop after observing fallback allocation");
+				return 49300;
+			},
+			readinessWaiter: async () => {
+				throw new Error("daemon not ready");
+			},
+		});
+
+		await expect(
+			service.start({ workspaceRoot: "/tmp/failed-workspace", image: "pi-sandbox:test", daemonPort: 49300 }),
+		).rejects.toThrow("Sandbox readiness and cleanup both failed");
+		await expect(
+			service.start({ workspaceRoot: "/tmp/other-workspace", image: "pi-sandbox:test", daemonPort: 49300 }),
+		).rejects.toThrow("stop after observing fallback allocation");
+		expect(preferredPorts).toEqual([49300, 0]);
+
+		await new DockerSandboxService({ runner, env: {}, managedContainers }).stopManagedContainers();
+		expect(runner.calls.at(-1)?.args).toEqual(["stop", "failed123"]);
+	});
+
+	it("falls back when the preferred host-network daemon port is occupied", async () => {
+		const blocker = createServer();
+		await new Promise<void>((resolve) => blocker.listen(0, "127.0.0.1", resolve));
+		const address = blocker.address();
+		if (!address || typeof address === "string") throw new Error("Expected a TCP listener address");
+		try {
+			const allocated = await allocateSandboxDaemonPort("127.0.0.1", address.port);
+			expect(allocated).not.toBe(address.port);
+			expect(allocated).toBeGreaterThan(0);
+		} finally {
+			await new Promise<void>((resolve, reject) => blocker.close((error) => (error ? reject(error) : resolve())));
+		}
 	});
 
 	it("lists only label-filtered Pi sandbox containers and redacts displayed endpoints", async () => {

@@ -1987,7 +1987,7 @@ pi.registerTool({
 
 ### Overriding Built-in Tools
 
-Extensions can override built-in tools (`read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`, `subagent`, and `lsp_*`) by registering a tool with the same name. Interactive mode displays a warning when this happens.
+Extensions can override built-in tools (`read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`, `websearch`, `session_search`, `session_entry_get`, `subagent`, `subagent_runs`, `create_subagent`, and `lsp_*`) by registering a tool with the same name. Interactive mode displays a warning when this happens.
 
 ```bash
 # Extension's read tool replaces built-in read
@@ -2016,6 +2016,7 @@ Built-in tool implementations:
 - [grep.ts](https://github.com/fleetagent/pi/blob/main/packages/coding-agent/src/core/tools/grep.ts) - `GrepToolDetails`
 - [find.ts](https://github.com/fleetagent/pi/blob/main/packages/coding-agent/src/core/tools/find.ts) - `FindToolDetails`
 - [ls.ts](https://github.com/fleetagent/pi/blob/main/packages/coding-agent/src/core/tools/ls.ts) - `LsToolDetails`
+- [session-history.ts](https://github.com/fleetagent/pi/blob/main/packages/coding-agent/src/core/tools/session-history.ts) - `SessionSearchToolDetails`, `SessionEntryGetToolDetails`
 
 ### Remote Execution
 

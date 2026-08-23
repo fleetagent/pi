@@ -6,13 +6,14 @@ import { type AssistantMessage, getModel } from "@fleetagent/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
-import type { CompactOptions } from "../src/core/extensions/index.ts";
+import type { CompactOptions } from "../src/core/extensions/types.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
-import { InMemorySessionManager, type Session } from "../src/core/session-manager.ts";
+import { InMemorySessionManager } from "../src/core/session/in-memory-session-manager.ts";
+import type { Session } from "../src/core/session/session.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { createTestResourceLoader } from "./utilities.ts";
 
-vi.mock("../src/core/compaction/index.ts", () => ({
+vi.mock("../src/core/compaction/compaction.ts", () => ({
 	calculateContextTokens: (usage: {
 		input: number;
 		output: number;
@@ -20,7 +21,6 @@ vi.mock("../src/core/compaction/index.ts", () => ({
 		cacheWrite: number;
 		totalTokens?: number;
 	}) => usage.totalTokens ?? usage.input + usage.output + usage.cacheRead + usage.cacheWrite,
-	collectEntriesForBranchSummary: () => ({ entries: [], commonAncestorId: null }),
 	compact: async () => ({
 		summary: "compacted",
 		firstKeptEntryId: "entry-1",
@@ -45,13 +45,17 @@ vi.mock("../src/core/compaction/index.ts", () => ({
 		}
 		return { tokens: 0, usageTokens: 0, trailingTokens: 0, lastUsageIndex: null };
 	},
-	generateBranchSummary: async () => ({ summary: "", aborted: false, readFiles: [], modifiedFiles: [] }),
 	prepareCompaction: () => ({ dummy: true }),
 	shouldCompact: (
 		contextTokens: number,
 		contextWindow: number,
 		settings: { enabled: boolean; reserveTokens: number },
 	) => settings.enabled && contextTokens > contextWindow - settings.reserveTokens,
+}));
+
+vi.mock("../src/core/compaction/branch-summarization.ts", () => ({
+	collectEntriesForBranchSummary: () => ({ entries: [], commonAncestorId: null }),
+	generateBranchSummary: async () => ({ summary: "", aborted: false, readFiles: [], modifiedFiles: [] }),
 }));
 
 describe("AgentSession auto-compaction queue resume", () => {

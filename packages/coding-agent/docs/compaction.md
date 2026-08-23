@@ -6,7 +6,7 @@ LLMs have limited context windows. When conversations grow too long, pi uses com
 - [`packages/coding-agent/src/core/compaction/compaction.ts`](https://github.com/fleetagent/pi/blob/main/packages/coding-agent/src/core/compaction/compaction.ts) - Auto-compaction logic
 - [`packages/coding-agent/src/core/compaction/branch-summarization.ts`](https://github.com/fleetagent/pi/blob/main/packages/coding-agent/src/core/compaction/branch-summarization.ts) - Branch summarization
 - [`packages/coding-agent/src/core/compaction/utils.ts`](https://github.com/fleetagent/pi/blob/main/packages/coding-agent/src/core/compaction/utils.ts) - Shared utilities (file tracking, serialization)
-- [`packages/coding-agent/src/core/session-manager.ts`](https://github.com/fleetagent/pi/blob/main/packages/coding-agent/src/core/session-manager.ts) - Entry types (`CompactionEntry`, `BranchSummaryEntry`)
+- [`packages/coding-agent/src/core/session/types.ts`](https://github.com/fleetagent/pi/blob/main/packages/coding-agent/src/core/session/types.ts) - Entry types (`CompactionEntry`, `BranchSummaryEntry`)
 - [`packages/coding-agent/src/core/extensions/types.ts`](https://github.com/fleetagent/pi/blob/main/packages/coding-agent/src/core/extensions/types.ts) - Extension event types
 
 For TypeScript definitions in your project, inspect `node_modules/@fleetagent/pi-coding-agent/dist/`.
@@ -118,7 +118,7 @@ Never cut at tool results (they must stay with their tool call).
 
 ### CompactionEntry Structure
 
-Defined in [`session-manager.ts`](https://github.com/fleetagent/pi/blob/main/packages/coding-agent/src/core/session-manager.ts):
+Defined in [`session/types.ts`](https://github.com/fleetagent/pi/blob/main/packages/coding-agent/src/core/session/types.ts):
 
 ```typescript
 interface CompactionEntry<T = unknown> {
@@ -185,7 +185,7 @@ This means file tracking accumulates across multiple compactions or nested branc
 
 ### BranchSummaryEntry Structure
 
-Defined in [`session-manager.ts`](https://github.com/fleetagent/pi/blob/main/packages/coding-agent/src/core/session-manager.ts):
+Defined in [`session/types.ts`](https://github.com/fleetagent/pi/blob/main/packages/coding-agent/src/core/session/types.ts):
 
 ```typescript
 interface BranchSummaryEntry<T = unknown> {

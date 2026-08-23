@@ -43,7 +43,7 @@ import type {
 import type { Static, TSchema } from "typebox";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import type { BashExecutorOptions, BashResult } from "../bash-executor.ts";
-import type { CompactionPreparation, CompactionResult } from "../compaction/index.ts";
+import type { CompactionPreparation, CompactionResult } from "../compaction/compaction.ts";
 import type { EventBus } from "../event-bus.ts";
 import type { ExecOptions, ExecResult } from "../exec.ts";
 import type { ReadonlyFooterDataProvider } from "../footer-data-provider.ts";
@@ -54,43 +54,28 @@ import type { CustomMessage } from "../messages.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { PromptTemplate } from "../prompt-templates.ts";
 import type { Rule } from "../rules.ts";
-import type {
-	BranchSummaryEntry,
-	CompactionEntry,
-	ReadonlySession,
-	Session,
-	SessionEntry,
-} from "../session-manager.ts";
+import type { ReadonlySession, Session } from "../session/session.ts";
+import type { BranchSummaryEntry, CompactionEntry, SessionEntry } from "../session/types.ts";
 import type { Skill } from "../skills.ts";
 import type { SlashCommandInfo } from "../slash-commands.ts";
 import type { SourceInfo } from "../source-info.ts";
 import type { BuildSystemPromptOptions } from "../system-prompt.ts";
-import type { EditToolDetails } from "../tools/edit.ts";
-import type {
-	BashToolDetails,
-	BashToolInput,
-	EditToolInput,
-	FindToolDetails,
-	FindToolInput,
-	GrepToolDetails,
-	GrepToolInput,
-	LsToolDetails,
-	LsToolInput,
-	ReadToolDetails,
-	ReadToolInput,
-	SubagentDetails,
-	SubagentToolInput,
-	WebsearchToolDetails,
-	WebsearchToolInput,
-	WriteToolInput,
-} from "../tools/index.ts";
+import type { BashToolDetails, BashToolInput } from "../tools/bash.ts";
+import type { EditToolDetails, EditToolInput } from "../tools/edit.ts";
+import type { FindToolDetails, FindToolInput } from "../tools/find.ts";
+import type { GrepToolDetails, GrepToolInput } from "../tools/grep.ts";
+import type { LsToolDetails, LsToolInput } from "../tools/ls.ts";
 import type { BorrowedToolOperations, ToolBackendInfo, ToolOperations } from "../tools/operations.ts";
+import type { ReadToolDetails, ReadToolInput } from "../tools/read.ts";
+import type { SubagentDetails, SubagentToolInput } from "../tools/subagent.ts";
+import type { WebsearchToolDetails, WebsearchToolInput } from "../tools/websearch.ts";
+import type { WriteToolInput } from "../tools/write.ts";
 
 export type { BashResult } from "../bash-executor.ts";
 export type { ExecOptions, ExecResult } from "../exec.ts";
+export type { AppKeybinding, KeybindingsManager } from "../keybindings.ts";
 export type { BuildSystemPromptOptions } from "../system-prompt.ts";
 export type { AgentToolResult, AgentToolUpdateCallback, ToolExecutionMode };
-export type { AppKeybinding, KeybindingsManager } from "../keybindings.ts";
 
 // ============================================================================
 // UI Context

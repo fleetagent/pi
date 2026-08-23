@@ -8,12 +8,12 @@ import {
 import { createServer as createHttpsServer } from "node:https";
 import type { AddressInfo, Socket } from "node:net";
 import WebSocket, { type RawData, WebSocketServer } from "ws";
+import type { RemoteWorkspaceServerMessage } from "../core/remote-workspace-protocol/contract.ts";
 import {
 	type RemoteWorkspaceProtocolCloseReason,
 	type RemoteWorkspaceServerHandler,
-	type RemoteWorkspaceServerMessage,
 	RemoteWorkspaceServerProtocol,
-} from "../core/remote-workspace-protocol/index.ts";
+} from "../core/remote-workspace-protocol/session.ts";
 import type { DaemonConfiguration } from "./config.ts";
 import {
 	createDaemonAuthorization,

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
-import type { UserBashEvent } from "../../../src/core/extensions/index.ts";
+import type { UserBashEvent } from "../../../src/core/extensions/types.ts";
 import type { PiAgentRuntimeHost } from "../../../src/core/pi-agent.ts";
 import { LocalToolOperations } from "../../../src/core/tools/operations.ts";
 import { runRpcMode } from "../../../src/modes/rpc/rpc-mode.ts";

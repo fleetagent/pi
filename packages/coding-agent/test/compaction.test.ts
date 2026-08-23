@@ -4,6 +4,7 @@ import { getModel } from "@fleetagent/pi-ai";
 import { readFileSync } from "fs";
 import { join } from "path";
 import { beforeEach, describe, expect, it } from "vitest";
+import { prepareBranchEntries } from "../src/core/compaction/branch-summarization.ts";
 import {
 	type CompactionSettings,
 	calculateContextTokens,
@@ -13,22 +14,20 @@ import {
 	estimateTokens,
 	findCutPoint,
 	getLastAssistantUsage,
-	prepareBranchEntries,
 	prepareCompaction,
 	shouldCompact,
-} from "../src/core/compaction/index.ts";
-import {
-	type BranchSummaryEntry,
-	buildSessionContext,
-	type CompactionEntry,
-	type CustomMessageEntry,
-	type ModelChangeEntry,
-	migrateSessionEntries,
-	parseSessionEntries,
-	type SessionEntry,
-	type SessionMessageEntry,
-	type ThinkingLevelChangeEntry,
-} from "../src/core/session-manager.ts";
+} from "../src/core/compaction/compaction.ts";
+import { buildSessionContext } from "../src/core/session/context.ts";
+import { migrateSessionEntries, parseSessionEntries } from "../src/core/session/migrations.ts";
+import type {
+	BranchSummaryEntry,
+	CompactionEntry,
+	CustomMessageEntry,
+	ModelChangeEntry,
+	SessionEntry,
+	SessionMessageEntry,
+	ThinkingLevelChangeEntry,
+} from "../src/core/session/types.ts";
 
 // ============================================================================
 // Test fixtures

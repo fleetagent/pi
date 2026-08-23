@@ -22,9 +22,9 @@ export {
 	generateSummary,
 	getLastAssistantUsage,
 	prepareCompaction,
-	serializeConversation,
 	shouldCompact,
 } from "./harness/compaction/compaction.ts";
+export { serializeConversation } from "./harness/compaction/utils.ts";
 export * from "./harness/messages.ts";
 export * from "./harness/prompt-templates.ts";
 export * from "./harness/session/jsonl-errors.ts";

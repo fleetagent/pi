@@ -197,6 +197,16 @@ async function findNearestProjectAgentsDirWithOperations(
 	}
 }
 
+function discoverHostOwnedAgents(scope: AgentScope): AgentDiscoveryResult {
+	return {
+		agents:
+			scope === "project"
+				? []
+				: [...BUNDLED_AGENTS, ...loadAgentsFromDir(path.join(getAgentDir(), "agents"), "user")],
+		projectAgentsDir: null,
+	};
+}
+
 export async function discoverAgentsWithOperations(
 	cwd: string,
 	scope: AgentScope,
@@ -204,8 +214,13 @@ export async function discoverAgentsWithOperations(
 ): Promise<AgentDiscoveryResult> {
 	if (!operations) return discoverAgents(cwd, scope);
 	const backend = operations.getBackendInfo?.();
-	if (backend?.type !== "remote" || !backend.configured) return discoverAgents(cwd, scope);
-	const remoteCwd = backend.workspace.root;
+	if (backend?.type === "local") return discoverAgents(cwd, scope);
+	if (!backend) return discoverHostOwnedAgents(scope);
+	if (backend.type === "remote" && !backend.configured) {
+		return discoverHostOwnedAgents(scope);
+	}
+	const remoteCwd = backend.type === "ssh" ? backend.cwd : backend.workspace.root;
+	const pathFlavor = backend.type === "ssh" ? "posix" : backend.workspace.pathFlavor;
 	const userDir = path.join(getAgentDir(), "agents");
 	const projectAgentsDir =
 		scope === "user"
@@ -213,8 +228,8 @@ export async function discoverAgentsWithOperations(
 			: await findNearestProjectAgentsDirWithOperations(
 					remoteCwd,
 					operations,
-					backend.workspace.root,
-					backend.workspace.pathFlavor,
+					backend.type === "ssh" ? backend.cwd : backend.workspace.root,
+					pathFlavor,
 				);
 	const bundledAgents = scope === "project" ? [] : BUNDLED_AGENTS;
 	const userAgents = scope === "project" ? [] : loadAgentsFromDir(userDir, "user");

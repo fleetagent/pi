@@ -8,7 +8,9 @@
 import type { AgentMessage, StreamFn } from "@fleetagent/pi-agent-core";
 import type { Model, ProviderHeaders, RetryCallbacks, RetryPolicy, SimpleStreamOptions } from "@fleetagent/pi-ai";
 import { convertToLlm } from "../messages.ts";
-import { type ReadonlySession, type SessionEntry, sessionEntryToContextMessages } from "../session-manager.ts";
+import { sessionEntryToContextMessages } from "../session/context.ts";
+import type { ReadonlySession } from "../session/session.ts";
+import type { SessionEntry } from "../session/types.ts";
 import { completeSummarization, estimateTokens } from "./compaction.ts";
 import {
 	computeFileLists,
@@ -37,8 +39,6 @@ export interface BranchSummaryDetails {
 	readFiles: string[];
 	modifiedFiles: string[];
 }
-
-export type { FileOperations } from "./utils.ts";
 
 export interface BranchPreparation {
 	/** Messages extracted for summarization, in chronological order */

@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createExtensionRuntime } from "../src/core/extensions/loader.ts";
 import { PiAgent } from "../src/core/pi-agent.ts";
 import type { ResourceLoader } from "../src/core/resource-loader.ts";
-import { InMemorySessionManager } from "../src/core/session-manager.ts";
+import { InMemorySessionManager } from "../src/core/session/in-memory-session-manager.ts";
 import { createSyntheticSourceInfo } from "../src/core/source-info.ts";
 
 describe("PiAgent skills option", () => {

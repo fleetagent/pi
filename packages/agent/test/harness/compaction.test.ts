@@ -20,9 +20,9 @@ import {
 	generateSummary,
 	getLastAssistantUsage,
 	prepareCompaction,
-	serializeConversation,
 	shouldCompact,
 } from "../../src/harness/compaction/compaction.ts";
+import { serializeConversation } from "../../src/harness/compaction/utils.ts";
 import { buildSessionContext } from "../../src/harness/session/session.ts";
 import type {
 	BranchSummaryEntry,
