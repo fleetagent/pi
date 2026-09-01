@@ -1,13 +1,14 @@
 import {
 	type ExecutionEnv,
 	type ExecutionEnvExecOptions,
+	type ExecutionEnvExecResult,
 	ExecutionError,
 	err,
 	ok,
 	type Result,
 	toError,
 } from "../types.ts";
-import { DEFAULT_MAX_BYTES, truncateTail } from "./truncate.ts";
+import { DEFAULT_MAX_BYTES, type TruncationResult, truncateTail } from "./truncate.ts";
 
 export interface ShellCaptureOptions extends Omit<ExecutionEnvExecOptions, "onStdout" | "onStderr"> {
 	onChunk?: (chunk: string) => void;
@@ -25,6 +26,37 @@ function toExecutionError(error: unknown): ExecutionError {
 	if (error instanceof ExecutionError) return error;
 	const cause = toError(error);
 	return new ExecutionError("unknown", cause.message, cause);
+}
+
+interface ShellCaptureCompletion {
+	executionResult: Result<ExecutionEnvExecResult, ExecutionError>;
+	truncationResult: TruncationResult;
+	tailOutput: string;
+	aborted: boolean;
+	fullOutputPath?: string;
+}
+
+function completeShellCapture(completion: ShellCaptureCompletion): Result<ShellCaptureResult, ExecutionError> {
+	const output = completion.truncationResult.truncated ? completion.truncationResult.content : completion.tailOutput;
+	if (!completion.executionResult.ok) {
+		if (completion.executionResult.error.code === "aborted" || completion.aborted) {
+			return ok({
+				output,
+				exitCode: undefined,
+				cancelled: true,
+				truncated: completion.truncationResult.truncated,
+				fullOutputPath: completion.fullOutputPath,
+			});
+		}
+		return err(completion.executionResult.error);
+	}
+	return ok({
+		output,
+		exitCode: completion.aborted ? undefined : completion.executionResult.value.exitCode,
+		cancelled: completion.aborted,
+		truncated: completion.truncationResult.truncated,
+		fullOutputPath: completion.fullOutputPath,
+	});
 }
 
 export function sanitizeBinaryOutput(str: string): string {
@@ -117,24 +149,11 @@ export async function executeShellWithCapture(
 		if (!writeResult.ok) return err(writeResult.error);
 		if (captureError) return err(captureError);
 
-		if (!result.ok) {
-			if (result.error.code === "aborted" || options?.abortSignal?.aborted) {
-				return ok({
-					output: truncationResult.truncated ? truncationResult.content : tailOutput,
-					exitCode: undefined,
-					cancelled: true,
-					truncated: truncationResult.truncated,
-					fullOutputPath,
-				});
-			}
-			return err(result.error);
-		}
-		const cancelled = options?.abortSignal?.aborted ?? false;
-		return ok({
-			output: truncationResult.truncated ? truncationResult.content : tailOutput,
-			exitCode: cancelled ? undefined : result.value.exitCode,
-			cancelled,
-			truncated: truncationResult.truncated,
+		return completeShellCapture({
+			executionResult: result,
+			truncationResult,
+			tailOutput,
+			aborted: options?.abortSignal?.aborted ?? false,
 			fullOutputPath,
 		});
 	} catch (error) {

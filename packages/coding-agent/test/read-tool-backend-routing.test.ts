@@ -7,7 +7,9 @@ import type { ExtensionContext } from "../src/core/extensions/types.ts";
 import type {
 	ToolBackendInfo,
 	ToolExecOptions,
+	ToolExecResult,
 	ToolOperations,
+	WorkspaceToolExecutionTarget,
 	WorkspaceToolRemoteInvocation,
 } from "../src/core/tools/operations.ts";
 import { createReadToolDefinition } from "../src/core/tools/read.ts";
@@ -25,7 +27,7 @@ class ReadOnlyOperations implements ToolOperations {
 		this.backend = backend;
 	}
 
-	async exec(_command: string, _options: ToolExecOptions): Promise<{ exitCode: number | null }> {
+	async exec(_command: string, _options: ToolExecOptions): Promise<ToolExecResult> {
 		return { exitCode: 0 };
 	}
 
@@ -56,7 +58,7 @@ class ReadOnlyOperations implements ToolOperations {
 		return this.backend;
 	}
 
-	resolveWorkspaceToolExecution(): "local" | "remote" {
+	resolveWorkspaceToolExecution(): WorkspaceToolExecutionTarget {
 		return this.backend.type === "remote" ? "remote" : "local";
 	}
 

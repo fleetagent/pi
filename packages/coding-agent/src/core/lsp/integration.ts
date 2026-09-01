@@ -17,13 +17,14 @@ export const LSP_TOOL_NAMES = Object.freeze([
 	"lsp_code_actions",
 ] as const);
 export type LspToolName = (typeof LSP_TOOL_NAMES)[number];
+export type LspRuntimeOwner = "agent-session" | "standalone" | "daemon";
 export interface LspRuntimeState {
 	manager: LspManager;
 	fileSync: LspFileSync;
 }
 
 export interface LspSessionStatus {
-	owner: "agent-session" | "standalone" | "daemon";
+	owner: LspRuntimeOwner;
 	enabled: boolean;
 	configuration: ResolvedLspConfiguration;
 	servers: LspServerStatus[];

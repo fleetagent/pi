@@ -6,8 +6,11 @@
 import * as Diff from "diff";
 import type { ToolOperations } from "./operations.ts";
 import { resolveToCwd } from "./path-utils.ts";
+import { type LineEnding, stripBOM } from "./replace-diff.ts";
 
-export function detectLineEnding(content: string): "\r\n" | "\n" {
+export { stripBOM as stripBom };
+
+export function detectLineEnding(content: string): LineEnding {
 	const crlfIdx = content.indexOf("\r\n");
 	const lfIdx = content.indexOf("\n");
 	if (lfIdx === -1) return "\n";
@@ -19,7 +22,7 @@ export function normalizeToLF(text: string): string {
 	return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 }
 
-export function restoreLineEndings(text: string, ending: "\r\n" | "\n"): string {
+export function restoreLineEndings(text: string, ending: LineEnding): string {
 	return ending === "\r\n" ? text.replace(/\n/g, "\r\n") : text;
 }
 
@@ -131,12 +134,6 @@ export function fuzzyFindText(content: string, oldText: string): FuzzyMatchResul
 		contentForReplacement: fuzzyContent,
 	};
 }
-
-/** Strip UTF-8 BOM if present, return both the BOM (if any) and the text without it */
-export function stripBom(content: string): { bom: string; text: string } {
-	return content.startsWith("\uFEFF") ? { bom: "\uFEFF", text: content.slice(1) } : { bom: "", text: content };
-}
-
 function countOccurrences(content: string, oldText: string): number {
 	const fuzzyContent = normalizeForFuzzyMatch(content);
 	const fuzzyOldText = normalizeForFuzzyMatch(oldText);
@@ -266,135 +263,137 @@ export function generateUnifiedPatch(path: string, oldContent: string, newConten
 	});
 }
 
+interface DiffRenderState {
+	output: string[];
+	oldLineNumber: number;
+	newLineNumber: number;
+	lineNumberWidth: number;
+	firstChangedLine: number | undefined;
+}
+
+function getDiffPartLines(part: Diff.Change): string[] {
+	const lines = part.value.split("\n");
+	if (lines.at(-1) === "") lines.pop();
+	return lines;
+}
+
+function appendChangedDiffLines(state: DiffRenderState, part: Diff.Change, lines: string[]): void {
+	state.firstChangedLine ??= state.newLineNumber;
+	for (const line of lines) {
+		if (part.added) {
+			const lineNumber = String(state.newLineNumber).padStart(state.lineNumberWidth, " ");
+			state.output.push(`+${lineNumber} ${line}`);
+			state.newLineNumber++;
+		} else {
+			const lineNumber = String(state.oldLineNumber).padStart(state.lineNumberWidth, " ");
+			state.output.push(`-${lineNumber} ${line}`);
+			state.oldLineNumber++;
+		}
+	}
+}
+
+function appendContextDiffLines(state: DiffRenderState, lines: string[]): void {
+	for (const line of lines) {
+		const lineNumber = String(state.oldLineNumber).padStart(state.lineNumberWidth, " ");
+		state.output.push(` ${lineNumber} ${line}`);
+		state.oldLineNumber++;
+		state.newLineNumber++;
+	}
+}
+
+function appendSkippedDiffLines(state: DiffRenderState, count: number): void {
+	if (count <= 0) return;
+	state.output.push(` ${"".padStart(state.lineNumberWidth, " ")} ...`);
+	state.oldLineNumber += count;
+	state.newLineNumber += count;
+}
+
+function appendContextBetweenChanges(state: DiffRenderState, lines: string[], contextLines: number): void {
+	if (lines.length <= contextLines * 2) {
+		appendContextDiffLines(state, lines);
+		return;
+	}
+	const leadingLines = lines.slice(0, contextLines);
+	const trailingLines = lines.slice(lines.length - contextLines);
+	appendContextDiffLines(state, leadingLines);
+	appendSkippedDiffLines(state, lines.length - leadingLines.length - trailingLines.length);
+	appendContextDiffLines(state, trailingLines);
+}
+
+function appendContextAfterChange(state: DiffRenderState, lines: string[], contextLines: number): void {
+	const shownLines = lines.slice(0, contextLines);
+	appendContextDiffLines(state, shownLines);
+	appendSkippedDiffLines(state, lines.length - shownLines.length);
+}
+
+function appendContextBeforeChange(state: DiffRenderState, lines: string[], contextLines: number): void {
+	const skippedLines = Math.max(0, lines.length - contextLines);
+	appendSkippedDiffLines(state, skippedLines);
+	appendContextDiffLines(state, lines.slice(skippedLines));
+}
+
+function appendUnchangedDiffPart(
+	state: DiffRenderState,
+	lines: string[],
+	hasLeadingChange: boolean,
+	hasTrailingChange: boolean,
+	contextLines: number,
+): void {
+	if (hasLeadingChange && hasTrailingChange) {
+		appendContextBetweenChanges(state, lines, contextLines);
+		return;
+	}
+	if (hasLeadingChange) {
+		appendContextAfterChange(state, lines, contextLines);
+		return;
+	}
+	if (hasTrailingChange) {
+		appendContextBeforeChange(state, lines, contextLines);
+		return;
+	}
+	state.oldLineNumber += lines.length;
+	state.newLineNumber += lines.length;
+}
+
 /**
  * Generate a display-oriented diff string with line numbers and context.
  * Returns both the diff string and the first changed line number (in the new file).
  */
-export function generateDiffString(
-	oldContent: string,
-	newContent: string,
-	contextLines = 4,
-): { diff: string; firstChangedLine: number | undefined } {
+export function generateDiffString(oldContent: string, newContent: string, contextLines = 4): EditDiffResult {
 	const parts = Diff.diffLines(oldContent, newContent);
-	const output: string[] = [];
-
-	const oldLines = oldContent.split("\n");
-	const newLines = newContent.split("\n");
-	const maxLineNum = Math.max(oldLines.length, newLines.length);
-	const lineNumWidth = String(maxLineNum).length;
-
-	let oldLineNum = 1;
-	let newLineNum = 1;
+	const maxLineNumber = Math.max(oldContent.split("\n").length, newContent.split("\n").length);
+	const state: DiffRenderState = {
+		output: [],
+		oldLineNumber: 1,
+		newLineNumber: 1,
+		lineNumberWidth: String(maxLineNumber).length,
+		firstChangedLine: undefined,
+	};
 	let lastWasChange = false;
-	let firstChangedLine: number | undefined;
 
-	for (let i = 0; i < parts.length; i++) {
-		const part = parts[i];
-		const raw = part.value.split("\n");
-		if (raw[raw.length - 1] === "") {
-			raw.pop();
-		}
-
+	for (let index = 0; index < parts.length; index++) {
+		const part = parts[index];
+		const lines = getDiffPartLines(part);
 		if (part.added || part.removed) {
-			// Capture the first changed line (in the new file)
-			if (firstChangedLine === undefined) {
-				firstChangedLine = newLineNum;
-			}
-
-			// Show the change
-			for (const line of raw) {
-				if (part.added) {
-					const lineNum = String(newLineNum).padStart(lineNumWidth, " ");
-					output.push(`+${lineNum} ${line}`);
-					newLineNum++;
-				} else {
-					// removed
-					const lineNum = String(oldLineNum).padStart(lineNumWidth, " ");
-					output.push(`-${lineNum} ${line}`);
-					oldLineNum++;
-				}
-			}
+			appendChangedDiffLines(state, part, lines);
 			lastWasChange = true;
-		} else {
-			// Context lines - only show a few before/after changes
-			const nextPartIsChange = i < parts.length - 1 && (parts[i + 1].added || parts[i + 1].removed);
-			const hasLeadingChange = lastWasChange;
-			const hasTrailingChange = nextPartIsChange;
-
-			if (hasLeadingChange && hasTrailingChange) {
-				if (raw.length <= contextLines * 2) {
-					for (const line of raw) {
-						const lineNum = String(oldLineNum).padStart(lineNumWidth, " ");
-						output.push(` ${lineNum} ${line}`);
-						oldLineNum++;
-						newLineNum++;
-					}
-				} else {
-					const leadingLines = raw.slice(0, contextLines);
-					const trailingLines = raw.slice(raw.length - contextLines);
-					const skippedLines = raw.length - leadingLines.length - trailingLines.length;
-
-					for (const line of leadingLines) {
-						const lineNum = String(oldLineNum).padStart(lineNumWidth, " ");
-						output.push(` ${lineNum} ${line}`);
-						oldLineNum++;
-						newLineNum++;
-					}
-
-					output.push(` ${"".padStart(lineNumWidth, " ")} ...`);
-					oldLineNum += skippedLines;
-					newLineNum += skippedLines;
-
-					for (const line of trailingLines) {
-						const lineNum = String(oldLineNum).padStart(lineNumWidth, " ");
-						output.push(` ${lineNum} ${line}`);
-						oldLineNum++;
-						newLineNum++;
-					}
-				}
-			} else if (hasLeadingChange) {
-				const shownLines = raw.slice(0, contextLines);
-				const skippedLines = raw.length - shownLines.length;
-
-				for (const line of shownLines) {
-					const lineNum = String(oldLineNum).padStart(lineNumWidth, " ");
-					output.push(` ${lineNum} ${line}`);
-					oldLineNum++;
-					newLineNum++;
-				}
-
-				if (skippedLines > 0) {
-					output.push(` ${"".padStart(lineNumWidth, " ")} ...`);
-					oldLineNum += skippedLines;
-					newLineNum += skippedLines;
-				}
-			} else if (hasTrailingChange) {
-				const skippedLines = Math.max(0, raw.length - contextLines);
-				if (skippedLines > 0) {
-					output.push(` ${"".padStart(lineNumWidth, " ")} ...`);
-					oldLineNum += skippedLines;
-					newLineNum += skippedLines;
-				}
-
-				for (const line of raw.slice(skippedLines)) {
-					const lineNum = String(oldLineNum).padStart(lineNumWidth, " ");
-					output.push(` ${lineNum} ${line}`);
-					oldLineNum++;
-					newLineNum++;
-				}
-			} else {
-				// Skip these context lines entirely
-				oldLineNum += raw.length;
-				newLineNum += raw.length;
-			}
-
-			lastWasChange = false;
+			continue;
 		}
+		const nextPart = parts[index + 1];
+		appendUnchangedDiffPart(
+			state,
+			lines,
+			lastWasChange,
+			index < parts.length - 1 && Boolean(nextPart.added || nextPart.removed),
+			contextLines,
+		);
+		lastWasChange = false;
 	}
 
-	return { diff: output.join("\n"), firstChangedLine };
+	return { diff: state.output.join("\n"), firstChangedLine: state.firstChangedLine };
 }
 
+// pi-ignore noNearIdenticalDataStructures: Plain line-number diffs and hashline-anchored diffs use distinct rendering formats and evolve independently.
 export interface EditDiffResult {
 	diff: string;
 	firstChangedLine: number | undefined;
@@ -428,7 +427,7 @@ export async function computeEditsDiff(
 		const rawContent = (await operations.readFile(absolutePath)).toString("utf-8");
 
 		// Strip BOM before matching (LLM won't include invisible BOM in oldText)
-		const { text: content } = stripBom(rawContent);
+		const { text: content } = stripBOM(rawContent);
 		const normalizedContent = normalizeToLF(content);
 		const { baseContent, newContent } = applyEditsToNormalizedContent(normalizedContent, edits, path);
 

@@ -43,6 +43,8 @@ export interface LspRouterOptions {
 	pathExists?: (path: string) => Promise<boolean>;
 }
 
+type ServerFileUriParseResult = { ok: true; url: URL } | { ok: false; reason: string };
+
 interface NormalizedMapping {
 	agentRoot: string;
 	serverRoot: URL;
@@ -119,6 +121,25 @@ function fileUriToPortablePath(url: URL): string {
 	return `/${segments.join("/")}`;
 }
 
+function parseServerFileUri(serverUri: string): ServerFileUriParseResult {
+	if (/^file:/i.test(serverUri) && !/^file:\//i.test(serverUri)) {
+		return { ok: false, reason: `File URI ${JSON.stringify(serverUri)} must contain an absolute path` };
+	}
+	let url: URL;
+	try {
+		url = new URL(serverUri);
+	} catch {
+		return { ok: false, reason: `Server URI ${JSON.stringify(serverUri)} is malformed` };
+	}
+	if (url.protocol !== "file:") {
+		return { ok: false, reason: `Server URI ${JSON.stringify(serverUri)} is not a file URI` };
+	}
+	if (url.search || url.hash) {
+		return { ok: false, reason: `File URI ${JSON.stringify(serverUri)} must not contain a query or fragment` };
+	}
+	return { ok: true, url };
+}
+
 /** Bidirectional, longest-root path mapper for one configured server. */
 export class LspPathMapper {
 	private readonly agentMappings: NormalizedMapping[];
@@ -154,21 +175,9 @@ export class LspPathMapper {
 	}
 
 	serverUriToAgentPath(serverUri: string): LspPathMappingResult {
-		if (/^file:/i.test(serverUri) && !/^file:\//i.test(serverUri)) {
-			return { ok: false, reason: `File URI ${JSON.stringify(serverUri)} must contain an absolute path` };
-		}
-		let url: URL;
-		try {
-			url = new URL(serverUri);
-		} catch {
-			return { ok: false, reason: `Server URI ${JSON.stringify(serverUri)} is malformed` };
-		}
-		if (url.protocol !== "file:") {
-			return { ok: false, reason: `Server URI ${JSON.stringify(serverUri)} is not a file URI` };
-		}
-		if (url.search || url.hash) {
-			return { ok: false, reason: `File URI ${JSON.stringify(serverUri)} must not contain a query or fragment` };
-		}
+		const parsed = parseServerFileUri(serverUri);
+		if (!parsed.ok) return parsed;
+		const { url } = parsed;
 		if (this.serverMappings.length === 0) {
 			try {
 				return { ok: true, value: fileUriToPortablePath(url) };
@@ -317,6 +326,13 @@ export class LspRouter {
 		return discovery;
 	}
 
+	private async directoryContainsWorkspaceMarker(directory: string, markers: readonly string[]): Promise<boolean> {
+		for (const marker of markers) {
+			if (await this.pathExists(joinPortablePath(directory, marker)).catch(() => false)) return true;
+		}
+		return false;
+	}
+
 	private async discoverMarkerRoot(server: LspConfiguredServer, startDirectory: string): Promise<string | undefined> {
 		if (server.workspace.type !== "markers") return undefined;
 		const api = pathApi(pathFlavor(startDirectory));
@@ -326,9 +342,7 @@ export class LspRouter {
 		}
 		let directory = normalizePortablePath(startDirectory);
 		while (true) {
-			for (const marker of server.workspace.markers) {
-				if (await this.pathExists(joinPortablePath(directory, marker)).catch(() => false)) return directory;
-			}
+			if (await this.directoryContainsWorkspaceMarker(directory, server.workspace.markers)) return directory;
 			if (pathComparisonValue(directory) === pathComparisonValue(boundary)) break;
 			const parent = api.dirname(directory);
 			if (parent === directory || relativeWithin(boundary, parent) === undefined) break;

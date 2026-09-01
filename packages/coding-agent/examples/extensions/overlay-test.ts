@@ -11,11 +11,23 @@
 import type { ExtensionAPI, ExtensionCommandContext, Theme } from "@fleetagent/pi-coding-agent";
 import { CURSOR_MARKER, type Focusable, matchesKey, visibleWidth } from "@fleetagent/pi-tui";
 
+interface OverlayTestResult {
+	action: string;
+	query?: string;
+}
+
+interface OverlayTestItem {
+	label: string;
+	hasInput: boolean;
+	text: string;
+	cursor: number;
+}
+
 export default function (pi: ExtensionAPI) {
 	pi.registerCommand("overlay-test", {
 		description: "Test overlay rendering with edge cases",
 		handler: async (_args: string, ctx: ExtensionCommandContext) => {
-			const result = await ctx.ui.custom<{ action: string; query?: string } | undefined>(
+			const result = await ctx.ui.custom<OverlayTestResult | undefined>(
 				(_tui, theme, _keybindings, done) => new OverlayTestComponent(theme, done),
 				{ overlay: true },
 			);
@@ -35,7 +47,7 @@ class OverlayTestComponent implements Focusable {
 	focused = false;
 
 	private selected = 0;
-	private items = [
+	private items: OverlayTestItem[] = [
 		{ label: "Search", hasInput: true, text: "", cursor: 0 },
 		{ label: "Run", hasInput: true, text: "", cursor: 0 },
 		{ label: "Settings", hasInput: false, text: "", cursor: 0 },
@@ -43,9 +55,9 @@ class OverlayTestComponent implements Focusable {
 	];
 
 	private theme: Theme;
-	private done: (result: { action: string; query?: string } | undefined) => void;
+	private done: (result: OverlayTestResult | undefined) => void;
 
-	constructor(theme: Theme, done: (result: { action: string; query?: string } | undefined) => void) {
+	constructor(theme: Theme, done: (result: OverlayTestResult | undefined) => void) {
 		this.theme = theme;
 		this.done = done;
 	}
@@ -68,34 +80,62 @@ class OverlayTestComponent implements Focusable {
 		} else if (matchesKey(data, "down")) {
 			this.selected = Math.min(this.items.length - 1, this.selected + 1);
 		} else if (current.hasInput) {
-			if (matchesKey(data, "backspace")) {
-				if (current.cursor > 0) {
-					current.text = current.text.slice(0, current.cursor - 1) + current.text.slice(current.cursor);
-					current.cursor--;
-				}
-			} else if (matchesKey(data, "left")) {
-				current.cursor = Math.max(0, current.cursor - 1);
-			} else if (matchesKey(data, "right")) {
-				current.cursor = Math.min(current.text.length, current.cursor + 1);
-			} else if (data.length === 1 && data.charCodeAt(0) >= 32) {
-				current.text = current.text.slice(0, current.cursor) + data + current.text.slice(current.cursor);
-				current.cursor++;
-			}
+			this.editInput(current, data);
 		}
 	}
 
+	private editInput(item: OverlayTestItem, data: string): void {
+		if (matchesKey(data, "backspace")) {
+			if (item.cursor === 0) return;
+			item.text = item.text.slice(0, item.cursor - 1) + item.text.slice(item.cursor);
+			item.cursor--;
+			return;
+		}
+		if (matchesKey(data, "left")) {
+			item.cursor = Math.max(0, item.cursor - 1);
+			return;
+		}
+		if (matchesKey(data, "right")) {
+			item.cursor = Math.min(item.text.length, item.cursor + 1);
+			return;
+		}
+		if (data.length !== 1 || data.charCodeAt(0) < 32) return;
+		item.text = item.text.slice(0, item.cursor) + data + item.text.slice(item.cursor);
+		item.cursor++;
+	}
+
+	private renderRow(content: string, innerWidth: number): string {
+		const padding = " ".repeat(Math.max(0, innerWidth - visibleWidth(content)));
+		return this.theme.fg("border", "│") + content + padding + this.theme.fg("border", "│");
+	}
+
+	private renderActionItem(item: OverlayTestItem, index: number): string {
+		const isSelected = index === this.selected;
+		const prefix = isSelected ? " ▶ " : "   ";
+		if (!item.hasInput) {
+			const label = isSelected ? this.theme.fg("accent", item.label) : this.theme.fg("text", item.label);
+			return prefix + label;
+		}
+
+		const label = isSelected ? this.theme.fg("accent", `${item.label}:`) : this.theme.fg("text", `${item.label}:`);
+		let inputDisplay = item.text;
+		if (isSelected) {
+			const before = inputDisplay.slice(0, item.cursor);
+			const cursorChar = item.cursor < inputDisplay.length ? inputDisplay[item.cursor] : " ";
+			const after = inputDisplay.slice(item.cursor + 1);
+			// Emit hardware cursor marker for IME support when focused
+			const marker = this.focused ? CURSOR_MARKER : "";
+			inputDisplay = `${before}${marker}\x1b[7m${cursorChar}\x1b[27m${after}`;
+		}
+		return `${prefix + label} ${inputDisplay}`;
+	}
 	render(_width: number): string[] {
 		const w = this.width;
 		const th = this.theme;
 		const innerW = w - 2;
 		const lines: string[] = [];
 
-		const pad = (s: string, len: number) => {
-			const vis = visibleWidth(s);
-			return s + " ".repeat(Math.max(0, len - vis));
-		};
-
-		const row = (content: string) => th.fg("border", "│") + pad(content, innerW) + th.fg("border", "│");
+		const row = (content: string) => this.renderRow(content, innerW);
 
 		lines.push(th.fg("border", `╭${"─".repeat(innerW)}╮`));
 		lines.push(row(` ${th.fg("accent", "🧪 Overlay Test")}`));
@@ -116,29 +156,7 @@ class OverlayTestComponent implements Focusable {
 		lines.push(row(` ${th.fg("dim", "─── Actions ───")}`));
 
 		for (let i = 0; i < this.items.length; i++) {
-			const item = this.items[i]!;
-			const isSelected = i === this.selected;
-			const prefix = isSelected ? " ▶ " : "   ";
-
-			let content: string;
-			if (item.hasInput) {
-				const label = isSelected ? th.fg("accent", `${item.label}:`) : th.fg("text", `${item.label}:`);
-
-				let inputDisplay = item.text;
-				if (isSelected) {
-					const before = inputDisplay.slice(0, item.cursor);
-					const cursorChar = item.cursor < inputDisplay.length ? inputDisplay[item.cursor] : " ";
-					const after = inputDisplay.slice(item.cursor + 1);
-					// Emit hardware cursor marker for IME support when focused
-					const marker = this.focused ? CURSOR_MARKER : "";
-					inputDisplay = `${before}${marker}\x1b[7m${cursorChar}\x1b[27m${after}`;
-				}
-				content = `${prefix + label} ${inputDisplay}`;
-			} else {
-				content = prefix + (isSelected ? th.fg("accent", item.label) : th.fg("text", item.label));
-			}
-
-			lines.push(row(content));
+			lines.push(row(this.renderActionItem(this.items[i]!, i)));
 		}
 
 		lines.push(row(""));

@@ -2,6 +2,7 @@ import type { Component } from "./tui.ts";
 
 export const LAYOUT_NODE = Symbol.for("@fleetagent/pi-tui/layout-node");
 
+// pi-ignore noNearIdenticalDataStructures: TUI layout viewport constraints and image pixel dimensions evolve independently.
 export interface LayoutViewport {
 	width: number;
 	height: number;
@@ -17,17 +18,21 @@ export interface StackLayoutEntry {
 	visible?: (viewport: LayoutViewport) => boolean;
 }
 
+export type StackAlignment = "stretch" | "start" | "center" | "end";
+export type StackLayoutType = "vstack" | "hstack";
+export type ScrollViewOverscrollBehavior = "chain" | "contain";
+
 export interface StackLayoutNode {
-	type: "vstack" | "hstack";
+	type: StackLayoutType;
 	entries: readonly StackLayoutEntry[];
 	gap: number;
-	align: "stretch" | "start" | "center" | "end";
+	align: StackAlignment;
 }
 
 export interface ScrollLayoutState {
 	readonly scrollTop: number;
 	readonly primary: boolean;
-	readonly overscroll: "chain" | "contain";
+	readonly overscroll: ScrollViewOverscrollBehavior;
 	readonly viewportHeight: number;
 	getContentWidth(width: number): number;
 	updateLayout(contentHeight: number, viewportHeight: number, requestRender: () => void): void;

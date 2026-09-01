@@ -1,12 +1,10 @@
 import { existsSync } from "node:fs";
 import { delimiter } from "node:path";
+import type { ShellConfig } from "@fleetagent/pi-agent-core/node";
 import { spawn, spawnSync } from "child_process";
 import { getBinDir } from "../config.ts";
 
-export interface ShellConfig {
-	shell: string;
-	args: string[];
-}
+export type { ShellConfig };
 
 /**
  * Find bash executable on PATH (cross-platform)
@@ -46,6 +44,33 @@ function findBashOnPath(): string | null {
 	}
 	return null;
 }
+function getWindowsShellConfig(): ShellConfig {
+	const paths: string[] = [];
+	const programFiles = process.env.ProgramFiles;
+	if (programFiles) paths.push(`${programFiles}\\Git\\bin\\bash.exe`);
+	const programFilesX86 = process.env["ProgramFiles(x86)"];
+	if (programFilesX86) paths.push(`${programFilesX86}\\Git\\bin\\bash.exe`);
+
+	for (const path of paths) {
+		if (existsSync(path)) return { shell: path, args: ["-c"] };
+	}
+	const bashOnPath = findBashOnPath();
+	if (bashOnPath) return { shell: bashOnPath, args: ["-c"] };
+	throw new Error(
+		`No bash shell found. Options:\n` +
+			`  1. Install Git for Windows: https://git-scm.com/download/win\n` +
+			`  2. Add your bash to PATH (Cygwin, MSYS2, etc.)\n` +
+			"  3. Set shellPath in settings.json\n\n" +
+			`Searched Git Bash in:\n${paths.map((path) => `  ${path}`).join("\n")}`,
+	);
+}
+
+function getUnixShellConfig(): ShellConfig {
+	if (existsSync("/bin/bash")) return { shell: "/bin/bash", args: ["-c"] };
+	const bashOnPath = findBashOnPath();
+	if (bashOnPath) return { shell: bashOnPath, args: ["-c"] };
+	return { shell: "sh", args: ["-c"] };
+}
 
 /**
  * Resolve shell configuration based on platform and an optional explicit shell path.
@@ -55,58 +80,13 @@ function findBashOnPath(): string | null {
  * 3. On Unix: /bin/bash, then bash on PATH, then fallback to sh
  */
 export function getShellConfig(customShellPath?: string): ShellConfig {
-	// 1. Check user-specified shell path
-	if (customShellPath) {
-		if (existsSync(customShellPath)) {
-			return { shell: customShellPath, args: ["-c"] };
-		}
+	if (!customShellPath) {
+		return process.platform === "win32" ? getWindowsShellConfig() : getUnixShellConfig();
+	}
+	if (!existsSync(customShellPath)) {
 		throw new Error(`Custom shell path not found: ${customShellPath}`);
 	}
-
-	if (process.platform === "win32") {
-		// 2. Try Git Bash in known locations
-		const paths: string[] = [];
-		const programFiles = process.env.ProgramFiles;
-		if (programFiles) {
-			paths.push(`${programFiles}\\Git\\bin\\bash.exe`);
-		}
-		const programFilesX86 = process.env["ProgramFiles(x86)"];
-		if (programFilesX86) {
-			paths.push(`${programFilesX86}\\Git\\bin\\bash.exe`);
-		}
-
-		for (const path of paths) {
-			if (existsSync(path)) {
-				return { shell: path, args: ["-c"] };
-			}
-		}
-
-		// 3. Fallback: search bash.exe on PATH (Cygwin, MSYS2, WSL, etc.)
-		const bashOnPath = findBashOnPath();
-		if (bashOnPath) {
-			return { shell: bashOnPath, args: ["-c"] };
-		}
-
-		throw new Error(
-			`No bash shell found. Options:\n` +
-				`  1. Install Git for Windows: https://git-scm.com/download/win\n` +
-				`  2. Add your bash to PATH (Cygwin, MSYS2, etc.)\n` +
-				"  3. Set shellPath in settings.json\n\n" +
-				`Searched Git Bash in:\n${paths.map((p) => `  ${p}`).join("\n")}`,
-		);
-	}
-
-	// Unix: try /bin/bash, then bash on PATH, then fallback to sh
-	if (existsSync("/bin/bash")) {
-		return { shell: "/bin/bash", args: ["-c"] };
-	}
-
-	const bashOnPath = findBashOnPath();
-	if (bashOnPath) {
-		return { shell: bashOnPath, args: ["-c"] };
-	}
-
-	return { shell: "sh", args: ["-c"] };
+	return { shell: customShellPath, args: ["-c"] };
 }
 
 export function getShellEnv(): NodeJS.ProcessEnv {

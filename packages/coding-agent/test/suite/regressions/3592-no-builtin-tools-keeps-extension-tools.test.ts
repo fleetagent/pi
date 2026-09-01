@@ -4,11 +4,15 @@ import { join } from "node:path";
 import { getModel } from "@fleetagent/pi-ai";
 import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { PiAgent } from "../../../src/core/pi-agent.ts";
+import { PiAgent, type PiAgentToolExclusionMode } from "../../../src/core/pi-agent.ts";
 import { DefaultResourceLoader } from "../../../src/core/resource-loader.ts";
 import { InMemorySessionManager } from "../../../src/core/session/in-memory-session-manager.ts";
 import { SettingsManager } from "../../../src/core/settings-manager.ts";
 
+interface SessionToolSelectionFixtureOptions {
+	noTools?: PiAgentToolExclusionMode;
+	tools?: string[];
+}
 describe("regression #3592: no-builtin-tools keeps extension tools enabled", () => {
 	let tempDir: string;
 	let agentDir: string;
@@ -25,7 +29,7 @@ describe("regression #3592: no-builtin-tools keeps extension tools enabled", () 
 		}
 	});
 
-	async function createSession(options?: { noTools?: "all" | "builtin"; tools?: string[] }) {
+	async function createSession(options?: SessionToolSelectionFixtureOptions) {
 		const settingsManager = SettingsManager.create(tempDir, agentDir);
 		const sessionManager = new InMemorySessionManager(tempDir).create();
 		const resourceLoader = new DefaultResourceLoader({

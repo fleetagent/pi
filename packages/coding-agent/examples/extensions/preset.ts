@@ -40,8 +40,8 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { Api, Model } from "@fleetagent/pi-ai";
-import type { ExtensionAPI, ExtensionContext } from "@fleetagent/pi-coding-agent";
+import type { Api, Model, ModelThinkingLevel } from "@fleetagent/pi-ai";
+import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@fleetagent/pi-coding-agent";
 import { DynamicBorder, getAgentDir } from "@fleetagent/pi-coding-agent";
 import { Container, Key, type SelectItem, SelectList, Text } from "@fleetagent/pi-tui";
 
@@ -52,7 +52,7 @@ interface Preset {
 	/** Model ID (e.g., "claude-sonnet-4-5") */
 	model?: string;
 	/** Thinking level */
-	thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+	thinkingLevel?: ModelThinkingLevel;
 	/** Tools to enable (replaces default set) */
 	tools?: string[];
 	/** Instructions to append to system prompt */
@@ -98,9 +98,13 @@ function loadPresets(cwd: string): PresetsConfig {
 	return { ...globalPresets, ...projectPresets };
 }
 
+interface PersistedPresetState {
+	name: string;
+}
+
 interface OriginalState {
 	model: Model<Api> | undefined;
-	thinkingLevel: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+	thinkingLevel: ModelThinkingLevel;
 	tools: string[];
 }
 
@@ -116,51 +120,50 @@ export default function presetExtension(pi: ExtensionAPI) {
 		type: "string",
 	});
 
+	function captureOriginalState(ctx: ExtensionContext): void {
+		if (activePresetName !== undefined) return;
+		originalState = {
+			model: ctx.model,
+			thinkingLevel: pi.getThinkingLevel(),
+			tools: pi.getActiveTools(),
+		};
+	}
+
+	async function applyPresetModel(name: string, preset: Preset, ctx: ExtensionContext): Promise<void> {
+		if (!preset.provider || !preset.model) return;
+		const model = ctx.modelRegistry.find(preset.provider, preset.model);
+		if (!model) {
+			ctx.ui.notify(`Preset "${name}": Model ${preset.provider}/${preset.model} not found`, "warning");
+			return;
+		}
+		if (!(await pi.setModel(model))) {
+			ctx.ui.notify(`Preset "${name}": No API key for ${preset.provider}/${preset.model}`, "warning");
+		}
+	}
+
+	function applyPresetTools(name: string, preset: Preset, ctx: ExtensionContext): void {
+		if (!preset.tools || preset.tools.length === 0) return;
+		const availableTools = new Set(pi.getAllTools().map((tool) => tool.name));
+		const validTools: string[] = [];
+		const invalidTools: string[] = [];
+		for (const tool of preset.tools) {
+			if (availableTools.has(tool)) validTools.push(tool);
+			else invalidTools.push(tool);
+		}
+		if (invalidTools.length > 0) {
+			ctx.ui.notify(`Preset "${name}": Unknown tools: ${invalidTools.join(", ")}`, "warning");
+		}
+		if (validTools.length > 0) pi.setActiveTools(validTools);
+	}
+
 	/**
 	 * Apply a preset configuration.
 	 */
 	async function applyPreset(name: string, preset: Preset, ctx: ExtensionContext): Promise<boolean> {
-		// Snapshot state before the first preset is applied (i.e. only when transitioning from no-preset)
-		if (activePresetName === undefined) {
-			originalState = {
-				model: ctx.model,
-				thinkingLevel: pi.getThinkingLevel(),
-				tools: pi.getActiveTools(),
-			};
-		}
-
-		// Apply model if specified
-		if (preset.provider && preset.model) {
-			const model = ctx.modelRegistry.find(preset.provider, preset.model);
-			if (model) {
-				const success = await pi.setModel(model);
-				if (!success) {
-					ctx.ui.notify(`Preset "${name}": No API key for ${preset.provider}/${preset.model}`, "warning");
-				}
-			} else {
-				ctx.ui.notify(`Preset "${name}": Model ${preset.provider}/${preset.model} not found`, "warning");
-			}
-		}
-
-		// Apply thinking level if specified
-		if (preset.thinkingLevel) {
-			pi.setThinkingLevel(preset.thinkingLevel);
-		}
-
-		// Apply tools if specified
-		if (preset.tools && preset.tools.length > 0) {
-			const allToolNames = pi.getAllTools().map((t) => t.name);
-			const validTools = preset.tools.filter((t) => allToolNames.includes(t));
-			const invalidTools = preset.tools.filter((t) => !allToolNames.includes(t));
-
-			if (invalidTools.length > 0) {
-				ctx.ui.notify(`Preset "${name}": Unknown tools: ${invalidTools.join(", ")}`, "warning");
-			}
-
-			if (validTools.length > 0) {
-				pi.setActiveTools(validTools);
-			}
-		}
+		captureOriginalState(ctx);
+		await applyPresetModel(name, preset, ctx);
+		if (preset.thinkingLevel) pi.setThinkingLevel(preset.thinkingLevel);
+		applyPresetTools(name, preset, ctx);
 
 		// Store active preset for system prompt injection
 		activePresetName = name;
@@ -191,6 +194,20 @@ export default function presetExtension(pi: ExtensionAPI) {
 		}
 
 		return parts.join(" | ");
+	}
+
+	async function clearPreset(ctx: ExtensionContext): Promise<void> {
+		activePresetName = undefined;
+		activePreset = undefined;
+		if (originalState) {
+			if (originalState.model) await pi.setModel(originalState.model);
+			pi.setThinkingLevel(originalState.thinkingLevel);
+			pi.setActiveTools(originalState.tools);
+		} else {
+			pi.setActiveTools(["read", "bash", "edit", "write"]);
+		}
+		ctx.ui.notify("Preset cleared, defaults restored", "info");
+		updateStatus(ctx);
 	}
 
 	/**
@@ -265,21 +282,7 @@ export default function presetExtension(pi: ExtensionAPI) {
 		if (!result) return;
 
 		if (result === "(none)") {
-			// Clear preset and restore original state
-			activePresetName = undefined;
-			activePreset = undefined;
-			if (originalState) {
-				if (originalState.model) {
-					await pi.setModel(originalState.model);
-				}
-				pi.setThinkingLevel(originalState.thinkingLevel);
-				pi.setActiveTools(originalState.tools);
-			} else {
-				pi.setActiveTools(["read", "bash", "edit", "write"]);
-			}
-			ctx.ui.notify("Preset cleared, defaults restored", "info");
-			updateStatus(ctx);
-			return;
+			await clearPreset(ctx);
 		}
 
 		const preset = presets[result];
@@ -319,20 +322,7 @@ export default function presetExtension(pi: ExtensionAPI) {
 		const nextName = cycleList[nextIndex];
 
 		if (nextName === "(none)") {
-			activePresetName = undefined;
-			activePreset = undefined;
-			if (originalState) {
-				if (originalState.model) {
-					await pi.setModel(originalState.model);
-				}
-				pi.setThinkingLevel(originalState.thinkingLevel);
-				pi.setActiveTools(originalState.tools);
-			} else {
-				pi.setActiveTools(["read", "bash", "edit", "write"]);
-			}
-			ctx.ui.notify("Preset cleared, defaults restored", "info");
-			updateStatus(ctx);
-			return;
+			await clearPreset(ctx);
 		}
 
 		const preset = presets[nextName];
@@ -406,8 +396,8 @@ export default function presetExtension(pi: ExtensionAPI) {
 		// Restore preset from session state
 		const entries = ctx.session.getEntries();
 		const presetEntry = entries
-			.filter((e: { type: string; customType?: string }) => e.type === "custom" && e.customType === "preset-state")
-			.pop() as { data?: { name: string } } | undefined;
+			.filter((entry: SessionEntry) => entry.type === "custom" && entry.customType === "preset-state")
+			.pop() as { data?: PersistedPresetState } | undefined;
 
 		if (presetEntry?.data?.name && !presetFlag) {
 			const preset = presets[presetEntry.data.name];

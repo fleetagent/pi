@@ -1,5 +1,5 @@
-import { complete, getModel } from "@fleetagent/pi-ai";
-import type { ExtensionAPI, ExtensionCommandContext } from "@fleetagent/pi-coding-agent";
+import { complete, getModel, type TextContent } from "@fleetagent/pi-ai";
+import type { ExtensionAPI, ExtensionCommandContext, SessionEntry } from "@fleetagent/pi-coding-agent";
 import { DynamicBorder, getMarkdownTheme } from "@fleetagent/pi-coding-agent";
 import { Container, Markdown, matchesKey, Text } from "@fleetagent/pi-tui";
 
@@ -8,14 +8,6 @@ type ContentBlock = {
 	text?: string;
 	name?: string;
 	arguments?: Record<string, unknown>;
-};
-
-type SessionEntry = {
-	type: string;
-	message?: {
-		role?: string;
-		content?: unknown;
-	};
 };
 
 const extractTextParts = (content: unknown): string[] => {
@@ -65,39 +57,23 @@ const extractToolCallLines = (content: unknown): string[] => {
 	return toolCalls;
 };
 
+const formatConversationEntry = (entry: SessionEntry): string | undefined => {
+	if (entry.type !== "message" || !entry.message?.role) return undefined;
+	const role = entry.message.role;
+	if (role !== "user" && role !== "assistant") return undefined;
+
+	const entryLines: string[] = [];
+	const messageText = extractTextParts(entry.message.content).join("\n").trim();
+	if (messageText.length > 0) entryLines.push(`${role === "user" ? "User" : "Assistant"}: ${messageText}`);
+	if (role === "assistant") entryLines.push(...extractToolCallLines(entry.message.content));
+	return entryLines.length > 0 ? entryLines.join("\n") : undefined;
+};
+
 const buildConversationText = (entries: SessionEntry[]): string => {
 	const sections: string[] = [];
-
 	for (const entry of entries) {
-		if (entry.type !== "message" || !entry.message?.role) {
-			continue;
-		}
-
-		const role = entry.message.role;
-		const isUser = role === "user";
-		const isAssistant = role === "assistant";
-
-		if (!isUser && !isAssistant) {
-			continue;
-		}
-
-		const entryLines: string[] = [];
-		const textParts = extractTextParts(entry.message.content);
-		if (textParts.length > 0) {
-			const roleLabel = isUser ? "User" : "Assistant";
-			const messageText = textParts.join("\n").trim();
-			if (messageText.length > 0) {
-				entryLines.push(`${roleLabel}: ${messageText}`);
-			}
-		}
-
-		if (isAssistant) {
-			entryLines.push(...extractToolCallLines(entry.message.content));
-		}
-
-		if (entryLines.length > 0) {
-			sections.push(entryLines.join("\n"));
-		}
+		const section = formatConversationEntry(entry);
+		if (section) sections.push(section);
 	}
 
 	return sections.join("\n\n");
@@ -142,6 +118,47 @@ const showSummaryUi = async (summary: string, ctx: ExtensionCommandContext) => {
 	});
 };
 
+function notifySummaryWarning(ctx: ExtensionCommandContext, message: string): void {
+	if (ctx.hasUI) ctx.ui.notify(message, "warning");
+}
+
+async function generateConversationSummary(
+	conversationText: string,
+	ctx: ExtensionCommandContext,
+): Promise<string | undefined> {
+	const model = getModel("openai", "gpt-5.2");
+	if (!model) {
+		notifySummaryWarning(ctx, "Model openai/gpt-5.2 not found");
+		return undefined;
+	}
+	const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+	if (!auth.ok) {
+		notifySummaryWarning(ctx, auth.error);
+		return undefined;
+	}
+	if (!auth.apiKey) {
+		notifySummaryWarning(ctx, "No API key for openai/gpt-5.2");
+		return undefined;
+	}
+	const response = await complete(
+		model,
+		{
+			messages: [
+				{
+					role: "user",
+					content: [{ type: "text", text: buildSummaryPrompt(conversationText) }],
+					timestamp: Date.now(),
+				},
+			],
+		},
+		{ apiKey: auth.apiKey, headers: auth.headers, reasoningEffort: "high" },
+	);
+	return response.content
+		.filter((content): content is TextContent => content.type === "text")
+		.map((content) => content.text)
+		.join("\n");
+}
+
 export default function (pi: ExtensionAPI) {
 	pi.registerCommand("summarize", {
 		description: "Summarize the current conversation in a custom UI",
@@ -160,45 +177,8 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify("Preparing summary...", "info");
 			}
 
-			const model = getModel("openai", "gpt-5.2");
-			if (!model && ctx.hasUI) {
-				ctx.ui.notify("Model openai/gpt-5.2 not found", "warning");
-			}
-
-			const auth = model ? await ctx.modelRegistry.getApiKeyAndHeaders(model) : undefined;
-			if (auth && !auth.ok && ctx.hasUI) {
-				ctx.ui.notify(auth.error, "warning");
-			}
-			if (auth?.ok && !auth.apiKey && ctx.hasUI) {
-				ctx.ui.notify("No API key for openai/gpt-5.2", "warning");
-			}
-
-			if (!model || !auth?.ok || !auth.apiKey) {
-				return;
-			}
-
-			const summaryMessages = [
-				{
-					role: "user" as const,
-					content: [{ type: "text" as const, text: buildSummaryPrompt(conversationText) }],
-					timestamp: Date.now(),
-				},
-			];
-
-			const response = await complete(
-				model,
-				{ messages: summaryMessages },
-				{
-					apiKey: auth.apiKey,
-					headers: auth.headers,
-					reasoningEffort: "high",
-				},
-			);
-
-			const summary = response.content
-				.filter((c): c is { type: "text"; text: string } => c.type === "text")
-				.map((c) => c.text)
-				.join("\n");
+			const summary = await generateConversationSummary(conversationText, ctx);
+			if (summary === undefined) return;
 
 			await showSummaryUi(summary, ctx);
 		},

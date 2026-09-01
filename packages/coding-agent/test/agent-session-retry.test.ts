@@ -49,6 +49,11 @@ function createAssistantMessage(text: string, overrides?: Partial<AssistantMessa
 type SessionWithExtensionEmitHook = {
 	_emitExtensionEvent: (event: AgentEvent) => Promise<void>;
 };
+interface RetrySessionFixtureOptions {
+	failCount?: number;
+	maxRetries?: number;
+	delayAssistantMessageEndMs?: number;
+}
 
 describe("AgentSession retry", () => {
 	let session: AgentSession;
@@ -68,7 +73,7 @@ describe("AgentSession retry", () => {
 		}
 	});
 
-	function createSession(options?: { failCount?: number; maxRetries?: number; delayAssistantMessageEndMs?: number }) {
+	function createSession(options?: RetrySessionFixtureOptions) {
 		const failCount = options?.failCount ?? 1;
 		const maxRetries = options?.maxRetries ?? 3;
 		const delayAssistantMessageEndMs = options?.delayAssistantMessageEndMs ?? 0;

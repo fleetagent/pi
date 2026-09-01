@@ -128,6 +128,11 @@ export async function refreshOAuthToken(
 	return refreshProviderToken(providerId, provider, credentials, signal);
 }
 
+export interface OAuthApiKeyResolution {
+	newCredentials: OAuthCredentials;
+	apiKey: string;
+}
+
 /**
  * Get API key for a provider from OAuth credentials.
  * Automatically refreshes expired tokens.
@@ -139,7 +144,7 @@ export async function getOAuthApiKey(
 	providerId: OAuthProviderId,
 	credentials: Record<string, OAuthCredentials>,
 	signal?: AbortSignal,
-): Promise<{ newCredentials: OAuthCredentials; apiKey: string } | null> {
+): Promise<OAuthApiKeyResolution | null> {
 	const provider = getOAuthProvider(providerId);
 	if (!provider) {
 		throw new Error(`Unknown OAuth provider: ${providerId}`);

@@ -1,0 +1,17 @@
+{
+	"hooks": {
+		"Stop": [
+			{
+				"hooks": [
+					{
+						"type": "command",
+						"command": "node",
+						"args": [".pi/hooks/biome-check.mjs"],
+						"timeout": 120,
+						"statusMessage": "Running Biome checks"
+					}
+				]
+			}
+		]
+	}
+}

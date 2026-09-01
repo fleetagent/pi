@@ -1,7 +1,23 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { generateImages } from "../src/images.ts";
 import type { ImagesContext, ImagesModel } from "../src/types.ts";
+import type { MockOpenAIRequestPromise } from "./openai-mock-types.ts";
 
+// pi-ignore noNearIdenticalDataStructures: This OpenRouter image request wire block is unrelated to coding-agent tool update and replace-result rendering entries.
+interface OpenRouterImageRequestTextContent {
+	type: string;
+	text?: string;
+}
+
+interface OpenRouterImageRequestMessage {
+	content?: [OpenRouterImageRequestTextContent];
+}
+
+interface OpenRouterImageRequestParams {
+	stream?: boolean;
+	modalities?: string[];
+	messages?: [OpenRouterImageRequestMessage];
+}
 const mockState = vi.hoisted(() => ({
 	lastParams: undefined as unknown,
 	lastRequestOptions: undefined as unknown,
@@ -39,12 +55,7 @@ vi.mock("openai", () => {
 							},
 						],
 					};
-					const promise = Promise.resolve(response) as Promise<typeof response> & {
-						withResponse: () => Promise<{
-							data: typeof response;
-							response: { status: number; headers: Headers };
-						}>;
-					};
+					const promise = Promise.resolve(response) as MockOpenAIRequestPromise<typeof response>;
 					promise.withResponse = async () => ({
 						data: response,
 						response: { status: 200, headers: new Headers() },
@@ -86,11 +97,7 @@ describe("openrouter images", () => {
 		expect(output.output[0]).toMatchObject({ type: "text", text: "Here is your image." });
 		expect(output.output[1]).toMatchObject({ type: "image", mimeType: "image/png", data: "ZmFrZS1wbmc=" });
 
-		const params = mockState.lastParams as {
-			stream?: boolean;
-			modalities?: string[];
-			messages?: [{ content?: [{ type: string; text?: string }] }];
-		};
+		const params = mockState.lastParams as OpenRouterImageRequestParams;
 		expect(params.stream).toBe(false);
 		expect(params.modalities).toEqual(["image", "text"]);
 		expect(params.messages?.[0]?.content?.[0]).toMatchObject({ type: "text", text: "Generate a dog" });

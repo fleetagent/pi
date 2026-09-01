@@ -5,6 +5,10 @@ import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyHint } from "./keybinding-hints.ts";
 
+interface LoginAuthDisplayOptions {
+	autoOpenBrowser?: boolean;
+}
+
 /**
  * Login dialog component - replaces editor during OAuth login flow
  */
@@ -86,7 +90,7 @@ export class LoginDialogComponent extends Container implements Focusable {
 	/**
 	 * Called by onAuth callback - show URL and optional instructions
 	 */
-	showAuth(url: string, instructions?: string, options: { autoOpenBrowser?: boolean } = {}): void {
+	showAuth(url: string, instructions?: string, options: LoginAuthDisplayOptions = {}): void {
 		this.contentContainer.clear();
 		this.contentContainer.addChild(new Spacer(1));
 		const linkedUrl = `\x1b]8;;${url}\x07${url}\x1b]8;;\x07`;

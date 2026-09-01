@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import type { ExtensionSessionActionResult } from "../src/core/extensions/types.ts";
 import { SessionImportFileNotFoundError } from "../src/core/pi-agent.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 
@@ -9,10 +10,22 @@ type InteractiveModePrototype = {
 	handleImportCommand(this: ImportCommandContext, text: string): Promise<void>;
 };
 
-type ImportCommandContext = {
-	loadingAnimation?: { stop: () => void };
-	statusContainer: { clear: () => void };
-	runtimeHost: { importFromJsonl: (inputPath: string, cwdOverride?: string) => Promise<{ cancelled: boolean }> };
+interface ImportCommandLoadingAnimation {
+	stop: () => void;
+}
+
+interface ImportCommandStatusContainer {
+	clear: () => void;
+}
+
+interface ImportCommandRuntimeHost {
+	importFromJsonl: (inputPath: string, cwdOverride?: string) => Promise<ExtensionSessionActionResult>;
+}
+
+interface ImportCommandContext {
+	loadingAnimation?: ImportCommandLoadingAnimation;
+	statusContainer: ImportCommandStatusContainer;
+	runtimeHost: ImportCommandRuntimeHost;
 	showError: (message: string) => void;
 	showStatus: (message: string) => void;
 	showExtensionConfirm: (title: string, message: string) => Promise<boolean>;
@@ -21,7 +34,7 @@ type ImportCommandContext = {
 	handleFatalRuntimeError: (prefix: string, error: unknown) => Promise<never>;
 	promptForMissingSessionCwd: (error: unknown) => Promise<string | undefined>;
 	getPathCommandArgument: (text: string, command: PathCommand) => string | undefined;
-};
+}
 
 const interactiveModePrototype = InteractiveMode.prototype as unknown as InteractiveModePrototype;
 

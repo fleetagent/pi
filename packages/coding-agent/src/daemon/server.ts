@@ -10,6 +10,7 @@ import type { AddressInfo, Socket } from "node:net";
 import WebSocket, { type RawData, WebSocketServer } from "ws";
 import type { RemoteWorkspaceServerMessage } from "../core/remote-workspace-protocol/contract.ts";
 import {
+	type RemoteWorkspaceProtocolCloseCode,
 	type RemoteWorkspaceProtocolCloseReason,
 	type RemoteWorkspaceServerHandler,
 	RemoteWorkspaceServerProtocol,
@@ -55,7 +56,7 @@ function websocketPayload(data: RawData): Uint8Array {
 	return Uint8Array.from(new Uint8Array(data));
 }
 
-function websocketCloseCode(code: RemoteWorkspaceProtocolCloseReason["code"]): number {
+function websocketCloseCode(code: RemoteWorkspaceProtocolCloseCode): number {
 	switch (code) {
 		case "normal":
 			return 1000;
@@ -94,6 +95,38 @@ function waitWithin(promise: Promise<unknown>, timeoutMs: number, forceSignal: A
 			() => finish(false),
 		);
 	});
+}
+function terminateDaemonConnections(connections: Iterable<DaemonConnection>): void {
+	for (const connection of connections) connection.websocket.terminate();
+}
+
+function beginDaemonConnectionDrain(
+	connections: readonly DaemonConnection[],
+	hostDisposal: Promise<void>,
+): Promise<void> {
+	return Promise.allSettled([...connections.map((connection) => connection.protocol.beginDrain()), hostDisposal]).then(
+		() => undefined,
+	);
+}
+
+function disconnectDaemonConnections(connections: readonly DaemonConnection[]): Promise<void> {
+	return Promise.allSettled(connections.map((connection) => connection.protocol.disconnect())).then(() => undefined);
+}
+
+function requestDaemonConnectionClose(connections: readonly DaemonConnection[]): void {
+	for (const connection of connections) {
+		if (connection.websocket.readyState === WebSocket.OPEN) {
+			connection.websocket.close(1001, "Daemon shutting down");
+		}
+	}
+}
+
+function waitForDaemonConnectionsClosed(connections: readonly DaemonConnection[]): Promise<void> {
+	return Promise.allSettled(connections.map((connection) => connection.closed)).then(() => undefined);
+}
+
+function destroyDaemonSockets(sockets: ReadonlySet<Socket>): void {
+	for (const socket of sockets) socket.destroy();
 }
 
 function formatHostForUrl(host: string): string {
@@ -376,35 +409,25 @@ export function createDaemonServer(configuration: DaemonConfiguration): DaemonSe
 				);
 				const hostDisposal = runtime.dispose();
 				const drained = await waitWithin(
-					Promise.allSettled([
-						...snapshot.map((connection) => connection.protocol.beginDrain()),
-						hostDisposal,
-					]).then(() => undefined),
+					beginDaemonConnectionDrain(snapshot, hostDisposal),
 					remainingMs(),
 					forceController.signal,
 				);
-				if (!drained) for (const connection of snapshot) connection.websocket.terminate();
-				await waitWithin(
-					Promise.allSettled(snapshot.map((connection) => connection.protocol.disconnect())).then(() => undefined),
-					remainingMs(),
-					forceController.signal,
-				);
-				for (const connection of snapshot) {
-					if (connection.websocket.readyState === WebSocket.OPEN)
-						connection.websocket.close(1001, "Daemon shutting down");
-				}
+				if (!drained) terminateDaemonConnections(snapshot);
+				await waitWithin(disconnectDaemonConnections(snapshot), remainingMs(), forceController.signal);
+				requestDaemonConnectionClose(snapshot);
 				const socketsClosed = await waitWithin(
-					Promise.allSettled(snapshot.map((connection) => connection.closed)).then(() => undefined),
+					waitForDaemonConnectionsClosed(snapshot),
 					remainingMs(),
 					forceController.signal,
 				);
-				if (!socketsClosed) for (const connection of snapshot) connection.websocket.terminate();
-				for (const socket of sockets) socket.destroy();
+				if (!socketsClosed) terminateDaemonConnections(snapshot);
+				destroyDaemonSockets(sockets);
 				await listenerClose;
 				connections.clear();
 			})().finally(() => {
-				for (const connection of connections) connection.websocket.terminate();
-				for (const socket of sockets) socket.destroy();
+				terminateDaemonConnections(connections);
+				destroyDaemonSockets(sockets);
 				for (const timer of pendingSocketTimers.values()) clearTimeout(timer);
 				pendingSocketTimers.clear();
 				pendingSocketDeadlines.clear();
@@ -420,8 +443,8 @@ export function createDaemonServer(configuration: DaemonConfiguration): DaemonSe
 			serverState = "closing";
 			forceController.abort();
 			currentAddress = undefined;
-			for (const connection of connections) connection.websocket.terminate();
-			for (const socket of sockets) socket.destroy();
+			terminateDaemonConnections(connections);
+			destroyDaemonSockets(sockets);
 			return api.close();
 		},
 	};

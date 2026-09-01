@@ -5,7 +5,18 @@
  * Uses the last assistant message to generate a commit message.
  */
 
-import type { ExtensionAPI } from "@fleetagent/pi-coding-agent";
+import type { ExtensionAPI, SessionEntry } from "@fleetagent/pi-coding-agent";
+
+function findLastAssistantText(entries: SessionEntry[]): string {
+	for (let index = entries.length - 1; index >= 0; index--) {
+		const entry = entries[index];
+		if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+		const content = entry.message.content;
+		if (!Array.isArray(content)) return "";
+		return content.flatMap((item) => (item.type === "text" ? [item.text] : [])).join("\n");
+	}
+	return "";
+}
 
 export default function (pi: ExtensionAPI) {
 	pi.on("session_shutdown", async (_event, ctx) => {
@@ -18,21 +29,7 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		// Find the last assistant message for commit context
-		const entries = ctx.session.getEntries();
-		let lastAssistantText = "";
-		for (let i = entries.length - 1; i >= 0; i--) {
-			const entry = entries[i];
-			if (entry.type === "message" && entry.message.role === "assistant") {
-				const content = entry.message.content;
-				if (Array.isArray(content)) {
-					lastAssistantText = content
-						.filter((c): c is { type: "text"; text: string } => c.type === "text")
-						.map((c) => c.text)
-						.join("\n");
-				}
-				break;
-			}
-		}
+		const lastAssistantText = findLastAssistantText(ctx.session.getEntries());
 
 		// Generate a simple commit message
 		const firstLine = lastAssistantText.split("\n")[0] || "Work in progress";

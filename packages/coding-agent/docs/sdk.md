@@ -6,6 +6,8 @@ The SDK provides programmatic access to pi's agent capabilities. Use `PiAgent` a
 
 See [examples/sdk/](../examples/sdk/) for working examples from minimal to full control.
 
+`CreatePiAgentOptions.hooks` controls Claude-compatible hooks. Automatic discovery is user-only. Set the host-only `trustProjectHooks: true` only after approving the destination repository; it does not discover project hooks when the initial workspace backend is non-local. Once an approved local snapshot exists, project/local command hooks follow later backend transitions and execute inside sandbox/remote operations rather than on the host. Project/local HTTP hooks fail closed on non-local backends. User hooks and `hooks.snapshot` remain trusted host configuration, while `hooks.allowedHttpHookUrls` and `hooks.httpHookAllowedEnvVars` impose host ceilings. See [hooks.md](hooks.md).
+
 ## Quick Start
 
 ```typescript

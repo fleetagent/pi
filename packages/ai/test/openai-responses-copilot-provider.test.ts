@@ -1,9 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getModel } from "../src/models.ts";
-import { streamOpenAIResponses } from "../src/providers/openai-responses.ts";
+import { type OpenAIResponsesOptions, streamOpenAIResponses } from "../src/providers/openai-responses.ts";
 import type { Model } from "../src/types.ts";
 
 type CapturedHeaders = Headers | string[][] | Record<string, string | readonly string[]> | undefined;
+
+interface CapturedCacheAffinityHeaders {
+	sessionId: string | null;
+	clientRequestId: string | null;
+}
 
 function getHeader(headers: CapturedHeaders, name: string): string | null {
 	if (!headers) return null;
@@ -22,10 +27,10 @@ function getHeader(headers: CapturedHeaders, name: string): string | null {
 }
 
 async function captureOpenAIResponseHeaders(
-	options: Parameters<typeof streamOpenAIResponses>[2],
+	options: OpenAIResponsesOptions | undefined,
 	model: Model<"openai-responses"> = getModel("openai", "gpt-5.4"),
-): Promise<{ sessionId: string | null; clientRequestId: string | null }> {
-	const captured = { sessionId: null as string | null, clientRequestId: null as string | null };
+): Promise<CapturedCacheAffinityHeaders> {
+	const captured: CapturedCacheAffinityHeaders = { sessionId: null, clientRequestId: null };
 	vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
 		captured.sessionId = getHeader(init?.headers, "session_id");
 		captured.clientRequestId = getHeader(init?.headers, "x-client-request-id");

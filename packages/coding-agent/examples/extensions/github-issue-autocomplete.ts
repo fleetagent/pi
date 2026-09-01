@@ -1,7 +1,7 @@
 // Requires GitHub CLI (`gh`) and a GitHub repository checkout.
 // Preloads the latest open issues once per session, then filters them locally for fast `#...` completion.
 
-import type { ExtensionAPI } from "@fleetagent/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@fleetagent/pi-coding-agent";
 import {
 	type AutocompleteItem,
 	type AutocompleteProvider,
@@ -127,6 +127,54 @@ function createIssueAutocompleteProvider(
 	};
 }
 
+type GitHubIssueLoader = () => Promise<GitHubIssue[] | undefined>;
+
+function createGitHubIssueLoader(pi: ExtensionAPI, ctx: ExtensionContext, repo: string): GitHubIssueLoader {
+	let issuesPromise: Promise<GitHubIssue[] | undefined> | undefined;
+	let loadErrorShown = false;
+
+	const showLoadErrorOnce = (message: string): void => {
+		if (loadErrorShown) return;
+		loadErrorShown = true;
+		ctx.ui.notify(message, "error");
+	};
+
+	const loadIssues = async (): Promise<GitHubIssue[] | undefined> => {
+		const result = await pi.exec(
+			"gh",
+			[
+				"issue",
+				"list",
+				"--repo",
+				repo,
+				"--state",
+				"open",
+				"--limit",
+				String(MAX_ISSUES),
+				"--json",
+				"number,title,state",
+			],
+			{ cwd: ctx.cwd, timeout: 5_000 },
+		);
+		if (result.code !== 0) {
+			const details = result.stderr.trim() || `exit code ${result.code}`;
+			showLoadErrorOnce(`github-issue-autocomplete: failed to load issues: ${details}`);
+			return undefined;
+		}
+
+		try {
+			return JSON.parse(result.stdout) as GitHubIssue[];
+		} catch {
+			showLoadErrorOnce("github-issue-autocomplete: failed to parse gh issue list output");
+			return undefined;
+		}
+	};
+
+	return async () => {
+		issuesPromise ||= loadIssues();
+		return issuesPromise;
+	};
+}
 export default function (pi: ExtensionAPI): void {
 	pi.on("session_start", async (_event, ctx) => {
 		const resolvedRepo = await resolveGitHubRepo(pi, ctx.cwd);
@@ -135,49 +183,7 @@ export default function (pi: ExtensionAPI): void {
 			return;
 		}
 
-		const repo = resolvedRepo.repo;
-		let issuesPromise: Promise<GitHubIssue[] | undefined> | undefined;
-		let loadErrorShown = false;
-
-		const getIssues = async (): Promise<GitHubIssue[] | undefined> => {
-			issuesPromise ||= (async () => {
-				const result = await pi.exec(
-					"gh",
-					[
-						"issue",
-						"list",
-						"--repo",
-						repo,
-						"--state",
-						"open",
-						"--limit",
-						String(MAX_ISSUES),
-						"--json",
-						"number,title,state",
-					],
-					{ cwd: ctx.cwd, timeout: 5_000 },
-				);
-				if (result.code !== 0) {
-					if (!loadErrorShown) {
-						loadErrorShown = true;
-						const details = result.stderr.trim() || `exit code ${result.code}`;
-						ctx.ui.notify(`github-issue-autocomplete: failed to load issues: ${details}`, "error");
-					}
-					return undefined;
-				}
-
-				try {
-					return JSON.parse(result.stdout) as GitHubIssue[];
-				} catch {
-					if (!loadErrorShown) {
-						loadErrorShown = true;
-						ctx.ui.notify("github-issue-autocomplete: failed to parse gh issue list output", "error");
-					}
-					return undefined;
-				}
-			})();
-			return issuesPromise;
-		};
+		const getIssues = createGitHubIssueLoader(pi, ctx, resolvedRepo.repo);
 
 		void getIssues();
 		ctx.ui.addAutocompleteProvider((current) => createIssueAutocompleteProvider(current, getIssues));

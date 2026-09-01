@@ -9,8 +9,32 @@
  */
 
 import type { AssistantMessage } from "@fleetagent/pi-ai";
-import type { ExtensionAPI } from "@fleetagent/pi-coding-agent";
+import type { ExtensionAPI, SessionEntry } from "@fleetagent/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@fleetagent/pi-tui";
+
+interface FooterUsage {
+	input: number;
+	output: number;
+	cost: number;
+}
+
+function summarizeFooterUsage(entries: SessionEntry[]): FooterUsage {
+	let input = 0;
+	let output = 0;
+	let cost = 0;
+	for (const entry of entries) {
+		if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+		const message = entry.message as AssistantMessage;
+		input += message.usage.input;
+		output += message.usage.output;
+		cost += message.usage.cost.total;
+	}
+	return { input, output, cost };
+}
+
+function formatTokenCount(count: number): string {
+	return count < 1000 ? `${count}` : `${(count / 1000).toFixed(1)}k`;
+}
 
 export default function (pi: ExtensionAPI) {
 	let enabled = false;
@@ -28,24 +52,15 @@ export default function (pi: ExtensionAPI) {
 						dispose: unsub,
 						invalidate() {},
 						render(width: number): string[] {
-							// Compute tokens from ctx (already accessible to extensions)
-							let input = 0,
-								output = 0,
-								cost = 0;
-							for (const e of ctx.session.getBranch()) {
-								if (e.type === "message" && e.message.role === "assistant") {
-									const m = e.message as AssistantMessage;
-									input += m.usage.input;
-									output += m.usage.output;
-									cost += m.usage.cost.total;
-								}
-							}
+							const { input, output, cost } = summarizeFooterUsage(ctx.session.getBranch());
 
 							// Get git branch (not otherwise accessible)
 							const branch = footerData.getGitBranch();
-							const fmt = (n: number) => (n < 1000 ? `${n}` : `${(n / 1000).toFixed(1)}k`);
 
-							const left = theme.fg("dim", `↑${fmt(input)} ↓${fmt(output)} $${cost.toFixed(3)}`);
+							const left = theme.fg(
+								"dim",
+								`↑${formatTokenCount(input)} ↓${formatTokenCount(output)} $${cost.toFixed(3)}`,
+							);
 							const branchStr = branch ? ` (${branch})` : "";
 							const right = theme.fg("dim", `${ctx.model?.id || "no-model"}${branchStr}`);
 

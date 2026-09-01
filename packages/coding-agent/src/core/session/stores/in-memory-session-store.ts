@@ -1,5 +1,5 @@
 import type { FileEntry, LabelEntry, SessionEntry, SessionHeader, SessionTreeNode } from "../types.ts";
-import type { SessionStore } from "./session-store.ts";
+import type { SessionLabelSnapshot, SessionStore } from "./session-store.ts";
 
 export class InMemorySessionStore implements SessionStore {
 	protected fileEntries: FileEntry[] = [];
@@ -126,26 +126,21 @@ export class InMemorySessionStore implements SessionStore {
 			nodeMap.set(entry.id, { entry, children: [], label, labelTimestamp });
 		}
 
+		const childNodes: Array<[parent: SessionTreeNode, child: SessionTreeNode]> = [];
 		for (const entry of entries) {
 			const node = nodeMap.get(entry.id)!;
 			if (entry.parentId === null || entry.parentId === entry.id) {
 				roots.push(node);
-			} else {
-				const parent = nodeMap.get(entry.parentId);
-				if (parent) {
-					parent.children.push(node);
-				} else {
-					roots.push(node);
-				}
+				continue;
 			}
+			const parent = nodeMap.get(entry.parentId);
+			if (parent) childNodes.push([parent, node]);
+			else roots.push(node);
 		}
-
-		const stack: SessionTreeNode[] = [...roots];
-		while (stack.length > 0) {
-			const node = stack.pop()!;
-			node.children.sort((a, b) => new Date(a.entry.timestamp).getTime() - new Date(b.entry.timestamp).getTime());
-			stack.push(...node.children);
-		}
+		childNodes.sort(
+			([, left], [, right]) => new Date(left.entry.timestamp).getTime() - new Date(right.entry.timestamp).getTime(),
+		);
+		for (const [parent, child] of childNodes) parent.children.push(child);
 
 		return roots;
 	}
@@ -161,8 +156,8 @@ export class InMemorySessionStore implements SessionStore {
 		return undefined;
 	}
 
-	getLabelsForEntryIds(entryIds: Set<string>): Array<{ targetId: string; label: string; timestamp: string }> {
-		const labels: Array<{ targetId: string; label: string; timestamp: string }> = [];
+	getLabelsForEntryIds(entryIds: Set<string>): SessionLabelSnapshot[] {
+		const labels: SessionLabelSnapshot[] = [];
 		for (const [targetId, label] of this.labelsById) {
 			if (entryIds.has(targetId)) {
 				labels.push({ targetId, label, timestamp: this.labelTimestampsById.get(targetId)! });

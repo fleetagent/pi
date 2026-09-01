@@ -531,6 +531,8 @@ const SIZE_COMMANDS = new Set([
 	"biggr",
 	"Biggr",
 ]);
+const LITERAL_COMMANDS = new Set(["{", "}", "$", "%", "#", "_", "&"]);
+const DELIMITER_COMMANDS = new Set(["left", "middle", "right"]);
 const PLAIN_WRAPPERS = new Set([
 	"emph",
 	"mathcal",
@@ -584,6 +586,10 @@ const ACCENTS: Readonly<Record<string, string>> = {
 	widetilde: "\u0303",
 };
 
+type MathScriptKind = "sub" | "sup";
+type OperatorScriptMarker = "_" | "^";
+type InlineOperatorLowerStyle = "bracket" | "script";
+
 function replaceCharacters(value: string, replacements: Readonly<Record<string, string>>): string | undefined {
 	let result = "";
 	for (const character of value) {
@@ -596,7 +602,7 @@ function replaceCharacters(value: string, replacements: Readonly<Record<string, 
 	return result;
 }
 
-function formatScript(value: string, kind: "sub" | "sup"): string {
+function formatScript(value: string, kind: MathScriptKind): string {
 	value = value.trim();
 	const replacements = kind === "sub" ? SUBSCRIPTS : SUPERSCRIPTS;
 	const unicode = replaceCharacters(value.replace(/\s*([=+-])\s*/g, "$1"), replacements);
@@ -655,6 +661,11 @@ interface OperatorNode {
 	upper?: string;
 }
 
+interface ParsedOperatorScripts {
+	lower?: string;
+	upper?: string;
+}
+
 interface MatrixNode {
 	type: "matrix";
 	lines: string[];
@@ -685,6 +696,46 @@ interface LatexParseState {
 	nestingDepth: number;
 }
 
+type LatexSequenceCharacterKind =
+	| "end"
+	| "unexpected-close"
+	| "group"
+	| "command"
+	| "script"
+	| "whitespace"
+	| "relation"
+	| "alignment"
+	| "space"
+	| "period"
+	| "literal";
+
+function classifyLatexSequenceCharacter(character: string, endCharacter?: string): LatexSequenceCharacterKind {
+	if (endCharacter && character === endCharacter) return "end";
+	switch (character) {
+		case "}":
+			return "unexpected-close";
+		case "{":
+			return "group";
+		case "\\":
+			return "command";
+		case "^":
+		case "_":
+			return "script";
+		case "=":
+		case "<":
+		case ">":
+			return "relation";
+		case "&":
+			return "alignment";
+		case "~":
+			return "space";
+		case ".":
+			return "period";
+		default:
+			return /\s/.test(character) ? "whitespace" : "literal";
+	}
+}
+
 function assertLayoutBounds(width: number, rowCount: number): void {
 	if (
 		!Number.isSafeInteger(width) ||
@@ -704,6 +755,7 @@ function padLayoutLine(line: string, width: number, centered = false): string {
 	return `${" ".repeat(left)}${line}${" ".repeat(padding - left)}`;
 }
 
+// pi-ignore noExcessiveCollectionIterations: Every output row must concatenate every layout segment; rows are capped at 200 and parsed layout nodes at 256.
 function joinLayouts(layouts: readonly Layout[]): Layout {
 	if (layouts.length === 0) {
 		return { lines: [""], width: 0, baseline: 0 };
@@ -728,98 +780,110 @@ function joinLayouts(layouts: readonly Layout[]): Layout {
 	return { lines, width, baseline };
 }
 
+function createTextLayout(text: string): Layout {
+	return { lines: [text], width: visibleWidth(text), baseline: 0 };
+}
+
+function createInterNodeTextLayout(source: string, previousNode: LayoutNode | undefined, nextNode: LayoutNode): Layout {
+	const trimmed = (previousNode ? source.trimStart() : source).trimEnd();
+	const preserveLeadingSpace = previousNode?.type === "matrix" && /^\s/.test(source);
+	const preserveTrailingSpace = nextNode.type === "matrix" && /\s$/.test(source);
+	const text = trimmed
+		? `${preserveLeadingSpace ? " " : ""}${trimmed}${preserveTrailingSpace ? " " : ""}`
+		: preserveLeadingSpace || preserveTrailingSpace
+			? " "
+			: "";
+	return createTextLayout(text);
+}
+
+function createTrailingTextLayout(source: string, previousNode: LayoutNode | undefined): Layout {
+	const trimmed = previousNode ? source.trimStart() : source;
+	const text = previousNode?.type === "matrix" && /^\s/.test(source) ? ` ${trimmed}` : trimmed;
+	return createTextLayout(text);
+}
+
+function renderFractionNodeLayout(node: FractionNode, nodes: readonly LayoutNode[]): Layout {
+	const numerator = renderLayout(node.numerator, nodes);
+	const denominator = renderLayout(node.denominator, nodes);
+	const contentWidth = Math.max(numerator.width, denominator.width, 1);
+	const width = contentWidth + 2;
+	const lines = [
+		...numerator.lines.map((line) => padLayoutLine(line, width, true)),
+		` ${"─".repeat(contentWidth)} `,
+		...denominator.lines.map((line) => padLayoutLine(line, width, true)),
+	];
+	assertLayoutBounds(width, lines.length);
+	return { lines, width, baseline: numerator.lines.length };
+}
+
+function renderOperatorNodeLayout(node: OperatorNode): Layout {
+	const contentWidth = Math.max(
+		visibleWidth(node.operator),
+		node.lower === undefined ? 0 : visibleWidth(node.lower),
+		node.upper === undefined ? 0 : visibleWidth(node.upper),
+	);
+	const lines: string[] = [];
+	if (node.upper !== undefined) lines.push(`${padLayoutLine(node.upper, contentWidth, true)} `);
+	lines.push(`${padLayoutLine(node.operator, contentWidth, true)} `);
+	if (node.lower !== undefined) lines.push(`${padLayoutLine(node.lower, contentWidth, true)} `);
+	assertLayoutBounds(contentWidth + 1, lines.length);
+	return { lines, width: contentWidth + 1, baseline: node.upper === undefined ? 0 : 1 };
+}
+
+function renderMatrixNodeLayout(node: MatrixNode): Layout {
+	const width = Math.max(0, ...node.lines.map((line) => visibleWidth(line)));
+	assertLayoutBounds(width, node.lines.length);
+	return {
+		lines: node.lines.map((line) => padLayoutLine(line, width)),
+		width,
+		baseline: node.baseline,
+	};
+}
+
+function renderLayoutNode(node: LayoutNode, nodes: readonly LayoutNode[]): Layout {
+	switch (node.type) {
+		case "fraction":
+			return renderFractionNodeLayout(node, nodes);
+		case "operator":
+			return renderOperatorNodeLayout(node);
+		case "matrix":
+			return renderMatrixNodeLayout(node);
+	}
+}
+
+function renderSourceLineLayout(sourceLine: string, nodes: readonly LayoutNode[]): Layout {
+	const layouts: Layout[] = [];
+	let position = 0;
+	let previousNode: LayoutNode | undefined;
+	for (const match of sourceLine.matchAll(LAYOUT_MARKER_PATTERN)) {
+		const index = match.index;
+		const node = nodes[Number(match[1])];
+		if (!node) continue;
+		if (index > position) {
+			layouts.push(createInterNodeTextLayout(sourceLine.slice(position, index), previousNode, node));
+		}
+		layouts.push(renderLayoutNode(node, nodes));
+		position = index + match[0].length;
+		previousNode = node;
+	}
+	if (position < sourceLine.length) {
+		layouts.push(createTrailingTextLayout(sourceLine.slice(position), previousNode));
+	}
+	return joinLayouts(layouts);
+}
+
 function renderLayout(source: string, nodes: readonly LayoutNode[]): Layout {
 	const renderedLines: string[] = [];
 	let firstBaseline = 0;
 	for (const sourceLine of source.split("\n")) {
-		const layouts: Layout[] = [];
-		let position = 0;
-		let previousNode: LayoutNode | undefined;
-		for (const match of sourceLine.matchAll(LAYOUT_MARKER_PATTERN)) {
-			const index = match.index;
-			const node = nodes[Number(match[1])];
-			if (!node) {
-				continue;
-			}
-			if (index > position) {
-				const sliced = sourceLine.slice(position, index);
-				const trimmed = (previousNode ? sliced.trimStart() : sliced).trimEnd();
-				const preserveLeadingSpace = previousNode?.type === "matrix" && /^\s/.test(sliced);
-				const preserveTrailingSpace = node.type === "matrix" && /\s$/.test(sliced);
-				const text = trimmed
-					? `${preserveLeadingSpace ? " " : ""}${trimmed}${preserveTrailingSpace ? " " : ""}`
-					: preserveLeadingSpace || preserveTrailingSpace
-						? " "
-						: "";
-				layouts.push({ lines: [text], width: visibleWidth(text), baseline: 0 });
-			}
-			if (node.type === "fraction") {
-				const numerator = renderLayout(node.numerator, nodes);
-				const denominator = renderLayout(node.denominator, nodes);
-				const contentWidth = Math.max(numerator.width, denominator.width, 1);
-				const width = contentWidth + 2;
-				assertLayoutBounds(width, numerator.lines.length + denominator.lines.length + 1);
-				layouts.push({
-					lines: [
-						...numerator.lines.map((line) => padLayoutLine(line, width, true)),
-						` ${"─".repeat(contentWidth)} `,
-						...denominator.lines.map((line) => padLayoutLine(line, width, true)),
-					],
-					width,
-					baseline: numerator.lines.length,
-				});
-			} else if (node.type === "operator") {
-				const contentWidth = Math.max(
-					visibleWidth(node.operator),
-					node.lower === undefined ? 0 : visibleWidth(node.lower),
-					node.upper === undefined ? 0 : visibleWidth(node.upper),
-				);
-				const lines: string[] = [];
-				if (node.upper !== undefined) {
-					lines.push(`${padLayoutLine(node.upper, contentWidth, true)} `);
-				}
-				lines.push(`${padLayoutLine(node.operator, contentWidth, true)} `);
-				if (node.lower !== undefined) {
-					lines.push(`${padLayoutLine(node.lower, contentWidth, true)} `);
-				}
-				assertLayoutBounds(contentWidth + 1, lines.length);
-				layouts.push({
-					lines,
-					width: contentWidth + 1,
-					baseline: node.upper === undefined ? 0 : 1,
-				});
-			} else {
-				const width = Math.max(0, ...node.lines.map((line) => visibleWidth(line)));
-				assertLayoutBounds(width, node.lines.length);
-				layouts.push({
-					lines: node.lines.map((line) => padLayoutLine(line, width)),
-					width,
-					baseline: node.baseline,
-				});
-			}
-			position = index + match[0].length;
-			previousNode = node;
-		}
-		if (position < sourceLine.length) {
-			const sliced = sourceLine.slice(position);
-			const trimmed = previousNode ? sliced.trimStart() : sliced;
-			const text = previousNode?.type === "matrix" && /^\s/.test(sliced) ? ` ${trimmed}` : trimmed;
-			layouts.push({ lines: [text], width: visibleWidth(text), baseline: 0 });
-		}
-		const lineLayout = joinLayouts(layouts);
-		if (renderedLines.length === 0) {
-			firstBaseline = lineLayout.baseline;
-		}
+		const lineLayout = renderSourceLineLayout(sourceLine, nodes);
+		if (renderedLines.length === 0) firstBaseline = lineLayout.baseline;
 		renderedLines.push(...lineLayout.lines);
 		assertLayoutBounds(0, renderedLines.length);
 	}
 	const width = Math.max(0, ...renderedLines.map((line) => visibleWidth(line)));
 	assertLayoutBounds(width, renderedLines.length);
-	return {
-		lines: renderedLines,
-		width,
-		baseline: firstBaseline,
-	};
+	return { lines: renderedLines, width, baseline: firstBaseline };
 }
 
 class LatexParser {
@@ -851,91 +915,80 @@ class LatexParser {
 		return normalizeOutput(rendered);
 	}
 
+	private appendParsedCommand(result: string): string {
+		const command = this.parseCommand();
+		if (command !== NEGATIVE_SPACE) return result + command;
+		const trimmed = result.trimEnd();
+		return trimmed.endsWith(NAMED_OPERATOR_END) ? trimmed.slice(0, -NAMED_OPERATOR_END.length) : trimmed;
+	}
+
+	private appendParsedScript(result: string, character: string): string {
+		this.position++;
+		const trimmed = result.trimEnd();
+		const script = formatScript(this.parseRequiredArgument(false), character === "_" ? "sub" : "sup");
+		return trimmed.endsWith(NAMED_OPERATOR_END)
+			? `${trimmed.slice(0, -NAMED_OPERATOR_END.length)}${script}${NAMED_OPERATOR_END}`
+			: trimmed + script;
+	}
+
+	private appendPeriod(result: string): string {
+		const marker = TRAILING_LAYOUT_MARKER_PATTERN.exec(result);
+		const node = marker ? this.layoutNodes[Number(marker[1])] : undefined;
+		if (node?.type === "matrix") {
+			const lastLine = node.lines.length - 1;
+			node.lines[lastLine] = `${node.lines[lastLine] ?? ""}.`;
+			this.position++;
+			return result;
+		}
+		this.position++;
+		return `${result}.`;
+	}
+
 	private parseSequence(endCharacter?: string): string {
 		let result = "";
 		while (this.position < this.source.length) {
 			const character = this.source[this.position];
-			if (endCharacter && character === endCharacter) {
-				this.position++;
-				return result;
-			}
-
-			if (character === "}") {
-				this.supported = false;
-				return result;
-			}
-
-			if (character === "{") {
-				this.position++;
-				result += this.parseNestedSequence("}");
-				continue;
-			}
-
-			if (character === "\\") {
-				const command = this.parseCommand();
-				if (command === NEGATIVE_SPACE) {
-					result = result.trimEnd();
-					if (result.endsWith(NAMED_OPERATOR_END)) {
-						result = result.slice(0, -NAMED_OPERATOR_END.length);
-					}
-				} else {
-					result += command;
-				}
-				continue;
-			}
-
-			if (character === "^" || character === "_") {
-				this.position++;
-				result = result.trimEnd();
-				const script = formatScript(this.parseRequiredArgument(false), character === "_" ? "sub" : "sup");
-				if (result.endsWith(NAMED_OPERATOR_END)) {
-					result = `${result.slice(0, -NAMED_OPERATOR_END.length)}${script}${NAMED_OPERATOR_END}`;
-				} else {
-					result += script;
-				}
-				continue;
-			}
-
-			if (/\s/.test(character)) {
-				result += this.parseWhitespace();
-				continue;
-			}
-
-			if (character === "=" || character === "<" || character === ">") {
-				result = `${result.trimEnd()} ${character} `;
-				this.position++;
-				continue;
-			}
-
-			if (character === "&") {
-				this.position++;
-				continue;
-			}
-
-			if (character === "~") {
-				this.position++;
-				result += " ";
-				continue;
-			}
-
-			if (character === ".") {
-				const marker = TRAILING_LAYOUT_MARKER_PATTERN.exec(result);
-				const node = marker ? this.layoutNodes[Number(marker[1])] : undefined;
-				if (node?.type === "matrix") {
-					const lastLine = node.lines.length - 1;
-					node.lines[lastLine] = `${node.lines[lastLine] ?? ""}${character}`;
+			switch (classifyLatexSequenceCharacter(character, endCharacter)) {
+				case "end":
 					this.position++;
-					continue;
-				}
+					return result;
+				case "unexpected-close":
+					this.supported = false;
+					return result;
+				case "group":
+					this.position++;
+					result += this.parseNestedSequence("}");
+					break;
+				case "command":
+					result = this.appendParsedCommand(result);
+					break;
+				case "script":
+					result = this.appendParsedScript(result, character);
+					break;
+				case "whitespace":
+					result += this.parseWhitespace();
+					break;
+				case "relation":
+					result = `${result.trimEnd()} ${character} `;
+					this.position++;
+					break;
+				case "alignment":
+					this.position++;
+					break;
+				case "space":
+					this.position++;
+					result += " ";
+					break;
+				case "period":
+					result = this.appendPeriod(result);
+					break;
+				case "literal":
+					result += character;
+					this.position++;
+					break;
 			}
-
-			result += character;
-			this.position++;
 		}
-
-		if (endCharacter) {
-			this.supported = false;
-		}
+		if (endCharacter) this.supported = false;
 		return result;
 	}
 
@@ -946,215 +999,215 @@ class LatexParser {
 		return " ";
 	}
 
-	private parseCommand(): string {
+	private readCommandName(): string | undefined {
 		this.position++;
 		if (this.position >= this.source.length) {
 			this.supported = false;
-			return "";
+			return undefined;
 		}
 
-		let command = "";
 		const first = this.source[this.position] ?? "";
-		if (/[A-Za-z]/.test(first)) {
-			const start = this.position;
-			while (this.position < this.source.length && /[A-Za-z]/.test(this.source[this.position] ?? "")) {
-				this.position++;
-			}
-			command = this.source.slice(start, this.position);
-		} else {
-			command = first;
+		if (!/[A-Za-z]/.test(first)) {
+			this.position++;
+			return first;
+		}
+		const start = this.position;
+		while (this.position < this.source.length && /[A-Za-z]/.test(this.source[this.position] ?? "")) {
 			this.position++;
 		}
+		return this.source.slice(start, this.position);
+	}
 
-		if (command === "\\") {
-			return "\n";
-		}
-		if (SPACING_COMMANDS.has(command)) {
-			return " ";
-		}
-		if (NEGATIVE_SPACING_COMMANDS.has(command)) {
-			return NEGATIVE_SPACE;
-		}
-		if (IGNORED_COMMANDS.has(command)) {
+	private parsePredefinedCommand(command: string): string | undefined {
+		if (command === "\\") return "\n";
+		if (SPACING_COMMANDS.has(command)) return " ";
+		if (NEGATIVE_SPACING_COMMANDS.has(command)) return NEGATIVE_SPACE;
+		if (IGNORED_COMMANDS.has(command)) return "";
+		if (LITERAL_COMMANDS.has(command)) return command;
+		if (command === "|") return "‖";
+		return undefined;
+	}
+
+	private parseNegatedCommand(): string {
+		const value = this.parseRequiredArgument(false).trim();
+		const negated = NEGATED_SYMBOLS[value];
+		if (negated !== undefined) return ` ${negated} `;
+
+		const characters = Array.from(value);
+		if (characters.length === 0) {
+			this.supported = false;
 			return "";
 		}
-		if (
-			command === "{" ||
-			command === "}" ||
-			command === "$" ||
-			command === "%" ||
-			command === "#" ||
-			command === "_" ||
-			command === "&"
-		) {
-			return command;
-		}
-		if (command === "|") {
-			return "‖";
-		}
-		if (command === "not") {
-			const value = this.parseRequiredArgument(false).trim();
-			const negated = NEGATED_SYMBOLS[value];
-			if (negated !== undefined) {
-				return ` ${negated} `;
+		return ` ${characters[0]}\u0338${characters.slice(1).join("")} `;
+	}
+
+	private parseSymbolCommand(command: string): string | undefined {
+		const symbol = SYMBOLS[command];
+		if (symbol === undefined) return undefined;
+		if (DISPLAY_LIMIT_SYMBOLS.has(command)) return this.parseOperator(symbol, "script", true);
+		return command === "cdot" || command === "times" || RELATION_COMMANDS.has(command) ? ` ${symbol} ` : symbol;
+	}
+
+	private parseNamedOrDelimiterCommand(command: string): string | undefined {
+		if (NAMED_OPERATORS.has(command)) return `${NAMED_OPERATOR_START}${command}${NAMED_OPERATOR_END}`;
+		if (SIZE_COMMANDS.has(command)) return "";
+		if (!DELIMITER_COMMANDS.has(command)) return undefined;
+		if (this.source[this.position] === ".") this.position++;
+		return "";
+	}
+
+	private parseFractionCommand(command: string): string {
+		const shouldStack = this.display && this.stackFractions && command !== "tfrac";
+		const numerator = this.parseRequiredArgument(!shouldStack);
+		const denominator = this.parseRequiredArgument(!shouldStack);
+		if (!shouldStack) return formatFraction(numerator, denominator);
+
+		const index = this.addLayoutNode({
+			type: "fraction",
+			numerator: normalizeOutput(numerator),
+			denominator: normalizeOutput(denominator),
+		});
+		return index === undefined ? "" : `${LAYOUT_MARKER_START}${index}${LAYOUT_MARKER_END}`;
+	}
+
+	private parseRootCommand(): string {
+		const degree = this.parseOptionalArgument()?.trim();
+		const value = this.parseRequiredArgument();
+		if (degree === undefined || degree === "2") return formatRoot(value);
+		if (degree === "3") return formatRoot(value, "∛");
+		if (degree === "4") return formatRoot(value, "∜");
+		return `${formatScript(degree, "sup")}${formatRoot(value)}`;
+	}
+
+	private parseAccentCommand(command: string, accent: string): string {
+		const value = this.parseRequiredArgument();
+		return Array.from(value).length === 1 ? `${value}${accent}` : `${command}(${value})`;
+	}
+
+	private parseOperatorNameCommand(): string {
+		const starred = this.source[this.position] === "*";
+		if (starred) this.position++;
+		const operator = normalizeOutput(this.parseRequiredArgument()).trim();
+		return this.parseOperator(operator, "bracket", starred, true);
+	}
+
+	private parseArgumentCommand(command: string): string | undefined {
+		switch (command) {
+			case "frac":
+			case "dfrac":
+			case "tfrac":
+				return this.parseFractionCommand(command);
+			case "sqrt":
+				return this.parseRootCommand();
+			case "boxed":
+			case "fbox":
+				return `[${this.parseRequiredArgument().trim()}]`;
+			case "binom":
+			case "dbinom":
+			case "tbinom":
+				return `(${this.parseRequiredArgument()} choose ${this.parseRequiredArgument()})`;
+			case "mathbb": {
+				const value = this.parseRequiredArgument();
+				return Array.from(value, (character) => BLACKBOARD[character] ?? character).join("");
 			}
-			const characters = Array.from(value);
-			if (characters.length === 0) {
+			case "operatorname":
+				return this.parseOperatorNameCommand();
+			case "mod":
+			case "bmod":
+				return " mod ";
+			case "pmod":
+			case "pod": {
+				const value = this.parseRequiredArgument().trim();
+				return command === "pmod" ? ` (mod ${value})` : ` (${value})`;
+			}
+			case "overset":
+			case "stackrel": {
+				const upper = this.parseRequiredArgument();
+				const value = this.parseRequiredArgument().trim();
+				return `${value}${formatScript(upper, "sup")}`;
+			}
+			case "underset": {
+				const lower = this.parseRequiredArgument();
+				const value = this.parseRequiredArgument().trim();
+				return `${value}${formatScript(lower, "sub")}`;
+			}
+			case "begin":
+				return this.parseEnvironment();
+			case "end":
 				this.supported = false;
 				return "";
-			}
-			return ` ${characters[0]}\u0338${characters.slice(1).join("")} `;
-		}
-		if (LIMIT_OPERATORS.has(command)) {
-			return this.parseOperator(command, "bracket", true, true);
 		}
 
-		const symbol = SYMBOLS[command];
-		if (symbol !== undefined) {
-			if (DISPLAY_LIMIT_SYMBOLS.has(command)) {
-				return this.parseOperator(symbol, "script", true);
-			}
-			return command === "cdot" || command === "times" || RELATION_COMMANDS.has(command) ? ` ${symbol} ` : symbol;
-		}
-		if (NAMED_OPERATORS.has(command)) {
-			return `${NAMED_OPERATOR_START}${command}${NAMED_OPERATOR_END}`;
-		}
-		if (SIZE_COMMANDS.has(command)) {
-			return "";
-		}
-		if (command === "left" || command === "middle" || command === "right") {
-			if (this.source[this.position] === ".") {
-				this.position++;
-			}
-			return "";
-		}
-		if (command === "frac" || command === "dfrac" || command === "tfrac") {
-			const shouldStack = this.display && this.stackFractions && command !== "tfrac";
-			const numerator = this.parseRequiredArgument(!shouldStack);
-			const denominator = this.parseRequiredArgument(!shouldStack);
-			if (shouldStack) {
-				const index = this.addLayoutNode({
-					type: "fraction",
-					numerator: normalizeOutput(numerator),
-					denominator: normalizeOutput(denominator),
-				});
-				return index === undefined ? "" : `${LAYOUT_MARKER_START}${index}${LAYOUT_MARKER_END}`;
-			}
-			return formatFraction(numerator, denominator);
-		}
-		if (command === "sqrt") {
-			const degree = this.parseOptionalArgument()?.trim();
-			const value = this.parseRequiredArgument();
-			if (degree === undefined || degree === "2") {
-				return formatRoot(value);
-			}
-			if (degree === "3") {
-				return formatRoot(value, "∛");
-			}
-			if (degree === "4") {
-				return formatRoot(value, "∜");
-			}
-			return `${formatScript(degree, "sup")}${formatRoot(value)}`;
-		}
-		if (command === "boxed" || command === "fbox") {
-			return `[${this.parseRequiredArgument().trim()}]`;
-		}
-		if (command === "binom" || command === "dbinom" || command === "tbinom") {
-			return `(${this.parseRequiredArgument()} choose ${this.parseRequiredArgument()})`;
-		}
 		const accent = ACCENTS[command];
-		if (accent !== undefined) {
-			const value = this.parseRequiredArgument();
-			return Array.from(value).length === 1 ? `${value}${accent}` : `${command}(${value})`;
-		}
-		if (command === "mathbb") {
-			const value = this.parseRequiredArgument();
-			return Array.from(value, (character) => BLACKBOARD[character] ?? character).join("");
-		}
-		if (command === "operatorname") {
-			const starred = this.source[this.position] === "*";
-			if (starred) {
-				this.position++;
-			}
-			const operator = normalizeOutput(this.parseRequiredArgument()).trim();
-			return this.parseOperator(operator, "bracket", starred, true);
-		}
-		if (command === "mod" || command === "bmod") {
-			return " mod ";
-		}
-		if (command === "pmod" || command === "pod") {
-			const value = this.parseRequiredArgument().trim();
-			return command === "pmod" ? ` (mod ${value})` : ` (${value})`;
-		}
-		if (command === "overset" || command === "stackrel") {
-			const upper = this.parseRequiredArgument();
-			const value = this.parseRequiredArgument().trim();
-			return `${value}${formatScript(upper, "sup")}`;
-		}
-		if (command === "underset") {
-			const lower = this.parseRequiredArgument();
-			const value = this.parseRequiredArgument().trim();
-			return `${value}${formatScript(lower, "sub")}`;
-		}
+		if (accent !== undefined) return this.parseAccentCommand(command, accent);
 		if (PLAIN_WRAPPERS.has(command)) {
 			const value = this.parseRequiredArgument();
 			return command.startsWith("text") || command === "mbox" ? value : value.trim();
 		}
-		if (command === "begin") {
-			return this.parseEnvironment();
-		}
-		if (command === "end") {
-			this.supported = false;
-			return "";
-		}
+		return undefined;
+	}
+
+	private parseCommand(): string {
+		const command = this.readCommandName();
+		if (command === undefined) return "";
+
+		const predefined = this.parsePredefinedCommand(command);
+		if (predefined !== undefined) return predefined;
+		if (command === "not") return this.parseNegatedCommand();
+		if (LIMIT_OPERATORS.has(command)) return this.parseOperator(command, "bracket", true, true);
+
+		const symbol = this.parseSymbolCommand(command);
+		if (symbol !== undefined) return symbol;
+		const namedOrDelimiter = this.parseNamedOrDelimiterCommand(command);
+		if (namedOrDelimiter !== undefined) return namedOrDelimiter;
+		const argumentCommand = this.parseArgumentCommand(command);
+		if (argumentCommand !== undefined) return argumentCommand;
 
 		this.supported = false;
 		return `\\${command}`;
 	}
 
-	private parseOperator(
-		operator: string,
-		inlineLowerStyle: "bracket" | "script",
-		displayLimits: boolean,
-		spaced = false,
-	): string {
-		let useDisplayLimits = displayLimits;
+	private assignOperatorScript(scripts: ParsedOperatorScripts, kind: OperatorScriptMarker, value: string): void {
+		const property = kind === "_" ? "lower" : "upper";
+		if (scripts[property] !== undefined) this.supported = false;
+		scripts[property] = value;
+	}
+
+	private parseOperatorDisplayLimits(displayLimits: boolean): boolean {
 		let modifierPosition = this.position;
 		while (modifierPosition < this.source.length && /[ \t]/.test(this.source[modifierPosition] ?? "")) {
 			modifierPosition++;
 		}
 		const modifier = /^\\(limits|nolimits)(?![A-Za-z])/.exec(this.source.slice(modifierPosition));
-		if (modifier) {
-			useDisplayLimits = modifier[1] === "limits";
-			this.position = modifierPosition + modifier[0].length;
-		}
+		if (!modifier) return displayLimits;
+		this.position = modifierPosition + modifier[0].length;
+		return modifier[1] === "limits";
+	}
 
-		let lower: string | undefined;
-		let upper: string | undefined;
+	private parseOperatorScripts(): ParsedOperatorScripts {
+		const scripts: ParsedOperatorScripts = {};
 		while (true) {
 			let scriptPosition = this.position;
 			while (scriptPosition < this.source.length && /[ \t]/.test(this.source[scriptPosition] ?? "")) {
 				scriptPosition++;
 			}
 			const kind = this.source[scriptPosition];
-			if (kind !== "_" && kind !== "^") {
-				break;
-			}
+			if (kind !== "_" && kind !== "^") break;
 			this.position = scriptPosition + 1;
 			const value = normalizeOutput(this.parseRequiredArgument(false)).replaceAll(" ", "");
-			if (kind === "_") {
-				if (lower !== undefined) {
-					this.supported = false;
-				}
-				lower = value;
-			} else {
-				if (upper !== undefined) {
-					this.supported = false;
-				}
-				upper = value;
-			}
+			this.assignOperatorScript(scripts, kind, value);
 		}
+		return scripts;
+	}
 
+	private parseOperator(
+		operator: string,
+		inlineLowerStyle: InlineOperatorLowerStyle,
+		displayLimits: boolean,
+		spaced = false,
+	): string {
+		const useDisplayLimits = this.parseOperatorDisplayLimits(displayLimits);
+		const { lower, upper } = this.parseOperatorScripts();
 		if (this.display && useDisplayLimits && (lower !== undefined || upper !== undefined)) {
 			const index = this.addLayoutNode({ type: "operator", operator, lower, upper });
 			return index === undefined ? "" : `${LAYOUT_MARKER_START}${index}${LAYOUT_MARKER_END}`;
@@ -1164,9 +1217,7 @@ class LatexParser {
 		if (lower !== undefined) {
 			rendered += inlineLowerStyle === "bracket" ? `[${lower}]` : formatScript(lower, "sub");
 		}
-		if (upper !== undefined) {
-			rendered += formatScript(upper, "sup");
-		}
+		if (upper !== undefined) rendered += formatScript(upper, "sup");
 		return spaced ? ` ${rendered} ` : rendered;
 	}
 
@@ -1215,21 +1266,8 @@ class LatexParser {
 		return this.renderNested(value);
 	}
 
-	private readRawGroup(): string | undefined {
-		while (this.position < this.source.length && /[ \t]/.test(this.source[this.position] ?? "")) {
-			this.position++;
-		}
-		if (this.source[this.position] !== "{") {
-			this.supported = false;
-			return undefined;
-		}
-
-		const start = ++this.position;
+	private readRawGroupContents(start: number): string | undefined {
 		let depth = 1;
-		if (this.state.nestingDepth + depth > MAX_NESTING_DEPTH) {
-			this.supported = false;
-			return undefined;
-		}
 		while (this.position < this.source.length) {
 			const character = this.source[this.position];
 			if (character === "\\") {
@@ -1242,17 +1280,41 @@ class LatexParser {
 					this.supported = false;
 					return undefined;
 				}
-			}
-			if (character === "}") depth--;
-			if (depth === 0) {
-				const value = this.source.slice(start, this.position);
 				this.position++;
-				return value;
+				continue;
 			}
+			if (character !== "}") {
+				this.position++;
+				continue;
+			}
+			depth--;
+			if (depth > 0) {
+				this.position++;
+				continue;
+			}
+			const value = this.source.slice(start, this.position);
 			this.position++;
+			return value;
 		}
 		this.supported = false;
 		return undefined;
+	}
+
+	private readRawGroup(): string | undefined {
+		while (this.position < this.source.length && /[ \t]/.test(this.source[this.position] ?? "")) {
+			this.position++;
+		}
+		if (this.source[this.position] !== "{") {
+			this.supported = false;
+			return undefined;
+		}
+
+		const start = ++this.position;
+		if (this.state.nestingDepth + 1 > MAX_NESTING_DEPTH) {
+			this.supported = false;
+			return undefined;
+		}
+		return this.readRawGroupContents(start);
 	}
 
 	private splitEnvironmentRows(body: string): string[] {

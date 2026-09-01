@@ -14,13 +14,35 @@
 import { createReadStream } from "node:fs";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
-import type { ExtensionAPI } from "@fleetagent/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@fleetagent/pi-coding-agent";
 
 interface ConflictBlock {
 	file: string;
 	startLine: number;
 	separatorLine: number;
 	endLine: number;
+}
+
+async function parseConflictFile(cwd: string, file: string): Promise<ConflictBlock[]> {
+	const blocks: ConflictBlock[] = [];
+	const lines = createInterface({ input: createReadStream(join(cwd, file), "utf-8") });
+	let lineNumber = 0;
+	let blockStart: number | undefined;
+	let separatorLine: number | undefined;
+	for await (const line of lines) {
+		lineNumber++;
+		if (line.startsWith("<<<<<<<")) {
+			blockStart = lineNumber;
+			separatorLine = undefined;
+		} else if (line.startsWith("=======") && blockStart !== undefined) {
+			separatorLine = lineNumber;
+		} else if (line.startsWith(">>>>>>>") && blockStart !== undefined && separatorLine !== undefined) {
+			blocks.push({ file, startLine: blockStart, separatorLine, endLine: lineNumber });
+			blockStart = undefined;
+			separatorLine = undefined;
+		}
+	}
+	return blocks;
 }
 
 /** Parse conflict markers from working tree files with unmerged paths. */
@@ -31,23 +53,7 @@ async function findConflicts(pi: ExtensionAPI, cwd: string): Promise<ConflictBlo
 	const blocks: ConflictBlock[] = [];
 	for (const file of stdout.trim().split("\n")) {
 		try {
-			const rl = createInterface({ input: createReadStream(join(cwd, file), "utf-8") });
-			let lineNo = 0;
-			let blockStart: number | undefined;
-			let separatorLine: number | undefined;
-			for await (const line of rl) {
-				lineNo++;
-				if (line.startsWith("<<<<<<<")) {
-					blockStart = lineNo;
-					separatorLine = undefined;
-				} else if (line.startsWith("=======") && blockStart !== undefined) {
-					separatorLine = lineNo;
-				} else if (line.startsWith(">>>>>>>") && blockStart !== undefined && separatorLine !== undefined) {
-					blocks.push({ file, startLine: blockStart, separatorLine, endLine: lineNo });
-					blockStart = undefined;
-					separatorLine = undefined;
-				}
-			}
+			blocks.push(...(await parseConflictFile(cwd, file)));
 		} catch {}
 	}
 	return blocks;
@@ -70,6 +76,31 @@ function formatConflicts(ref: string, blocks: ConflictBlock[]): string {
 	return lines.join("\n");
 }
 
+async function attemptUpstreamMerge(pi: ExtensionAPI, ctx: ExtensionContext): Promise<string | undefined> {
+	const { stdout: status } = await pi.exec("git", ["status", "--porcelain"]);
+	if (status.trim()) return undefined;
+
+	const { stdout: upstream, code: upstreamCode } = await pi.exec("git", [
+		"rev-parse",
+		"--abbrev-ref",
+		"--symbolic-full-name",
+		"@{u}",
+	]);
+	if (upstreamCode !== 0) return undefined;
+
+	const ref = upstream.trim();
+	const remote = ref.split("/")[0];
+	ctx.ui.notify(`git-merge-and-resolve: fetching ${remote}, merging ${ref}`, "info");
+
+	const { code: fetchCode, stderr: fetchErr } = await pi.exec("git", ["fetch", remote]);
+	if (fetchCode !== 0) {
+		ctx.ui.notify(`git-merge-and-resolve: fetch failed: ${fetchErr.trim()}`, "warning");
+		return undefined;
+	}
+
+	const { code: mergeCode } = await pi.exec("git", ["merge", "--no-ff", ref]);
+	return mergeCode === 0 ? undefined : ref;
+}
 export default function (pi: ExtensionAPI) {
 	pi.on("agent_end", async (_event, ctx) => {
 		const { code: revParseCode } = await pi.exec("git", ["rev-parse", "--git-dir"]);
@@ -80,30 +111,9 @@ export default function (pi: ExtensionAPI) {
 		// If not already in a merge, attempt one
 		const { code: mergeHeadCode } = await pi.exec("git", ["rev-parse", "MERGE_HEAD"]);
 		if (mergeHeadCode !== 0) {
-			// Only attempt a new merge if the working tree is clean
-			const { stdout: status } = await pi.exec("git", ["status", "--porcelain"]);
-			if (status.trim()) return;
-
-			const { stdout: upstream, code: upstreamCode } = await pi.exec("git", [
-				"rev-parse",
-				"--abbrev-ref",
-				"--symbolic-full-name",
-				"@{u}",
-			]);
-			if (upstreamCode !== 0) return;
-
-			ref = upstream.trim();
-			const remote = ref.split("/")[0];
-			ctx.ui.notify(`git-merge-and-resolve: fetching ${remote}, merging ${ref}`, "info");
-
-			const { code: fetchCode, stderr: fetchErr } = await pi.exec("git", ["fetch", remote]);
-			if (fetchCode !== 0) {
-				ctx.ui.notify(`git-merge-and-resolve: fetch failed: ${fetchErr.trim()}`, "warning");
-				return;
-			}
-
-			const { code: mergeCode } = await pi.exec("git", ["merge", "--no-ff", ref]);
-			if (mergeCode === 0) return;
+			const upstreamRef = await attemptUpstreamMerge(pi, ctx);
+			if (upstreamRef === undefined) return;
+			ref = upstreamRef;
 		}
 
 		// Either we just merged with conflicts, or we were already in an unfinished merge

@@ -4,6 +4,7 @@ import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { convertMessages, streamOpenAICompletions } from "../src/providers/openai-completions.ts";
 import type {
+	AssistantContent,
 	AssistantMessage,
 	AssistantMessageEvent,
 	Context,
@@ -59,7 +60,7 @@ function buildModel(baseUrl = "http://127.0.0.1:1"): Model<"openai-completions">
 	};
 }
 
-function buildAssistant(content: AssistantMessage["content"]): AssistantMessage {
+function buildAssistant(content: AssistantContent[]): AssistantMessage {
 	return {
 		role: "assistant",
 		content,
@@ -90,11 +91,21 @@ async function collectEvents(stream: AsyncIterable<AssistantMessageEvent>): Prom
 	return events;
 }
 
+// pi-ignore noNearIdenticalDataStructures: This mocked OpenAI chat request payload and the remote-session example's generic runtime narrowing envelope have separate protocol ownership.
+interface ChatCompletionsRequestMessage {
+	role: string;
+	content?: unknown;
+}
+
+interface ChatCompletionsStreamOptions {
+	include_usage?: boolean;
+}
+
 interface ChatCompletionsRequestBody {
 	model: string;
-	messages: Array<{ role: string; content?: unknown }>;
+	messages: ChatCompletionsRequestMessage[];
 	stream: boolean;
-	stream_options?: { include_usage?: boolean };
+	stream_options?: ChatCompletionsStreamOptions;
 }
 
 describe("openai-completions thinking-as-text replay", () => {

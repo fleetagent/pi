@@ -1,30 +1,17 @@
 import type { AgentState } from "@fleetagent/pi-agent-core";
+import type { AssistantMessage, ToolResultMessage } from "@fleetagent/pi-ai";
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { basename, join } from "path";
 import { APP_NAME, getExportTemplateDir } from "../../config.ts";
-import { getResolvedThemeColors, getThemeExportColors } from "../../modes/interactive/theme/theme.ts";
+import { getResolvedThemeColors, getThemeExportColors, type RgbColor } from "../../modes/interactive/theme/theme.ts";
 import { normalizePath, resolvePath } from "../../utils/paths.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { LocalSessionManager } from "../session/local-session-manager.ts";
 import type { Session } from "../session/session.ts";
 import type { SessionEntry } from "../session/types.ts";
+import type { ToolHtmlRenderer } from "./tool-renderer.ts";
 
-/**
- * Interface for rendering custom tools to HTML.
- * Used by agent-session to pre-render extension tool output.
- */
-export interface ToolHtmlRenderer {
-	/** Render a tool call to HTML. Returns undefined if tool has no custom renderer. */
-	renderCall(toolCallId: string, toolName: string, args: unknown): string | undefined;
-	/** Render a tool result to HTML. Returns collapsed/expanded or undefined if tool has no custom renderer. */
-	renderResult(
-		toolCallId: string,
-		toolName: string,
-		result: Array<{ type: string; text?: string; data?: string; mimeType?: string }>,
-		details: unknown,
-		isError: boolean,
-	): { collapsed?: string; expanded?: string } | undefined;
-}
+export type { ToolHtmlRenderer } from "./tool-renderer.ts";
 
 /** Pre-rendered HTML for a custom tool call and result */
 interface RenderedToolHtml {
@@ -41,7 +28,7 @@ export interface ExportOptions {
 }
 
 /** Parse a color string to RGB values. Supports hex (#RRGGBB) and rgb(r,g,b) formats. */
-function parseColor(color: string): { r: number; g: number; b: number } | undefined {
+function parseColor(color: string): RgbColor | undefined {
 	const hexMatch = color.match(/^#([0-9a-fA-F]{2})([0-9a-fA-F]{2})([0-9a-fA-F]{2})$/);
 	if (hexMatch) {
 		return {
@@ -78,8 +65,15 @@ function adjustBrightness(color: string, factor: number): string {
 	return `rgb(${adjust(parsed.r)}, ${adjust(parsed.g)}, ${adjust(parsed.b)})`;
 }
 
+// pi-ignore noNearIdenticalDataStructures: Derived export fallbacks are complete computed colors, while ThemeExportColors represents optional theme-authored overrides.
+interface DerivedExportColors {
+	pageBg: string;
+	cardBg: string;
+	infoBg: string;
+}
+
 /** Derive export background colors from a base color (e.g., userMessageBg). */
-function deriveExportColors(baseColor: string): { pageBg: string; cardBg: string; infoBg: string } {
+function deriveExportColors(baseColor: string): DerivedExportColors {
 	const parsed = parseColor(baseColor);
 	if (!parsed) {
 		return {
@@ -178,6 +172,44 @@ function generateHtml(sessionData: SessionData, themeName?: string): string {
 /** Tools rendered directly by the HTML template (not pre-rendered via TUI→ANSI→HTML pipeline) */
 const TEMPLATE_RENDERED_TOOLS = new Set(["bash", "read", "write", "edit", "ls"]);
 
+function preRenderToolCalls(
+	message: AssistantMessage,
+	toolRenderer: ToolHtmlRenderer,
+	renderedTools: Record<string, RenderedToolHtml>,
+): void {
+	if (!Array.isArray(message.content)) return;
+	for (const block of message.content) {
+		if (block.type !== "toolCall" || TEMPLATE_RENDERED_TOOLS.has(block.name)) continue;
+		const callHtml = toolRenderer.renderCall(block.id, block.name, block.arguments);
+		if (callHtml) renderedTools[block.id] = { callHtml };
+	}
+}
+
+function preRenderToolResult(
+	message: ToolResultMessage,
+	toolRenderer: ToolHtmlRenderer,
+	renderedTools: Record<string, RenderedToolHtml>,
+): void {
+	if (!message.toolCallId) return;
+	const toolName = message.toolName || "";
+	const existing = renderedTools[message.toolCallId];
+	if (!existing && TEMPLATE_RENDERED_TOOLS.has(toolName)) return;
+
+	const rendered = toolRenderer.renderResult(
+		message.toolCallId,
+		toolName,
+		message.content,
+		message.details,
+		message.isError || false,
+	);
+	if (!rendered) return;
+	renderedTools[message.toolCallId] = {
+		...existing,
+		resultHtmlCollapsed: rendered.collapsed,
+		resultHtmlExpanded: rendered.expanded,
+	};
+}
+
 /**
  * Pre-render custom tools to HTML using their TUI renderers.
  */
@@ -186,47 +218,12 @@ function preRenderCustomTools(
 	toolRenderer: ToolHtmlRenderer,
 ): Record<string, RenderedToolHtml> {
 	const renderedTools: Record<string, RenderedToolHtml> = {};
-
 	for (const entry of entries) {
 		if (entry.type !== "message") continue;
-		const msg = entry.message;
-
-		// Find tool calls in assistant messages
-		if (msg.role === "assistant" && Array.isArray(msg.content)) {
-			for (const block of msg.content) {
-				if (block.type === "toolCall" && !TEMPLATE_RENDERED_TOOLS.has(block.name)) {
-					const callHtml = toolRenderer.renderCall(block.id, block.name, block.arguments);
-					if (callHtml) {
-						renderedTools[block.id] = { callHtml };
-					}
-				}
-			}
-		}
-
-		// Find tool results
-		if (msg.role === "toolResult" && msg.toolCallId) {
-			const toolName = msg.toolName || "";
-			// Only render if we have a pre-rendered call OR it's not template-rendered
-			const existing = renderedTools[msg.toolCallId];
-			if (existing || !TEMPLATE_RENDERED_TOOLS.has(toolName)) {
-				const rendered = toolRenderer.renderResult(
-					msg.toolCallId,
-					toolName,
-					msg.content,
-					msg.details,
-					msg.isError || false,
-				);
-				if (rendered) {
-					renderedTools[msg.toolCallId] = {
-						...existing,
-						resultHtmlCollapsed: rendered.collapsed,
-						resultHtmlExpanded: rendered.expanded,
-					};
-				}
-			}
-		}
+		const message = entry.message;
+		if (message.role === "assistant") preRenderToolCalls(message, toolRenderer, renderedTools);
+		else if (message.role === "toolResult") preRenderToolResult(message, toolRenderer, renderedTools);
 	}
-
 	return renderedTools;
 }
 

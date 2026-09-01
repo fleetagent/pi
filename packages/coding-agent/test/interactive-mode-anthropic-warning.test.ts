@@ -1,7 +1,8 @@
 import { describe, expect, test, vi } from "vitest";
+import type { WarningSettings } from "../src/core/settings-manager.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 
-function createSettingsManager(warnings: { anthropicExtraUsage?: boolean } = {}) {
+function createSettingsManager(warnings: WarningSettings = {}) {
 	return {
 		getWarnings: vi.fn().mockReturnValue(warnings),
 	};

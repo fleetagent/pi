@@ -1,10 +1,17 @@
 import { Mistral } from "@mistralai/mistralai";
+import type { RequestOptions } from "@mistralai/mistralai/lib/sdks.js";
 import type {
 	ChatCompletionStreamRequest,
 	ChatCompletionStreamRequestMessage,
+	ChatCompletionStreamRequestToolChoice,
+	CompletionChunk,
 	CompletionEvent,
+	CompletionResponseStreamChoice,
 	ContentChunk,
+	DeltaMessageContent,
+	FunctionName,
 	FunctionTool,
+	ToolCall as MistralToolCall,
 } from "@mistralai/mistralai/models/components";
 import { getEnvApiKey } from "../env-api-keys.ts";
 import { calculateCost, clampThinkingLevel } from "../models.ts";
@@ -20,8 +27,11 @@ import type {
 	StreamOptions,
 	TextContent,
 	ThinkingContent,
+	ThinkingLevel,
 	Tool,
 	ToolCall,
+	ToolResultMessage,
+	UserMessage,
 } from "../types.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { shortHash } from "../utils/hash.ts";
@@ -39,8 +49,15 @@ const MAX_MISTRAL_ERROR_BODY_CHARS = 4000;
  */
 type MistralReasoningEffort = "none" | "high";
 
+export interface MistralFunctionToolChoice {
+	type: "function";
+	function: FunctionName;
+}
+
+export type MistralToolChoice = "auto" | "none" | "any" | "required" | MistralFunctionToolChoice;
+
 export interface MistralOptions extends StreamOptions {
-	toolChoice?: "auto" | "none" | "any" | "required" | { type: "function"; function: { name: string } };
+	toolChoice?: MistralToolChoice;
 	promptMode?: "reasoning";
 	reasoningEffort?: MistralReasoningEffort;
 }
@@ -59,56 +76,63 @@ export const streamMistral: StreamFunction<"mistral-conversations", MistralOptio
 		const output = createOutput(model);
 
 		try {
-			const apiKey = options?.apiKey || getEnvApiKey(model.provider);
-			if (!apiKey) {
-				throw new Error(`No API key for provider: ${model.provider}`);
-			}
-
-			// Intentionally per-request: avoids shared SDK mutable state across concurrent consumers.
-			const mistral = new Mistral({
-				apiKey,
-				serverURL: model.baseUrl,
-			});
-
-			const normalizeMistralToolCallId = createMistralToolCallIdNormalizer();
-			const transformedMessages = transformMessages(context.messages, model, (id) => normalizeMistralToolCallId(id));
-
-			let payload = buildChatPayload(model, context, transformedMessages, options);
-			const nextPayload = await options?.onPayload?.(payload, model);
-			if (nextPayload !== undefined) {
-				payload = nextPayload as ChatCompletionStreamRequest;
-			}
-			const mistralStream = await mistral.chat.stream(payload, buildRequestOptions(model, options));
+			const mistralStream = await startMistralChatStream(model, context, options);
 			stream.push({ type: "start", partial: output });
 			await consumeChatStream(model, output, stream, mistralStream);
-
-			if (options?.signal?.aborted) {
-				throw new Error("Request was aborted");
-			}
-
-			if (output.stopReason === "pending") {
-				throw new Error("Mistral stream ended without a finish reason");
-			}
-			if (output.stopReason === "aborted" || output.stopReason === "error") {
-				throw new Error("An unknown error occurred");
-			}
-
-			stream.push({ type: "done", reason: output.stopReason, message: output });
-			stream.end();
+			finishMistralChatStream(output, stream, options?.signal);
 		} catch (error) {
-			for (const block of output.content) {
-				// partialArgs is only a streaming scratch buffer; never persist it.
-				delete (block as { partialArgs?: string }).partialArgs;
-			}
-			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-			output.errorMessage = formatMistralError(error);
-			stream.push({ type: "error", reason: output.stopReason, error: output });
-			stream.end();
+			failMistralChatStream(output, stream, error, options?.signal);
 		}
 	})();
 
 	return stream;
 };
+
+async function startMistralChatStream(
+	model: Model<"mistral-conversations">,
+	context: Context,
+	options?: MistralOptions,
+): Promise<AsyncIterable<CompletionEvent>> {
+	const apiKey = options?.apiKey || getEnvApiKey(model.provider);
+	if (!apiKey) throw new Error(`No API key for provider: ${model.provider}`);
+	const mistral = new Mistral({ apiKey, serverURL: model.baseUrl });
+	const normalizeMistralToolCallId = createMistralToolCallIdNormalizer();
+	const transformedMessages = transformMessages(context.messages, model, normalizeMistralToolCallId);
+	let payload = buildChatPayload(model, context, transformedMessages, options);
+	const nextPayload = await options?.onPayload?.(payload, model);
+	if (nextPayload !== undefined) payload = nextPayload as ChatCompletionStreamRequest;
+	return mistral.chat.stream(payload, buildRequestOptions(model, options));
+}
+
+function finishMistralChatStream(
+	output: AssistantMessage,
+	stream: AssistantMessageEventStream,
+	signal?: AbortSignal,
+): void {
+	if (signal?.aborted) throw new Error("Request was aborted");
+	if (output.stopReason === "pending") throw new Error("Mistral stream ended without a finish reason");
+	if (output.stopReason === "aborted" || output.stopReason === "error") {
+		throw new Error("An unknown error occurred");
+	}
+	stream.push({ type: "done", reason: output.stopReason, message: output });
+	stream.end();
+}
+
+function failMistralChatStream(
+	output: AssistantMessage,
+	stream: AssistantMessageEventStream,
+	error: unknown,
+	signal?: AbortSignal,
+): void {
+	for (const block of output.content) {
+		// partialArgs is only a streaming scratch buffer; never persist it.
+		delete (block as { partialArgs?: string }).partialArgs;
+	}
+	output.stopReason = signal?.aborted ? "aborted" : "error";
+	output.errorMessage = formatMistralError(error);
+	stream.push({ type: "error", reason: output.stopReason, error: output });
+	stream.end();
+}
 
 /**
  * Maps provider-agnostic `SimpleStreamOptions` to Mistral options.
@@ -216,12 +240,8 @@ function safeJsonStringify(value: unknown): string {
 	}
 }
 
-function buildRequestOptions(model: Model<"mistral-conversations">, options?: MistralOptions) {
-	const requestOptions: {
-		signal?: AbortSignal;
-		retries: { strategy: "none" };
-		headers?: Record<string, string>;
-	} = {
+function buildRequestOptions(model: Model<"mistral-conversations">, options?: MistralOptions): RequestOptions {
+	const requestOptions: RequestOptions = {
 		retries: { strategy: "none" },
 	};
 	if (options?.signal) requestOptions.signal = options.signal;
@@ -272,192 +292,219 @@ function buildChatPayload(
 	return payload;
 }
 
+type MistralContentBlock = TextContent | ThinkingContent;
+
+type StreamingMistralToolBlock = ToolCall & {
+	partialArgs?: string;
+};
+
+interface MistralChatStreamState {
+	model: Model<"mistral-conversations">;
+	output: AssistantMessage;
+	stream: AssistantMessageEventStream;
+	currentBlock: MistralContentBlock | null;
+	toolBlocksByKey: Map<string, number>;
+}
+
+interface ResolvedMistralToolBlock {
+	block: StreamingMistralToolBlock;
+	index: number;
+}
+
+function currentMistralBlockIndex(state: MistralChatStreamState): number {
+	return state.output.content.length - 1;
+}
+
+function finishCurrentMistralBlock(state: MistralChatStreamState): void {
+	const block = state.currentBlock;
+	if (!block) return;
+	if (block.type === "text") {
+		state.stream.push({
+			type: "text_end",
+			contentIndex: currentMistralBlockIndex(state),
+			content: block.text,
+			partial: state.output,
+		});
+	} else {
+		state.stream.push({
+			type: "thinking_end",
+			contentIndex: currentMistralBlockIndex(state),
+			content: block.thinking,
+			partial: state.output,
+		});
+	}
+	state.currentBlock = null;
+}
+
+function appendMistralTextDelta(state: MistralChatStreamState, delta: string): void {
+	let block = state.currentBlock;
+	if (block?.type !== "text") {
+		finishCurrentMistralBlock(state);
+		block = { type: "text", text: "" };
+		state.currentBlock = block;
+		state.output.content.push(block);
+		state.stream.push({
+			type: "text_start",
+			contentIndex: currentMistralBlockIndex(state),
+			partial: state.output,
+		});
+	}
+	block.text += delta;
+	state.stream.push({
+		type: "text_delta",
+		contentIndex: currentMistralBlockIndex(state),
+		delta,
+		partial: state.output,
+	});
+}
+
+function appendMistralThinkingDelta(state: MistralChatStreamState, delta: string): void {
+	let block = state.currentBlock;
+	if (block?.type !== "thinking") {
+		finishCurrentMistralBlock(state);
+		block = { type: "thinking", thinking: "" };
+		state.currentBlock = block;
+		state.output.content.push(block);
+		state.stream.push({
+			type: "thinking_start",
+			contentIndex: currentMistralBlockIndex(state),
+			partial: state.output,
+		});
+	}
+	block.thinking += delta;
+	state.stream.push({
+		type: "thinking_delta",
+		contentIndex: currentMistralBlockIndex(state),
+		delta,
+		partial: state.output,
+	});
+}
+
+function consumeMistralContentDelta(
+	state: MistralChatStreamState,
+	content: DeltaMessageContent | null | undefined,
+): void {
+	if (content === null || content === undefined) return;
+	const items = typeof content === "string" ? [content] : content;
+	for (const item of items) {
+		if (typeof item === "string") {
+			appendMistralTextDelta(state, sanitizeSurrogates(item));
+			continue;
+		}
+		if (item.type === "thinking") {
+			const delta = item.thinking
+				.map((part) => ("text" in part ? part.text : ""))
+				.filter((text) => text.length > 0)
+				.join("");
+			const sanitized = sanitizeSurrogates(delta);
+			if (sanitized) appendMistralThinkingDelta(state, sanitized);
+			continue;
+		}
+		if (item.type === "text") appendMistralTextDelta(state, sanitizeSurrogates(item.text));
+	}
+}
+
+function updateMistralChunkMetadata(state: MistralChatStreamState, chunk: CompletionChunk): void {
+	state.output.responseId ||= chunk.id;
+	if (!chunk.usage) return;
+	state.output.usage.input = chunk.usage.promptTokens || 0;
+	state.output.usage.output = chunk.usage.completionTokens || 0;
+	state.output.usage.cacheRead = 0;
+	state.output.usage.cacheWrite = 0;
+	state.output.usage.totalTokens = chunk.usage.totalTokens || state.output.usage.input + state.output.usage.output;
+	calculateCost(state.model, state.output.usage);
+}
+
+function resolveMistralToolBlock(state: MistralChatStreamState, toolCall: MistralToolCall): ResolvedMistralToolBlock {
+	const callId =
+		toolCall.id && toolCall.id !== "null"
+			? toolCall.id
+			: deriveMistralToolCallId(`toolcall:${toolCall.index ?? 0}`, 0);
+	const key = `${callId}:${toolCall.index || 0}`;
+	const existingIndex = state.toolBlocksByKey.get(key);
+	if (existingIndex !== undefined) {
+		const existing = state.output.content[existingIndex];
+		if (existing?.type === "toolCall") {
+			return { block: existing as StreamingMistralToolBlock, index: existingIndex };
+		}
+	}
+	const block: StreamingMistralToolBlock = {
+		type: "toolCall",
+		id: callId,
+		name: toolCall.function.name,
+		arguments: {},
+		partialArgs: "",
+	};
+	state.output.content.push(block);
+	const index = state.output.content.length - 1;
+	state.toolBlocksByKey.set(key, index);
+	state.stream.push({ type: "toolcall_start", contentIndex: index, partial: state.output });
+	return { block, index };
+}
+
+function consumeMistralToolCall(state: MistralChatStreamState, toolCall: MistralToolCall): void {
+	finishCurrentMistralBlock(state);
+	const { block, index } = resolveMistralToolBlock(state, toolCall);
+	const argsDelta =
+		typeof toolCall.function.arguments === "string"
+			? toolCall.function.arguments
+			: JSON.stringify(toolCall.function.arguments || {});
+	block.partialArgs = (block.partialArgs || "") + argsDelta;
+	block.arguments = parseStreamingJson<Record<string, unknown>>(block.partialArgs);
+	state.stream.push({
+		type: "toolcall_delta",
+		contentIndex: index,
+		delta: argsDelta,
+		partial: state.output,
+	});
+}
+
+function consumeMistralChoice(state: MistralChatStreamState, choice: CompletionResponseStreamChoice): void {
+	if (choice.finishReason) state.output.stopReason = mapChatStopReason(choice.finishReason);
+	consumeMistralContentDelta(state, choice.delta.content);
+	for (const toolCall of choice.delta.toolCalls || []) consumeMistralToolCall(state, toolCall);
+}
+
+function finalizeMistralToolCalls(state: MistralChatStreamState): void {
+	for (const index of state.toolBlocksByKey.values()) {
+		const block = state.output.content[index];
+		if (block.type !== "toolCall") continue;
+		const toolBlock = block as StreamingMistralToolBlock;
+		toolBlock.arguments = parseStreamingJson<Record<string, unknown>>(toolBlock.partialArgs);
+		delete toolBlock.partialArgs;
+		state.stream.push({
+			type: "toolcall_end",
+			contentIndex: index,
+			toolCall: toolBlock,
+			partial: state.output,
+		});
+	}
+}
+
 async function consumeChatStream(
 	model: Model<"mistral-conversations">,
 	output: AssistantMessage,
 	stream: AssistantMessageEventStream,
 	mistralStream: AsyncIterable<CompletionEvent>,
 ): Promise<void> {
-	let currentBlock: TextContent | ThinkingContent | null = null;
-	const blocks = output.content;
-	const blockIndex = () => blocks.length - 1;
-	const toolBlocksByKey = new Map<string, number>();
-
-	const finishCurrentBlock = (block?: typeof currentBlock) => {
-		if (!block) return;
-		if (block.type === "text") {
-			stream.push({
-				type: "text_end",
-				contentIndex: blockIndex(),
-				content: block.text,
-				partial: output,
-			});
-			return;
-		}
-		if (block.type === "thinking") {
-			stream.push({
-				type: "thinking_end",
-				contentIndex: blockIndex(),
-				content: block.thinking,
-				partial: output,
-			});
-		}
+	const state: MistralChatStreamState = {
+		model,
+		output,
+		stream,
+		currentBlock: null,
+		toolBlocksByKey: new Map(),
 	};
-
 	for await (const event of mistralStream) {
 		const chunk = event.data;
-		// Mistral's streamed CompletionChunk carries an id field. Keep the first non-empty one,
-		// mirroring how OpenAI-style streaming exposes a stable response identifier per stream.
-		output.responseId ||= chunk.id;
-
-		if (chunk.usage) {
-			output.usage.input = chunk.usage.promptTokens || 0;
-			output.usage.output = chunk.usage.completionTokens || 0;
-			output.usage.cacheRead = 0;
-			output.usage.cacheWrite = 0;
-			output.usage.totalTokens = chunk.usage.totalTokens || output.usage.input + output.usage.output;
-			calculateCost(model, output.usage);
-		}
-
+		updateMistralChunkMetadata(state, chunk);
 		const choice = chunk.choices[0];
-		if (!choice) continue;
-
-		if (choice.finishReason) {
-			output.stopReason = mapChatStopReason(choice.finishReason);
-		}
-
-		const delta = choice.delta;
-		if (delta.content !== null && delta.content !== undefined) {
-			const contentItems = typeof delta.content === "string" ? [delta.content] : delta.content;
-			for (const item of contentItems) {
-				if (typeof item === "string") {
-					const textDelta = sanitizeSurrogates(item);
-					if (currentBlock?.type !== "text") {
-						finishCurrentBlock(currentBlock);
-						currentBlock = { type: "text", text: "" };
-						output.content.push(currentBlock);
-						stream.push({ type: "text_start", contentIndex: blockIndex(), partial: output });
-					}
-					currentBlock.text += textDelta;
-					stream.push({
-						type: "text_delta",
-						contentIndex: blockIndex(),
-						delta: textDelta,
-						partial: output,
-					});
-					continue;
-				}
-
-				if (item.type === "thinking") {
-					const deltaText = item.thinking
-						.map((part) => ("text" in part ? part.text : ""))
-						.filter((text) => text.length > 0)
-						.join("");
-					const thinkingDelta = sanitizeSurrogates(deltaText);
-					if (!thinkingDelta) continue;
-					if (currentBlock?.type !== "thinking") {
-						finishCurrentBlock(currentBlock);
-						currentBlock = { type: "thinking", thinking: "" };
-						output.content.push(currentBlock);
-						stream.push({ type: "thinking_start", contentIndex: blockIndex(), partial: output });
-					}
-					currentBlock.thinking += thinkingDelta;
-					stream.push({
-						type: "thinking_delta",
-						contentIndex: blockIndex(),
-						delta: thinkingDelta,
-						partial: output,
-					});
-					continue;
-				}
-
-				if (item.type === "text") {
-					const textDelta = sanitizeSurrogates(item.text);
-					if (currentBlock?.type !== "text") {
-						finishCurrentBlock(currentBlock);
-						currentBlock = { type: "text", text: "" };
-						output.content.push(currentBlock);
-						stream.push({ type: "text_start", contentIndex: blockIndex(), partial: output });
-					}
-					currentBlock.text += textDelta;
-					stream.push({
-						type: "text_delta",
-						contentIndex: blockIndex(),
-						delta: textDelta,
-						partial: output,
-					});
-				}
-			}
-		}
-
-		const toolCalls = delta.toolCalls || [];
-		for (const toolCall of toolCalls) {
-			if (currentBlock) {
-				finishCurrentBlock(currentBlock);
-				currentBlock = null;
-			}
-			const callId =
-				toolCall.id && toolCall.id !== "null"
-					? toolCall.id
-					: deriveMistralToolCallId(`toolcall:${toolCall.index ?? 0}`, 0);
-			const key = `${callId}:${toolCall.index || 0}`;
-			const existingIndex = toolBlocksByKey.get(key);
-			let block: (ToolCall & { partialArgs?: string }) | undefined;
-
-			if (existingIndex !== undefined) {
-				const existing = output.content[existingIndex];
-				if (existing?.type === "toolCall") {
-					block = existing as ToolCall & { partialArgs?: string };
-				}
-			}
-
-			if (!block) {
-				block = {
-					type: "toolCall",
-					id: callId,
-					name: toolCall.function.name,
-					arguments: {},
-					partialArgs: "",
-				};
-				output.content.push(block);
-				toolBlocksByKey.set(key, output.content.length - 1);
-				stream.push({ type: "toolcall_start", contentIndex: output.content.length - 1, partial: output });
-			}
-
-			const argsDelta =
-				typeof toolCall.function.arguments === "string"
-					? toolCall.function.arguments
-					: JSON.stringify(toolCall.function.arguments || {});
-			block.partialArgs = (block.partialArgs || "") + argsDelta;
-			block.arguments = parseStreamingJson<Record<string, unknown>>(block.partialArgs);
-			stream.push({
-				type: "toolcall_delta",
-				contentIndex: toolBlocksByKey.get(key)!,
-				delta: argsDelta,
-				partial: output,
-			});
-		}
+		if (choice) consumeMistralChoice(state, choice);
 	}
-
-	finishCurrentBlock(currentBlock);
-	for (const index of toolBlocksByKey.values()) {
-		const block = output.content[index];
-		if (block.type !== "toolCall") continue;
-		const toolBlock = block as ToolCall & { partialArgs?: string };
-		toolBlock.arguments = parseStreamingJson<Record<string, unknown>>(toolBlock.partialArgs);
-		// Finalize in-place and strip the scratch buffer so replay only
-		// carries parsed arguments.
-		delete toolBlock.partialArgs;
-		stream.push({
-			type: "toolcall_end",
-			contentIndex: index,
-			toolCall: toolBlock,
-			partial: output,
-		});
-	}
+	finishCurrentMistralBlock(state);
+	finalizeMistralToolCalls(state);
 }
 
-function toFunctionTools(tools: Tool[]): Array<FunctionTool & { type: "function" }> {
+function toFunctionTools(tools: Tool[]): FunctionTool[] {
 	return tools.map((tool) => ({
 		type: "function",
 		function: {
@@ -485,90 +532,99 @@ function stripSymbolKeys(value: unknown): unknown {
 	return value;
 }
 
-function toChatMessages(messages: Message[], supportsImages: boolean): ChatCompletionStreamRequestMessage[] {
-	const result: ChatCompletionStreamRequestMessage[] = [];
+function convertMistralUserMessage(
+	message: UserMessage,
+	supportsImages: boolean,
+): ChatCompletionStreamRequestMessage | undefined {
+	if (typeof message.content === "string") {
+		return { role: "user", content: sanitizeSurrogates(message.content) };
+	}
+	const hadImages = message.content.some((item) => item.type === "image");
+	const content: ContentChunk[] = message.content
+		.filter((item) => item.type === "text" || supportsImages)
+		.map((item) => {
+			if (item.type === "text") return { type: "text", text: sanitizeSurrogates(item.text) };
+			return { type: "image_url", imageUrl: `data:${item.mimeType};base64,${item.data}` };
+		});
+	if (content.length > 0) return { role: "user", content };
+	return hadImages && !supportsImages
+		? { role: "user", content: "(image omitted: model does not support images)" }
+		: undefined;
+}
 
-	for (const msg of messages) {
-		if (msg.role === "user") {
-			if (typeof msg.content === "string") {
-				result.push({ role: "user", content: sanitizeSurrogates(msg.content) });
-				continue;
-			}
-			const hadImages = msg.content.some((item) => item.type === "image");
-			const content: ContentChunk[] = msg.content
-				.filter((item) => item.type === "text" || supportsImages)
-				.map((item) => {
-					if (item.type === "text") return { type: "text", text: sanitizeSurrogates(item.text) };
-					return { type: "image_url", imageUrl: `data:${item.mimeType};base64,${item.data}` };
-				});
-			if (content.length > 0) {
-				result.push({ role: "user", content });
-				continue;
-			}
-			if (hadImages && !supportsImages) {
-				result.push({ role: "user", content: "(image omitted: model does not support images)" });
-			}
-			continue;
-		}
-
-		if (msg.role === "assistant") {
-			const contentParts: ContentChunk[] = [];
-			const toolCalls: Array<{ id: string; type: "function"; function: { name: string; arguments: string } }> = [];
-
-			for (const block of msg.content) {
-				if (block.type === "text") {
-					if (block.text.trim().length > 0) {
-						contentParts.push({ type: "text", text: sanitizeSurrogates(block.text) });
-					}
-					continue;
+function convertMistralAssistantMessage(message: AssistantMessage): ChatCompletionStreamRequestMessage | undefined {
+	const contentParts: ContentChunk[] = [];
+	const toolCalls: MistralToolCall[] = [];
+	for (const block of message.content) {
+		switch (block.type) {
+			case "text":
+				if (block.text.trim().length > 0) {
+					contentParts.push({ type: "text", text: sanitizeSurrogates(block.text) });
 				}
-				if (block.type === "thinking") {
-					if (block.thinking.trim().length > 0) {
-						contentParts.push({
-							type: "thinking",
-							thinking: [{ type: "text", text: sanitizeSurrogates(block.thinking) }],
-						});
-					}
-					continue;
+				break;
+			case "thinking":
+				if (block.thinking.trim().length > 0) {
+					contentParts.push({
+						type: "thinking",
+						thinking: [{ type: "text", text: sanitizeSurrogates(block.thinking) }],
+					});
 				}
+				break;
+			case "toolCall":
 				toolCalls.push({
 					id: block.id,
 					type: "function",
 					function: { name: block.name, arguments: JSON.stringify(block.arguments || {}) },
 				});
-			}
-
-			const assistantMessage: ChatCompletionStreamRequestMessage = { role: "assistant" };
-			if (contentParts.length > 0) assistantMessage.content = contentParts;
-			if (toolCalls.length > 0) assistantMessage.toolCalls = toolCalls;
-			if (contentParts.length > 0 || toolCalls.length > 0) result.push(assistantMessage);
-			continue;
+				break;
 		}
-
-		const toolContent: ContentChunk[] = [];
-		const textResult = msg.content
-			.filter((part) => part.type === "text")
-			.map((part) => (part.type === "text" ? sanitizeSurrogates(part.text) : ""))
-			.join("\n");
-		const hasImages = msg.content.some((part) => part.type === "image");
-		const toolText = buildToolResultText(textResult, hasImages, supportsImages, msg.isError);
-		toolContent.push({ type: "text", text: toolText });
-		for (const part of msg.content) {
-			if (!supportsImages) continue;
-			if (part.type !== "image") continue;
-			toolContent.push({
-				type: "image_url",
-				imageUrl: `data:${part.mimeType};base64,${part.data}`,
-			});
-		}
-		result.push({
-			role: "tool",
-			toolCallId: msg.toolCallId,
-			name: msg.toolName,
-			content: toolContent,
-		});
 	}
 
+	const assistantMessage: ChatCompletionStreamRequestMessage = { role: "assistant" };
+	if (contentParts.length > 0) assistantMessage.content = contentParts;
+	if (toolCalls.length > 0) assistantMessage.toolCalls = toolCalls;
+	return contentParts.length > 0 || toolCalls.length > 0 ? assistantMessage : undefined;
+}
+
+function convertMistralToolResultMessage(
+	message: ToolResultMessage,
+	supportsImages: boolean,
+): ChatCompletionStreamRequestMessage {
+	const toolContent: ContentChunk[] = [];
+	const textResult = message.content
+		.filter((part) => part.type === "text")
+		.map((part) => (part.type === "text" ? sanitizeSurrogates(part.text) : ""))
+		.join("\n");
+	const hasImages = message.content.some((part) => part.type === "image");
+	const toolText = buildToolResultText(textResult, hasImages, supportsImages, message.isError);
+	toolContent.push({ type: "text", text: toolText });
+	for (const part of message.content) {
+		if (!supportsImages) continue;
+		if (part.type !== "image") continue;
+		toolContent.push({
+			type: "image_url",
+			imageUrl: `data:${part.mimeType};base64,${part.data}`,
+		});
+	}
+	return {
+		role: "tool",
+		toolCallId: message.toolCallId,
+		name: message.toolName,
+		content: toolContent,
+	};
+}
+
+function toChatMessages(messages: Message[], supportsImages: boolean): ChatCompletionStreamRequestMessage[] {
+	const result: ChatCompletionStreamRequestMessage[] = [];
+	for (const message of messages) {
+		const converted =
+			message.role === "user"
+				? convertMistralUserMessage(message, supportsImages)
+				: message.role === "assistant"
+					? convertMistralAssistantMessage(message)
+					: convertMistralToolResultMessage(message, supportsImages);
+		if (converted) result.push(converted);
+	}
 	return result;
 }
 
@@ -601,19 +657,14 @@ function usesPromptModeReasoning(model: Model<"mistral-conversations">): boolean
 	return model.reasoning && !usesReasoningEffort(model);
 }
 
-function mapReasoningEffort(
-	model: Model<"mistral-conversations">,
-	level: Exclude<SimpleStreamOptions["reasoning"], undefined>,
-): MistralReasoningEffort {
+function mapReasoningEffort(model: Model<"mistral-conversations">, level: ThinkingLevel): MistralReasoningEffort {
 	return (model.thinkingLevelMap?.[level] ?? "high") as MistralReasoningEffort;
 }
 
-function mapToolChoice(
-	choice: MistralOptions["toolChoice"],
-): "auto" | "none" | "any" | "required" | { type: "function"; function: { name: string } } | undefined {
+function mapToolChoice(choice: MistralToolChoice | undefined): ChatCompletionStreamRequestToolChoice | undefined {
 	if (!choice) return undefined;
 	if (choice === "auto" || choice === "none" || choice === "any" || choice === "required") {
-		return choice as any;
+		return choice;
 	}
 	return {
 		type: "function",

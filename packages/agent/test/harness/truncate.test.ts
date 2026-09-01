@@ -61,6 +61,46 @@ function sampledByteLimits(input: string): number[] {
 	return [...new Set(candidates.filter((value) => value >= 0))].sort((a, b) => a - b);
 }
 
+/* pi-ignore noExcessiveCollectionIterations: Exhaustive coverage is bounded to a 15-character alphabet at depth 3, and randomized coverage to 1,000 strings of at most 79 characters. */
+function verifyDeterministicTailFuzzCases(): void {
+	const alphabet = [
+		"a",
+		"\u007f",
+		"\u0080",
+		"é",
+		"\u07ff",
+		"\u0800",
+		"中",
+		"\ud7ff",
+		"\ud800",
+		"\ud83d",
+		"\udc00",
+		"\ude42",
+		"🙂",
+		"\ue000",
+		"\uffff",
+	];
+
+	function checkExhaustive(prefix: string, depth: number): void {
+		assertMatchesBufferTail(prefix, sampledByteLimits(prefix));
+		if (depth === 0) return;
+		for (const character of alphabet) checkExhaustive(prefix + character, depth - 1);
+	}
+	checkExhaustive("", 3);
+
+	let seed = 0x12345678;
+	function random(): number {
+		seed = (seed * 1664525 + 1013904223) >>> 0;
+		return seed / 0x100000000;
+	}
+	for (let i = 0; i < 1_000; i++) {
+		let input = "";
+		const length = Math.floor(random() * 80);
+		for (let j = 0; j < length; j++) input += alphabet[Math.floor(random() * alphabet.length)];
+		assertMatchesBufferTail(input, sampledByteLimits(input));
+	}
+}
+
 describe("truncate utilities", () => {
 	it("counts UTF-8 bytes without Node Buffer", () => {
 		const content = "aé🙂\nb";
@@ -128,42 +168,5 @@ describe("truncate utilities", () => {
 		for (const input of inputs) assertMatchesBufferTail(input);
 	});
 
-	it("matches Buffer tail truncation semantics across deterministic fuzz cases", () => {
-		const alphabet = [
-			"a",
-			"\u007f",
-			"\u0080",
-			"é",
-			"\u07ff",
-			"\u0800",
-			"中",
-			"\ud7ff",
-			"\ud800",
-			"\ud83d",
-			"\udc00",
-			"\ude42",
-			"🙂",
-			"\ue000",
-			"\uffff",
-		];
-
-		function checkExhaustive(prefix: string, depth: number): void {
-			assertMatchesBufferTail(prefix, sampledByteLimits(prefix));
-			if (depth === 0) return;
-			for (const character of alphabet) checkExhaustive(prefix + character, depth - 1);
-		}
-		checkExhaustive("", 3);
-
-		let seed = 0x12345678;
-		function random(): number {
-			seed = (seed * 1664525 + 1013904223) >>> 0;
-			return seed / 0x100000000;
-		}
-		for (let i = 0; i < 1_000; i++) {
-			let input = "";
-			const length = Math.floor(random() * 80);
-			for (let j = 0; j < length; j++) input += alphabet[Math.floor(random() * alphabet.length)];
-			assertMatchesBufferTail(input, sampledByteLimits(input));
-		}
-	});
+	it("matches Buffer tail truncation semantics across deterministic fuzz cases", verifyDeterministicTailFuzzCases);
 });

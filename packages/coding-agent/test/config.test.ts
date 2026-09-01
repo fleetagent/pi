@@ -15,6 +15,22 @@ const originalPiPackageDir = process.env.PI_PACKAGE_DIR;
 const originalArgv1 = process.argv[1];
 let tempDir: string | undefined;
 
+interface PackageInstallFixture {
+	packageDir: string;
+}
+
+interface NpmPrefixInstallFixture extends PackageInstallFixture {
+	prefix: string;
+}
+
+interface PnpmGlobalInstallFixture extends PackageInstallFixture {
+	root: string;
+}
+
+interface YarnGlobalInstallFixture extends PackageInstallFixture {
+	globalDir: string;
+}
+
 function setExecPath(value: string): void {
 	Object.defineProperty(process, "execPath", {
 		value,
@@ -48,7 +64,7 @@ afterEach(() => {
 	}
 });
 
-function createNpmPrefixInstall(template = "pi-prefix-"): { prefix: string; packageDir: string } {
+function createNpmPrefixInstall(template = "pi-prefix-"): NpmPrefixInstallFixture {
 	const prefix = mkdtempSync(join(tmpdir(), template));
 	const root = join(prefix, "lib", "node_modules");
 	const scopeDir = join(root, "@fleetagent");
@@ -60,7 +76,7 @@ function createNpmPrefixInstall(template = "pi-prefix-"): { prefix: string; pack
 	return { prefix, packageDir };
 }
 
-function createPnpmGlobalInstall(): { root: string; packageDir: string } {
+function createPnpmGlobalInstall(): PnpmGlobalInstallFixture {
 	const temp = mkdtempSync(join(tmpdir(), "pi-pnpm-"));
 	const binDir = join(temp, "bin");
 	const root = join(temp, "pnpm", "global", "5", "node_modules");
@@ -87,7 +103,7 @@ function createPnpmGlobalInstall(): { root: string; packageDir: string } {
 	return { root, packageDir };
 }
 
-function createYarnGlobalInstall(): { globalDir: string; packageDir: string } {
+function createYarnGlobalInstall(): YarnGlobalInstallFixture {
 	const temp = mkdtempSync(join(tmpdir(), "pi-yarn-"));
 	const binDir = join(temp, "bin");
 	const globalDir = join(temp, "yarn", "global");
@@ -103,7 +119,7 @@ function createYarnGlobalInstall(): { globalDir: string; packageDir: string } {
 	return { globalDir, packageDir };
 }
 
-function createBunGlobalInstall(): { packageDir: string } {
+function createBunGlobalInstall(): PackageInstallFixture {
 	const temp = mkdtempSync(join(tmpdir(), "pi-bun-"));
 	const prefix = join(temp, ".bun");
 	const bunBin = join(prefix, "bin");

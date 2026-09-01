@@ -194,6 +194,43 @@ type ActiveOverlayFocusRestoreState = EligibleOverlayFocusRestoreState | Blocked
 type OverlayFocusRestoreState = { status: "inactive" } | ActiveOverlayFocusRestoreState;
 type OverlayFocusRestorePolicy = "clear" | "preserve";
 
+interface FocusTransitionRequest {
+	component: Component | null;
+	overlayFocusRestore: OverlayFocusRestorePolicy;
+}
+
+interface ResolvedOverlayLayout {
+	width: number;
+	row: number;
+	col: number;
+	maxHeight: number | undefined;
+}
+
+interface RenderedOverlay {
+	lines: string[];
+	row: number;
+	col: number;
+	width: number;
+}
+
+interface OverlayRenderPlan {
+	overlays: RenderedOverlay[];
+	minimumLineCount: number;
+}
+
+interface OverlayLayoutBounds {
+	marginTop: number;
+	marginRight: number;
+	marginBottom: number;
+	marginLeft: number;
+	availableWidth: number;
+	availableHeight: number;
+}
+
+export interface RenderedCursorPosition {
+	row: number;
+	col: number;
+}
 /**
  * Container - a component that contains other components
  */
@@ -406,69 +443,81 @@ export abstract class TuiBase extends Container implements TUI {
 		this.setFocusInternal({ component, overlayFocusRestore: "clear" });
 	}
 
-	private setFocusInternal({
-		component,
-		overlayFocusRestore,
-	}: {
-		component: Component | null;
-		overlayFocusRestore: OverlayFocusRestorePolicy;
-	}): void {
-		const previousFocus = this.focusedComponent;
-		let nextFocus = component;
+	private resolveNonOverlayFocus(
+		nextFocus: Component,
+		previousFocus: Component | null,
+		restoreState: OverlayFocusRestoreState,
+	): Component | null {
+		if (restoreState.status === "blocked" && restoreState.blockedBy === previousFocus) {
+			if (restoreState.resume.status === "focus-target" || !this.isComponentMounted(restoreState.blockedBy)) {
+				return this.resolveBlockedOverlayFocusResume(restoreState);
+			}
+			this.overlayFocusRestore = {
+				status: "blocked",
+				overlay: restoreState.overlay,
+				blockedBy: nextFocus,
+				resume: restoreState.resume,
+			};
+			return nextFocus;
+		}
+
 		const previousFocusedOverlay = previousFocus
 			? this.overlayStack.find((entry) => entry.component === previousFocus && this.isOverlayVisible(entry))
 			: undefined;
-		const nextFocusIsOverlay = nextFocus ? this.overlayStack.some((entry) => entry.component === nextFocus) : false;
+		if (
+			previousFocusedOverlay &&
+			restoreState.status !== "inactive" &&
+			restoreState.overlay === previousFocusedOverlay &&
+			!this.isOverlayFocusAncestor(previousFocusedOverlay, nextFocus)
+		) {
+			this.overlayFocusRestore = {
+				status: "blocked",
+				overlay: previousFocusedOverlay,
+				blockedBy: nextFocus,
+				resume: { status: "restore-overlay" },
+			};
+		}
+		return nextFocus;
+	}
+
+	private resolveNullFocus(
+		previousFocus: Component | null,
+		restoreState: OverlayFocusRestoreState,
+		overlayFocusRestore: OverlayFocusRestorePolicy,
+	): Component | null {
+		if (restoreState.status === "blocked" && restoreState.blockedBy === previousFocus) {
+			return this.resolveBlockedOverlayFocusResume(restoreState);
+		}
+		if (overlayFocusRestore === "clear") this.clearOverlayFocusRestore();
+		return null;
+	}
+
+	private resolveFocusTarget(
+		component: Component | null,
+		overlayFocusRestore: OverlayFocusRestorePolicy,
+	): Component | null {
+		const previousFocus = this.focusedComponent;
 		const restoreState = this.getVisibleOverlayFocusRestore();
-		if (nextFocus && !nextFocusIsOverlay) {
-			if (restoreState.status === "blocked" && restoreState.blockedBy === previousFocus) {
-				if (restoreState.resume.status === "focus-target" || !this.isComponentMounted(restoreState.blockedBy)) {
-					nextFocus = this.resolveBlockedOverlayFocusResume(restoreState);
-				} else {
-					this.overlayFocusRestore = {
-						status: "blocked",
-						overlay: restoreState.overlay,
-						blockedBy: nextFocus,
-						resume: restoreState.resume,
-					};
-				}
-			} else if (
-				previousFocusedOverlay &&
-				restoreState.status !== "inactive" &&
-				restoreState.overlay === previousFocusedOverlay &&
-				!this.isOverlayFocusAncestor(previousFocusedOverlay, nextFocus)
-			) {
-				this.overlayFocusRestore = {
-					status: "blocked",
-					overlay: previousFocusedOverlay,
-					blockedBy: nextFocus,
-					resume: { status: "restore-overlay" },
-				};
-			}
-		} else if (nextFocus === null) {
-			if (restoreState.status === "blocked" && restoreState.blockedBy === previousFocus) {
-				nextFocus = this.resolveBlockedOverlayFocusResume(restoreState);
-			} else if (overlayFocusRestore === "clear") {
-				this.clearOverlayFocusRestore();
-			}
-		}
+		if (component === null) return this.resolveNullFocus(previousFocus, restoreState, overlayFocusRestore);
+		const isOverlay = this.overlayStack.some((entry) => entry.component === component);
+		if (isOverlay) return component;
+		return this.resolveNonOverlayFocus(component, previousFocus, restoreState);
+	}
 
-		if (isFocusable(this.focusedComponent)) {
-			this.focusedComponent.focused = false;
-		}
-
+	private applyFocus(nextFocus: Component | null): void {
+		if (isFocusable(this.focusedComponent)) this.focusedComponent.focused = false;
 		this.focusedComponent = nextFocus;
-
-		if (isFocusable(nextFocus)) {
-			nextFocus.focused = true;
-		}
+		if (isFocusable(nextFocus)) nextFocus.focused = true;
 
 		const focusedOverlay = nextFocus
 			? this.overlayStack.find((entry) => entry.component === nextFocus && this.isOverlayVisible(entry))
 			: undefined;
-		if (focusedOverlay) {
-			this.overlayFocusRestore = { status: "eligible", overlay: focusedOverlay };
-		}
+		if (focusedOverlay) this.overlayFocusRestore = { status: "eligible", overlay: focusedOverlay };
+	}
+
+	private setFocusInternal({ component, overlayFocusRestore }: FocusTransitionRequest): void {
+		const nextFocus = this.resolveFocusTarget(component, overlayFocusRestore);
+		this.applyFocus(nextFocus);
 	}
 
 	private clearOverlayFocusRestore(): void {
@@ -497,12 +546,19 @@ export abstract class TuiBase extends Container implements TUI {
 	}
 
 	private isOverlayFocusAncestor(entry: OverlayStackEntry, component: Component): boolean {
+		const preFocusByComponent = new Map<Component, Component | null>();
+		for (const overlay of this.overlayStack) {
+			if (!preFocusByComponent.has(overlay.component)) {
+				preFocusByComponent.set(overlay.component, overlay.preFocus);
+			}
+		}
+
 		const visited = new Set<Component>();
 		let current = entry.preFocus;
 		while (current && !visited.has(current)) {
 			visited.add(current);
 			if (current === component) return true;
-			current = this.overlayStack.find((overlay) => overlay.component === current)?.preFocus ?? null;
+			current = preFocusByComponent.get(current) ?? null;
 		}
 		return false;
 	}
@@ -527,6 +583,48 @@ export abstract class TuiBase extends Container implements TUI {
 		if (root === target) return true;
 		if (!(root instanceof Container)) return false;
 		return root.children.some((child) => this.containsComponent(child, target));
+	}
+
+	private applyBlockedOverlayUnfocus(
+		entry: OverlayStackEntry,
+		restoreState: OverlayFocusRestoreState,
+		options: OverlayUnfocusOptions | undefined,
+	): boolean {
+		if (
+			restoreState.status !== "blocked" ||
+			restoreState.overlay !== entry ||
+			this.focusedComponent !== restoreState.blockedBy
+		) {
+			return false;
+		}
+		if (options) {
+			this.overlayFocusRestore = {
+				status: "blocked",
+				overlay: entry,
+				blockedBy: restoreState.blockedBy,
+				resume: { status: "focus-target", target: options.target },
+			};
+		} else {
+			this.clearOverlayFocusRestore();
+		}
+		this.requestRender();
+		return true;
+	}
+
+	private unfocusOverlay(entry: OverlayStackEntry, options: OverlayUnfocusOptions | undefined): void {
+		const isFocused = this.focusedComponent === entry.component;
+		const restoreState = this.overlayFocusRestore;
+		const hasPendingRestore = restoreState.status !== "inactive" && restoreState.overlay === entry;
+		if (!isFocused && !hasPendingRestore) return;
+		if (this.applyBlockedOverlayUnfocus(entry, restoreState, options)) return;
+
+		this.clearOverlayFocusRestoreFor(entry);
+		if (isFocused || options) {
+			const topVisible = this.getTopmostVisibleOverlay();
+			const fallbackTarget = topVisible && topVisible !== entry ? topVisible.component : entry.preFocus;
+			this.setFocus(options ? options.target : fallbackTarget);
+		}
+		this.requestRender();
 	}
 
 	/**
@@ -599,37 +697,7 @@ export abstract class TuiBase extends Container implements TUI {
 				this.setFocus(component);
 				this.requestRender();
 			},
-			unfocus: (unfocusOptions) => {
-				const isFocused = this.focusedComponent === component;
-				const restoreState = this.overlayFocusRestore;
-				const hasPendingRestore = restoreState.status !== "inactive" && restoreState.overlay === entry;
-				if (!isFocused && !hasPendingRestore) return;
-				if (
-					restoreState.status === "blocked" &&
-					restoreState.overlay === entry &&
-					this.focusedComponent === restoreState.blockedBy
-				) {
-					if (unfocusOptions) {
-						this.overlayFocusRestore = {
-							status: "blocked",
-							overlay: entry,
-							blockedBy: restoreState.blockedBy,
-							resume: { status: "focus-target", target: unfocusOptions.target },
-						};
-					} else {
-						this.clearOverlayFocusRestore();
-					}
-					this.requestRender();
-					return;
-				}
-				this.clearOverlayFocusRestoreFor(entry);
-				if (isFocused || unfocusOptions) {
-					const topVisible = this.getTopmostVisibleOverlay();
-					const fallbackTarget = topVisible && topVisible !== entry ? topVisible.component : entry.preFocus;
-					this.setFocus(unfocusOptions ? unfocusOptions.target : fallbackTarget);
-				}
-				this.requestRender();
-			},
+			unfocus: (unfocusOptions) => this.unfocusOverlay(entry, unfocusOptions),
 			isFocused: () => this.focusedComponent === component,
 		};
 	}
@@ -681,7 +749,7 @@ export abstract class TuiBase extends Container implements TUI {
 		return topmost;
 	}
 
-	private reconcileOverlayFocus(): void {
+	private refreshOverlayVisibility(): OverlayStackEntry | undefined {
 		let newlyVisible: OverlayStackEntry | undefined;
 		for (const overlay of this.overlayStack) {
 			const visible = this.isOverlayVisible(overlay);
@@ -690,35 +758,51 @@ export abstract class TuiBase extends Container implements TUI {
 			}
 			overlay.visible = visible;
 		}
+		return newlyVisible;
+	}
 
+	private retargetFocusFromHiddenOverlay(): void {
 		const focusedOverlay = this.overlayStack.find((overlay) => overlay.component === this.focusedComponent);
-		if (focusedOverlay && !this.isOverlayVisible(focusedOverlay)) {
-			const topVisible = this.getTopmostVisibleOverlay();
-			if (topVisible) {
-				this.setFocus(topVisible.component);
-			} else {
-				this.setFocusInternal({ component: focusedOverlay.preFocus, overlayFocusRestore: "preserve" });
-			}
+		if (!focusedOverlay || this.isOverlayVisible(focusedOverlay)) return;
+		const topVisible = this.getTopmostVisibleOverlay();
+		if (topVisible) {
+			this.setFocus(topVisible.component);
+			return;
 		}
+		this.setFocusInternal({ component: focusedOverlay.preFocus, overlayFocusRestore: "preserve" });
+	}
 
+	private focusNewlyVisibleOverlay(newlyVisible: OverlayStackEntry | undefined): void {
+		if (!newlyVisible) return;
 		const currentFocusedOverlay = this.overlayStack.find(
 			(overlay) => overlay.component === this.focusedComponent && this.isOverlayVisible(overlay),
 		);
-		if (newlyVisible && (!currentFocusedOverlay || newlyVisible.focusOrder > currentFocusedOverlay.focusOrder)) {
+		if (!currentFocusedOverlay || newlyVisible.focusOrder > currentFocusedOverlay.focusOrder) {
 			this.setFocus(newlyVisible.component);
 		}
+	}
+
+	private restoreVisibleOverlayFocus(): void {
 		if (this.overlayStack.some((overlay) => overlay.component === this.focusedComponent)) return;
 		const restoreState = this.getVisibleOverlayFocusRestore();
 		if (restoreState.status === "eligible") {
 			this.setFocus(restoreState.overlay.component);
-		} else if (restoreState.status === "blocked" && restoreState.blockedBy !== this.focusedComponent) {
-			if (restoreState.resume.status === "restore-overlay") {
-				this.setFocus(restoreState.overlay.component);
-			} else {
-				this.clearOverlayFocusRestore();
-				this.setFocus(restoreState.resume.target);
-			}
+			return;
 		}
+		if (restoreState.status !== "blocked" || restoreState.blockedBy === this.focusedComponent) return;
+		if (restoreState.resume.status === "restore-overlay") {
+			this.setFocus(restoreState.overlay.component);
+			return;
+		}
+		this.clearOverlayFocusRestore();
+		this.setFocus(restoreState.resume.target);
+	}
+
+	private reconcileOverlayFocus(): void {
+		const newlyVisible = this.refreshOverlayVisibility();
+		this.retargetFocusFromHiddenOverlay();
+		this.focusNewlyVisibleOverlay(newlyVisible);
+		this.restoreVisibleOverlayFocus();
 	}
 
 	override invalidate(): void {
@@ -850,29 +934,25 @@ export abstract class TuiBase extends Container implements TUI {
 		}, delay);
 	}
 
+	private applyInputListeners(data: string): string | undefined {
+		if (this.inputListeners.size === 0) return data;
+		let current = data;
+		for (const listener of this.inputListeners) {
+			const result = listener(current);
+			if (result?.consume) return undefined;
+			if (result?.data !== undefined) current = result.data;
+		}
+		return current.length === 0 ? undefined : current;
+	}
+
 	private handleTerminalInput(data: string): void {
 		this.reconcileOverlayFocus();
-		if (this.inputListeners.size > 0) {
-			let current = data;
-			for (const listener of this.inputListeners) {
-				const result = listener(current);
-				if (result?.consume) {
-					return;
-				}
-				if (result?.data !== undefined) {
-					current = result.data;
-				}
-			}
-			if (current.length === 0) {
-				return;
-			}
-			data = current;
-		}
+		const filteredData = this.applyInputListeners(data);
+		if (filteredData === undefined) return;
+		data = filteredData;
 
 		// Consume terminal cell size responses without blocking unrelated input.
-		if (this.consumeCellSizeResponse(data)) {
-			return;
-		}
+		if (this.consumeCellSizeResponse(data)) return;
 
 		// Global debug key handler (Shift+Ctrl+D)
 		if (matchesKey(data, "shift+ctrl+d") && this.onDebug) {
@@ -880,16 +960,13 @@ export abstract class TuiBase extends Container implements TUI {
 			return;
 		}
 
-		// Pass input to focused component (including Ctrl+C)
-		// The focused component can decide how to handle Ctrl+C
-		if (this.focusedComponent?.handleInput) {
-			// Filter out key release events unless component opts in
-			if (isKeyRelease(data) && !this.focusedComponent.wantsKeyRelease) {
-				return;
-			}
-			this.focusedComponent.handleInput(data);
-			this.requestImmediateRender();
-		}
+		// Pass input to focused component (including Ctrl+C).
+		// The focused component can decide how to handle Ctrl+C.
+		if (!this.focusedComponent?.handleInput) return;
+		// Filter out key release events unless component opts in.
+		if (isKeyRelease(data) && !this.focusedComponent.wantsKeyRelease) return;
+		this.focusedComponent.handleInput(data);
+		this.requestImmediateRender();
 	}
 
 	private consumeCellSizeResponse(data: string): boolean {
@@ -912,107 +989,83 @@ export abstract class TuiBase extends Container implements TUI {
 		return true;
 	}
 
-	/**
-	 * Resolve overlay layout from options.
-	 * Returns { width, row, col, maxHeight } for rendering.
-	 */
+	private resolveOverlayBounds(options: OverlayOptions, termWidth: number, termHeight: number): OverlayLayoutBounds {
+		const margin =
+			typeof options.margin === "number"
+				? { top: options.margin, right: options.margin, bottom: options.margin, left: options.margin }
+				: (options.margin ?? {});
+		const marginTop = Math.max(0, margin.top ?? 0);
+		const marginRight = Math.max(0, margin.right ?? 0);
+		const marginBottom = Math.max(0, margin.bottom ?? 0);
+		const marginLeft = Math.max(0, margin.left ?? 0);
+		return {
+			marginTop,
+			marginRight,
+			marginBottom,
+			marginLeft,
+			availableWidth: Math.max(1, termWidth - marginLeft - marginRight),
+			availableHeight: Math.max(1, termHeight - marginTop - marginBottom),
+		};
+	}
+
+	private resolveOverlayWidth(options: OverlayOptions, termWidth: number, bounds: OverlayLayoutBounds): number {
+		let width = parseSizeValue(options.width, termWidth) ?? Math.min(80, bounds.availableWidth);
+		if (options.minWidth !== undefined) width = Math.max(width, options.minWidth);
+		return Math.max(1, Math.min(width, bounds.availableWidth));
+	}
+
+	private resolveOverlayMaxHeight(
+		options: OverlayOptions,
+		termHeight: number,
+		bounds: OverlayLayoutBounds,
+	): number | undefined {
+		const maxHeight = parseSizeValue(options.maxHeight, termHeight);
+		return maxHeight === undefined ? undefined : Math.max(1, Math.min(maxHeight, bounds.availableHeight));
+	}
+
+	private resolveOverlayRow(options: OverlayOptions, overlayHeight: number, bounds: OverlayLayoutBounds): number {
+		if (options.row === undefined) {
+			return this.resolveAnchorRow(
+				options.anchor ?? "center",
+				overlayHeight,
+				bounds.availableHeight,
+				bounds.marginTop,
+			);
+		}
+		if (typeof options.row === "number") return options.row;
+		const match = options.row.match(/^(\d+(?:\.\d+)?)%$/);
+		if (!match) return this.resolveAnchorRow("center", overlayHeight, bounds.availableHeight, bounds.marginTop);
+		const maxRow = Math.max(0, bounds.availableHeight - overlayHeight);
+		return bounds.marginTop + Math.floor(maxRow * (parseFloat(match[1]) / 100));
+	}
+
+	private resolveOverlayColumn(options: OverlayOptions, width: number, bounds: OverlayLayoutBounds): number {
+		if (options.col === undefined) {
+			return this.resolveAnchorCol(options.anchor ?? "center", width, bounds.availableWidth, bounds.marginLeft);
+		}
+		if (typeof options.col === "number") return options.col;
+		const match = options.col.match(/^(\d+(?:\.\d+)?)%$/);
+		if (!match) return this.resolveAnchorCol("center", width, bounds.availableWidth, bounds.marginLeft);
+		const maxCol = Math.max(0, bounds.availableWidth - width);
+		return bounds.marginLeft + Math.floor(maxCol * (parseFloat(match[1]) / 100));
+	}
+
+	/** Resolve overlay layout from options. */
 	private resolveOverlayLayout(
 		options: OverlayOptions | undefined,
 		overlayHeight: number,
 		termWidth: number,
 		termHeight: number,
-	): { width: number; row: number; col: number; maxHeight: number | undefined } {
-		const opt = options ?? {};
-
-		// Parse margin (clamp to non-negative)
-		const margin =
-			typeof opt.margin === "number"
-				? { top: opt.margin, right: opt.margin, bottom: opt.margin, left: opt.margin }
-				: (opt.margin ?? {});
-		const marginTop = Math.max(0, margin.top ?? 0);
-		const marginRight = Math.max(0, margin.right ?? 0);
-		const marginBottom = Math.max(0, margin.bottom ?? 0);
-		const marginLeft = Math.max(0, margin.left ?? 0);
-
-		// Available space after margins
-		const availWidth = Math.max(1, termWidth - marginLeft - marginRight);
-		const availHeight = Math.max(1, termHeight - marginTop - marginBottom);
-
-		// === Resolve width ===
-		let width = parseSizeValue(opt.width, termWidth) ?? Math.min(80, availWidth);
-		// Apply minWidth
-		if (opt.minWidth !== undefined) {
-			width = Math.max(width, opt.minWidth);
-		}
-		// Clamp to available space
-		width = Math.max(1, Math.min(width, availWidth));
-
-		// === Resolve maxHeight ===
-		let maxHeight = parseSizeValue(opt.maxHeight, termHeight);
-		// Clamp to available space
-		if (maxHeight !== undefined) {
-			maxHeight = Math.max(1, Math.min(maxHeight, availHeight));
-		}
-
-		// Effective overlay height (may be clamped by maxHeight)
-		const effectiveHeight = maxHeight !== undefined ? Math.min(overlayHeight, maxHeight) : overlayHeight;
-
-		// === Resolve position ===
-		let row: number;
-		let col: number;
-
-		if (opt.row !== undefined) {
-			if (typeof opt.row === "string") {
-				// Percentage: 0% = top, 100% = bottom (overlay stays within bounds)
-				const match = opt.row.match(/^(\d+(?:\.\d+)?)%$/);
-				if (match) {
-					const maxRow = Math.max(0, availHeight - effectiveHeight);
-					const percent = parseFloat(match[1]) / 100;
-					row = marginTop + Math.floor(maxRow * percent);
-				} else {
-					// Invalid format, fall back to center
-					row = this.resolveAnchorRow("center", effectiveHeight, availHeight, marginTop);
-				}
-			} else {
-				// Absolute row position
-				row = opt.row;
-			}
-		} else {
-			// Anchor-based (default: center)
-			const anchor = opt.anchor ?? "center";
-			row = this.resolveAnchorRow(anchor, effectiveHeight, availHeight, marginTop);
-		}
-
-		if (opt.col !== undefined) {
-			if (typeof opt.col === "string") {
-				// Percentage: 0% = left, 100% = right (overlay stays within bounds)
-				const match = opt.col.match(/^(\d+(?:\.\d+)?)%$/);
-				if (match) {
-					const maxCol = Math.max(0, availWidth - width);
-					const percent = parseFloat(match[1]) / 100;
-					col = marginLeft + Math.floor(maxCol * percent);
-				} else {
-					// Invalid format, fall back to center
-					col = this.resolveAnchorCol("center", width, availWidth, marginLeft);
-				}
-			} else {
-				// Absolute column position
-				col = opt.col;
-			}
-		} else {
-			// Anchor-based (default: center)
-			const anchor = opt.anchor ?? "center";
-			col = this.resolveAnchorCol(anchor, width, availWidth, marginLeft);
-		}
-
-		// Apply offsets
-		if (opt.offsetY !== undefined) row += opt.offsetY;
-		if (opt.offsetX !== undefined) col += opt.offsetX;
-
-		// Clamp to terminal bounds (respecting margins)
-		row = Math.max(marginTop, Math.min(row, termHeight - marginBottom - effectiveHeight));
-		col = Math.max(marginLeft, Math.min(col, termWidth - marginRight - width));
-
+	): ResolvedOverlayLayout {
+		const resolvedOptions = options ?? {};
+		const bounds = this.resolveOverlayBounds(resolvedOptions, termWidth, termHeight);
+		const width = this.resolveOverlayWidth(resolvedOptions, termWidth, bounds);
+		const maxHeight = this.resolveOverlayMaxHeight(resolvedOptions, termHeight, bounds);
+		const effectiveHeight = maxHeight === undefined ? overlayHeight : Math.min(overlayHeight, maxHeight);
+		let row = this.resolveOverlayRow(resolvedOptions, effectiveHeight, bounds) + (resolvedOptions.offsetY ?? 0);
+		let col = this.resolveOverlayColumn(resolvedOptions, width, bounds) + (resolvedOptions.offsetX ?? 0);
+		row = Math.max(bounds.marginTop, Math.min(row, termHeight - bounds.marginBottom - effectiveHeight));
+		col = Math.max(bounds.marginLeft, Math.min(col, termWidth - bounds.marginRight - width));
 		return { width, row, col, maxHeight };
 	}
 
@@ -1050,65 +1103,59 @@ export abstract class TuiBase extends Container implements TUI {
 		}
 	}
 
+	private prepareOverlayRenderPlan(baseLineCount: number, termWidth: number, termHeight: number): OverlayRenderPlan {
+		const visibleEntries = this.overlayStack.filter((entry) => this.isOverlayVisible(entry));
+		visibleEntries.sort((left, right) => left.focusOrder - right.focusOrder);
+		const overlays: RenderedOverlay[] = [];
+		let minimumLineCount = baseLineCount;
+		for (const entry of visibleEntries) {
+			const { width, maxHeight } = this.resolveOverlayLayout(entry.options, 0, termWidth, termHeight);
+			let overlayLines = entry.component.render(width);
+			if (maxHeight !== undefined && overlayLines.length > maxHeight) {
+				overlayLines = overlayLines.slice(0, maxHeight);
+			}
+			const { row, col } = this.resolveOverlayLayout(entry.options, overlayLines.length, termWidth, termHeight);
+			overlays.push({ lines: overlayLines, row, col, width });
+			minimumLineCount = Math.max(minimumLineCount, row + overlayLines.length);
+		}
+		return { overlays, minimumLineCount };
+	}
+
+	private compositeRenderedOverlay(
+		result: string[],
+		overlay: RenderedOverlay,
+		viewportStart: number,
+		termWidth: number,
+	): void {
+		for (let lineIndex = 0; lineIndex < overlay.lines.length; lineIndex++) {
+			const targetIndex = viewportStart + overlay.row + lineIndex;
+			if (targetIndex < 0 || targetIndex >= result.length) continue;
+			const overlayLine = overlay.lines[lineIndex]!;
+			const truncatedLine =
+				visibleWidth(overlayLine) > overlay.width
+					? sliceByColumn(overlayLine, 0, overlay.width, true)
+					: overlayLine;
+			result[targetIndex] = this.compositeLineAt(
+				result[targetIndex]!,
+				truncatedLine,
+				overlay.col,
+				overlay.width,
+				termWidth,
+			);
+		}
+	}
+
 	/** Composite all overlays into content lines (sorted by focusOrder, higher = on top). */
 	protected compositeOverlays(lines: string[], termWidth: number, termHeight: number): string[] {
 		if (this.overlayStack.length === 0) return lines;
 		const result = [...lines];
-
-		// Pre-render all visible overlays and calculate positions
-		const rendered: { overlayLines: string[]; row: number; col: number; w: number }[] = [];
-		let minLinesNeeded = result.length;
-
-		const visibleEntries = this.overlayStack.filter((e) => this.isOverlayVisible(e));
-		visibleEntries.sort((a, b) => a.focusOrder - b.focusOrder);
-		for (const entry of visibleEntries) {
-			const { component, options } = entry;
-
-			// Get layout with height=0 first to determine width and maxHeight
-			// (width and maxHeight don't depend on overlay height)
-			const { width, maxHeight } = this.resolveOverlayLayout(options, 0, termWidth, termHeight);
-
-			// Render component at calculated width
-			let overlayLines = component.render(width);
-
-			// Apply maxHeight if specified
-			if (maxHeight !== undefined && overlayLines.length > maxHeight) {
-				overlayLines = overlayLines.slice(0, maxHeight);
-			}
-
-			// Get final row/col with actual overlay height
-			const { row, col } = this.resolveOverlayLayout(options, overlayLines.length, termWidth, termHeight);
-
-			rendered.push({ overlayLines, row, col, w: width });
-			minLinesNeeded = Math.max(minLinesNeeded, row + overlayLines.length);
-		}
-
-		// Pad to at least terminal height so overlays have screen-relative positions.
-		// Excludes maxLinesRendered: the historical high-water mark caused self-reinforcing
-		// inflation that pushed content into scrollback on terminal widen.
-		const workingHeight = Math.max(result.length, termHeight, minLinesNeeded);
-
-		// Extend result with empty lines if content is too short for overlay placement or working area
-		while (result.length < workingHeight) {
-			result.push("");
-		}
-
+		const plan = this.prepareOverlayRenderPlan(result.length, termWidth, termHeight);
+		const workingHeight = Math.max(result.length, termHeight, plan.minimumLineCount);
+		while (result.length < workingHeight) result.push("");
 		const viewportStart = Math.max(0, workingHeight - termHeight);
-
-		// Composite each overlay
-		for (const { overlayLines, row, col, w } of rendered) {
-			for (let i = 0; i < overlayLines.length; i++) {
-				const idx = viewportStart + row + i;
-				if (idx >= 0 && idx < result.length) {
-					// Defensive: truncate overlay line to declared width before compositing
-					// (components should already respect width, but this ensures it)
-					const truncatedOverlayLine =
-						visibleWidth(overlayLines[i]) > w ? sliceByColumn(overlayLines[i], 0, w, true) : overlayLines[i];
-					result[idx] = this.compositeLineAt(result[idx], truncatedOverlayLine, col, w, termWidth);
-				}
-			}
+		for (const overlay of plan.overlays) {
+			this.compositeRenderedOverlay(result, overlay, viewportStart, termWidth);
 		}
-
 		return result;
 	}
 
@@ -1141,7 +1188,7 @@ export abstract class TuiBase extends Container implements TUI {
 	 * @param height - Terminal height (visible viewport size)
 	 * @returns Cursor position { row, col } or null if no marker found
 	 */
-	protected extractCursorPosition(lines: string[], height: number): { row: number; col: number } | null {
+	protected extractCursorPosition(lines: string[], height: number): RenderedCursorPosition | null {
 		// Only scan the bottom `height` lines (visible viewport)
 		const viewportTop = Math.max(0, lines.length - height);
 		for (let row = lines.length - 1; row >= viewportTop; row--) {

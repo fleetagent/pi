@@ -21,6 +21,11 @@ interface ExportContractEntry {
 	value: boolean;
 }
 
+interface LspExportSurfaces {
+	root: Map<string, ExportContractEntry>;
+	leaves: Map<string, Map<string, ExportContractEntry>>;
+}
+
 const rootPath = fileURLToPath(new URL("../src/index.ts", import.meta.url));
 const lspSourceDirectory = fileURLToPath(new URL("../src/core/lsp", import.meta.url));
 const leafFileNames = ts.sys
@@ -79,10 +84,7 @@ function resolveExports(checker: ts.TypeChecker, sourceFile: ts.SourceFile): Map
 	);
 }
 
-function loadSurfaces(): {
-	root: Map<string, ExportContractEntry>;
-	leaves: Map<string, Map<string, ExportContractEntry>>;
-} {
+function loadSurfaces(): LspExportSurfaces {
 	const configPath = ts.findConfigFile(dirname(rootPath), ts.sys.fileExists, "tsconfig.json");
 	if (!configPath) throw new Error("Expected repository tsconfig.json");
 	const configFile = ts.readConfigFile(configPath, ts.sys.readFile);
@@ -155,9 +157,10 @@ describe("public LSP exports", () => {
 			.filter(({ entry }) => entry.value)
 			.map(({ name }) => name)
 			.sort();
+		const runtimeNameSet = new Set(runtimeNames);
 		expect(
 			Object.keys(lspRuntimeValues)
-				.filter((name) => runtimeNames.includes(name))
+				.filter((name) => runtimeNameSet.has(name))
 				.sort(),
 		).toEqual(runtimeNames);
 		for (const name of runtimeNames) {

@@ -11,6 +11,8 @@ const TOOLS_DIR = getBinDir();
 const NETWORK_TIMEOUT_MS = 10_000;
 const DOWNLOAD_TIMEOUT_MS = 120_000;
 
+type ManagedToolName = "fd" | "rg";
+
 function isOfflineModeEnabled(): boolean {
 	const value = process.env.PI_OFFLINE;
 	if (!value) return false;
@@ -82,7 +84,7 @@ function commandExists(cmd: string): boolean {
 }
 
 // Get the path to a tool (system-wide or in our tools dir)
-export function getToolPath(tool: "fd" | "rg"): string | null {
+export function getToolPath(tool: ManagedToolName): string | null {
 	const config = TOOLS[tool];
 	if (!config) return null;
 
@@ -136,6 +138,7 @@ async function downloadFile(url: string, dest: string): Promise<void> {
 	await pipeline(Readable.fromWeb(response.body as any), fileStream);
 }
 
+// pi-ignore noExcessiveCollectionIterations: Each discovered directory is visited once, so traversal is linear in archive entries.
 function findBinaryRecursively(rootDir: string, binaryFileName: string): string | null {
 	const stack: string[] = [rootDir];
 
@@ -238,7 +241,7 @@ function extractZipArchive(archivePath: string, extractDir: string, assetName: s
 }
 
 // Download and install a tool
-async function downloadTool(tool: "fd" | "rg"): Promise<string> {
+async function downloadTool(tool: ManagedToolName): Promise<string> {
 	const config = TOOLS[tool];
 	if (!config) throw new Error(`Unknown tool: ${tool}`);
 
@@ -320,10 +323,18 @@ const TERMUX_PACKAGES: Record<string, string> = {
 	fd: "fd",
 	rg: "ripgrep",
 };
+function getToolUnavailableMessage(tool: ManagedToolName, config: ToolConfig): string | null {
+	if (isOfflineModeEnabled()) {
+		return `${config.name} not found. Offline mode enabled, skipping download.`;
+	}
+	if (platform() !== "android") return null;
+	const pkgName = TERMUX_PACKAGES[tool] ?? tool;
+	return `${config.name} not found. Install with: pkg install ${pkgName}`;
+}
 
 // Ensure a tool is available, downloading if necessary
 // Returns the path to the tool, or null if unavailable
-export async function ensureTool(tool: "fd" | "rg", silent: boolean = false): Promise<string | undefined> {
+export async function ensureTool(tool: ManagedToolName, silent: boolean = false): Promise<string | undefined> {
 	const existingPath = getToolPath(tool);
 	if (existingPath) {
 		return existingPath;
@@ -332,20 +343,9 @@ export async function ensureTool(tool: "fd" | "rg", silent: boolean = false): Pr
 	const config = TOOLS[tool];
 	if (!config) return undefined;
 
-	if (isOfflineModeEnabled()) {
-		if (!silent) {
-			console.log(chalk.yellow(`${config.name} not found. Offline mode enabled, skipping download.`));
-		}
-		return undefined;
-	}
-
-	// On Android/Termux, Linux binaries don't work due to Bionic libc incompatibility.
-	// Users must install via pkg.
-	if (platform() === "android") {
-		const pkgName = TERMUX_PACKAGES[tool] ?? tool;
-		if (!silent) {
-			console.log(chalk.yellow(`${config.name} not found. Install with: pkg install ${pkgName}`));
-		}
+	const unavailableMessage = getToolUnavailableMessage(tool, config);
+	if (unavailableMessage) {
+		if (!silent) console.log(chalk.yellow(unavailableMessage));
 		return undefined;
 	}
 

@@ -6,9 +6,39 @@ import { fileURLToPath } from "url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { getModel } from "../src/models.ts";
 import { complete, stream } from "../src/stream.ts";
-import type { Api, Context, ImageContent, Model, StreamOptions, Tool, ToolResultMessage } from "../src/types.ts";
+import type {
+	Api,
+	AssistantContent,
+	AssistantMessageEvent,
+	Context,
+	ImageContent,
+	Model,
+	StreamOptions,
+	Tool,
+	ToolCall,
+	ToolResultMessage,
+} from "../src/types.ts";
 
 type StreamOptionsWithExtras = StreamOptions & Record<string, unknown>;
+
+interface CapturedBedrockThinkingSettings {
+	type?: string;
+	display?: string;
+}
+
+interface CapturedBedrockOutputConfig {
+	effort?: string;
+}
+
+interface CapturedBedrockAdditionalModelRequestFields {
+	thinking?: CapturedBedrockThinkingSettings;
+	output_config?: CapturedBedrockOutputConfig;
+	anthropic_beta?: string[];
+}
+
+interface CapturedBedrockThinkingPayload {
+	additionalModelRequestFields?: CapturedBedrockAdditionalModelRequestFields;
+}
 
 import { StringEnum } from "../src/utils/typebox-helpers.ts";
 import { hasAzureOpenAICredentials, resolveAzureDeploymentName } from "./azure-utils.ts";
@@ -73,6 +103,58 @@ async function basicTextGeneration<TApi extends Api>(model: Model<TApi>, options
 	);
 }
 
+interface ToolCallStreamState {
+	hasToolStart: boolean;
+	hasToolDelta: boolean;
+	hasToolEnd: boolean;
+	accumulatedToolArgs: string;
+	contentIndex: number;
+}
+
+function observeToolCallStreamEvent(event: AssistantMessageEvent, state: ToolCallStreamState): void {
+	switch (event.type) {
+		case "toolcall_start": {
+			state.hasToolStart = true;
+			const toolCall = event.partial.content[event.contentIndex];
+			state.contentIndex = event.contentIndex;
+			expect(toolCall.type).toBe("toolCall");
+			if (toolCall.type === "toolCall") {
+				expect(toolCall.name).toBe("math_operation");
+				expect(toolCall.id).toBeTruthy();
+			}
+			return;
+		}
+		case "toolcall_delta": {
+			state.hasToolDelta = true;
+			const toolCall = event.partial.content[event.contentIndex];
+			expect(event.contentIndex).toBe(state.contentIndex);
+			expect(toolCall.type).toBe("toolCall");
+			if (toolCall.type === "toolCall") {
+				expect(toolCall.name).toBe("math_operation");
+				state.accumulatedToolArgs += event.delta;
+				expect(toolCall.arguments).toBeDefined();
+				expect(typeof toolCall.arguments).toBe("object");
+				expect(toolCall.arguments).not.toBeNull();
+			}
+			return;
+		}
+		case "toolcall_end": {
+			state.hasToolEnd = true;
+			const toolCall = event.partial.content[event.contentIndex];
+			expect(event.contentIndex).toBe(state.contentIndex);
+			expect(toolCall.type).toBe("toolCall");
+			if (toolCall.type === "toolCall") {
+				expect(toolCall.name).toBe("math_operation");
+				JSON.parse(state.accumulatedToolArgs);
+				expect(toolCall.arguments).not.toBeUndefined();
+				expect((toolCall.arguments as any).a).toBe(15);
+				expect((toolCall.arguments as any).b).toBe(27);
+				expect((toolCall.arguments as any).operation).oneOf(["add", "subtract", "multiply", "divide"]);
+			}
+		}
+	}
+}
+
 async function handleToolCall<TApi extends Api>(model: Model<TApi>, options?: StreamOptionsWithExtras) {
 	const context: Context = {
 		systemPrompt: "You are a helpful assistant that uses tools when asked.",
@@ -87,57 +169,18 @@ async function handleToolCall<TApi extends Api>(model: Model<TApi>, options?: St
 	};
 
 	const s = await stream(model, context, options);
-	let hasToolStart = false;
-	let hasToolDelta = false;
-	let hasToolEnd = false;
-	let accumulatedToolArgs = "";
-	let index = 0;
-	for await (const event of s) {
-		if (event.type === "toolcall_start") {
-			hasToolStart = true;
-			const toolCall = event.partial.content[event.contentIndex];
-			index = event.contentIndex;
-			expect(toolCall.type).toBe("toolCall");
-			if (toolCall.type === "toolCall") {
-				expect(toolCall.name).toBe("math_operation");
-				expect(toolCall.id).toBeTruthy();
-			}
-		}
-		if (event.type === "toolcall_delta") {
-			hasToolDelta = true;
-			const toolCall = event.partial.content[event.contentIndex];
-			expect(event.contentIndex).toBe(index);
-			expect(toolCall.type).toBe("toolCall");
-			if (toolCall.type === "toolCall") {
-				expect(toolCall.name).toBe("math_operation");
-				accumulatedToolArgs += event.delta;
-				// Check that we have a parsed arguments object during streaming
-				expect(toolCall.arguments).toBeDefined();
-				expect(typeof toolCall.arguments).toBe("object");
-				// The arguments should be partially populated as we stream
-				// At minimum it should be an empty object, never undefined
-				expect(toolCall.arguments).not.toBeNull();
-			}
-		}
-		if (event.type === "toolcall_end") {
-			hasToolEnd = true;
-			const toolCall = event.partial.content[event.contentIndex];
-			expect(event.contentIndex).toBe(index);
-			expect(toolCall.type).toBe("toolCall");
-			if (toolCall.type === "toolCall") {
-				expect(toolCall.name).toBe("math_operation");
-				JSON.parse(accumulatedToolArgs);
-				expect(toolCall.arguments).not.toBeUndefined();
-				expect((toolCall.arguments as any).a).toBe(15);
-				expect((toolCall.arguments as any).b).toBe(27);
-				expect((toolCall.arguments as any).operation).oneOf(["add", "subtract", "multiply", "divide"]);
-			}
-		}
-	}
+	const state: ToolCallStreamState = {
+		hasToolStart: false,
+		hasToolDelta: false,
+		hasToolEnd: false,
+		accumulatedToolArgs: "",
+		contentIndex: 0,
+	};
+	for await (const event of s) observeToolCallStreamEvent(event, state);
 
-	expect(hasToolStart).toBe(true);
-	expect(hasToolDelta).toBe(true);
-	expect(hasToolEnd).toBe(true);
+	expect(state.hasToolStart).toBe(true);
+	expect(state.hasToolDelta).toBe(true);
+	expect(state.hasToolEnd).toBe(true);
 
 	const response = await s.result();
 	expect(response.stopReason).toBe("toolUse");
@@ -265,6 +308,57 @@ async function handleImage<TApi extends Api>(model: Model<TApi>, options?: Strea
 	}
 }
 
+interface MultiTurnContentResult {
+	text: string;
+	hasThinking: boolean;
+	hasToolCalls: boolean;
+	toolResults: ToolResultMessage[];
+}
+
+function executeCalculatorToolCall(block: ToolCall): ToolResultMessage {
+	expect(block.name).toBe("math_operation");
+	expect(block.id).toBeTruthy();
+	expect(block.arguments).toBeTruthy();
+	const { a, b, operation } = block.arguments;
+	let result: number;
+	switch (operation) {
+		case "add":
+			result = a + b;
+			break;
+		case "multiply":
+			result = a * b;
+			break;
+		default:
+			result = 0;
+	}
+	return {
+		role: "toolResult",
+		toolCallId: block.id,
+		toolName: block.name,
+		content: [{ type: "text", text: `${result}` }],
+		isError: false,
+		timestamp: Date.now(),
+	};
+}
+
+function processMultiTurnContent(content: AssistantContent[]): MultiTurnContentResult {
+	let text = "";
+	let hasThinking = false;
+	let hasToolCalls = false;
+	const toolResults: ToolResultMessage[] = [];
+	for (const block of content) {
+		if (block.type === "text") {
+			text += block.text;
+		} else if (block.type === "thinking") {
+			hasThinking = true;
+		} else if (block.type === "toolCall") {
+			hasToolCalls = true;
+			toolResults.push(executeCalculatorToolCall(block));
+		}
+	}
+	return { text, hasThinking, hasToolCalls, toolResults };
+}
+
 async function multiTurn<TApi extends Api>(model: Model<TApi>, options?: StreamOptionsWithExtras) {
 	const context: Context = {
 		systemPrompt: "You are a helpful assistant that can use tools to answer questions.",
@@ -290,46 +384,11 @@ async function multiTurn<TApi extends Api>(model: Model<TApi>, options?: StreamO
 		// Add the assistant response to context
 		context.messages.push(response);
 
-		// Process content blocks
-		const results: ToolResultMessage[] = [];
-		for (const block of response.content) {
-			if (block.type === "text") {
-				allTextContent += block.text;
-			} else if (block.type === "thinking") {
-				hasSeenThinking = true;
-			} else if (block.type === "toolCall") {
-				hasSeenToolCalls = true;
-
-				// Process the tool call
-				expect(block.name).toBe("math_operation");
-				expect(block.id).toBeTruthy();
-				expect(block.arguments).toBeTruthy();
-
-				const { a, b, operation } = block.arguments;
-				let result: number;
-				switch (operation) {
-					case "add":
-						result = a + b;
-						break;
-					case "multiply":
-						result = a * b;
-						break;
-					default:
-						result = 0;
-				}
-
-				// Add tool result to context
-				results.push({
-					role: "toolResult",
-					toolCallId: block.id,
-					toolName: block.name,
-					content: [{ type: "text", text: `${result}` }],
-					isError: false,
-					timestamp: Date.now(),
-				});
-			}
-		}
-		context.messages.push(...results);
+		const processed = processMultiTurnContent(response.content);
+		allTextContent += processed.text;
+		hasSeenThinking ||= processed.hasThinking;
+		hasSeenToolCalls ||= processed.hasToolCalls;
+		context.messages.push(...processed.toolResults);
 
 		// If we got a stop response with text content, we're likely done
 		expect(response.stopReason, `Error: ${response.errorMessage}`).not.toBe("error");
@@ -1415,13 +1474,7 @@ describe("Generate E2E Tests", () => {
 			expect(response.stopReason, `Error: ${response.errorMessage}`).not.toBe("error");
 			expect(capturedPayload).toBeTruthy();
 
-			const payload = capturedPayload as {
-				additionalModelRequestFields?: {
-					thinking?: { type?: string; display?: string };
-					output_config?: { effort?: string };
-					anthropic_beta?: string[];
-				};
-			};
+			const payload = capturedPayload as CapturedBedrockThinkingPayload;
 
 			expect(payload.additionalModelRequestFields?.thinking).toEqual({
 				type: "adaptive",

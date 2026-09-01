@@ -10,6 +10,20 @@ export interface LatestPiRelease {
 	note?: string;
 }
 
+interface PiVersionCheckOptions {
+	timeoutMs?: number;
+}
+interface NpmRegistryDistributionTags {
+	latest?: unknown;
+}
+
+interface NpmRegistryPackageMetadata {
+	"dist-tags"?: NpmRegistryDistributionTags;
+	note?: unknown;
+	packageName?: unknown;
+	version?: unknown;
+}
+
 interface ParsedVersion {
 	major: number;
 	minor: number;
@@ -61,7 +75,7 @@ export function isNewerPackageVersion(candidateVersion: string, currentVersion: 
 
 export async function getLatestPiRelease(
 	currentVersion: string,
-	options: { timeoutMs?: number } = {},
+	options: PiVersionCheckOptions = {},
 ): Promise<LatestPiRelease | undefined> {
 	if (isTruthyEnvFlag(process.env.PI_SKIP_VERSION_CHECK) || isTruthyEnvFlag(process.env.PI_OFFLINE)) return undefined;
 
@@ -74,12 +88,7 @@ export async function getLatestPiRelease(
 	});
 	if (!response.ok) return undefined;
 
-	const data = (await response.json()) as {
-		"dist-tags"?: { latest?: unknown };
-		note?: unknown;
-		packageName?: unknown;
-		version?: unknown;
-	};
+	const data = (await response.json()) as NpmRegistryPackageMetadata;
 	const version =
 		typeof data["dist-tags"]?.latest === "string" && data["dist-tags"].latest.trim()
 			? data["dist-tags"].latest.trim()
@@ -101,7 +110,7 @@ export async function getLatestPiRelease(
 
 export async function getLatestPiVersion(
 	currentVersion: string,
-	options: { timeoutMs?: number } = {},
+	options: PiVersionCheckOptions = {},
 ): Promise<string | undefined> {
 	return (await getLatestPiRelease(currentVersion, options))?.version;
 }

@@ -5,13 +5,15 @@ import type { SessionInfo } from "../src/core/session/types.ts";
 import { SessionSelectorComponent } from "../src/modes/interactive/components/session-selector.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 
+type SessionFixtureOverrides = Partial<SessionInfo> & { id: string };
+
 async function flushPromises(): Promise<void> {
 	await new Promise<void>((resolve) => {
 		setImmediate(resolve);
 	});
 }
 
-function makeSession(overrides: Partial<SessionInfo> & { id: string }): SessionInfo {
+function makeSession(overrides: SessionFixtureOverrides): SessionInfo {
 	return {
 		path: overrides.path ?? `/tmp/${overrides.id}.jsonl`,
 		id: overrides.id,

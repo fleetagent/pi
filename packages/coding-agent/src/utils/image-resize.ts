@@ -3,7 +3,7 @@ import type { ImageResizeOptions, ResizedImage } from "./image-resize-core.ts";
 
 export type { ImageResizeOptions, ResizedImage } from "./image-resize-core.ts";
 
-interface ResizeImageWorkerResponse {
+export interface ResizeImageWorkerResponse {
 	result?: ResizedImage | null;
 	error?: string;
 }

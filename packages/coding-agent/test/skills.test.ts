@@ -5,17 +5,19 @@ import type { ResourceDiagnostic } from "../src/core/diagnostics.ts";
 import { formatSkillsForPrompt, loadSkills, loadSkillsFromDir, type Skill } from "../src/core/skills.ts";
 import { createSyntheticSourceInfo } from "../src/core/source-info.ts";
 
-const fixturesDir = resolve(__dirname, "fixtures/skills");
-const collisionFixturesDir = resolve(__dirname, "fixtures/skills-collision");
-
-function createTestSkill(options: {
+interface TestSkillOptions {
 	name: string;
 	description: string;
 	filePath: string;
 	baseDir: string;
 	disableModelInvocation?: boolean;
 	source?: string;
-}): Skill {
+}
+
+const fixturesDir = resolve(__dirname, "fixtures/skills");
+const collisionFixturesDir = resolve(__dirname, "fixtures/skills-collision");
+
+function createTestSkill(options: TestSkillOptions): Skill {
 	return {
 		name: options.name,
 		description: options.description,

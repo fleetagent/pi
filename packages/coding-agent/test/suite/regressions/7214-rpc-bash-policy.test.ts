@@ -54,15 +54,17 @@ async function sendCommand(command: Record<string, unknown>): Promise<RpcRespons
 }
 
 function removeAddedSignalListeners(signal: NodeJS.Signals, existing: NodeJS.SignalsListener[]): void {
+	const existingListeners = new Set(existing);
 	for (const listener of process.listeners(signal)) {
-		if (!existing.includes(listener)) process.removeListener(signal, listener);
+		if (!existingListeners.has(listener)) process.removeListener(signal, listener);
 	}
 }
 
 function removeAddedEndListeners(existing: Array<() => void>): void {
+	const existingListeners = new Set(existing);
 	for (const listener of process.stdin.listeners("end")) {
 		const endListener = listener as () => void;
-		if (!existing.includes(endListener)) process.stdin.removeListener("end", endListener);
+		if (!existingListeners.has(endListener)) process.stdin.removeListener("end", endListener);
 	}
 }
 

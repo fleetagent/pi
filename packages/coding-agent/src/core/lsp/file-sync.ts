@@ -23,10 +23,34 @@ export interface LspSynchronizationResult {
 	failures: LspSynchronizationFailure[];
 	lifecycleCancelled?: true;
 }
+
+interface IncrementalDocumentChange {
+	range: Range;
+	text: string;
+}
+
 interface OpenDocument {
 	agentPath: string;
 	content: string;
 	operations: ToolOperations;
+}
+
+interface SynchronizationContentReadContext {
+	operations: ToolOperations;
+	callerSignal: AbortSignal | undefined;
+	lifecycleSignal: AbortSignal;
+	routes: readonly LspClientRoute[];
+	failures: LspSynchronizationFailure[];
+}
+
+interface ClientSynchronizationContext {
+	document: OpenDocument;
+	target: LspRouteTarget;
+	client: LspClient;
+	written: boolean;
+	callerSignal: AbortSignal | undefined;
+	lifecycleSignal: AbortSignal;
+	reconnectOnFailure: boolean;
 }
 
 interface ClientDocumentState extends LspTrackedDocument {
@@ -57,7 +81,7 @@ function positionAt(text: string, offset: number): Position {
 	return { line, character: offset - lineStart };
 }
 
-function createIncrementalChange(previous: string, next: string): { range: Range; text: string } {
+function createIncrementalChange(previous: string, next: string): IncrementalDocumentChange {
 	let prefix = 0;
 	while (prefix < previous.length && prefix < next.length && previous[prefix] === next[prefix]) prefix++;
 	let suffix = 0;
@@ -170,6 +194,26 @@ export class LspFileSync {
 		return this.waitForQueuedSynchronization(result, signal, lifecycleSignal);
 	}
 
+	private async readSynchronizationContent(
+		absolutePath: string,
+		context: SynchronizationContentReadContext,
+	): Promise<string | undefined> {
+		try {
+			return await this.waitForSynchronization(
+				this.readUtf8(absolutePath, context.operations),
+				context.callerSignal,
+				context.lifecycleSignal,
+			);
+		} catch (error) {
+			if (this.isSynchronizationAborted(context.callerSignal, context.lifecycleSignal)) throw error;
+			for (const { target } of context.routes) {
+				this.manager.reportSynchronizationError(target, error);
+				context.failures.push(this.synchronizationFailure(target, error));
+			}
+			return undefined;
+		}
+	}
+
 	private async synchronize(
 		filePath: string,
 		operations: ToolOperations,
@@ -199,21 +243,14 @@ export class LspFileSync {
 		});
 		if (!existingDocument && runningTargets.length === 0) return { failures };
 
-		let content: string;
-		try {
-			content = await this.waitForSynchronization(
-				this.readUtf8(absolutePath, operations),
-				callerSignal,
-				lifecycleSignal,
-			);
-		} catch (error) {
-			if (this.isSynchronizationAborted(callerSignal, lifecycleSignal)) throw error;
-			for (const { target } of runningTargets) {
-				this.manager.reportSynchronizationError(target, error);
-				failures.push(this.synchronizationFailure(target, error));
-			}
-			return { failures };
-		}
+		const content = await this.readSynchronizationContent(absolutePath, {
+			operations,
+			callerSignal,
+			lifecycleSignal,
+			routes: runningTargets,
+			failures,
+		});
+		if (content === undefined) return { failures };
 		this.throwIfSynchronizationAborted(callerSignal, lifecycleSignal);
 		const document: OpenDocument = existingDocument ?? { agentPath: absolutePath, content, operations };
 		document.content = content;
@@ -236,6 +273,50 @@ export class LspFileSync {
 			await this.evictOldestDocuments(lifecycleSignal);
 		}
 		return { failures };
+	}
+
+	private async openClientDocument(
+		context: ClientSynchronizationContext,
+		key: string,
+		saveDocumentKey: string | undefined,
+	): Promise<void> {
+		const { document, target, client, callerSignal, lifecycleSignal, reconnectOnFailure } = context;
+		const capabilities = client.documentSyncCapabilities;
+		const state: ClientDocumentState = {
+			agentPath: document.agentPath,
+			uri: target.serverUri,
+			languageId: target.languageId,
+			instanceKey: target.instanceKey,
+			version: 1,
+			client,
+			target,
+			content: document.content,
+			opened: false,
+		};
+		if (capabilities.openClose) {
+			await this.sendSynchronizationNotification(
+				target,
+				client,
+				(signal) => client.didOpen(state.uri, state.languageId, state.version, document.content, signal),
+				callerSignal,
+				lifecycleSignal,
+				reconnectOnFailure,
+				saveDocumentKey,
+			);
+			state.opened = true;
+		}
+		this.clientDocuments.set(key, state);
+		if (context.written && capabilities.save) {
+			await this.sendSynchronizationNotification(
+				target,
+				client,
+				(signal) => client.didSave(state.uri, capabilities.saveIncludeText ? document.content : undefined, signal),
+				callerSignal,
+				lifecycleSignal,
+				reconnectOnFailure,
+				saveDocumentKey,
+			);
+		}
 	}
 
 	private async synchronizeClient(
@@ -273,49 +354,11 @@ export class LspFileSync {
 			state = undefined;
 		}
 		if (!state || state.client !== client) {
-			const createdState: ClientDocumentState = {
-				agentPath: document.agentPath,
-				uri: target.serverUri,
-				languageId: target.languageId,
-				instanceKey: target.instanceKey,
-				version: 1,
-				client,
-				target,
-				content: document.content,
-				opened: false,
-			};
-			if (capabilities.openClose) {
-				await this.sendSynchronizationNotification(
-					target,
-					client,
-					(signal) =>
-						client.didOpen(
-							createdState.uri,
-							createdState.languageId,
-							createdState.version,
-							document.content,
-							signal,
-						),
-					callerSignal,
-					lifecycleSignal,
-					reconnectOnFailure,
-					saveDocumentKey,
-				);
-				createdState.opened = true;
-			}
-			this.clientDocuments.set(key, createdState);
-			if (written && capabilities.save) {
-				await this.sendSynchronizationNotification(
-					target,
-					client,
-					(signal) =>
-						client.didSave(createdState.uri, capabilities.saveIncludeText ? document.content : undefined, signal),
-					callerSignal,
-					lifecycleSignal,
-					reconnectOnFailure,
-					saveDocumentKey,
-				);
-			}
+			await this.openClientDocument(
+				{ document, target, client, written, callerSignal, lifecycleSignal, reconnectOnFailure },
+				key,
+				saveDocumentKey,
+			);
 			return;
 		}
 
@@ -402,30 +445,35 @@ export class LspFileSync {
 			throw error;
 		}
 	}
+	private async replayDocumentForClient(
+		document: OpenDocument,
+		route: LspClientRoute,
+		lifecycleSignal: AbortSignal,
+	): Promise<void> {
+		throwIfAborted(lifecycleSignal);
+		const content = await waitForAbort(this.readUtf8(document.agentPath, document.operations), lifecycleSignal);
+		throwIfAborted(lifecycleSignal);
+		document.content = content;
+		const routed = await this.manager.resolveTargets(document.agentPath, lifecycleSignal);
+		const target = routed.targets.find((candidate) => candidate.instanceKey === route.target.instanceKey);
+		if (!target) return;
+		const reason = this.manager.getSynchronizationCompatibilityReason(target, document.operations.getBackendInfo?.());
+		if (reason) {
+			this.manager.reportSynchronizationUnavailable(target, reason);
+			return;
+		}
+		const pendingSaves = this.pendingSaveReplays.get(target.instanceKey);
+		const documentKey = pathComparisonValue(document.agentPath);
+		const replaySave = pendingSaves?.has(documentKey) === true;
+		await this.synchronizeClient(document, target, route.client, replaySave, undefined, lifecycleSignal, false);
+		if (replaySave) pendingSaves?.delete(documentKey);
+	}
+
 	private async replayForClient(route: LspClientRoute, lifecycleSignal: AbortSignal): Promise<void> {
 		let replayError: unknown;
 		for (const document of this.openDocuments.values()) {
-			throwIfAborted(lifecycleSignal);
 			try {
-				const content = await waitForAbort(this.readUtf8(document.agentPath, document.operations), lifecycleSignal);
-				throwIfAborted(lifecycleSignal);
-				document.content = content;
-				const routed = await this.manager.resolveTargets(document.agentPath, lifecycleSignal);
-				const target = routed.targets.find((candidate) => candidate.instanceKey === route.target.instanceKey);
-				if (!target) continue;
-				const reason = this.manager.getSynchronizationCompatibilityReason(
-					target,
-					document.operations.getBackendInfo?.(),
-				);
-				if (reason) {
-					this.manager.reportSynchronizationUnavailable(target, reason);
-					continue;
-				}
-				const pendingSaves = this.pendingSaveReplays.get(target.instanceKey);
-				const documentKey = pathComparisonValue(document.agentPath);
-				const replaySave = pendingSaves?.has(documentKey) === true;
-				await this.synchronizeClient(document, target, route.client, replaySave, undefined, lifecycleSignal, false);
-				if (replaySave) pendingSaves?.delete(documentKey);
+				await this.replayDocumentForClient(document, route, lifecycleSignal);
 			} catch (error) {
 				if (lifecycleSignal.aborted) throw error;
 				replayError = error;
@@ -445,14 +493,34 @@ export class LspFileSync {
 		this.openDocuments.set(key, document);
 	}
 
+	private clearPendingSaveReplaysForDocument(
+		documentKey: string,
+		pendingReplaysByDocument: Map<string, Set<string>[]>,
+	): void {
+		const replaySets = pendingReplaysByDocument.get(documentKey);
+		if (!replaySets) return;
+		for (const pending of replaySets) pending.delete(documentKey);
+		pendingReplaysByDocument.delete(documentKey);
+	}
+
 	private async evictOldestDocuments(lifecycleSignal: AbortSignal): Promise<void> {
+		if (this.openDocuments.size <= this.maxTrackedDocuments) return;
+		const pendingReplaysByDocument = new Map<string, Set<string>[]>();
+		for (const pending of this.pendingSaveReplays.values()) {
+			for (const documentKey of pending) {
+				const replaySets = pendingReplaysByDocument.get(documentKey) ?? [];
+				replaySets.push(pending);
+				pendingReplaysByDocument.set(documentKey, replaySets);
+			}
+		}
 		while (this.openDocuments.size > this.maxTrackedDocuments) {
 			throwIfAborted(lifecycleSignal);
 			const oldest = this.openDocuments.entries().next();
 			if (oldest.done) return;
-			this.openDocuments.delete(oldest.value[0]);
-			for (const pending of this.pendingSaveReplays.values()) pending.delete(oldest.value[0]);
-			await this.closeDocumentStates(oldest.value[0], undefined, lifecycleSignal);
+			const documentKey = oldest.value[0];
+			this.openDocuments.delete(documentKey);
+			this.clearPendingSaveReplaysForDocument(documentKey, pendingReplaysByDocument);
+			await this.closeDocumentStates(documentKey, undefined, lifecycleSignal);
 		}
 	}
 

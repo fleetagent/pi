@@ -4,10 +4,14 @@ type ParsedFrontmatter<T extends Record<string, unknown>> = {
 	frontmatter: T;
 	body: string;
 };
+interface ExtractedFrontmatter {
+	yamlString: string | null;
+	body: string;
+}
 
 const normalizeNewlines = (value: string): string => value.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 
-const extractFrontmatter = (content: string): { yamlString: string | null; body: string } => {
+const extractFrontmatter = (content: string): ExtractedFrontmatter => {
 	const normalized = normalizeNewlines(content);
 
 	if (!normalized.startsWith("---")) {

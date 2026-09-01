@@ -15,7 +15,7 @@
  */
 
 import { mkdtemp, writeFile } from "node:fs/promises";
-import type { ExtensionAPI } from "@fleetagent/pi-coding-agent";
+import type { AgentToolResult, ExtensionAPI, Theme } from "@fleetagent/pi-coding-agent";
 import {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
@@ -45,6 +45,28 @@ interface RgDetails {
 	fullOutputPath?: string;
 }
 
+function renderExpandedRgResult(
+	summary: string,
+	result: AgentToolResult<unknown>,
+	details: RgDetails,
+	theme: Theme,
+): Text {
+	let text = summary;
+	const content = result.content[0];
+	if (content?.type === "text") {
+		const outputLines = content.text.split("\n");
+		for (const line of outputLines.slice(0, 20)) {
+			text += `\n${theme.fg("dim", line)}`;
+		}
+		if (outputLines.length > 20) {
+			text += `\n${theme.fg("muted", "... (use read tool to see full output)")}`;
+		}
+	}
+	if (details.fullOutputPath) {
+		text += `\n${theme.fg("dim", `Full output: ${details.fullOutputPath}`)}`;
+	}
+	return new Text(text, 0, 0);
+}
 export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "rg",
@@ -169,25 +191,8 @@ export default function (pi: ExtensionAPI) {
 				text += theme.fg("warning", " (truncated)");
 			}
 
-			// In expanded view, show the actual matches
-			if (expanded) {
-				const content = result.content[0];
-				if (content?.type === "text") {
-					// Show first 20 lines in expanded view, or all if fewer
-					const lines = content.text.split("\n").slice(0, 20);
-					for (const line of lines) {
-						text += `\n${theme.fg("dim", line)}`;
-					}
-					if (content.text.split("\n").length > 20) {
-						text += `\n${theme.fg("muted", "... (use read tool to see full output)")}`;
-					}
-				}
-
-				// Show temp file path if truncated
-				if (details.fullOutputPath) {
-					text += `\n${theme.fg("dim", `Full output: ${details.fullOutputPath}`)}`;
-				}
-			}
+			// In expanded view, show the actual matches and any saved-output path.
+			if (expanded) return renderExpandedRgResult(text, result, details, theme);
 
 			return new Text(text, 0, 0);
 		},

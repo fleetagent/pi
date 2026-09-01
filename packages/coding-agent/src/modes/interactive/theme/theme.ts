@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import type { ModelThinkingLevel } from "@fleetagent/pi-ai";
 import {
 	type EditorTheme,
 	getCapabilities,
@@ -164,7 +165,7 @@ type ColorMode = "truecolor" | "256color";
 // Color Utilities
 // ============================================================================
 
-function hexToRgb(hex: string): { r: number; g: number; b: number } {
+function hexToRgb(hex: string): RgbColor {
 	const cleaned = hex.replace("#", "");
 	if (cleaned.length !== 6) {
 		throw new Error(`Invalid hex color: ${hex}`);
@@ -319,6 +320,11 @@ function resolveThemeColors<T extends Record<string, ColorValue>>(
 // Theme Class
 // ============================================================================
 
+interface ThemeConstructionOptions {
+	name?: string;
+	sourcePath?: string;
+	sourceInfo?: SourceInfo;
+}
 export class Theme {
 	readonly name?: string;
 	readonly sourcePath?: string;
@@ -331,7 +337,7 @@ export class Theme {
 		fgColors: Record<ThemeColor, string | number>,
 		bgColors: Record<ThemeBg, string | number>,
 		mode: ColorMode,
-		options: { name?: string; sourcePath?: string; sourceInfo?: SourceInfo } = {},
+		options: ThemeConstructionOptions = {},
 	) {
 		this.name = options.name;
 		this.sourcePath = options.sourcePath;
@@ -395,7 +401,7 @@ export class Theme {
 		return this.mode;
 	}
 
-	getThinkingBorderColor(level: "off" | "minimal" | "low" | "medium" | "high" | "xhigh"): (str: string) => string {
+	getThinkingBorderColor(level: ModelThinkingLevel): (str: string) => string {
 		// Map thinking levels to dedicated theme colors
 		switch (level) {
 			case "off":
@@ -502,40 +508,44 @@ function getCustomThemeInfos(): ThemeInfo[] {
 	return result;
 }
 
+interface ThemeValidationErrors {
+	missingColors: Set<string>;
+	otherErrors: string[];
+}
+
+function collectThemeValidationErrors(json: unknown): ThemeValidationErrors {
+	const missingColors = new Set<string>();
+	const otherErrors: string[] = [];
+	for (const error of validateThemeJson.Errors(json)) {
+		if (error.keyword === "required" && error.instancePath === "/colors") {
+			const requiredProperties = (error.params as { requiredProperties?: string[] }).requiredProperties;
+			for (const requiredProperty of requiredProperties ?? []) missingColors.add(requiredProperty);
+			continue;
+		}
+		const path = error.instancePath || "/";
+		otherErrors.push(`  - ${path}: ${error.message}`);
+	}
+	return { missingColors, otherErrors };
+}
+
+function formatThemeValidationError(label: string, errors: ThemeValidationErrors): string {
+	let message = `Invalid theme "${label}":\n`;
+	if (errors.missingColors.size > 0) {
+		message += "\nMissing required color tokens:\n";
+		message += Array.from(errors.missingColors)
+			.sort()
+			.map((color) => `  - ${color}`)
+			.join("\n");
+		message += '\n\nPlease add these colors to your theme\'s "colors" object.';
+		message += "\nSee the built-in themes (dark.json, light.json) for reference values.";
+	}
+	if (errors.otherErrors.length > 0) message += `\n\nOther errors:\n${errors.otherErrors.join("\n")}`;
+	return message;
+}
+
 function parseThemeJson(label: string, json: unknown): ThemeJson {
 	if (!validateThemeJson.Check(json)) {
-		const errors = Array.from(validateThemeJson.Errors(json));
-		const missingColors = new Set<string>();
-		const otherErrors: string[] = [];
-
-		for (const error of errors) {
-			if (error.keyword === "required" && error.instancePath === "/colors") {
-				const requiredProperties = (error.params as { requiredProperties?: string[] }).requiredProperties;
-				for (const requiredProperty of requiredProperties ?? []) {
-					missingColors.add(requiredProperty);
-				}
-				continue;
-			}
-
-			const path = error.instancePath || "/";
-			otherErrors.push(`  - ${path}: ${error.message}`);
-		}
-
-		let errorMessage = `Invalid theme "${label}":\n`;
-		if (missingColors.size > 0) {
-			errorMessage += "\nMissing required color tokens:\n";
-			errorMessage += Array.from(missingColors)
-				.sort()
-				.map((color) => `  - ${color}`)
-				.join("\n");
-			errorMessage += '\n\nPlease add these colors to your theme\'s "colors" object.';
-			errorMessage += "\nSee the built-in themes (dark.json, light.json) for reference values.";
-		}
-		if (otherErrors.length > 0) {
-			errorMessage += `\n\nOther errors:\n${otherErrors.join("\n")}`;
-		}
-
-		throw new Error(errorMessage);
+		throw new Error(formatThemeValidationError(label, collectThemeValidationErrors(json)));
 	}
 
 	return json as ThemeJson;
@@ -623,6 +633,8 @@ export function getThemeByName(name: string): Theme | undefined {
 }
 
 export type TerminalTheme = "dark" | "light";
+type TerminalThemeDetectionSource = "terminal background" | "COLORFGBG" | "fallback";
+type TerminalThemeDetectionConfidence = "high" | "low";
 
 export interface RgbColor {
 	r: number;
@@ -632,9 +644,9 @@ export interface RgbColor {
 
 export interface TerminalThemeDetection {
 	theme: TerminalTheme;
-	source: "terminal background" | "COLORFGBG" | "fallback";
+	source: TerminalThemeDetectionSource;
 	detail: string;
-	confidence: "high" | "low";
+	confidence: TerminalThemeDetectionConfidence;
 }
 
 export interface TerminalThemeDetectionOptions {
@@ -790,7 +802,12 @@ export function initTheme(themeName?: string, enableWatcher: boolean = false): v
 	}
 }
 
-export function setTheme(name: string, enableWatcher: boolean = false): { success: boolean; error?: string } {
+export interface ThemeActivationResult {
+	success: boolean;
+	error?: string;
+}
+
+export function setTheme(name: string, enableWatcher: boolean = false): ThemeActivationResult {
 	currentThemeName = name;
 	try {
 		setGlobalTheme(loadTheme(name));
@@ -997,11 +1014,13 @@ export function isLightTheme(themeName?: string): boolean {
  * Get explicit export colors from theme JSON, if specified.
  * Returns undefined for each color that isn't explicitly set.
  */
-export function getThemeExportColors(themeName?: string): {
+interface ThemeExportColors {
 	pageBg?: string;
 	cardBg?: string;
 	infoBg?: string;
-} {
+}
+
+export function getThemeExportColors(themeName?: string): ThemeExportColors {
 	const name = themeName ?? currentThemeName ?? getDefaultTheme();
 	try {
 		const themeJson = loadThemeJson(name);

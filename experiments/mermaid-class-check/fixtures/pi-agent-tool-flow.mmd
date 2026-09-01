@@ -1,0 +1,42 @@
+flowchart TD
+    prompt["Agent.prompt()"]
+    runAgentLoop["Start agent lifecycle"]
+    runLoop["Run turns while work remains"]
+    assistantTurn["Execute assistant turn"]
+    streamResponse["Stream provider response"]
+    dispatch{"Assistant emitted tool calls?"}
+    sequential["Sequential batch"]
+    parallel["Parallel batch"]
+    prepare["Lookup, adapt, validate, beforeToolCall"]
+    execute["Execute tool and stream progress"]
+    finalize["Apply afterToolCall and normalize errors"]
+    createResult["Create ordered ToolResultMessage"]
+    emitResult["Emit result message lifecycle"]
+
+    %% pi:symbol prompt Agent.prompt
+    %% pi:symbol runAgentLoop runAgentLoop
+    %% pi:symbol runLoop runLoop
+    %% pi:symbol assistantTurn executeAssistantTurn
+    %% pi:symbol streamResponse streamAssistantResponse
+    %% pi:symbol dispatch executeToolCalls
+    %% pi:symbol sequential executeToolCallsSequential
+    %% pi:symbol parallel executeToolCallsParallel
+    %% pi:symbol prepare prepareToolCall
+    %% pi:symbol execute executePreparedToolCall
+    %% pi:symbol finalize finalizeExecutedToolCall
+    %% pi:symbol createResult createToolResultMessage
+    %% pi:symbol emitResult emitToolResultMessage
+
+    prompt --> runAgentLoop
+    runAgentLoop --> runLoop
+    runLoop --> assistantTurn
+    assistantTurn --> streamResponse
+    streamResponse --> dispatch
+    dispatch -->|global sequential or tool override| sequential
+    dispatch -->|default| parallel
+    sequential --> prepare
+    parallel --> prepare
+    prepare --> execute
+    execute --> finalize
+    finalize --> createResult
+    createResult --> emitResult

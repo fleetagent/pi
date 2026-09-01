@@ -1,4 +1,11 @@
-import { fauxAssistantMessage, fauxToolCall, getModel, registerFauxProvider } from "@fleetagent/pi-ai";
+import {
+	type FauxProviderRegistration,
+	fauxAssistantMessage,
+	fauxToolCall,
+	getModel,
+	type Message,
+	registerFauxProvider,
+} from "@fleetagent/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { AgentHarness } from "../../src/harness/agent-harness.ts";
 import { NodeExecutionEnv } from "../../src/harness/env/nodejs.ts";
@@ -9,21 +16,28 @@ import type { AgentMessage, AgentTool } from "../../src/types.ts";
 import { calculateTool } from "../utils/calculate.ts";
 import { getCurrentTimeTool } from "../utils/get-current-time.ts";
 
+type AppResourceSource = "project" | "user";
+type AppToolSource = "builtin" | "extension";
 interface AppSkill extends Skill {
-	source: "project" | "user";
+	source: AppResourceSource;
 }
 
 interface AppPromptTemplate extends PromptTemplate {
-	source: "project" | "user";
+	source: AppResourceSource;
 }
 
 interface AppTool extends AgentTool {
-	source: "builtin" | "extension";
+	source: AppToolSource;
 }
 
-const registrations: Array<{ unregister(): void }> = [];
+interface DeferredSignal {
+	promise: Promise<void>;
+	resolve(): void;
+}
 
-function textFromUserMessages(messages: Array<{ role: string; content: unknown }>): string[] {
+const registrations: FauxProviderRegistration[] = [];
+
+function textFromUserMessages(messages: Message[]): string[] {
 	return messages.flatMap((message) => {
 		if (message.role !== "user") return [];
 		if (typeof message.content === "string") return [message.content];
@@ -35,7 +49,7 @@ function textFromUserMessages(messages: Array<{ role: string; content: unknown }
 	});
 }
 
-function deferred(): { promise: Promise<void>; resolve: () => void } {
+function deferred(): DeferredSignal {
 	let resolve = () => {};
 	const promise = new Promise<void>((resolvePromise) => {
 		resolve = resolvePromise;
@@ -494,5 +508,38 @@ describe("AgentHarness", () => {
 		expect(resolved.promptTemplates?.[0]?.source).toBe("user");
 		expect(resolved.skills).not.toBe(resources.skills);
 		expect(resolved.promptTemplates).not.toBe(resources.promptTemplates);
+	});
+	it("moves before a selected user message and preserves hook-provided branch summaries", async () => {
+		const session = new Session(new InMemorySessionStorage());
+		const targetId = await session.appendMessage({
+			role: "user",
+			content: [
+				{ type: "text", text: "first" },
+				{ type: "text", text: " second" },
+			],
+			timestamp: Date.now(),
+		});
+		await session.appendMessage(fauxAssistantMessage("response"));
+		const harness = new AgentHarness({
+			env: new NodeExecutionEnv({ cwd: process.cwd() }),
+			session,
+			model: getModel("anthropic", "claude-sonnet-4-5"),
+		});
+		harness.on("session_before_tree", () => ({
+			summary: { summary: "preserved summary", details: { source: "hook" } },
+		}));
+
+		const result = await harness.navigateTree(targetId, { summarize: true });
+
+		expect(result).toMatchObject({
+			cancelled: false,
+			editorText: "first second",
+			summaryEntry: {
+				type: "branch_summary",
+				summary: "preserved summary",
+				details: { source: "hook" },
+				fromHook: true,
+			},
+		});
 	});
 });

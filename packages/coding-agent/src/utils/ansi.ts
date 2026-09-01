@@ -25,8 +25,11 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
  */
+interface AnsiRegexOptions {
+	onlyFirst?: boolean;
+}
 
-function ansiRegex({ onlyFirst = false }: { onlyFirst?: boolean } = {}): RegExp {
+function ansiRegex({ onlyFirst = false }: AnsiRegexOptions = {}): RegExp {
 	// Valid string terminator sequences are BEL, ESC\, and 0x9c
 	const ST = "(?:\\u0007|\\u001B\\u005C|\\u009C)";
 

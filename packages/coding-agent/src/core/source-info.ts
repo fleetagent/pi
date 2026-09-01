@@ -3,12 +3,21 @@ import type { WorkspaceIdentity } from "./workspace-identity.ts";
 
 export type SourceScope = "user" | "project" | "temporary";
 export type SourceOrigin = "package" | "top-level";
+type SourceBackend = "local" | "remote";
 
 export interface SourceInfo {
 	path: string;
 	source: string;
 	scope: SourceScope;
 	origin: SourceOrigin;
+	baseDir?: string;
+	workspace?: WorkspaceIdentity;
+}
+
+export interface SyntheticSourceInfoOptions {
+	source: string;
+	scope?: SourceScope;
+	origin?: SourceOrigin;
 	baseDir?: string;
 	workspace?: WorkspaceIdentity;
 }
@@ -24,16 +33,7 @@ export function createSourceInfo(path: string, metadata: PathMetadata): SourceIn
 	};
 }
 
-export function createSyntheticSourceInfo(
-	path: string,
-	options: {
-		source: string;
-		scope?: SourceScope;
-		origin?: SourceOrigin;
-		baseDir?: string;
-		workspace?: WorkspaceIdentity;
-	},
-): SourceInfo {
+export function createSyntheticSourceInfo(path: string, options: SyntheticSourceInfoOptions): SourceInfo {
 	return {
 		path,
 		source: options.source,
@@ -44,8 +44,8 @@ export function createSyntheticSourceInfo(
 	};
 }
 
-export function getSourceBackend(sourceInfo: SourceInfo | undefined): "local" | "remote" {
-	return sourceInfo?.source === "ssh" || sourceInfo?.source === "remote" ? "remote" : "local";
+export function getSourceBackend(sourceInfo: SourceInfo | undefined): SourceBackend {
+	return sourceInfo?.source === "remote" ? "remote" : "local";
 }
 
 export function getSourceBackendIcon(sourceInfo: SourceInfo | undefined): string {

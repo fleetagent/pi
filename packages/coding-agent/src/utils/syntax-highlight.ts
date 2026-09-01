@@ -69,12 +69,26 @@ function getActiveFormatter(scopes: Array<string | undefined>, theme: HighlightT
 	return theme.default;
 }
 
+interface HighlightSpanOpenTag {
+	endIndex: number;
+	scope: string | undefined;
+}
+
 function isSpanOpenTagStart(html: string, index: number): boolean {
 	if (!html.startsWith("<span", index)) {
 		return false;
 	}
 	const nextChar = html[index + "<span".length];
 	return nextChar === ">" || nextChar === " " || nextChar === "\t" || nextChar === "\n" || nextChar === "\r";
+}
+function parseSpanOpenTag(html: string, index: number): HighlightSpanOpenTag | null {
+	if (!isSpanOpenTagStart(html, index)) return null;
+	const endIndex = html.indexOf(">", index + 5);
+	if (endIndex === -1) return null;
+	return {
+		endIndex,
+		scope: getScopeFromSpanTag(html.slice(index, endIndex + 1)),
+	};
 }
 
 export function renderHighlightedHtml(html: string, theme: HighlightTheme = {}): string {
@@ -93,16 +107,12 @@ export function renderHighlightedHtml(html: string, theme: HighlightTheme = {}):
 
 	let index = 0;
 	while (index < html.length) {
-		if (isSpanOpenTagStart(html, index)) {
-			const tagEndIndex = html.indexOf(">", index + 5);
-			if (tagEndIndex !== -1) {
-				flushText();
-				const tag = html.slice(index, tagEndIndex + 1);
-				const scope = getScopeFromSpanTag(tag);
-				scopes.push(scope);
-				index = tagEndIndex + 1;
-				continue;
-			}
+		const spanOpenTag = parseSpanOpenTag(html, index);
+		if (spanOpenTag) {
+			flushText();
+			scopes.push(spanOpenTag.scope);
+			index = spanOpenTag.endIndex + 1;
+			continue;
 		}
 
 		if (html.startsWith(SPAN_CLOSE, index)) {

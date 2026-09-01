@@ -7,16 +7,15 @@
 
 import type { ExtensionAPI } from "@fleetagent/pi-coding-agent";
 
+const PROTECTED_PATH_PATTERN = /(?:\.env|\.git\/|node_modules\/)/;
 export default function (pi: ExtensionAPI) {
-	const protectedPaths = [".env", ".git/", "node_modules/"];
-
 	pi.on("tool_call", async (event, ctx) => {
 		if (event.toolName !== "write" && event.toolName !== "edit") {
 			return undefined;
 		}
 
 		const path = event.input.path as string;
-		const isProtected = protectedPaths.some((p) => path.includes(p));
+		const isProtected = PROTECTED_PATH_PATTERN.test(path);
 
 		if (isProtected) {
 			if (ctx.hasUI) {

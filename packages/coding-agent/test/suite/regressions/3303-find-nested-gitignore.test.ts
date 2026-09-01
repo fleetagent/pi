@@ -1,6 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { AgentToolResult } from "@fleetagent/pi-agent-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createFindToolDefinition } from "../../../src/core/tools/find.ts";
 import { LocalToolOperations } from "../../../src/core/tools/operations.ts";
@@ -21,10 +22,9 @@ describe("issue #3303 nested .gitignore rules leak into sibling directories", ()
 	async function runFind(pattern: string): Promise<string[]> {
 		const def = createFindToolDefinition(new LocalToolOperations(tempRoot));
 		const ctx = {} as Parameters<typeof def.execute>[4];
-		const result = (await def.execute("call-1", { pattern }, undefined, undefined, ctx)) as {
-			content: Array<{ type: string; text?: string }>;
-		};
-		const text = result.content[0]?.text ?? "";
+		const result = (await def.execute("call-1", { pattern }, undefined, undefined, ctx)) as AgentToolResult<unknown>;
+		const firstContent = result.content[0];
+		const text = firstContent?.type === "text" ? firstContent.text : "";
 		if (text === "No files found matching pattern") return [];
 		return text
 			.split("\n")

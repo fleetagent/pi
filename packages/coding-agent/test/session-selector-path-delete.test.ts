@@ -14,6 +14,15 @@ type Deferred<T> = {
 	reject: (err: unknown) => void;
 };
 
+type SessionFixtureOptions = Partial<SessionInfo> & Pick<SessionInfo, "id">;
+
+interface SymlinkedSessionPaths {
+	baseDir: string;
+	parentAliasA: string;
+	parentAliasB: string;
+	childAliasB: string;
+}
+
 function createDeferred<T>(): Deferred<T> {
 	let resolve: (value: T) => void = () => {};
 	let reject: (err: unknown) => void = () => {};
@@ -34,7 +43,7 @@ function stripAnsi(text: string): string {
 	return text.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
 }
 
-function makeSession(overrides: Partial<SessionInfo> & { id: string }): SessionInfo {
+function makeSession(overrides: SessionFixtureOptions): SessionInfo {
 	return {
 		path: overrides.path ?? `/tmp/${overrides.id}.jsonl`,
 		id: overrides.id,
@@ -49,12 +58,7 @@ function makeSession(overrides: Partial<SessionInfo> & { id: string }): SessionI
 	};
 }
 
-function createSymlinkedSessionPaths(): {
-	baseDir: string;
-	parentAliasA: string;
-	parentAliasB: string;
-	childAliasB: string;
-} {
+function createSymlinkedSessionPaths(): SymlinkedSessionPaths {
 	const baseDir = mkdtempSync(join(tmpdir(), "pi-session-selector-"));
 	const realDir = join(baseDir, "real");
 	const aliasADir = join(baseDir, "alias-a");

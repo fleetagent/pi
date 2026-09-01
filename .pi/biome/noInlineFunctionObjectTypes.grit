@@ -1,0 +1,40 @@
+engine biome(1.0)
+language js(typescript, jsx)
+
+or {
+    JsFormalParameter(type_annotation = TsTypeAnnotation(ty = $signature_type)) as $parameter where {
+        $signature_type <: contains TsObjectType() until TsTypeParameters(),
+        not $parameter <: within TsFunctionType()
+    },
+    JsRestParameter(type_annotation = TsTypeAnnotation(ty = $signature_type)) as $parameter where {
+        $signature_type <: contains TsObjectType() until TsTypeParameters(),
+        not $parameter <: within TsFunctionType()
+    },
+    TsThisParameter(type_annotation = TsTypeAnnotation(ty = $signature_type)) as $parameter where {
+        $signature_type <: contains TsObjectType() until TsTypeParameters(),
+        not $parameter <: within TsFunctionType()
+    },
+    TsReturnTypeAnnotation(ty = $signature_type) where {
+        $signature_type <: contains TsObjectType() until TsTypeParameters()
+    },
+    TsFunctionType(parameters = $parameters, return_type = $return_type) as $signature_type where {
+        or {
+            $parameters <: contains TsObjectType() until TsTypeParameters(),
+            $return_type <: contains TsObjectType() until TsTypeParameters()
+        },
+        not $signature_type <: within JsFormalParameter(),
+        not $signature_type <: within JsRestParameter(),
+        not $signature_type <: within TsThisParameter(),
+        not $signature_type <: within TsReturnTypeAnnotation()
+    },
+    TsObjectType() as $signature_type where {
+        $signature_type <: within TsPropertySignatureTypeMember(),
+        not $signature_type <: within TsFunctionType()
+    }
+} where {
+    not $signature_type <: within TsTypeParameters(),
+    register_diagnostic(
+        span = $signature_type,
+        message = "[noInlineFunctionObjectTypes] Extract inline object types from function signatures and named object contracts into dedicated interfaces or type aliases."
+    )
+}

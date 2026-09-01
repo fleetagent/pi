@@ -20,6 +20,9 @@ import type { LspClientInfo, LspJsonValue, LspTraceValue } from "./config.ts";
 import { pathApi, pathFlavor, portablePathToFileUri } from "./portable-path.ts";
 import type { LspConnectionEndpoint, LspConnectionFactory, LspConnectionHandle } from "./transport.ts";
 
+export type LspShutdownMode = "protocol" | "disconnect";
+export type LspClientOwnership = "managed" | "attached";
+
 export interface LspClientOptions {
 	serverId: string;
 	rootDir: string;
@@ -31,8 +34,8 @@ export interface LspClientOptions {
 	initializeTimeoutMs?: number;
 	requestTimeoutMs?: number;
 	shutdownTimeoutMs?: number;
-	shutdownMode?: "protocol" | "disconnect";
-	ownership?: "managed" | "attached";
+	shutdownMode?: LspShutdownMode;
+	ownership?: LspClientOwnership;
 	initializationOptions?: LspJsonValue;
 	settings?: LspJsonValue;
 	clientInfo?: LspClientInfo;
@@ -64,6 +67,13 @@ interface OperationDeadline {
 	expiresAt: number | undefined;
 }
 
+interface OperationWaitOptions {
+	signal?: AbortSignal;
+	onTimeout?: () => void;
+	onAbort?: () => void;
+	abortMessage?: string;
+}
+
 const MAX_INVALIDATION_CLOSE_MS = 3000;
 
 function createDeadline(timeoutMs: number | undefined): OperationDeadline {
@@ -77,7 +87,7 @@ async function waitForOperation<T>(
 	promise: Promise<T>,
 	deadline: OperationDeadline,
 	description: string,
-	options: { signal?: AbortSignal; onTimeout?: () => void; onAbort?: () => void; abortMessage?: string } = {},
+	options: OperationWaitOptions = {},
 ): Promise<T> {
 	return new Promise<T>((resolve, reject) => {
 		let settled = false;
@@ -236,7 +246,7 @@ export class LspClient {
 		return this.state;
 	}
 
-	get ownership(): "managed" | "attached" {
+	get ownership(): LspClientOwnership {
 		return this.options.ownership ?? "managed";
 	}
 
@@ -264,6 +274,192 @@ export class LspClient {
 		return this.startPromise;
 	}
 
+	private async connectForStartup(controller: AbortController): Promise<LspConnectionHandle> {
+		let resolvedHandle: LspConnectionHandle | undefined;
+		let discardHandle = false;
+		const handlePromise = Promise.resolve().then(() =>
+			this.options.connectionFactory({
+				serverId: this.serverId,
+				workspaceRoot: this.rootDir,
+				workspaceUri: this.rootUri,
+				signal: controller.signal,
+				connectTimeoutMs: this.options.connectTimeoutMs,
+				onStderr: (text) => {
+					this.stderr = `${this.stderr}${text}`.slice(-16_384);
+					this.options.onStderr?.(text);
+				},
+			}),
+		);
+		void handlePromise.then(
+			(handle) => {
+				resolvedHandle = handle;
+				if (discardHandle) void this.closeConnectionHandle(handle);
+			},
+			() => undefined,
+		);
+		try {
+			return await waitForOperation(
+				handlePromise,
+				createDeadline(this.options.connectTimeoutMs),
+				`Connecting to LSP server ${this.serverId}`,
+				{
+					signal: controller.signal,
+					onTimeout: () => controller.abort(),
+					abortMessage: `LSP client startup for ${this.serverId} was aborted`,
+				},
+			);
+		} catch (error) {
+			discardHandle = true;
+			controller.abort();
+			if (resolvedHandle) void this.closeConnectionHandle(resolvedHandle);
+			throw error;
+		}
+	}
+
+	private attachConnectionHandle(handle: LspConnectionHandle): void {
+		this.connectionHandle = handle;
+		this.state = "initializing";
+		this.endpoint = handle.endpoint;
+		handle.onError((error) => {
+			if (this.connectionHandle === handle) this.recordTransportError(error);
+		});
+		handle.onClose(() => {
+			if (this.connectionHandle !== handle) return;
+			this.initialized = false;
+			void this.closeHandle();
+			if (!this.closing) this.state = this.disposed ? "disposed" : "closed";
+			this.disposeConnection();
+			if (!this.disposed && !this.closing) this.options.onUnexpectedClose?.(this.transportError);
+		});
+		this.connection = createMessageConnection(handle.reader, handle.writer);
+		this.registerConnectionHandlers();
+		this.connection.listen();
+	}
+
+	private createInitializeParams(): InitializeParams {
+		return {
+			processId: this.ownership === "attached" ? null : process.pid,
+			rootUri: this.rootUri,
+			workspaceFolders: [this.workspaceFolder],
+			capabilities: {
+				textDocument: {
+					synchronization: { didSave: true, dynamicRegistration: false },
+					hover: { contentFormat: ["plaintext", "markdown"] },
+					definition: {},
+					references: {},
+					rename: { prepareSupport: false },
+					publishDiagnostics: { relatedInformation: true },
+					codeAction: {
+						dynamicRegistration: false,
+						codeActionLiteralSupport: {
+							codeActionKind: {
+								valueSet: [
+									CodeActionKind.Empty,
+									CodeActionKind.QuickFix,
+									CodeActionKind.Refactor,
+									CodeActionKind.RefactorExtract,
+									CodeActionKind.RefactorInline,
+									CodeActionKind.RefactorRewrite,
+									CodeActionKind.Source,
+									CodeActionKind.SourceOrganizeImports,
+									CodeActionKind.SourceFixAll,
+								],
+							},
+						},
+						isPreferredSupport: true,
+						dataSupport: true,
+					},
+				},
+				workspace: {
+					configuration: true,
+					workspaceFolders: true,
+					workspaceEdit: {
+						documentChanges: true,
+						resourceOperations: [
+							ResourceOperationKind.Create,
+							ResourceOperationKind.Rename,
+							ResourceOperationKind.Delete,
+						],
+					},
+				},
+			},
+			clientInfo: this.options.clientInfo ?? { name: "@fleetagent/pi-coding-agent" },
+			...(this.options.initializationOptions === undefined
+				? {}
+				: { initializationOptions: this.options.initializationOptions }),
+			...(this.options.locale === undefined ? {} : { locale: this.options.locale }),
+			...(this.options.trace === undefined ? {} : { trace: this.options.trace }),
+		};
+	}
+
+	private async initializeConnection(
+		generation: number,
+		controller: AbortController,
+		handle: LspConnectionHandle,
+	): Promise<InitializeResult> {
+		if (!this.connection) throw new Error(`Connection to LSP server ${this.serverId} closed during initialization`);
+		const deadline = createDeadline(this.options.initializeTimeoutMs);
+		const description = `Initializing LSP server ${this.serverId}`;
+		const cancellation = new CancellationTokenSource();
+		let result: InitializeResult;
+		try {
+			result = await waitForOperation(
+				this.connection.sendRequest<InitializeResult>(
+					"initialize",
+					this.createInitializeParams(),
+					cancellation.token,
+				),
+				deadline,
+				description,
+				{
+					signal: controller.signal,
+					onTimeout: () => cancellation.cancel(),
+					onAbort: () => cancellation.cancel(),
+					abortMessage: `LSP client startup for ${this.serverId} was aborted`,
+				},
+			);
+		} finally {
+			cancellation.dispose();
+		}
+		this.assertStartupCurrent(generation, controller, handle);
+		await waitForOperation(this.connection.sendNotification("initialized", {}), deadline, description, {
+			signal: controller.signal,
+			abortMessage: `LSP client startup for ${this.serverId} was aborted`,
+		});
+		this.assertStartupCurrent(generation, controller, handle);
+		if (this.options.settings !== undefined) {
+			await waitForOperation(
+				this.connection.sendNotification("workspace/didChangeConfiguration", { settings: this.options.settings }),
+				deadline,
+				description,
+				{ signal: controller.signal, abortMessage: `LSP client startup for ${this.serverId} was aborted` },
+			);
+		}
+		this.assertStartupCurrent(generation, controller, handle);
+		return result;
+	}
+
+	private async recordStartupFailure(error: unknown): Promise<Error> {
+		const failure = error instanceof Error ? error : new Error(String(error));
+		if (!this.disposed) {
+			this.state = "failed";
+			this.recordTransportError(failure);
+		}
+		this.closing = true;
+		this.disposeConnection();
+		try {
+			await this.closeHandle(
+				createDeadline(this.options.shutdownTimeoutMs ?? 3000),
+				`Closing connection to LSP server ${this.serverId}`,
+			);
+		} catch (closeError) {
+			this.recordTransportError(closeError instanceof Error ? closeError : new Error(String(closeError)));
+		} finally {
+			this.closing = false;
+		}
+		return failure;
+	}
+
 	private async startInternal(): Promise<LspClientStartResult> {
 		if (this.disposed) throw new Error(`LSP client for ${this.serverId} is disposed`);
 		if (this.initialized && this.capabilities && this.endpoint) {
@@ -274,185 +470,17 @@ export class LspClient {
 		const controller = new AbortController();
 		this.startController = controller;
 		this.transportError = undefined;
-		const connectDescription = `Connecting to LSP server ${this.serverId}`;
 		try {
-			let resolvedHandle: LspConnectionHandle | undefined;
-			let discardHandle = false;
-			const handlePromise = Promise.resolve().then(() =>
-				this.options.connectionFactory({
-					serverId: this.serverId,
-					workspaceRoot: this.rootDir,
-					workspaceUri: this.rootUri,
-					signal: controller.signal,
-					connectTimeoutMs: this.options.connectTimeoutMs,
-					onStderr: (text) => {
-						this.stderr = `${this.stderr}${text}`.slice(-16_384);
-						this.options.onStderr?.(text);
-					},
-				}),
-			);
-			void handlePromise.then(
-				(handle) => {
-					resolvedHandle = handle;
-					if (discardHandle) void this.closeConnectionHandle(handle);
-				},
-				() => undefined,
-			);
-			let handle: LspConnectionHandle;
-			try {
-				handle = await waitForOperation(
-					handlePromise,
-					createDeadline(this.options.connectTimeoutMs),
-					connectDescription,
-					{
-						signal: controller.signal,
-						onTimeout: () => controller.abort(),
-						abortMessage: `LSP client startup for ${this.serverId} was aborted`,
-					},
-				);
-			} catch (error) {
-				discardHandle = true;
-				controller.abort();
-				if (resolvedHandle) void this.closeConnectionHandle(resolvedHandle);
-				throw error;
-			}
+			const handle = await this.connectForStartup(controller);
 			this.assertStartupCurrent(generation, controller);
-			this.connectionHandle = handle;
-			this.state = "initializing";
-			this.endpoint = handle.endpoint;
-			handle.onError((error) => {
-				if (this.connectionHandle === handle) this.recordTransportError(error);
-			});
-			handle.onClose(() => {
-				if (this.connectionHandle !== handle) return;
-				this.initialized = false;
-				void this.closeHandle();
-				if (!this.closing) this.state = this.disposed ? "disposed" : "closed";
-				this.disposeConnection();
-				if (!this.disposed && !this.closing) this.options.onUnexpectedClose?.(this.transportError);
-			});
-
-			this.connection = createMessageConnection(handle.reader, handle.writer);
-			this.registerConnectionHandlers();
-			this.connection.listen();
-			const initializeParams: InitializeParams = {
-				processId: this.ownership === "attached" ? null : process.pid,
-				rootUri: this.rootUri,
-				workspaceFolders: [this.workspaceFolder],
-				capabilities: {
-					textDocument: {
-						synchronization: { didSave: true, dynamicRegistration: false },
-						hover: { contentFormat: ["plaintext", "markdown"] },
-						definition: {},
-						references: {},
-						rename: { prepareSupport: false },
-						publishDiagnostics: { relatedInformation: true },
-						codeAction: {
-							dynamicRegistration: false,
-							codeActionLiteralSupport: {
-								codeActionKind: {
-									valueSet: [
-										CodeActionKind.Empty,
-										CodeActionKind.QuickFix,
-										CodeActionKind.Refactor,
-										CodeActionKind.RefactorExtract,
-										CodeActionKind.RefactorInline,
-										CodeActionKind.RefactorRewrite,
-										CodeActionKind.Source,
-										CodeActionKind.SourceOrganizeImports,
-										CodeActionKind.SourceFixAll,
-									],
-								},
-							},
-							isPreferredSupport: true,
-							dataSupport: true,
-						},
-					},
-					workspace: {
-						configuration: true,
-						workspaceFolders: true,
-						workspaceEdit: {
-							documentChanges: true,
-							resourceOperations: [
-								ResourceOperationKind.Create,
-								ResourceOperationKind.Rename,
-								ResourceOperationKind.Delete,
-							],
-						},
-					},
-				},
-				clientInfo: this.options.clientInfo ?? { name: "@fleetagent/pi-coding-agent" },
-				...(this.options.initializationOptions === undefined
-					? {}
-					: { initializationOptions: this.options.initializationOptions }),
-				...(this.options.locale === undefined ? {} : { locale: this.options.locale }),
-				...(this.options.trace === undefined ? {} : { trace: this.options.trace }),
-			};
-			const initializeDeadline = createDeadline(this.options.initializeTimeoutMs);
-			const initializeDescription = `Initializing LSP server ${this.serverId}`;
-			const initializeCancellation = new CancellationTokenSource();
-			let result: InitializeResult;
-			try {
-				result = await waitForOperation(
-					this.connection.sendRequest<InitializeResult>(
-						"initialize",
-						initializeParams,
-						initializeCancellation.token,
-					),
-					initializeDeadline,
-					initializeDescription,
-					{
-						signal: controller.signal,
-						onTimeout: () => initializeCancellation.cancel(),
-						onAbort: () => initializeCancellation.cancel(),
-						abortMessage: `LSP client startup for ${this.serverId} was aborted`,
-					},
-				);
-			} finally {
-				initializeCancellation.dispose();
-			}
-			this.assertStartupCurrent(generation, controller, handle);
-			await waitForOperation(
-				this.connection.sendNotification("initialized", {}),
-				initializeDeadline,
-				initializeDescription,
-				{ signal: controller.signal, abortMessage: `LSP client startup for ${this.serverId} was aborted` },
-			);
-			this.assertStartupCurrent(generation, controller, handle);
-			if (this.options.settings !== undefined) {
-				await waitForOperation(
-					this.connection.sendNotification("workspace/didChangeConfiguration", {
-						settings: this.options.settings,
-					}),
-					initializeDeadline,
-					initializeDescription,
-					{ signal: controller.signal, abortMessage: `LSP client startup for ${this.serverId} was aborted` },
-				);
-			}
-			this.assertStartupCurrent(generation, controller, handle);
+			this.attachConnectionHandle(handle);
+			const result = await this.initializeConnection(generation, controller, handle);
 			this.capabilities = result.capabilities;
 			this.initialized = true;
 			this.state = "running";
 			return { capabilities: result.capabilities, endpoint: handle.endpoint };
 		} catch (error) {
-			const failure = error instanceof Error ? error : new Error(String(error));
-			if (!this.disposed) {
-				this.state = "failed";
-				this.recordTransportError(failure);
-			}
-			this.closing = true;
-			this.disposeConnection();
-			try {
-				await this.closeHandle(
-					createDeadline(this.options.shutdownTimeoutMs ?? 3000),
-					`Closing connection to LSP server ${this.serverId}`,
-				);
-			} catch (closeError) {
-				this.recordTransportError(closeError instanceof Error ? closeError : new Error(String(closeError)));
-			} finally {
-				this.closing = false;
-			}
-			throw failure;
+			throw await this.recordStartupFailure(error);
 		} finally {
 			if (this.startController === controller) this.startController = undefined;
 		}
@@ -602,6 +630,35 @@ export class LspClient {
 		return shutdown;
 	}
 
+	private async requestServerShutdown(connection: MessageConnection, deadline: OperationDeadline): Promise<void> {
+		const cancellation = new CancellationTokenSource();
+		try {
+			await waitForOperation(
+				connection.sendRequest("shutdown", undefined, cancellation.token),
+				deadline,
+				`Shutting down LSP server ${this.serverId}`,
+				{ onTimeout: () => cancellation.cancel() },
+			);
+		} catch (error) {
+			this.recordTransportError(error instanceof Error ? error : new Error(String(error)));
+		} finally {
+			cancellation.dispose();
+		}
+	}
+
+	private async notifyServerExit(connection: MessageConnection, deadline: OperationDeadline): Promise<void> {
+		try {
+			await waitForOperation(
+				connection.sendNotification("exit"),
+				deadline,
+				`Sending exit to LSP server ${this.serverId}`,
+			);
+			await new Promise((resolve) => setTimeout(resolve, 50));
+		} catch (error) {
+			this.recordTransportError(error instanceof Error ? error : new Error(String(error)));
+		}
+	}
+
 	private async shutdownInternal(): Promise<void> {
 		this.disposed = true;
 		this.lifecycleGeneration++;
@@ -613,29 +670,8 @@ export class LspClient {
 		try {
 			const connection = this.connection;
 			if (connection && this.options.shutdownMode !== "disconnect") {
-				const cancellation = new CancellationTokenSource();
-				try {
-					await waitForOperation(
-						connection.sendRequest("shutdown", undefined, cancellation.token),
-						deadline,
-						`Shutting down LSP server ${this.serverId}`,
-						{ onTimeout: () => cancellation.cancel() },
-					);
-				} catch (error) {
-					this.recordTransportError(error instanceof Error ? error : new Error(String(error)));
-				} finally {
-					cancellation.dispose();
-				}
-				try {
-					await waitForOperation(
-						connection.sendNotification("exit"),
-						deadline,
-						`Sending exit to LSP server ${this.serverId}`,
-					);
-					await new Promise((resolve) => setTimeout(resolve, 50));
-				} catch (error) {
-					this.recordTransportError(error instanceof Error ? error : new Error(String(error)));
-				}
+				await this.requestServerShutdown(connection, deadline);
+				await this.notifyServerExit(connection, deadline);
 			}
 		} finally {
 			this.disposeConnection();

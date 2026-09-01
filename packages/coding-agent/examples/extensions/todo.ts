@@ -11,7 +11,7 @@
  */
 
 import { StringEnum } from "@fleetagent/pi-ai";
-import type { ExtensionAPI, ExtensionContext, Theme } from "@fleetagent/pi-coding-agent";
+import type { AgentToolResult, ExtensionAPI, ExtensionContext, Theme } from "@fleetagent/pi-coding-agent";
 import { matchesKey, Text, truncateToWidth } from "@fleetagent/pi-tui";
 import { Type } from "typebox";
 
@@ -21,8 +21,10 @@ interface Todo {
 	done: boolean;
 }
 
+type TodoAction = "list" | "add" | "toggle" | "clear";
+
 interface TodoDetails {
-	action: "list" | "add" | "toggle" | "clear";
+	action: TodoAction;
 	todos: Todo[];
 	nextId: number;
 	error?: string;
@@ -102,6 +104,50 @@ class TodoListComponent {
 	}
 }
 
+interface TodoResultRenderContext {
+	result: AgentToolResult<unknown>;
+	details: TodoDetails;
+	expanded: boolean;
+	theme: Theme;
+}
+
+function renderTodoListResult(todoList: Todo[], expanded: boolean, theme: Theme): Text {
+	if (todoList.length === 0) return new Text(theme.fg("dim", "No todos"), 0, 0);
+	let listText = theme.fg("muted", `${todoList.length} todo(s):`);
+	const display = expanded ? todoList : todoList.slice(0, 5);
+	for (const todo of display) {
+		const check = todo.done ? theme.fg("success", "✓") : theme.fg("dim", "○");
+		const itemText = todo.done ? theme.fg("dim", todo.text) : theme.fg("muted", todo.text);
+		listText += `\n${check} ${theme.fg("accent", `#${todo.id}`)} ${itemText}`;
+	}
+	if (!expanded && todoList.length > 5) {
+		listText += `\n${theme.fg("dim", `... ${todoList.length - 5} more`)}`;
+	}
+	return new Text(listText, 0, 0);
+}
+
+function renderTodoResultDetails(context: TodoResultRenderContext): Text {
+	const { details, expanded, result, theme } = context;
+	switch (details.action) {
+		case "list":
+			return renderTodoListResult(details.todos, expanded, theme);
+		case "add": {
+			const added = details.todos[details.todos.length - 1];
+			return new Text(
+				`${theme.fg("success", "✓ Added ")}${theme.fg("accent", `#${added.id}`)} ${theme.fg("muted", added.text)}`,
+				0,
+				0,
+			);
+		}
+		case "toggle": {
+			const text = result.content[0];
+			const message = text?.type === "text" ? text.text : "";
+			return new Text(theme.fg("success", "✓ ") + theme.fg("muted", message), 0, 0);
+		}
+		case "clear":
+			return new Text(theme.fg("success", "✓ ") + theme.fg("muted", "Cleared all todos"), 0, 0);
+	}
+}
 export default function (pi: ExtensionAPI) {
 	// In-memory state (reconstructed from session on load)
 	let todos: Todo[] = [];
@@ -131,6 +177,32 @@ export default function (pi: ExtensionAPI) {
 	// Reconstruct state on session events
 	pi.on("session_start", async (_event, ctx) => reconstructState(ctx));
 	pi.on("session_tree", async (_event, ctx) => reconstructState(ctx));
+
+	function toggleTodo(id: number | undefined) {
+		if (id === undefined) {
+			return {
+				content: [{ type: "text" as const, text: "Error: id required for toggle" }],
+				details: { action: "toggle", todos: [...todos], nextId, error: "id required" } as TodoDetails,
+			};
+		}
+		const todo = todos.find((item) => item.id === id);
+		if (!todo) {
+			return {
+				content: [{ type: "text" as const, text: `Todo #${id} not found` }],
+				details: {
+					action: "toggle",
+					todos: [...todos],
+					nextId,
+					error: `#${id} not found`,
+				} as TodoDetails,
+			};
+		}
+		todo.done = !todo.done;
+		return {
+			content: [{ type: "text" as const, text: `Todo #${todo.id} ${todo.done ? "completed" : "uncompleted"}` }],
+			details: { action: "toggle", todos: [...todos], nextId } as TodoDetails,
+		};
+	}
 
 	// Register the todo tool for the LLM
 	pi.registerTool({
@@ -169,31 +241,8 @@ export default function (pi: ExtensionAPI) {
 					};
 				}
 
-				case "toggle": {
-					if (params.id === undefined) {
-						return {
-							content: [{ type: "text", text: "Error: id required for toggle" }],
-							details: { action: "toggle", todos: [...todos], nextId, error: "id required" } as TodoDetails,
-						};
-					}
-					const todo = todos.find((t) => t.id === params.id);
-					if (!todo) {
-						return {
-							content: [{ type: "text", text: `Todo #${params.id} not found` }],
-							details: {
-								action: "toggle",
-								todos: [...todos],
-								nextId,
-								error: `#${params.id} not found`,
-							} as TodoDetails,
-						};
-					}
-					todo.done = !todo.done;
-					return {
-						content: [{ type: "text", text: `Todo #${todo.id} ${todo.done ? "completed" : "uncompleted"}` }],
-						details: { action: "toggle", todos: [...todos], nextId } as TodoDetails,
-					};
-				}
+				case "toggle":
+					return toggleTodo(params.id);
 
 				case "clear": {
 					const count = todos.length;
@@ -236,47 +285,7 @@ export default function (pi: ExtensionAPI) {
 				return new Text(theme.fg("error", `Error: ${details.error}`), 0, 0);
 			}
 
-			const todoList = details.todos;
-
-			switch (details.action) {
-				case "list": {
-					if (todoList.length === 0) {
-						return new Text(theme.fg("dim", "No todos"), 0, 0);
-					}
-					let listText = theme.fg("muted", `${todoList.length} todo(s):`);
-					const display = expanded ? todoList : todoList.slice(0, 5);
-					for (const t of display) {
-						const check = t.done ? theme.fg("success", "✓") : theme.fg("dim", "○");
-						const itemText = t.done ? theme.fg("dim", t.text) : theme.fg("muted", t.text);
-						listText += `\n${check} ${theme.fg("accent", `#${t.id}`)} ${itemText}`;
-					}
-					if (!expanded && todoList.length > 5) {
-						listText += `\n${theme.fg("dim", `... ${todoList.length - 5} more`)}`;
-					}
-					return new Text(listText, 0, 0);
-				}
-
-				case "add": {
-					const added = todoList[todoList.length - 1];
-					return new Text(
-						theme.fg("success", "✓ Added ") +
-							theme.fg("accent", `#${added.id}`) +
-							" " +
-							theme.fg("muted", added.text),
-						0,
-						0,
-					);
-				}
-
-				case "toggle": {
-					const text = result.content[0];
-					const msg = text?.type === "text" ? text.text : "";
-					return new Text(theme.fg("success", "✓ ") + theme.fg("muted", msg), 0, 0);
-				}
-
-				case "clear":
-					return new Text(theme.fg("success", "✓ ") + theme.fg("muted", "Cleared all todos"), 0, 0);
-			}
+			return renderTodoResultDetails({ result, details, expanded, theme });
 		},
 	});
 

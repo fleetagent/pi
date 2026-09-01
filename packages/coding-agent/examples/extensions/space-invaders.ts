@@ -30,8 +30,13 @@ interface Shield {
 	segments: boolean[][]; // 4x3 grid of destructible segments
 }
 
+interface SpaceInvadersPlayerState {
+	x: number;
+	lives: number;
+}
+
 interface GameState {
-	player: { x: number; lives: number };
+	player: SpaceInvadersPlayerState;
 	aliens: Alien[];
 	alienDirection: 1 | -1;
 	alienMoveCounter: number;
@@ -53,6 +58,10 @@ interface KeyState {
 	fire: boolean;
 }
 
+interface SpaceInvadersRenderHost {
+	requestRender(): void;
+}
+
 function createShields(): Shield[] {
 	const shields: Shield[] = [];
 	const shieldPositions = [8, 22, 36, 50];
@@ -71,18 +80,93 @@ function createShields(): Shield[] {
 
 function createAliens(): Alien[] {
 	const aliens: Alien[] = [];
-	for (let row = 0; row < ALIEN_ROWS; row++) {
+	for (let index = 0; index < ALIEN_ROWS * ALIEN_COLS; index += 1) {
+		const row = Math.floor(index / ALIEN_COLS);
+		const col = index % ALIEN_COLS;
 		const type = row === 0 ? 2 : row < 3 ? 1 : 0;
-		for (let col = 0; col < ALIEN_COLS; col++) {
-			aliens.push({
-				x: 4 + col * 5,
-				y: ALIEN_START_Y + row * 2,
-				type,
-				alive: true,
-			});
-		}
+		aliens.push({
+			x: 4 + col * 5,
+			y: ALIEN_START_Y + row * 2,
+			type,
+			alive: true,
+		});
 	}
 	return aliens;
+}
+
+type CellStyler = (text: string) => string;
+
+interface InvaderCellStyles {
+	dim: CellStyler;
+	green: CellStyler;
+	red: CellStyler;
+	yellow: CellStyler;
+	cyan: CellStyler;
+	magenta: CellStyler;
+	white: CellStyler;
+}
+
+function gameCellKey(x: number, y: number): number {
+	return y * GAME_WIDTH + x;
+}
+
+function setFirstCell(cells: Map<number, string>, x: number, y: number, value: string): void {
+	const key = gameCellKey(x, y);
+	if (!cells.has(key)) cells.set(key, value);
+}
+
+function indexBulletCells(cells: Map<number, string>, state: GameState, styles: InvaderCellStyles): void {
+	for (const bullet of state.bullets) {
+		setFirstCell(cells, bullet.x, bullet.y, bullet.direction === -1 ? styles.yellow("│") : styles.red("│"));
+	}
+}
+
+function indexPlayerCells(cells: Map<number, string>, state: GameState, styles: InvaderCellStyles): void {
+	cells.set(gameCellKey(state.player.x - 1, PLAYER_Y), styles.white("═"));
+	cells.set(gameCellKey(state.player.x, PLAYER_Y), styles.white("▲"));
+	cells.set(gameCellKey(state.player.x + 1, PLAYER_Y), styles.white("═"));
+}
+
+function indexShieldCells(cells: Map<number, string>, state: GameState, styles: InvaderCellStyles): void {
+	for (const shield of state.shields) {
+		const rowCount = shield.segments.length;
+		const columnCount = shield.segments[0]?.length ?? 0;
+		for (let index = 0; index < rowCount * columnCount; index += 1) {
+			const relX = index % columnCount;
+			const relY = Math.floor(index / columnCount);
+			if (shield.segments[relY][relX]) {
+				cells.set(gameCellKey(shield.x + relX, PLAYER_Y - 5 + relY), styles.dim("█"));
+			}
+		}
+	}
+}
+
+function indexAlienCells(cells: Map<number, string>, state: GameState, styles: InvaderCellStyles): void {
+	const alienCells = new Map<number, string>();
+	const sprites = [
+		["╲", "▼", "╱"],
+		["╱", "◆", "╲"],
+		["◄", "☆", "►"],
+	];
+	const colors = [styles.green, styles.cyan, styles.magenta];
+	for (const alien of state.aliens) {
+		if (!alien.alive) continue;
+		const color = colors[alien.type];
+		const sprite = sprites[alien.type];
+		setFirstCell(alienCells, alien.x - 1, alien.y, color(sprite[0]));
+		setFirstCell(alienCells, alien.x, alien.y, color(sprite[1]));
+		setFirstCell(alienCells, alien.x + 1, alien.y, color(sprite[2]));
+	}
+	for (const [key, value] of alienCells) cells.set(key, value);
+}
+
+function createInvaderCellIndex(state: GameState, styles: InvaderCellStyles): Map<number, string> {
+	const cells = new Map<number, string>();
+	indexBulletCells(cells, state, styles);
+	indexPlayerCells(cells, state, styles);
+	indexShieldCells(cells, state, styles);
+	indexAlienCells(cells, state, styles);
+	return cells;
 }
 
 function createInitialState(highScore = 0, level = 1): GameState {
@@ -110,7 +194,7 @@ class SpaceInvadersComponent {
 	private interval: ReturnType<typeof setInterval> | null = null;
 	private onClose: () => void;
 	private onSave: (state: GameState | null) => void;
-	private tui: { requestRender: () => void };
+	private tui: SpaceInvadersRenderHost;
 	private cachedLines: string[] = [];
 	private cachedWidth = 0;
 	private version = 0;
@@ -123,7 +207,7 @@ class SpaceInvadersComponent {
 	wantsKeyRelease = true;
 
 	constructor(
-		tui: { requestRender: () => void },
+		tui: SpaceInvadersRenderHost,
 		onClose: () => void,
 		onSave: (state: GameState | null) => void,
 		savedState?: GameState,
@@ -205,41 +289,32 @@ class SpaceInvadersComponent {
 		}
 	}
 
-	private moveAliens(): void {
-		const aliveAliens = this.state.aliens.filter((a) => a.alive);
-		if (aliveAliens.length === 0) return;
-
-		if (this.state.alienDropping) {
-			// Drop down
-			for (const alien of aliveAliens) {
-				alien.y++;
-				if (alien.y >= PLAYER_Y - 1) {
-					this.state.gameOver = true;
-					return;
-				}
-			}
-			this.state.alienDropping = false;
-		} else {
-			// Check if we need to change direction
-			const minX = Math.min(...aliveAliens.map((a) => a.x));
-			const maxX = Math.max(...aliveAliens.map((a) => a.x));
-
-			if (
-				(this.state.alienDirection === 1 && maxX >= GAME_WIDTH - 3) ||
-				(this.state.alienDirection === -1 && minX <= 2)
-			) {
-				this.state.alienDirection *= -1;
-				this.state.alienDropping = true;
-			} else {
-				// Move horizontally
-				for (const alien of aliveAliens) {
-					alien.x += this.state.alienDirection;
-				}
+	private dropAlienFormation(aliveAliens: Alien[]): boolean {
+		for (const alien of aliveAliens) {
+			alien.y++;
+			if (alien.y >= PLAYER_Y - 1) {
+				this.state.gameOver = true;
+				return false;
 			}
 		}
+		this.state.alienDropping = false;
+		return true;
+	}
 
-		// Speed up as fewer aliens remain
-		const aliveCount = aliveAliens.length;
+	private moveAlienFormationHorizontally(aliveAliens: Alien[]): void {
+		const minX = Math.min(...aliveAliens.map((alien) => alien.x));
+		const maxX = Math.max(...aliveAliens.map((alien) => alien.x));
+		const reachedEdge =
+			(this.state.alienDirection === 1 && maxX >= GAME_WIDTH - 3) || (this.state.alienDirection === -1 && minX <= 2);
+		if (reachedEdge) {
+			this.state.alienDirection *= -1;
+			this.state.alienDropping = true;
+			return;
+		}
+		for (const alien of aliveAliens) alien.x += this.state.alienDirection;
+	}
+
+	private updateAlienMoveDelay(aliveCount: number): void {
 		if (aliveCount <= 5) {
 			this.state.alienMoveDelay = 1;
 		} else if (aliveCount <= 10) {
@@ -247,6 +322,17 @@ class SpaceInvadersComponent {
 		} else if (aliveCount <= 20) {
 			this.state.alienMoveDelay = 3;
 		}
+	}
+
+	private moveAliens(): void {
+		const aliveAliens = this.state.aliens.filter((alien) => alien.alive);
+		if (aliveAliens.length === 0) return;
+		if (this.state.alienDropping) {
+			if (!this.dropAlienFormation(aliveAliens)) return;
+		} else {
+			this.moveAlienFormationHorizontally(aliveAliens);
+		}
+		this.updateAlienMoveDelay(aliveAliens.length);
 	}
 
 	private alienShoot(): void {
@@ -270,109 +356,113 @@ class SpaceInvadersComponent {
 		}
 	}
 
+	private applyPlayerBulletAlienCollision(bullet: Bullet, bulletsToRemove: Set<Bullet>): void {
+		if (bullet.direction !== -1) return;
+		for (const alien of this.state.aliens) {
+			if (!alien.alive || Math.abs(bullet.x - alien.x) > 1 || bullet.y !== alien.y) continue;
+			alien.alive = false;
+			bulletsToRemove.add(bullet);
+			this.state.score += [10, 20, 30][alien.type];
+			if (this.state.score > this.state.highScore) this.state.highScore = this.state.score;
+			break;
+		}
+	}
+
+	private applyAlienBulletPlayerCollision(bullet: Bullet, bulletsToRemove: Set<Bullet>): void {
+		if (bullet.direction !== 1) return;
+		if (Math.abs(bullet.x - this.state.player.x) > 1 || bullet.y !== PLAYER_Y) return;
+		bulletsToRemove.add(bullet);
+		this.state.player.lives--;
+		if (this.state.player.lives <= 0) this.state.gameOver = true;
+	}
+
+	private applyBulletShieldCollisions(bullet: Bullet, bulletsToRemove: Set<Bullet>): void {
+		for (const shield of this.state.shields) {
+			const relX = bullet.x - shield.x;
+			const relY = bullet.y - (PLAYER_Y - 5);
+			if (relX < 0 || relX >= 4 || relY < 0 || relY >= 3) continue;
+			if (!shield.segments[relY][relX]) continue;
+			shield.segments[relY][relX] = false;
+			bulletsToRemove.add(bullet);
+		}
+	}
+
 	private checkCollisions(): void {
 		const bulletsToRemove = new Set<Bullet>();
-
 		for (const bullet of this.state.bullets) {
-			// Player bullets hitting aliens
-			if (bullet.direction === -1) {
-				for (const alien of this.state.aliens) {
-					if (alien.alive && Math.abs(bullet.x - alien.x) <= 1 && bullet.y === alien.y) {
-						alien.alive = false;
-						bulletsToRemove.add(bullet);
-						const points = [10, 20, 30][alien.type];
-						this.state.score += points;
-						if (this.state.score > this.state.highScore) {
-							this.state.highScore = this.state.score;
-						}
-						break;
-					}
-				}
-			}
-
-			// Alien bullets hitting player
-			if (bullet.direction === 1) {
-				if (Math.abs(bullet.x - this.state.player.x) <= 1 && bullet.y === PLAYER_Y) {
-					bulletsToRemove.add(bullet);
-					this.state.player.lives--;
-					if (this.state.player.lives <= 0) {
-						this.state.gameOver = true;
-					}
-				}
-			}
-
-			// Bullets hitting shields
-			for (const shield of this.state.shields) {
-				const relX = bullet.x - shield.x;
-				const relY = bullet.y - (PLAYER_Y - 5);
-				if (relX >= 0 && relX < 4 && relY >= 0 && relY < 3) {
-					if (shield.segments[relY][relX]) {
-						shield.segments[relY][relX] = false;
-						bulletsToRemove.add(bullet);
-					}
-				}
-			}
+			this.applyPlayerBulletAlienCollision(bullet, bulletsToRemove);
+			this.applyAlienBulletPlayerCollision(bullet, bulletsToRemove);
+			this.applyBulletShieldCollisions(bullet, bulletsToRemove);
 		}
+		this.state.bullets = this.state.bullets.filter((bullet) => !bulletsToRemove.has(bullet));
+	}
 
-		this.state.bullets = this.state.bullets.filter((b) => !bulletsToRemove.has(b));
+	private isQuitInput(data: string): boolean {
+		return data === "q" || data === "Q";
+	}
+
+	private handlePausedInput(data: string, released: boolean): boolean {
+		if (!this.paused || released) return false;
+		if (matchesKey(data, Key.escape) || this.isQuitInput(data)) {
+			this.dispose();
+			this.onClose();
+		} else {
+			this.paused = false;
+			this.startGame();
+		}
+		return true;
+	}
+
+	private handleActiveExit(data: string, released: boolean): boolean {
+		if (released) return false;
+		if (matchesKey(data, Key.escape)) {
+			this.dispose();
+			this.onSave(this.state);
+			this.onClose();
+			return true;
+		}
+		if (!this.isQuitInput(data)) return false;
+		this.dispose();
+		this.onSave(null);
+		this.onClose();
+		return true;
+	}
+
+	private isLeftInput(data: string): boolean {
+		return matchesKey(data, Key.left) || data === "a" || data === "A" || matchesKey(data, "a");
+	}
+
+	private isRightInput(data: string): boolean {
+		return matchesKey(data, Key.right) || data === "d" || data === "D" || matchesKey(data, "d");
+	}
+
+	private isFireInput(data: string): boolean {
+		return matchesKey(data, Key.space) || data === " " || data === "f" || data === "F" || matchesKey(data, "f");
+	}
+
+	private updateKeyState(data: string, released: boolean): void {
+		if (this.isLeftInput(data)) this.keys.left = !released;
+		if (this.isRightInput(data)) this.keys.right = !released;
+		if (this.isFireInput(data)) this.keys.fire = !released;
+	}
+
+	private restartGame(data: string, released: boolean): void {
+		if (released || (!this.state.gameOver && !this.state.victory)) return;
+		if (data !== "r" && data !== "R" && data !== " ") return;
+		const highScore = this.state.highScore;
+		const nextLevel = this.state.victory ? this.state.level + 1 : 1;
+		this.state = createInitialState(highScore, nextLevel);
+		this.keys = { left: false, right: false, fire: false };
+		this.onSave(null);
+		this.version++;
+		this.tui.requestRender();
 	}
 
 	handleInput(data: string): void {
 		const released = isKeyRelease(data);
-
-		// Pause handling
-		if (this.paused && !released) {
-			if (matchesKey(data, Key.escape) || data === "q" || data === "Q") {
-				this.dispose();
-				this.onClose();
-				return;
-			}
-			this.paused = false;
-			this.startGame();
-			return;
-		}
-
-		// ESC to pause and save
-		if (!released && matchesKey(data, Key.escape)) {
-			this.dispose();
-			this.onSave(this.state);
-			this.onClose();
-			return;
-		}
-
-		// Q to quit without saving
-		if (!released && (data === "q" || data === "Q")) {
-			this.dispose();
-			this.onSave(null);
-			this.onClose();
-			return;
-		}
-
-		// Movement keys (track press/release state)
-		if (matchesKey(data, Key.left) || data === "a" || data === "A" || matchesKey(data, "a")) {
-			this.keys.left = !released;
-		}
-		if (matchesKey(data, Key.right) || data === "d" || data === "D" || matchesKey(data, "d")) {
-			this.keys.right = !released;
-		}
-
-		// Fire key
-		if (matchesKey(data, Key.space) || data === " " || data === "f" || data === "F" || matchesKey(data, "f")) {
-			this.keys.fire = !released;
-		}
-
-		// Restart on game over or victory
-		if (!released && (this.state.gameOver || this.state.victory)) {
-			if (data === "r" || data === "R" || data === " ") {
-				const highScore = this.state.highScore;
-				const nextLevel = this.state.victory ? this.state.level + 1 : 1;
-				this.state = createInitialState(highScore, nextLevel);
-				this.keys = { left: false, right: false, fire: false };
-				this.onSave(null);
-				this.version++;
-				this.tui.requestRender();
-			}
-		}
+		if (this.handlePausedInput(data, released) || this.handleActiveExit(data, released)) return;
+		this.updateKeyState(data, released);
+		this.restartGame(data, released);
 	}
 
 	invalidate(): void {
@@ -395,6 +485,7 @@ class SpaceInvadersComponent {
 		const magenta = (s: string) => `\x1b[35m${s}\x1b[0m`;
 		const white = (s: string) => `\x1b[97m${s}\x1b[0m`;
 		const bold = (s: string) => `\x1b[1m${s}\x1b[22m`;
+		const cellIndex = createInvaderCellIndex(this.state, { dim, green, red, yellow, cyan, magenta, white });
 
 		const boxWidth = GAME_WIDTH;
 
@@ -420,66 +511,12 @@ class SpaceInvadersComponent {
 		lines.push(this.padLine(dim(` ├${"─".repeat(boxWidth)}┤`), width));
 
 		// Game grid
-		for (let y = 0; y < GAME_HEIGHT; y++) {
-			let row = "";
-			for (let x = 0; x < GAME_WIDTH; x++) {
-				let char = " ";
-				let colored = false;
-
-				// Check aliens
-				for (const alien of this.state.aliens) {
-					if (alien.alive && alien.y === y && Math.abs(alien.x - x) <= 1) {
-						const sprites = [
-							x === alien.x ? "▼" : "╲╱"[x < alien.x ? 0 : 1],
-							x === alien.x ? "◆" : "╱╲"[x < alien.x ? 0 : 1],
-							x === alien.x ? "☆" : "◄►"[x < alien.x ? 0 : 1],
-						];
-						const colors = [green, cyan, magenta];
-						char = colors[alien.type](sprites[alien.type]);
-						colored = true;
-						break;
-					}
-				}
-
-				// Check shields
-				if (!colored) {
-					for (const shield of this.state.shields) {
-						const relX = x - shield.x;
-						const relY = y - (PLAYER_Y - 5);
-						if (relX >= 0 && relX < 4 && relY >= 0 && relY < 3) {
-							if (shield.segments[relY][relX]) {
-								char = dim("█");
-								colored = true;
-							}
-							break;
-						}
-					}
-				}
-
-				// Check player
-				if (!colored && y === PLAYER_Y && Math.abs(x - this.state.player.x) <= 1) {
-					if (x === this.state.player.x) {
-						char = white("▲");
-					} else {
-						char = white("═");
-					}
-					colored = true;
-				}
-
-				// Check bullets
-				if (!colored) {
-					for (const bullet of this.state.bullets) {
-						if (bullet.x === x && bullet.y === y) {
-							char = bullet.direction === -1 ? yellow("│") : red("│");
-							colored = true;
-							break;
-						}
-					}
-				}
-
-				row += colored ? char : " ";
-			}
+		let row = "";
+		for (let index = 0; index < GAME_WIDTH * GAME_HEIGHT; index += 1) {
+			row += cellIndex.get(index) ?? " ";
+			if (index % GAME_WIDTH !== GAME_WIDTH - 1) continue;
 			lines.push(this.padLine(dim(" │") + row + dim("│"), width));
+			row = "";
 		}
 
 		// Separator

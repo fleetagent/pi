@@ -6,6 +6,7 @@ import {
 	fauxThinking,
 	fauxToolCall,
 	type Model,
+	type RegisterFauxProviderOptions,
 	registerFauxProvider,
 	type ToolResultMessage,
 	type UserMessage,
@@ -16,7 +17,7 @@ import { calculateTool } from "./utils/calculate.ts";
 
 const registrations: FauxProviderRegistration[] = [];
 
-function createFauxRegistration(options: Parameters<typeof registerFauxProvider>[0] = {}): FauxProviderRegistration {
+function createFauxRegistration(options: RegisterFauxProviderOptions = {}): FauxProviderRegistration {
 	const registration = registerFauxProvider(options);
 	registrations.push(registration);
 	return registration;

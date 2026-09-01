@@ -18,13 +18,19 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import {
+	type CreateDirOptions,
+	type CreateTempFileOptions,
 	type ExecutionEnv,
+	type ExecutionEnvExecOptions,
+	type ExecutionEnvExecResult,
 	ExecutionError,
 	err,
 	FileError,
 	type FileInfo,
 	type FileKind,
 	ok,
+	type ReadTextLinesOptions,
+	type RemovePathOptions,
 	type Result,
 	toError,
 } from "../types.ts";
@@ -57,21 +63,25 @@ function resolvePath(cwd: string, path: string): string {
 	return isAbsolute(path) ? path : resolve(cwd, path);
 }
 
-function fileKindFromStats(stats: {
+interface FileKindStats {
 	isFile(): boolean;
 	isDirectory(): boolean;
 	isSymbolicLink(): boolean;
-}): FileKind | undefined {
+}
+
+interface FileInfoStats extends FileKindStats {
+	size: number;
+	mtimeMs: number;
+}
+
+function fileKindFromStats(stats: FileKindStats): FileKind | undefined {
 	if (stats.isFile()) return "file";
 	if (stats.isDirectory()) return "directory";
 	if (stats.isSymbolicLink()) return "symlink";
 	return undefined;
 }
 
-function fileInfoFromStats(
-	path: string,
-	stats: { isFile(): boolean; isDirectory(): boolean; isSymbolicLink(): boolean; size: number; mtimeMs: number },
-): Result<FileInfo, FileError> {
+function fileInfoFromStats(path: string, stats: FileInfoStats): Result<FileInfo, FileError> {
 	const kind = fileKindFromStats(stats);
 	if (!kind) return err(new FileError("invalid", "Unsupported file type", path));
 	return ok({
@@ -148,11 +158,12 @@ async function pathExists(path: string): Promise<boolean> {
 	}
 }
 
-async function runCommand(
-	command: string,
-	args: string[],
-	timeoutMs: number,
-): Promise<{ stdout: string; status: number | null }> {
+interface CommandProbeResult {
+	stdout: string;
+	status: number | null;
+}
+
+async function runCommand(command: string, args: string[], timeoutMs: number): Promise<CommandProbeResult> {
 	return await new Promise((resolve) => {
 		let stdout = "";
 		let child: ReturnType<typeof spawn>;
@@ -193,41 +204,37 @@ async function findBashOnPath(): Promise<string | null> {
 	return firstMatch && (await pathExists(firstMatch)) ? firstMatch : null;
 }
 
-async function getShellConfig(
-	customShellPath?: string,
-): Promise<Result<{ shell: string; args: string[] }, ExecutionError>> {
-	if (customShellPath) {
-		if (await pathExists(customShellPath)) {
-			return ok({ shell: customShellPath, args: ["-c"] });
-		}
-		return err(new ExecutionError("shell_unavailable", `Custom shell path not found: ${customShellPath}`));
-	}
-	if (process.platform === "win32") {
-		const candidates: string[] = [];
-		const programFiles = process.env.ProgramFiles;
-		if (programFiles) candidates.push(`${programFiles}\\Git\\bin\\bash.exe`);
-		const programFilesX86 = process.env["ProgramFiles(x86)"];
-		if (programFilesX86) candidates.push(`${programFilesX86}\\Git\\bin\\bash.exe`);
-		for (const candidate of candidates) {
-			if (await pathExists(candidate)) {
-				return ok({ shell: candidate, args: ["-c"] });
-			}
-		}
-		const bashOnPath = await findBashOnPath();
-		if (bashOnPath) {
-			return ok({ shell: bashOnPath, args: ["-c"] });
-		}
-		return err(new ExecutionError("shell_unavailable", "No bash shell found"));
-	}
+export interface ShellConfig {
+	shell: string;
+	args: string[];
+}
 
-	if (await pathExists("/bin/bash")) {
-		return ok({ shell: "/bin/bash", args: ["-c"] });
+async function getWindowsShellConfig(): Promise<Result<ShellConfig, ExecutionError>> {
+	const candidates: string[] = [];
+	const programFiles = process.env.ProgramFiles;
+	if (programFiles) candidates.push(`${programFiles}\\Git\\bin\\bash.exe`);
+	const programFilesX86 = process.env["ProgramFiles(x86)"];
+	if (programFilesX86) candidates.push(`${programFilesX86}\\Git\\bin\\bash.exe`);
+	for (const candidate of candidates) {
+		if (await pathExists(candidate)) return ok({ shell: candidate, args: ["-c"] });
 	}
 	const bashOnPath = await findBashOnPath();
-	if (bashOnPath) {
-		return ok({ shell: bashOnPath, args: ["-c"] });
+	if (bashOnPath) return ok({ shell: bashOnPath, args: ["-c"] });
+	return err(new ExecutionError("shell_unavailable", "No bash shell found"));
+}
+
+async function getPosixShellConfig(): Promise<Result<ShellConfig, ExecutionError>> {
+	if (await pathExists("/bin/bash")) return ok({ shell: "/bin/bash", args: ["-c"] });
+	const bashOnPath = await findBashOnPath();
+	return ok({ shell: bashOnPath ?? "sh", args: ["-c"] });
+}
+
+async function getShellConfig(customShellPath?: string): Promise<Result<ShellConfig, ExecutionError>> {
+	if (customShellPath) {
+		if (await pathExists(customShellPath)) return ok({ shell: customShellPath, args: ["-c"] });
+		return err(new ExecutionError("shell_unavailable", `Custom shell path not found: ${customShellPath}`));
 	}
-	return ok({ shell: "sh", args: ["-c"] });
+	return process.platform === "win32" ? getWindowsShellConfig() : getPosixShellConfig();
 }
 
 function getShellEnv(baseEnv?: NodeJS.ProcessEnv, extraEnv?: Record<string, string>): NodeJS.ProcessEnv {
@@ -263,12 +270,18 @@ function killProcessTree(pid: number): void {
 	}
 }
 
+export interface NodeExecutionEnvOptions {
+	cwd: string;
+	shellPath?: string;
+	shellEnv?: NodeJS.ProcessEnv;
+}
+
 export class NodeExecutionEnv implements ExecutionEnv {
 	cwd: string;
 	private shellPath?: string;
 	private shellEnv?: NodeJS.ProcessEnv;
 
-	constructor(options: { cwd: string; shellPath?: string; shellEnv?: NodeJS.ProcessEnv }) {
+	constructor(options: NodeExecutionEnvOptions) {
 		this.cwd = options.cwd;
 		this.shellPath = options.shellPath;
 		this.shellEnv = options.shellEnv;
@@ -284,15 +297,8 @@ export class NodeExecutionEnv implements ExecutionEnv {
 
 	async exec(
 		command: string,
-		options?: {
-			cwd?: string;
-			env?: Record<string, string>;
-			timeout?: number;
-			abortSignal?: AbortSignal;
-			onStdout?: (chunk: string) => void;
-			onStderr?: (chunk: string) => void;
-		},
-	): Promise<Result<{ stdout: string; stderr: string; exitCode: number }, ExecutionError>> {
+		options?: ExecutionEnvExecOptions,
+	): Promise<Result<ExecutionEnvExecResult, ExecutionError>> {
 		if (options?.abortSignal?.aborted) return err(new ExecutionError("aborted", "aborted"));
 		const timeoutMsResult = resolveTimeoutMs(options?.timeout);
 		if (!timeoutMsResult.ok) return err(timeoutMsResult.error);
@@ -317,7 +323,7 @@ export class NodeExecutionEnv implements ExecutionEnv {
 				}
 			};
 
-			const settle = (result: Result<{ stdout: string; stderr: string; exitCode: number }, ExecutionError>) => {
+			const settle = (result: Result<ExecutionEnvExecResult, ExecutionError>) => {
 				if (timeoutId) clearTimeout(timeoutId);
 				if (options?.abortSignal) options.abortSignal.removeEventListener("abort", onAbort);
 				if (settled) return;
@@ -413,10 +419,7 @@ export class NodeExecutionEnv implements ExecutionEnv {
 		}
 	}
 
-	async readTextLines(
-		path: string,
-		options?: { maxLines?: number; abortSignal?: AbortSignal },
-	): Promise<Result<string[], FileError>> {
+	async readTextLines(path: string, options?: ReadTextLinesOptions): Promise<Result<string[], FileError>> {
 		const resolved = resolvePath(this.cwd, path);
 		const aborted = abortResult<string[]>(options?.abortSignal, resolved);
 		if (aborted) return aborted;
@@ -555,7 +558,7 @@ export class NodeExecutionEnv implements ExecutionEnv {
 		return err(result.error);
 	}
 
-	async createDir(path: string, options?: { recursive?: boolean }): Promise<Result<void, FileError>> {
+	async createDir(path: string, options?: CreateDirOptions): Promise<Result<void, FileError>> {
 		const resolved = resolvePath(this.cwd, path);
 		try {
 			await mkdir(resolved, { recursive: options?.recursive ?? true });
@@ -565,7 +568,7 @@ export class NodeExecutionEnv implements ExecutionEnv {
 		}
 	}
 
-	async remove(path: string, options?: { recursive?: boolean; force?: boolean }): Promise<Result<void, FileError>> {
+	async remove(path: string, options?: RemovePathOptions): Promise<Result<void, FileError>> {
 		const resolved = resolvePath(this.cwd, path);
 		try {
 			await rm(resolved, { recursive: options?.recursive ?? false, force: options?.force ?? false });
@@ -583,7 +586,7 @@ export class NodeExecutionEnv implements ExecutionEnv {
 		}
 	}
 
-	async createTempFile(options?: { prefix?: string; suffix?: string }): Promise<Result<string, FileError>> {
+	async createTempFile(options?: CreateTempFileOptions): Promise<Result<string, FileError>> {
 		const dir = await this.createTempDir("tmp-");
 		if (!dir.ok) return dir;
 		const filePath = join(dir.value, `${options?.prefix ?? ""}${randomUUID()}${options?.suffix ?? ""}`);

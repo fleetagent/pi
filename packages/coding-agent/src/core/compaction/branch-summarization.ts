@@ -5,8 +5,21 @@
  * a summary of the branch being left so context isn't lost.
  */
 
-import type { AgentMessage, StreamFn } from "@fleetagent/pi-agent-core";
-import type { Model, ProviderHeaders, RetryCallbacks, RetryPolicy, SimpleStreamOptions } from "@fleetagent/pi-ai";
+import type {
+	BranchPreparation as AgentBranchPreparation,
+	BranchSummaryDetails as AgentBranchSummaryDetails,
+	AgentMessage,
+	FileOperations,
+	StreamFn,
+} from "@fleetagent/pi-agent-core";
+import type {
+	Model,
+	ProviderHeaders,
+	RetryCallbacks,
+	RetryPolicy,
+	SimpleStreamOptions,
+	TextContent,
+} from "@fleetagent/pi-ai";
 import { convertToLlm } from "../messages.ts";
 import { sessionEntryToContextMessages } from "../session/context.ts";
 import type { ReadonlySession } from "../session/session.ts";
@@ -16,7 +29,6 @@ import {
 	computeFileLists,
 	createFileOps,
 	extractFileOpsFromMessage,
-	type FileOperations,
 	formatFileOperations,
 	SUMMARIZATION_SYSTEM_PROMPT,
 	serializeConversation,
@@ -34,20 +46,11 @@ export interface BranchSummaryResult {
 	error?: string;
 }
 
-/** Details stored in BranchSummaryEntry.details for file tracking */
-export interface BranchSummaryDetails {
-	readFiles: string[];
-	modifiedFiles: string[];
-}
+/** Details stored in BranchSummaryEntry.details for file tracking. */
+export type BranchSummaryDetails = AgentBranchSummaryDetails;
 
-export interface BranchPreparation {
-	/** Messages extracted for summarization, in chronological order */
-	messages: AgentMessage[];
-	/** File operations extracted from tool calls */
-	fileOps: FileOperations;
-	/** Total estimated tokens in messages */
-	totalTokens: number;
-}
+/** Messages, file operations, and token count prepared for branch summarization. */
+export type BranchPreparation = AgentBranchPreparation;
 
 export interface CollectEntriesResult {
 	/** Entries to summarize, in chronological order */
@@ -142,7 +145,50 @@ export function collectEntriesForBranchSummary(
 function getVisibleContextMessages(entry: SessionEntry): AgentMessage[] {
 	return sessionEntryToContextMessages(entry).filter((message) => convertToLlm([message]).length > 0);
 }
+interface BranchMessageSelection {
+	messages: AgentMessage[];
+	totalTokens: number;
+}
 
+function collectCumulativeFileOperations(entries: SessionEntry[], fileOps: FileOperations): void {
+	for (const entry of entries) {
+		if (entry.type !== "branch_summary" || entry.fromHook || !entry.details) continue;
+		const details = entry.details as BranchSummaryDetails;
+		if (Array.isArray(details.readFiles)) {
+			for (const filePath of details.readFiles) fileOps.read.add(filePath);
+		}
+		if (Array.isArray(details.modifiedFiles)) {
+			for (const filePath of details.modifiedFiles) fileOps.edited.add(filePath);
+		}
+	}
+}
+
+function selectBranchMessages(
+	entries: SessionEntry[],
+	tokenBudget: number,
+	fileOps: FileOperations,
+): BranchMessageSelection {
+	const messages: AgentMessage[] = [];
+	let totalTokens = 0;
+	for (let index = entries.length - 1; index >= 0; index--) {
+		const entry = entries[index];
+		const entryMessages = getVisibleContextMessages(entry);
+		if (entryMessages.length === 0) continue;
+		for (const message of entryMessages) extractFileOpsFromMessage(message, fileOps);
+		const tokens = entryMessages.reduce((sum, message) => sum + estimateTokens(message), 0);
+		if (tokenBudget > 0 && totalTokens + tokens > tokenBudget) {
+			const isExistingSummary = entry.type === "compaction" || entry.type === "branch_summary";
+			if (isExistingSummary && totalTokens < tokenBudget * 0.9) {
+				messages.unshift(...entryMessages);
+				totalTokens += tokens;
+			}
+			break;
+		}
+		messages.unshift(...entryMessages);
+		totalTokens += tokens;
+	}
+	return { messages, totalTokens };
+}
 /**
  * Prepare entries for summarization with token budget.
  *
@@ -157,50 +203,9 @@ function getVisibleContextMessages(entry: SessionEntry): AgentMessage[] {
  * @param tokenBudget - Maximum tokens to include (0 = no limit)
  */
 export function prepareBranchEntries(entries: SessionEntry[], tokenBudget: number = 0): BranchPreparation {
-	const messages: AgentMessage[] = [];
 	const fileOps = createFileOps();
-	let totalTokens = 0;
-
-	// First pass: collect file ops from ALL entries (even if they don't fit in token budget)
-	// This ensures we capture cumulative file tracking from nested branch summaries
-	// Only extract from pi-generated summaries (fromHook !== true), not extension-generated ones
-	for (const entry of entries) {
-		if (entry.type === "branch_summary" && !entry.fromHook && entry.details) {
-			const details = entry.details as BranchSummaryDetails;
-			if (Array.isArray(details.readFiles)) {
-				for (const f of details.readFiles) fileOps.read.add(f);
-			}
-			if (Array.isArray(details.modifiedFiles)) {
-				// Modified files go into both edited and written for proper deduplication
-				for (const f of details.modifiedFiles) {
-					fileOps.edited.add(f);
-				}
-			}
-		}
-	}
-
-	// Second pass: walk from newest to oldest, adding messages until token budget
-	for (let i = entries.length - 1; i >= 0; i--) {
-		const entry = entries[i];
-		const entryMessages = getVisibleContextMessages(entry);
-		if (entryMessages.length === 0) continue;
-
-		for (const message of entryMessages) extractFileOpsFromMessage(message, fileOps);
-		const tokens = entryMessages.reduce((sum, message) => sum + estimateTokens(message), 0);
-
-		if (tokenBudget > 0 && totalTokens + tokens > tokenBudget) {
-			// Existing summaries retain priority when most of the budget is still free.
-			if ((entry.type === "compaction" || entry.type === "branch_summary") && totalTokens < tokenBudget * 0.9) {
-				messages.unshift(...entryMessages);
-				totalTokens += tokens;
-			}
-			break;
-		}
-
-		messages.unshift(...entryMessages);
-		totalTokens += tokens;
-	}
-
+	collectCumulativeFileOperations(entries, fileOps);
+	const { messages, totalTokens } = selectBranchMessages(entries, tokenBudget, fileOps);
 	return { messages, fileOps, totalTokens };
 }
 
@@ -313,7 +318,7 @@ export async function generateBranchSummary(
 	}
 
 	let summary = response.content
-		.filter((c): c is { type: "text"; text: string } => c.type === "text")
+		.filter((c): c is TextContent => c.type === "text")
 		.map((c) => c.text)
 		.join("\n");
 

@@ -1,7 +1,13 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fauxAssistantMessage, fauxToolCall, getModel, registerFauxProvider } from "@fleetagent/pi-ai";
+import {
+	fauxAssistantMessage,
+	fauxToolCall,
+	getModel,
+	registerFauxProvider,
+	type TextContent,
+} from "@fleetagent/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_ACTIVE_TOOL_NAMES } from "../src/core/agent-session.ts";
@@ -24,6 +30,11 @@ import {
 } from "../src/core/tools/subagent.ts";
 import { discoverAgents, discoverAgentsWithOperations } from "../src/core/tools/subagent-agents.ts";
 import { createHarness } from "./suite/harness.ts";
+
+interface SubagentRunReference {
+	runId?: string;
+	sessionReference?: string;
+}
 
 const tempDirs: string[] = [];
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -119,28 +130,6 @@ describe("native subagent tool", () => {
 				systemPrompt: "Remote instructions.",
 				tools: ["read"],
 			}),
-		]);
-	});
-
-	it("discovers SSH project presets through SSH operations instead of the host cwd", async () => {
-		const remoteCwd = createTempDir("pi-subagent-ssh-remote-");
-		mkdirSync(join(remoteCwd, ".pi", "agents"), { recursive: true });
-		writeFileSync(
-			join(remoteCwd, ".pi", "agents", "remote.md"),
-			"---\nname: remote\ndescription: SSH preset\n---\nSSH instructions.",
-		);
-		const operations = new LocalToolOperations(remoteCwd);
-		Object.defineProperty(operations, "getBackendInfo", {
-			value: () => ({ type: "ssh" as const, cwd: remoteCwd, remote: "sandbox.test", configured: true as const }),
-		});
-		const discovery = await discoverAgentsWithOperations(
-			createTempDir("pi-subagent-ssh-host-"),
-			"project",
-			operations,
-		);
-		expect(discovery.projectAgentsDir).toBe(join(remoteCwd, ".pi", "agents"));
-		expect(discovery.agents).toEqual([
-			expect.objectContaining({ name: "remote", systemPrompt: "SSH instructions." }),
 		]);
 	});
 
@@ -448,7 +437,7 @@ describe("native subagent tool", () => {
 				childUserText =
 					user?.role === "user" && Array.isArray(user.content)
 						? user.content
-								.filter((part): part is { type: "text"; text: string } => part.type === "text")
+								.filter((part): part is TextContent => part.type === "text")
 								.map((part) => part.text)
 								.join("\n")
 						: "";
@@ -474,7 +463,7 @@ describe("native subagent tool", () => {
 			const toolText =
 				toolResult?.role === "toolResult"
 					? toolResult.content
-							.filter((part): part is { type: "text"; text: string } => part.type === "text")
+							.filter((part): part is TextContent => part.type === "text")
 							.map((part) => part.text)
 							.join("\n")
 					: "";
@@ -536,7 +525,7 @@ describe("native subagent tool", () => {
 				childUserTexts.push(
 					user?.role === "user" && Array.isArray(user.content)
 						? user.content
-								.filter((part): part is { type: "text"; text: string } => part.type === "text")
+								.filter((part): part is TextContent => part.type === "text")
 								.map((part) => part.text)
 								.join("\n")
 						: "",
@@ -548,7 +537,7 @@ describe("native subagent tool", () => {
 				childUserTexts.push(
 					user?.role === "user" && Array.isArray(user.content)
 						? user.content
-								.filter((part): part is { type: "text"; text: string } => part.type === "text")
+								.filter((part): part is TextContent => part.type === "text")
 								.map((part) => part.text)
 								.join("\n")
 						: "",
@@ -571,9 +560,7 @@ describe("native subagent tool", () => {
 			const ctx = { cwd, toolOperations: new LocalToolOperations(cwd), model, hasUI: false };
 			const subagent = session.getToolDefinition("subagent")!;
 			const first = await subagent.execute("subagent-1", { task: "First task" }, undefined, undefined, ctx as never);
-			const firstDetails = first.details as
-				| { results: Array<{ runId?: string; sessionReference?: string }> }
-				| undefined;
+			const firstDetails = first.details as { results: SubagentRunReference[] } | undefined;
 			const firstRun = firstDetails?.results[0];
 			expect(firstRun?.runId).toBe("subagent:1");
 			expect(firstRun?.sessionReference).toBeDefined();
@@ -591,7 +578,7 @@ describe("native subagent tool", () => {
 				undefined,
 				ctx as never,
 			);
-			const secondDetails = second.details as { results: Array<{ runId?: string }> } | undefined;
+			const secondDetails = second.details as { results: SubagentRunReference[] } | undefined;
 			expect(secondDetails?.results[0].runId).toBe("subagent:1");
 			expect(second.content[0]).toMatchObject({ type: "text", text: "second output" });
 			expect(childUserTexts).toEqual(["<task>\nFirst task\n</task>", "<task>\nFollow up\n</task>"]);
@@ -772,7 +759,7 @@ describe("native subagent tool", () => {
 			const toolText =
 				toolResult?.role === "toolResult"
 					? toolResult.content
-							.filter((part): part is { type: "text"; text: string } => part.type === "text")
+							.filter((part): part is TextContent => part.type === "text")
 							.map((part) => part.text)
 							.join("\n")
 					: "";

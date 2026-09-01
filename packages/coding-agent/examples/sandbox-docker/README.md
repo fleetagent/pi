@@ -38,7 +38,7 @@ The image sets:
 - workspace directory: `/workspace`
 - additional confined temporary root: `/tmp` via `PI_DAEMON_TEMP_ROOT`
 - daemon command: `pi --daemon`
-- daemon host inside the image: `0.0.0.0` (`/sandbox start` overrides it with configured loopback by default)
+- daemon host inside the image: `0.0.0.0` (the configured `daemonHostBind` controls Docker's published host address)
 - daemon port inside the container: `8787`
 - process execution: enabled for Pi shell/tool execution inside the container
 - user: unprivileged `pi` user with uid `1000`
@@ -48,8 +48,9 @@ The image sets:
 ```bash
 docker run --rm \
   --name pi-sandbox-local \
-  --network host \
-  -e PI_DAEMON_HOST=127.0.0.1 \
+  --network bridge \
+  --publish 127.0.0.1:8787:8787 \
+  -e PI_DAEMON_HOST=0.0.0.0 \
   -e PI_DAEMON_TOKEN=dev-token-dev-token-dev-token-dev-token \
   -v "$PWD:/workspace" \
   pi-sandbox:local
@@ -75,12 +76,12 @@ Or configure the default image with normal sandbox precedence:
 PI_SANDBOX_IMAGE=pi-sandbox:local ./pi-test.sh
 ```
 
-The sandbox service mounts the current workspace at `/workspace`, starts the container with Docker host networking, binds the daemon to loopback by default, and supplies `PI_DAEMON_TOKEN` through the Docker environment. Host networking lets sandbox processes reach services bound to host loopback, but it also gives the container direct access to host network services. Tokens must not be put in image layers, command-line arguments, labels, or URLs. See [Workspace Sandbox](../../docs/sandbox.md) for `/sandbox` commands, configuration precedence, stop behavior, troubleshooting, and security boundaries.
+The sandbox service mounts the current workspace at `/workspace`, uses Docker bridge networking, publishes only the authenticated daemon port to the configured host bind address (loopback by default), and supplies `PI_DAEMON_TOKEN` through the Docker environment. Sandbox processes cannot directly use host loopback services. Tokens must not be put in image layers, command-line arguments, labels, or URLs. See [Workspace Sandbox](../../docs/sandbox.md) for `/sandbox` commands, configuration precedence, stop behavior, troubleshooting, and security boundaries.
 
 ## Notes
 
 - The image uses the integrated `pi --daemon` command from `@fleetagent/pi-coding-agent`.
 - The mounted workspace is read/write. Files created by the container are owned by uid `1000` unless Docker is run with a different user policy.
 - `/tmp` is writable container-local scratch storage and is not mounted from the host by default.
-- Host networking must be supported by Docker; Docker Desktop requires it to be enabled explicitly.
+- Bridge networking and loopback-only daemon publication avoid exposing host loopback services to the container.
 - Docker is not a complete security boundary. Treat this image and any override image as trusted code for the mounted workspace.

@@ -15,9 +15,10 @@ export interface BuiltinSlashCommand {
 	description: string;
 }
 
-export const HIDDEN_BUILTIN_SLASH_COMMAND_NAMES: ReadonlySet<string> = new Set(["sandbox"]);
+export const HIDDEN_BUILTIN_SLASH_COMMAND_NAMES: ReadonlySet<string> = new Set(["hooks", "sandbox"]);
 
 export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
+	{ name: "hooks", description: "Enable or disable hooks for this session" },
 	{ name: "sandbox", description: "Configure or manage the workspace tool sandbox" },
 	{ name: "settings", description: "Open settings menu" },
 	{ name: "model", description: "Switch models" },

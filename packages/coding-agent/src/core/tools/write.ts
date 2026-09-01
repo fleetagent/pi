@@ -1,9 +1,9 @@
-import type { AgentTool } from "@fleetagent/pi-agent-core";
+import type { AgentTool, AgentToolResult } from "@fleetagent/pi-agent-core";
 import { Container, Text } from "@fleetagent/pi-tui";
 import { dirname } from "path";
 import { type Static, Type } from "typebox";
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
-import { getLanguageFromPath, highlightCode } from "../../modes/interactive/theme/theme.ts";
+import { getLanguageFromPath, highlightCode, type Theme } from "../../modes/interactive/theme/theme.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
 import { withFileMutationQueue } from "./file-mutation-queue.ts";
 import type { ToolOperations } from "./operations.ts";
@@ -26,6 +26,16 @@ const writeSchema = Type.Object({
 export type WriteToolInput = Static<typeof writeSchema>;
 
 export interface WriteToolOptions {}
+
+interface WriteRenderArgs {
+	path?: string;
+	file_path?: string;
+	content?: string;
+}
+
+interface WriteRenderResult extends AgentToolResult<undefined> {
+	isError?: boolean;
+}
 
 type WriteHighlightCache = {
 	rawPath: string | null;
@@ -116,10 +126,34 @@ function trimTrailingEmptyLines(lines: string[]): string[] {
 	return lines.slice(0, end);
 }
 
-function formatWriteCall(
-	args: { path?: string; file_path?: string; content?: string } | undefined,
+function formatWriteContentPreview(
+	fileContent: string | null,
+	rawPath: string | null,
 	options: ToolRenderResultOptions,
-	theme: typeof import("../../modes/interactive/theme/theme.ts").theme,
+	theme: Theme,
+	cache: WriteHighlightCache | undefined,
+): string {
+	if (fileContent === null) return `\n\n${theme.fg("error", "[invalid content arg - expected string]")}`;
+	if (!fileContent) return "";
+	const lang = rawPath ? getLanguageFromPath(rawPath) : undefined;
+	const renderedLines = lang
+		? (cache?.highlightedLines ?? highlightCode(replaceTabs(normalizeDisplayText(fileContent)), lang))
+		: normalizeDisplayText(fileContent).split("\n");
+	const lines = trimTrailingEmptyLines(renderedLines);
+	const maxLines = options.expanded ? lines.length : 10;
+	const displayLines = lines.slice(0, maxLines);
+	const remaining = lines.length - maxLines;
+	let text = `\n\n${displayLines.map((line) => (lang ? line : theme.fg("toolOutput", replaceTabs(line)))).join("\n")}`;
+	if (remaining > 0) {
+		text += `${theme.fg("muted", `\n... (${remaining} more lines, ${lines.length} total,`)} ${keyHint("app.tools.expand", "to expand")})`;
+	}
+	return text;
+}
+
+function formatWriteCall(
+	args: WriteRenderArgs | undefined,
+	options: ToolRenderResultOptions,
+	theme: Theme,
 	cache: WriteHighlightCache | undefined,
 ): string {
 	const rawPath = str(args?.file_path ?? args?.path);
@@ -127,32 +161,12 @@ function formatWriteCall(
 	const path = rawPath !== null ? shortenPath(rawPath) : null;
 	const invalidArg = invalidArgText(theme);
 	let text = `${theme.fg("toolTitle", theme.bold("write"))} ${path === null ? invalidArg : path ? theme.fg("accent", path) : theme.fg("toolOutput", "...")}`;
-
-	if (fileContent === null) {
-		text += `\n\n${theme.fg("error", "[invalid content arg - expected string]")}`;
-	} else if (fileContent) {
-		const lang = rawPath ? getLanguageFromPath(rawPath) : undefined;
-		const renderedLines = lang
-			? (cache?.highlightedLines ?? highlightCode(replaceTabs(normalizeDisplayText(fileContent)), lang))
-			: normalizeDisplayText(fileContent).split("\n");
-		const lines = trimTrailingEmptyLines(renderedLines);
-		const totalLines = lines.length;
-		const maxLines = options.expanded ? lines.length : 10;
-		const displayLines = lines.slice(0, maxLines);
-		const remaining = lines.length - maxLines;
-		text += `\n\n${displayLines.map((line) => (lang ? line : theme.fg("toolOutput", replaceTabs(line)))).join("\n")}`;
-		if (remaining > 0) {
-			text += `${theme.fg("muted", `\n... (${remaining} more lines, ${totalLines} total,`)} ${keyHint("app.tools.expand", "to expand")})`;
-		}
-	}
+	text += formatWriteContentPreview(fileContent, rawPath, options, theme, cache);
 
 	return text;
 }
 
-function formatWriteResult(
-	result: { content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>; isError?: boolean },
-	theme: typeof import("../../modes/interactive/theme/theme.ts").theme,
-): string | undefined {
+function formatWriteResult(result: WriteRenderResult, theme: Theme): string | undefined {
 	if (!result.isError) {
 		return undefined;
 	}
@@ -166,10 +180,12 @@ function formatWriteResult(
 	return `\n${theme.fg("error", output)}`;
 }
 
+export type WriteToolDefinition = ToolDefinition<typeof writeSchema, undefined>;
+
 export function createWriteToolDefinition(
 	operations: ToolOperations,
 	_options?: WriteToolOptions,
-): ToolDefinition<typeof writeSchema, undefined> {
+): WriteToolDefinition {
 	const ops = operations;
 	const cwd = operations.cwd;
 	return {
@@ -180,13 +196,7 @@ export function createWriteToolDefinition(
 		promptSnippet: "Create or overwrite files",
 		promptGuidelines: ["Use write only for new files or complete rewrites."],
 		parameters: writeSchema,
-		async execute(
-			_toolCallId,
-			{ path, content }: { path: string; content: string },
-			signal?: AbortSignal,
-			_onUpdate?,
-			_ctx?,
-		) {
+		async execute(_toolCallId, { path, content }: WriteToolInput, signal?: AbortSignal, _onUpdate?, _ctx?) {
 			const absolutePath = resolveToCwd(path, cwd);
 			const dir = dirname(absolutePath);
 			return withFileMutationQueue(absolutePath, async () => {
@@ -221,7 +231,7 @@ export function createWriteToolDefinition(
 			});
 		},
 		renderCall(args, theme, context) {
-			const renderArgs = args as { path?: string; file_path?: string; content?: string } | undefined;
+			const renderArgs = args as WriteRenderArgs | undefined;
 			const rawPath = str(renderArgs?.file_path ?? renderArgs?.path);
 			const fileContent = str(renderArgs?.content);
 			const component =

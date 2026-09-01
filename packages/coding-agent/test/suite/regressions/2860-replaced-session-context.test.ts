@@ -1,22 +1,22 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fauxAssistantMessage, registerFauxProvider } from "@fleetagent/pi-ai";
+import type { AgentMessage } from "@fleetagent/pi-agent-core";
+import { fauxAssistantMessage, registerFauxProvider, type TextContent } from "@fleetagent/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
-import type { AgentSession } from "../../../src/core/agent-session.ts";
 import { AuthStorage } from "../../../src/core/auth-storage.ts";
 import { PiAgent } from "../../../src/core/pi-agent.ts";
 import { LocalSessionManager } from "../../../src/core/session/local-session-manager.ts";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionFactory } from "../../../src/index.ts";
 
-function getText(message: AgentSession["messages"][number]): string {
+function getText(message: AgentMessage): string {
 	if (!("content" in message)) {
 		return "";
 	}
 	return typeof message.content === "string"
 		? message.content
 		: message.content
-				.filter((part): part is { type: "text"; text: string } => part.type === "text")
+				.filter((part): part is TextContent => part.type === "text")
 				.map((part) => part.text)
 				.join("");
 }

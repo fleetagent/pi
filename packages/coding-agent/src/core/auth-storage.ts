@@ -13,7 +13,12 @@ import {
 	type OAuthLoginCallbacks,
 	type OAuthProviderId,
 } from "@fleetagent/pi-ai";
-import { getOAuthApiKey, getOAuthProvider, getOAuthProviders } from "@fleetagent/pi-ai/oauth";
+import {
+	getOAuthApiKey,
+	getOAuthProvider,
+	getOAuthProviders,
+	type OAuthApiKeyResolution,
+} from "@fleetagent/pi-ai/oauth";
 import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
@@ -41,10 +46,16 @@ export type AuthStatus = {
 	label?: string;
 };
 
+export interface AuthApiKeyLookupOptions {
+	includeFallback?: boolean;
+}
+
 type LockResult<T> = {
 	result: T;
 	next?: string;
 };
+
+type StoredOAuthApiKeyResolution = { kind: "resolved"; apiKey: string | undefined } | { kind: "fallback" };
 
 const AUTH_FILE_WRITE_OPTIONS = { encoding: "utf-8", mode: 0o600 } as const;
 
@@ -73,9 +84,11 @@ export interface AuthStorageBackend {
 
 export class FileAuthStorageBackend implements AuthStorageBackend {
 	private authPath: string;
+	private initialContent: string;
 
-	constructor(authPath: string = join(getAgentDir(), "auth.json")) {
+	constructor(authPath: string = join(getAgentDir(), "auth.json"), initialContent = "{}") {
 		this.authPath = normalizePath(authPath);
+		this.initialContent = initialContent;
 	}
 
 	private ensureParentDir(): void {
@@ -87,7 +100,7 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 
 	private ensureFileExists(): void {
 		if (!existsSync(this.authPath)) {
-			writeFileSync(this.authPath, "{}", AUTH_FILE_WRITE_OPTIONS);
+			writeFileSync(this.authPath, this.initialContent, AUTH_FILE_WRITE_OPTIONS);
 			chmodSync(this.authPath, 0o600);
 		}
 	}
@@ -526,9 +539,7 @@ export class AuthStorage {
 	 * Refresh OAuth token with backend locking to prevent race conditions.
 	 * Multiple pi instances may try to refresh simultaneously when tokens expire.
 	 */
-	private async refreshOAuthTokenWithLock(
-		providerId: OAuthProviderId,
-	): Promise<{ apiKey: string; newCredentials: OAuthCredentials } | null> {
+	private async refreshOAuthTokenWithLock(providerId: OAuthProviderId): Promise<OAuthApiKeyResolution | null> {
 		const provider = getOAuthProvider(providerId);
 		if (!provider) {
 			return null;
@@ -576,6 +587,34 @@ export class AuthStorage {
 		return result;
 	}
 
+	private async resolveStoredOAuthApiKey(
+		providerId: string,
+		credential: OAuthCredential,
+	): Promise<StoredOAuthApiKeyResolution> {
+		const provider = getOAuthProvider(providerId);
+		if (!provider) return { kind: "resolved", apiKey: undefined };
+
+		if (Date.now() < credential.expires) {
+			return { kind: "resolved", apiKey: provider.getApiKey(credential) };
+		}
+
+		try {
+			const refreshed = await this.refreshOAuthTokenWithLock(providerId);
+			return refreshed ? { kind: "resolved", apiKey: refreshed.apiKey } : { kind: "fallback" };
+		} catch (error) {
+			this.recordError(error);
+			// Re-read storage in case another instance refreshed successfully.
+			this.reload();
+			const updatedCredential = this.readState.data[providerId];
+			if (updatedCredential?.type === "oauth" && Date.now() < updatedCredential.expires) {
+				return { kind: "resolved", apiKey: provider.getApiKey(updatedCredential) };
+			}
+
+			// Preserve credentials for retry; callers can re-authenticate with /login.
+			return { kind: "resolved", apiKey: undefined };
+		}
+	}
+
 	/**
 	 * Get API key for a provider.
 	 * Priority:
@@ -585,7 +624,7 @@ export class AuthStorage {
 	 * 4. Environment variable
 	 * 5. Fallback resolver (models.json custom providers)
 	 */
-	async getApiKey(providerId: string, options?: { includeFallback?: boolean }): Promise<string | undefined> {
+	async getApiKey(providerId: string, options?: AuthApiKeyLookupOptions): Promise<string | undefined> {
 		// Runtime override takes highest priority
 		const runtimeKey = this.runtimeOverrides.get(providerId);
 		if (runtimeKey) {
@@ -599,41 +638,8 @@ export class AuthStorage {
 		}
 
 		if (cred?.type === "oauth") {
-			const provider = getOAuthProvider(providerId);
-			if (!provider) {
-				// Unknown OAuth provider, can't get API key
-				return undefined;
-			}
-
-			// Check if token needs refresh
-			const needsRefresh = Date.now() >= cred.expires;
-
-			if (needsRefresh) {
-				// Use locked refresh to prevent race conditions
-				try {
-					const result = await this.refreshOAuthTokenWithLock(providerId);
-					if (result) {
-						return result.apiKey;
-					}
-				} catch (error) {
-					this.recordError(error);
-					// Refresh failed - re-read file to check if another instance succeeded
-					this.reload();
-					const updatedCred = this.readState.data[providerId];
-
-					if (updatedCred?.type === "oauth" && Date.now() < updatedCred.expires) {
-						// Another instance refreshed successfully, use those credentials
-						return provider.getApiKey(updatedCred);
-					}
-
-					// Refresh truly failed - return undefined so model discovery skips this provider
-					// User can /login to re-authenticate (credentials preserved for retry)
-					return undefined;
-				}
-			} else {
-				// Token not expired, use current access token
-				return provider.getApiKey(cred);
-			}
+			const resolution = await this.resolveStoredOAuthApiKey(providerId, cred);
+			if (resolution.kind === "resolved") return resolution.apiKey;
 		}
 
 		// Fall back to environment variable

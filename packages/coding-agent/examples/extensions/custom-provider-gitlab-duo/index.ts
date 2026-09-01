@@ -15,8 +15,10 @@ import {
 	type Context,
 	createAssistantMessageEventStream,
 	type Model,
+	type ModelInputModality,
 	type OAuthCredentials,
 	type OAuthLoginCallbacks,
+	type PKCEPair,
 	type SimpleStreamOptions,
 	streamSimpleAnthropic,
 	streamSimpleOpenAIResponses,
@@ -51,8 +53,8 @@ interface GitLabModel {
 	baseUrl: string;
 	reasoning: boolean;
 	thinkingLevelMap?: ThinkingLevelMap;
-	input: ("text" | "image")[];
-	cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
+	input: ModelInputModality[];
+	cost: Model<Api>["cost"];
 	contextWindow: number;
 	maxTokens: number;
 }
@@ -215,7 +217,7 @@ function invalidateDirectAccessToken() {
 // OAuth
 // =============================================================================
 
-async function generatePKCE(): Promise<{ verifier: string; challenge: string }> {
+async function generatePKCE(): Promise<PKCEPair> {
 	const array = new Uint8Array(32);
 	crypto.getRandomValues(array);
 	const verifier = btoa(String.fromCharCode(...array))

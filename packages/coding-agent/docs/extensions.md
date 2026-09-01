@@ -622,7 +622,7 @@ pi.on("before_provider_headers", (event, ctx) => {
 });
 ```
 
-The event contains only headers destined for the model provider. Tool-backend transport state and credentials—including SSH connection state and daemon/remote bearer tokens—are never copied into it. A model API key remains a separate stream option unless that model/provider configuration explicitly creates an HTTP header such as `authHeader`.
+The event contains only headers destined for the model provider. Tool-backend transport state and credentials—including daemon bearer tokens—are never copied into it. A model API key remains a separate stream option unless that model/provider configuration explicitly creates an HTTP header such as `authHeader`.
 
 The hook runs once for each coding-agent provider stream invocation. Session-level retries and separate compaction/branch requests invoke it again for their new request; provider-internal retries reuse the already-mutated headers.
 
@@ -812,7 +812,7 @@ pi.on("user_bash", (event, ctx) => {
   // event.excludeFromContext - true if !! prefix
   // event.cwd - working directory
 
-  // Option 1: Provide custom operations (e.g., SSH)
+  // Option 1: Provide custom operations (e.g., a service adapter)
   return { operations: remoteBashOps };
 
   // Option 2: Wrap pi's built-in local bash backend
@@ -896,7 +896,7 @@ Current working directory.
 
 ### ctx.toolOperations / ctx.getToolBackendInfo() / ctx.execToolBackend()
 
-Backend-aware file and shell operations for extensions. These APIs use the same active backend as Pi's built-in tools: local by default, or SSH/remote when a remote backend is configured.
+Backend-aware file and shell operations for extensions. These APIs use the same active backend as Pi's built-in tools: local by default, or a remote daemon when configured.
 
 Use these APIs for extension tools and extension-owned automation that reads files, writes files, lists directories, or executes shell commands. This is the only safe way for extension tools to run shell commands because it preserves Pi's active execution boundary. Direct local process APIs (`child_process`, `pi.exec`, shell libraries, etc.) bypass the configured tool backend and will run on the local machine even when Pi tools are remote.
 
@@ -1513,7 +1513,7 @@ pi.registerCommand("deploy", {
 
 ### pi.registerSkill(skill) / pi.registerRule(rule) / pi.registerPrompt(prompt)
 
-Register local extension-hosted skills, rules, or prompt templates. These stay on the local agent host even when built-in tools use an SSH backend.
+Register local extension-hosted skills, rules, or prompt templates. These stay on the local agent host even when built-in tools use a remote daemon.
 
 Provide either `filePath` (relative to the extension file directory) or inline `content`. Inline content is available to `/skill:name`, `/rule:name`, and `/prompt-name` expansion.
 
@@ -1634,7 +1634,7 @@ if (pi.getFlag("plan")) {
 
 ### pi.exec(command, args, options?)
 
-Execute a local process with argv. This API is local-only and legacy-compatible. It does not use Pi's active tool backend and does not honor SSH/remote sandboxing.
+Execute a local process with argv. This API is local-only and legacy-compatible. It does not use Pi's active tool backend and does not honor remote daemon sandboxing.
 
 Do not use `pi.exec` from extension tools or backend-sensitive automation. Use `ctx.execToolBackend()` from handlers/tools that receive `ExtensionContext` so shell commands execute in the same local/remote environment as built-in Pi tools.
 
@@ -1903,7 +1903,7 @@ pi.registerTool({
       details: { progress: 50 },
     });
 
-    // Run commands through the active Pi tool backend (local or SSH/remote)
+    // Run commands through the active Pi tool backend (local or remote daemon)
     const result = await ctx.execToolBackend("some-command", { signal });
 
     // Return result
@@ -2020,30 +2020,13 @@ Built-in tool implementations:
 
 ### Remote Execution
 
-Built-in tools support pluggable operations for delegating to remote systems (SSH, containers, etc.):
+Built-in tools use `ToolOperations`, allowing SDK hosts to provide custom local or remote implementations. Pi's built-in remote implementation connects to `pi --daemon`:
 
 ```typescript
-import { createReadTool, createBashTool, type ReadOperations } from "@fleetagent/pi-coding-agent";
+import { createRemoteToolOperations } from "@fleetagent/pi-coding-agent";
 
-// Create tool with custom operations
-const remoteRead = createReadTool(cwd, {
-  operations: {
-    readFile: (path) => sshExec(remote, `cat ${path}`),
-    access: (path) => sshExec(remote, `test -r ${path}`).then(() => {}),
-  }
-});
-
-// Register, checking flag at execution time
-pi.registerTool({
-  ...remoteRead,
-  async execute(id, params, signal, onUpdate, _ctx) {
-    const ssh = getSshConfig();
-    if (ssh) {
-      const tool = createReadTool(cwd, { operations: createRemoteOps(ssh) });
-      return tool.execute(id, params, signal, onUpdate);
-    }
-    return localRead.execute(id, params, signal, onUpdate);
-  },
+const operations = await createRemoteToolOperations("ws://127.0.0.1:8787/pi/workspace", {
+  token: process.env.PI_REMOTE_TOKEN,
 });
 ```
 
@@ -2064,10 +2047,9 @@ const bashTool = createBashTool(cwd, {
   }),
 });
 ```
-Remote execution is built in. Use `pi --remote ws://host:port` for a daemon backend, `pi --ssh user@host:/path` to run built-in tools over SSH, or `pi --remote-deferred --remote-cwd /path` and configure the target later via RPC, `/sandbox ssh <user@host[:/path]> [path]`, or `/sandbox --attach <ws://url>`. Connecting a deferred backend reloads project instruction resources from that backend.
+Remote execution is built in through daemon connections. Use `pi --remote ws://host:port`, or start with `pi --remote-deferred --remote-cwd /path` and configure the daemon later via RPC or `/sandbox --attach <ws://url>`. Connecting a deferred backend reloads project instruction resources from that backend.
 
 Extensions always load in the orchestrating Pi process. `pi --daemon` does not discover or execute user, package, or project Pi extensions and does not provide a reduced or fake `ExtensionContext`. Local extension hooks still wrap remote tool calls once, and backend-aware extension code can use `ctx.toolOperations` or `ctx.execToolBackend()` against the borrowed daemon connection. Direct Node filesystem or process APIs remain local.
-Remote execution is built in. Use `pi --remote ws://host:port` for a daemon backend, `pi --ssh user@host:/path` to run built-in tools over SSH, or `pi --remote-deferred --remote-cwd /path` and configure the target later via RPC, `/sandbox ssh <user@host[:/path]> [path]`, or `/sandbox --attach <ws://url>`. Connecting a deferred backend reloads project instruction resources from that backend.
 
 ### Output Truncation
 

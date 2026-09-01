@@ -4,6 +4,7 @@ import {
 	type SessionMetadata,
 	type SessionStorage,
 	type SessionTreeEntry,
+	type SessionTreeEntryOfType,
 } from "../types.ts";
 import { uuidv7 } from "./uuid.ts";
 
@@ -25,7 +26,11 @@ function buildLabelsById(entries: SessionTreeEntry[]): Map<string, string> {
 	return labelsById;
 }
 
-function generateEntryId(byId: { has(id: string): boolean }): string {
+interface SessionEntryIdLookup {
+	has(id: string): boolean;
+}
+
+function generateEntryId(byId: SessionEntryIdLookup): string {
 	for (let i = 0; i < 100; i++) {
 		// The uuidv7 prefix is timestamp-derived and nearly constant between calls,
 		// so short ids must come from the random tail.
@@ -39,6 +44,11 @@ function leafIdAfterEntry(entry: SessionTreeEntry): string | null {
 	return entry.type === "leaf" ? entry.targetId : entry.id;
 }
 
+interface InMemorySessionStorageOptions<TMetadata> {
+	entries?: SessionTreeEntry[];
+	metadata?: TMetadata;
+}
+
 export class InMemorySessionStorage<TMetadata extends SessionMetadata = SessionMetadata>
 	implements SessionStorage<TMetadata>
 {
@@ -48,7 +58,7 @@ export class InMemorySessionStorage<TMetadata extends SessionMetadata = SessionM
 	private labelsById: Map<string, string>;
 	private leafId: string | null;
 
-	constructor(options?: { entries?: SessionTreeEntry[]; metadata?: TMetadata }) {
+	constructor(options?: InMemorySessionStorageOptions<TMetadata>) {
 		this.entries = options?.entries ? [...options.entries] : [];
 		this.byId = new Map(this.entries.map((entry) => [entry.id, entry]));
 		this.labelsById = buildLabelsById(this.entries);
@@ -104,8 +114,8 @@ export class InMemorySessionStorage<TMetadata extends SessionMetadata = SessionM
 
 	async findEntries<TType extends SessionTreeEntry["type"]>(
 		type: TType,
-	): Promise<Array<Extract<SessionTreeEntry, { type: TType }>>> {
-		return this.entries.filter((entry): entry is Extract<SessionTreeEntry, { type: TType }> => entry.type === type);
+	): Promise<Array<SessionTreeEntryOfType<TType>>> {
+		return this.entries.filter((entry): entry is SessionTreeEntryOfType<TType> => entry.type === type);
 	}
 
 	async getLabel(id: string): Promise<string | undefined> {

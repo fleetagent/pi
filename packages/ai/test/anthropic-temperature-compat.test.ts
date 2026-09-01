@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { getModel } from "../src/models.ts";
 import { streamSimple } from "../src/stream.ts";
-import type { Context, Model, SimpleStreamOptions } from "../src/types.ts";
+import type { AnthropicMessagesCompat, Context, Model, SimpleStreamOptions } from "../src/types.ts";
 
 interface AnthropicTemperaturePayload {
 	temperature?: number;
@@ -20,7 +20,7 @@ function makeContext(): Context {
 	};
 }
 
-function makeCustomModel(compat?: Model<"anthropic-messages">["compat"]): Model<"anthropic-messages"> {
+function makeCustomModel(compat?: AnthropicMessagesCompat): Model<"anthropic-messages"> {
 	return {
 		id: "vendor--claude-opus-4-7",
 		name: "Vendor Proxy Opus 4.7",

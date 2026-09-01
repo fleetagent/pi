@@ -1,10 +1,5 @@
 import type * as NodeOs from "node:os";
-import type {
-	Tool as OpenAITool,
-	ResponseCreateParamsStreaming,
-	ResponseInput,
-	ResponseStreamEvent,
-} from "openai/resources/responses/responses.js";
+import type { Tool as OpenAITool, ResponseInput, ResponseStreamEvent } from "openai/resources/responses/responses.js";
 
 type ProcessWithOsBuiltinModule = typeof process & {
 	getBuiltinModule?: (id: "node:os") => typeof NodeOs;
@@ -35,6 +30,7 @@ import type {
 	SimpleStreamOptions,
 	StreamFunction,
 	StreamOptions,
+	Transport,
 	Usage,
 } from "../types.ts";
 import { combineAbortSignals } from "../utils/abort-signals.ts";
@@ -46,7 +42,12 @@ import {
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
-import { convertResponsesMessages, convertResponsesTools, processResponsesStream } from "./openai-responses-shared.ts";
+import {
+	convertResponsesMessages,
+	convertResponsesTools,
+	type OpenAIResponseServiceTier,
+	processResponsesStream,
+} from "./openai-responses-shared.ts";
 import { buildBaseOptions } from "./simple-options.ts";
 
 // ============================================================================
@@ -77,14 +78,43 @@ const CODEX_RESPONSE_STATUSES = new Set<CodexResponseStatus>([
 // Types
 // ============================================================================
 
+export type OpenAICodexReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
+export type OpenAICodexReasoningSummary = "auto" | "concise" | "detailed" | "off" | "on";
+export type OpenAICodexTextVerbosity = "low" | "medium" | "high";
+
 export interface OpenAICodexResponsesOptions extends StreamOptions {
-	reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
-	reasoningSummary?: "auto" | "concise" | "detailed" | "off" | "on" | null;
-	serviceTier?: ResponseCreateParamsStreaming["service_tier"];
-	textVerbosity?: "low" | "medium" | "high";
+	reasoningEffort?: OpenAICodexReasoningEffort;
+	reasoningSummary?: OpenAICodexReasoningSummary | null;
+	serviceTier?: OpenAIResponseServiceTier;
+	textVerbosity?: OpenAICodexTextVerbosity;
 }
 
 type CodexResponseStatus = "completed" | "incomplete" | "failed" | "cancelled" | "queued" | "in_progress";
+
+interface CodexRequestReasoning {
+	effort?: string;
+	summary?: string;
+}
+
+interface CodexRequestText {
+	verbosity?: string;
+}
+
+interface CodexFailedResponse {
+	error?: CodexEventError;
+}
+
+interface CodexFailedResponseEvent {
+	response?: CodexFailedResponse;
+}
+
+interface CodexCompletedResponse {
+	status?: unknown;
+}
+
+interface CodexCompletedResponseEvent {
+	response?: CodexCompletedResponse;
+}
 
 interface RequestBody {
 	model: string;
@@ -97,12 +127,91 @@ interface RequestBody {
 	tool_choice?: "auto";
 	parallel_tool_calls?: boolean;
 	temperature?: number;
-	reasoning?: { effort?: string; summary?: string };
-	service_tier?: ResponseCreateParamsStreaming["service_tier"];
-	text?: { verbosity?: string };
+	reasoning?: CodexRequestReasoning;
+	service_tier?: OpenAIResponseServiceTier;
+	text?: CodexRequestText;
 	include?: string[];
 	prompt_cache_key?: string;
 	[key: string]: unknown;
+}
+
+interface SseHeaderTimeout {
+	signal: AbortSignal;
+	clear(): void;
+	error(): Error | undefined;
+}
+
+interface CodexApiErrorOptions {
+	code?: string;
+	payload?: Record<string, unknown>;
+	cause?: unknown;
+}
+
+interface CodexProtocolErrorOptions {
+	payload?: unknown;
+	cause?: unknown;
+}
+
+interface CodexEventError {
+	code?: string;
+	message?: string;
+}
+
+interface WebSocketConstructorInit {
+	headers?: Record<string, string>;
+}
+
+interface WebSocketReleaseOptions {
+	keep?: boolean;
+}
+
+interface AcquiredWebSocket {
+	socket: WebSocketLike;
+	entry?: CachedWebSocketConnection;
+	reused: boolean;
+	release(options?: WebSocketReleaseOptions): void;
+}
+
+interface WebSocketCloseErrorOptions {
+	code?: number;
+	reason?: string;
+	wasClean?: boolean;
+}
+
+interface CodexErrorResponse {
+	message: string;
+	friendlyMessage?: string;
+}
+
+interface CodexErrorDetails {
+	code?: string;
+	type?: string;
+	message?: string;
+	plan_type?: string;
+	resets_at?: number;
+}
+
+interface CodexErrorPayload {
+	error?: CodexErrorDetails;
+}
+
+interface PreparedCodexRequest {
+	body: RequestBody;
+	bodyJson: string;
+	sseHeaders: Headers;
+	websocketHeaders: Headers;
+	idleTimeoutMs: number | undefined;
+	websocketConnectTimeoutMs: number | undefined;
+	transport: Transport;
+	websocketDisabledForSession: boolean;
+}
+
+interface CodexStreamExecution {
+	model: Model<"openai-codex-responses">;
+	options: OpenAICodexResponsesOptions | undefined;
+	output: AssistantMessage;
+	stream: AssistantMessageEventStream;
+	request: PreparedCodexRequest;
 }
 
 type SuccessfulAssistantMessage = AssistantMessage & { stopReason: "stop" | "length" | "toolUse" };
@@ -202,7 +311,7 @@ function normalizeTimeoutMs(value: number | undefined): number | undefined {
 	return Math.floor(value);
 }
 
-function createSSEHeaderTimeout(): { signal: AbortSignal; clear: () => void; error: () => Error | undefined } {
+function createSSEHeaderTimeout(): SseHeaderTimeout {
 	const controller = new AbortController();
 	let error: Error | undefined;
 	const timeout = setTimeout(() => {
@@ -216,6 +325,268 @@ function createSSEHeaderTimeout(): { signal: AbortSignal; clear: () => void; err
 	};
 }
 
+function createCodexAssistantMessage(model: Model<"openai-codex-responses">): AssistantMessage {
+	return {
+		role: "assistant",
+		content: [],
+		api: "openai-codex-responses" as Api,
+		provider: model.provider,
+		model: model.id,
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "pending",
+		timestamp: Date.now(),
+	};
+}
+
+async function prepareCodexRequest(
+	model: Model<"openai-codex-responses">,
+	context: Context,
+	options: OpenAICodexResponsesOptions | undefined,
+): Promise<PreparedCodexRequest> {
+	const apiKey = options?.apiKey;
+	if (!apiKey) throw new Error(`No API key for provider: ${model.provider}`);
+
+	const accountId = extractAccountId(apiKey);
+	let body = buildRequestBody(model, context, options);
+	const nextBody = await options?.onPayload?.(body, model);
+	if (nextBody !== undefined) body = nextBody as RequestBody;
+
+	const websocketRequestId = options?.sessionId || createCodexRequestId();
+	const sseHeaders = buildSSEHeaders(model.headers, options?.headers, accountId, apiKey, options?.sessionId);
+	const websocketHeaders = buildWebSocketHeaders(
+		model.headers,
+		options?.headers,
+		accountId,
+		apiKey,
+		websocketRequestId,
+	);
+	const transport = options?.transport || "auto";
+	const websocketDisabledForSession = transport !== "sse" && isWebSocketSseFallbackActive(options?.sessionId);
+	if (websocketDisabledForSession) recordWebSocketSseFallback(options?.sessionId);
+
+	return {
+		body,
+		bodyJson: JSON.stringify(body),
+		sseHeaders,
+		websocketHeaders,
+		idleTimeoutMs: normalizeTimeoutMs(options?.timeoutMs),
+		websocketConnectTimeoutMs: normalizeTimeoutMs(options?.websocketConnectTimeoutMs),
+		transport,
+		websocketDisabledForSession,
+	};
+}
+
+function throwIfCodexRequestAborted(signal: AbortSignal | undefined): void {
+	if (signal?.aborted) throw new Error("Request was aborted");
+}
+
+function completeCodexStream(output: SuccessfulAssistantMessage, stream: AssistantMessageEventStream): void {
+	stream.push({ type: "done", reason: output.stopReason, message: output });
+	stream.end();
+}
+
+function failCodexStream(
+	output: AssistantMessage,
+	stream: AssistantMessageEventStream,
+	options: OpenAICodexResponsesOptions | undefined,
+	error: unknown,
+): void {
+	for (const block of output.content) {
+		// partialJson is only a streaming scratch buffer; never persist it.
+		delete (block as { partialJson?: string }).partialJson;
+	}
+	output.stopReason = options?.signal?.aborted ? "aborted" : "error";
+	output.errorMessage = error instanceof Error ? error.message : String(error);
+	stream.push({ type: "error", reason: output.stopReason, error: output });
+	stream.end();
+}
+
+type CodexWebSocketFailureAction = "retry" | "fallback";
+
+function handleCodexWebSocketFailure(
+	execution: CodexStreamExecution,
+	error: unknown,
+	streamStarted: boolean,
+	retriedMissingContinuation: boolean,
+): CodexWebSocketFailureAction {
+	const { options, output, request } = execution;
+	const aborted = options?.signal?.aborted;
+	if (!aborted && !streamStarted && isPreviousResponseNotFoundError(error) && !retriedMissingContinuation) {
+		return "retry";
+	}
+	if (aborted || isCodexNonTransportError(error)) throw error;
+
+	appendAssistantMessageDiagnostic(
+		output,
+		createAssistantMessageDiagnostic("provider_transport_failure", error, {
+			configuredTransport: request.transport,
+			fallbackTransport: streamStarted ? undefined : "sse",
+			eventsEmitted: streamStarted,
+			phase: streamStarted ? "after_message_stream_start" : "before_message_stream_start",
+			requestBytes: new TextEncoder().encode(request.bodyJson).byteLength,
+		}),
+	);
+	recordWebSocketFailure(options?.sessionId, error);
+	if (streamStarted) throw error;
+	recordWebSocketSseFallback(options?.sessionId);
+	return "fallback";
+}
+
+async function tryCodexWebSocketTransport(execution: CodexStreamExecution): Promise<boolean> {
+	const { model, options, output, stream, request } = execution;
+	if (request.transport === "sse" || request.websocketDisabledForSession) return false;
+
+	let retriedMissingContinuation = false;
+	while (true) {
+		let streamStarted = false;
+		try {
+			await processWebSocketStream(
+				resolveCodexWebSocketUrl(model.baseUrl),
+				request.body,
+				request.websocketHeaders,
+				output,
+				stream,
+				model,
+				() => {
+					streamStarted = true;
+				},
+				request.idleTimeoutMs,
+				request.websocketConnectTimeoutMs,
+				options,
+			);
+			throwIfCodexRequestAborted(options?.signal);
+			assertSuccessfulOutput(output);
+			completeCodexStream(output, stream);
+			return true;
+		} catch (error) {
+			const action = handleCodexWebSocketFailure(execution, error, streamStarted, retriedMissingContinuation);
+			if (action === "retry") {
+				retriedMissingContinuation = true;
+				continue;
+			}
+			return false;
+		}
+	}
+}
+
+async function fetchCodexSseAttempt(execution: CodexStreamExecution): Promise<Response> {
+	const { model, options, request } = execution;
+	const headerTimeout = createSSEHeaderTimeout();
+	const combinedSignal = combineAbortSignals([options?.signal, headerTimeout.signal]);
+	let response: Response;
+	try {
+		try {
+			response = await fetch(resolveCodexUrl(model.baseUrl), {
+				method: "POST",
+				headers: request.sseHeaders,
+				body: request.bodyJson,
+				signal: combinedSignal.signal,
+			});
+		} catch (error) {
+			const timeoutError = headerTimeout.error();
+			throw timeoutError && !options?.signal?.aborted ? timeoutError : error;
+		}
+	} finally {
+		combinedSignal.cleanup();
+		headerTimeout.clear();
+	}
+	await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
+	return response;
+}
+
+function normalizeCodexSseError(error: unknown): Error {
+	if (error instanceof Error && (error.name === "AbortError" || error.message === "Request was aborted")) {
+		return new Error("Request was aborted");
+	}
+	return error instanceof Error ? error : new Error(String(error));
+}
+
+async function handleCodexHttpFailure(
+	response: Response,
+	attempt: number,
+	maxRetries: number,
+	options: OpenAICodexResponsesOptions | undefined,
+): Promise<void> {
+	const errorText = await response.text();
+	if (attempt < maxRetries && isRetryableError(response.status, errorText)) {
+		const retryAfterDelayMs = getRetryAfterDelayMs(response.headers);
+		const delayMs =
+			retryAfterDelayMs === undefined
+				? BASE_DELAY_MS * 2 ** attempt
+				: validateRetryDelayMs(retryAfterDelayMs, options);
+		await sleep(delayMs, options?.signal);
+		return;
+	}
+
+	const fakeResponse = new Response(errorText, {
+		status: response.status,
+		statusText: response.statusText,
+	});
+	const info = await parseErrorResponse(fakeResponse);
+	throw new Error(info.friendlyMessage || info.message);
+}
+
+async function handleCodexSseAttemptError(
+	error: unknown,
+	attempt: number,
+	maxRetries: number,
+	options: OpenAICodexResponsesOptions | undefined,
+): Promise<void> {
+	const requestError = normalizeCodexSseError(error);
+	if (requestError.message === "Request was aborted") throw requestError;
+	if (
+		attempt < maxRetries &&
+		!(requestError instanceof RetryDelayExceededError) &&
+		!requestError.message.includes("usage limit")
+	) {
+		await sleep(BASE_DELAY_MS * 2 ** attempt, options?.signal);
+		return;
+	}
+	throw requestError;
+}
+
+async function fetchCodexSseResponse(execution: CodexStreamExecution): Promise<Response> {
+	const { options } = execution;
+	const maxRetries = options?.maxRetries ?? DEFAULT_MAX_RETRIES;
+
+	for (let attempt = 0; attempt <= maxRetries; attempt++) {
+		throwIfCodexRequestAborted(options?.signal);
+		try {
+			const response = await fetchCodexSseAttempt(execution);
+			if (response.ok) return response;
+			await handleCodexHttpFailure(response, attempt, maxRetries, options);
+		} catch (error) {
+			await handleCodexSseAttemptError(error, attempt, maxRetries, options);
+		}
+	}
+
+	throw new Error("Failed after retries");
+}
+
+async function processCodexSseTransport(execution: CodexStreamExecution, response: Response): Promise<void> {
+	const { model, options, output, stream } = execution;
+	if (!response.body) throw new Error("No response body");
+
+	stream.push({ type: "start", partial: output });
+	await processStream(response, output, stream, model, options);
+	throwIfCodexRequestAborted(options?.signal);
+	assertSuccessfulOutput(output);
+	completeCodexStream(output, stream);
+}
+
+async function runCodexStream(execution: CodexStreamExecution): Promise<void> {
+	if (await tryCodexWebSocketTransport(execution)) return;
+	const response = await fetchCodexSseResponse(execution);
+	await processCodexSseTransport(execution, response);
+}
+
 // ============================================================================
 // Main Stream Function
 // ============================================================================
@@ -226,224 +597,14 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 	options?: OpenAICodexResponsesOptions,
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
+	const output = createCodexAssistantMessage(model);
 
 	(async () => {
-		const output: AssistantMessage = {
-			role: "assistant",
-			content: [],
-			api: "openai-codex-responses" as Api,
-			provider: model.provider,
-			model: model.id,
-			usage: {
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			stopReason: "pending",
-			timestamp: Date.now(),
-		};
-
 		try {
-			const apiKey = options?.apiKey;
-			if (!apiKey) {
-				throw new Error(`No API key for provider: ${model.provider}`);
-			}
-
-			const accountId = extractAccountId(apiKey);
-			let body = buildRequestBody(model, context, options);
-			const nextBody = await options?.onPayload?.(body, model);
-			if (nextBody !== undefined) {
-				body = nextBody as RequestBody;
-			}
-			const websocketRequestId = options?.sessionId || createCodexRequestId();
-			const sseHeaders = buildSSEHeaders(model.headers, options?.headers, accountId, apiKey, options?.sessionId);
-			const websocketHeaders = buildWebSocketHeaders(
-				model.headers,
-				options?.headers,
-				accountId,
-				apiKey,
-				websocketRequestId,
-			);
-			const bodyJson = JSON.stringify(body);
-			const idleTimeoutMs = normalizeTimeoutMs(options?.timeoutMs);
-			const websocketConnectTimeoutMs = normalizeTimeoutMs(options?.websocketConnectTimeoutMs);
-			const transport = options?.transport || "auto";
-			const websocketDisabledForSession = transport !== "sse" && isWebSocketSseFallbackActive(options?.sessionId);
-			if (websocketDisabledForSession) {
-				recordWebSocketSseFallback(options?.sessionId);
-			}
-
-			if (transport !== "sse" && !websocketDisabledForSession) {
-				let retriedMissingWebSocketContinuation = false;
-				while (true) {
-					let websocketStarted = false;
-					try {
-						await processWebSocketStream(
-							resolveCodexWebSocketUrl(model.baseUrl),
-							body,
-							websocketHeaders,
-							output,
-							stream,
-							model,
-							() => {
-								websocketStarted = true;
-							},
-							idleTimeoutMs,
-							websocketConnectTimeoutMs,
-							options,
-						);
-
-						if (options?.signal?.aborted) {
-							throw new Error("Request was aborted");
-						}
-						assertSuccessfulOutput(output);
-						stream.push({
-							type: "done",
-							reason: output.stopReason,
-							message: output,
-						});
-						stream.end();
-						return;
-					} catch (error) {
-						const aborted = options?.signal?.aborted;
-						if (
-							!aborted &&
-							!websocketStarted &&
-							isPreviousResponseNotFoundError(error) &&
-							!retriedMissingWebSocketContinuation
-						) {
-							retriedMissingWebSocketContinuation = true;
-							continue;
-						}
-						if (aborted || isCodexNonTransportError(error)) {
-							throw error;
-						}
-						appendAssistantMessageDiagnostic(
-							output,
-							createAssistantMessageDiagnostic("provider_transport_failure", error, {
-								configuredTransport: transport,
-								fallbackTransport: websocketStarted ? undefined : "sse",
-								eventsEmitted: websocketStarted,
-								phase: websocketStarted ? "after_message_stream_start" : "before_message_stream_start",
-								requestBytes: new TextEncoder().encode(bodyJson).byteLength,
-							}),
-						);
-						recordWebSocketFailure(options?.sessionId, error);
-						if (websocketStarted) {
-							throw error;
-						}
-						recordWebSocketSseFallback(options?.sessionId);
-						break;
-					}
-				}
-			}
-
-			// Fetch with retry logic for rate limits and transient errors
-			let response: Response | undefined;
-			let lastError: Error | undefined;
-			const maxRetries = options?.maxRetries ?? DEFAULT_MAX_RETRIES;
-
-			for (let attempt = 0; attempt <= maxRetries; attempt++) {
-				if (options?.signal?.aborted) {
-					throw new Error("Request was aborted");
-				}
-
-				try {
-					const headerTimeout = createSSEHeaderTimeout();
-					const combinedSignal = combineAbortSignals([options?.signal, headerTimeout.signal]);
-					try {
-						response = await fetch(resolveCodexUrl(model.baseUrl), {
-							method: "POST",
-							headers: sseHeaders,
-							body: bodyJson,
-							signal: combinedSignal.signal,
-						});
-					} catch (error) {
-						const timeoutError = headerTimeout.error();
-						throw timeoutError && !options?.signal?.aborted ? timeoutError : error;
-					} finally {
-						combinedSignal.cleanup();
-						headerTimeout.clear();
-					}
-					await options?.onResponse?.(
-						{ status: response.status, headers: headersToRecord(response.headers) },
-						model,
-					);
-
-					if (response.ok) {
-						break;
-					}
-
-					const errorText = await response.text();
-					if (attempt < maxRetries && isRetryableError(response.status, errorText)) {
-						const retryAfterDelayMs = getRetryAfterDelayMs(response.headers);
-						const delayMs =
-							retryAfterDelayMs === undefined
-								? BASE_DELAY_MS * 2 ** attempt
-								: validateRetryDelayMs(retryAfterDelayMs, options);
-
-						await sleep(delayMs, options?.signal);
-						continue;
-					}
-
-					// Parse error for friendly message on final attempt or non-retryable error
-					const fakeResponse = new Response(errorText, {
-						status: response.status,
-						statusText: response.statusText,
-					});
-					const info = await parseErrorResponse(fakeResponse);
-					throw new Error(info.friendlyMessage || info.message);
-				} catch (error) {
-					if (error instanceof Error) {
-						if (error.name === "AbortError" || error.message === "Request was aborted") {
-							throw new Error("Request was aborted");
-						}
-					}
-					lastError = error instanceof Error ? error : new Error(String(error));
-					// Network errors are retryable
-					if (
-						attempt < maxRetries &&
-						!(lastError instanceof RetryDelayExceededError) &&
-						!lastError.message.includes("usage limit")
-					) {
-						const delayMs = BASE_DELAY_MS * 2 ** attempt;
-						await sleep(delayMs, options?.signal);
-						continue;
-					}
-					throw lastError;
-				}
-			}
-
-			if (!response?.ok) {
-				throw lastError ?? new Error("Failed after retries");
-			}
-
-			if (!response.body) {
-				throw new Error("No response body");
-			}
-
-			stream.push({ type: "start", partial: output });
-			await processStream(response, output, stream, model, options);
-
-			if (options?.signal?.aborted) {
-				throw new Error("Request was aborted");
-			}
-
-			assertSuccessfulOutput(output);
-			stream.push({ type: "done", reason: output.stopReason, message: output });
-			stream.end();
+			const request = await prepareCodexRequest(model, context, options);
+			await runCodexStream({ model, options, output, stream, request });
 		} catch (error) {
-			for (const block of output.content) {
-				// partialJson is only a streaming scratch buffer; never persist it.
-				delete (block as { partialJson?: string }).partialJson;
-			}
-			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-			output.errorMessage = error instanceof Error ? error.message : String(error);
-			stream.push({ type: "error", reason: output.stopReason, error: output });
-			stream.end();
+			failCodexStream(output, stream, options, error);
 		}
 	})();
 
@@ -526,7 +687,7 @@ function buildRequestBody(
 
 function getServiceTierCostMultiplier(
 	model: Pick<Model<"openai-codex-responses">, "id">,
-	serviceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
+	serviceTier: OpenAIResponseServiceTier | undefined,
 ): number {
 	switch (serviceTier) {
 		case "flex":
@@ -540,7 +701,7 @@ function getServiceTierCostMultiplier(
 
 function applyServiceTierPricing(
 	usage: Usage,
-	serviceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
+	serviceTier: OpenAIResponseServiceTier | undefined,
 	model: Pick<Model<"openai-codex-responses">, "id">,
 ) {
 	const multiplier = getServiceTierCostMultiplier(model, serviceTier);
@@ -554,9 +715,9 @@ function applyServiceTierPricing(
 }
 
 function resolveCodexServiceTier(
-	responseServiceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
-	requestServiceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
-): ResponseCreateParamsStreaming["service_tier"] | undefined {
+	responseServiceTier: OpenAIResponseServiceTier | undefined,
+	requestServiceTier: OpenAIResponseServiceTier | undefined,
+): OpenAIResponseServiceTier | undefined {
 	if (responseServiceTier === "default" && (requestServiceTier === "flex" || requestServiceTier === "priority")) {
 		return requestServiceTier;
 	}
@@ -600,7 +761,7 @@ class CodexApiError extends Error {
 	readonly code?: string;
 	readonly payload?: Record<string, unknown>;
 
-	constructor(message: string, options?: { code?: string; payload?: Record<string, unknown>; cause?: unknown }) {
+	constructor(message: string, options?: CodexApiErrorOptions) {
 		super(message);
 		this.name = "CodexApiError";
 		this.code = options?.code;
@@ -612,7 +773,7 @@ class CodexApiError extends Error {
 class CodexProtocolError extends Error {
 	readonly payload?: unknown;
 
-	constructor(message: string, options?: { payload?: unknown; cause?: unknown }) {
+	constructor(message: string, options?: CodexProtocolErrorOptions) {
 		super(message);
 		this.name = "CodexProtocolError";
 		this.payload = options?.payload;
@@ -628,7 +789,7 @@ function isPreviousResponseNotFoundError(error: unknown): boolean {
 	return error instanceof CodexApiError && error.code === PREVIOUS_RESPONSE_NOT_FOUND_CODE;
 }
 
-function extractCodexEventError(event: Record<string, unknown>): { code?: string; message?: string } {
+function extractCodexEventError(event: Record<string, unknown>): CodexEventError {
 	const nested = event.error && typeof event.error === "object" ? (event.error as Record<string, unknown>) : undefined;
 	return {
 		code: typeof event.code === "string" ? event.code : typeof nested?.code === "string" ? nested.code : undefined,
@@ -641,28 +802,31 @@ function extractCodexEventError(event: Record<string, unknown>): { code?: string
 	};
 }
 
+function throwIfCodexEventFailed(type: string, event: Record<string, unknown>): void {
+	if (type === "error") {
+		const { code, message } = extractCodexEventError(event);
+		throw new CodexApiError(`Codex error: ${message || code || JSON.stringify(event)}`, {
+			code,
+			payload: event,
+		});
+	}
+	if (type === "response.failed") {
+		const response = (event as CodexFailedResponseEvent).response;
+		const code = response?.error?.code;
+		const message = response?.error?.message;
+		throw new CodexApiError(message || "Codex response failed", { code, payload: event });
+	}
+}
+
 async function* mapCodexEvents(events: AsyncIterable<Record<string, unknown>>): AsyncGenerator<ResponseStreamEvent> {
 	for await (const event of events) {
 		const type = typeof event.type === "string" ? event.type : undefined;
 		if (!type) continue;
 
-		if (type === "error") {
-			const { code, message } = extractCodexEventError(event);
-			throw new CodexApiError(`Codex error: ${message || code || JSON.stringify(event)}`, {
-				code,
-				payload: event,
-			});
-		}
-
-		if (type === "response.failed") {
-			const response = (event as { response?: { error?: { code?: string; message?: string } } }).response;
-			const code = response?.error?.code;
-			const message = response?.error?.message;
-			throw new CodexApiError(message || "Codex response failed", { code, payload: event });
-		}
+		throwIfCodexEventFailed(type, event);
 
 		if (type === "response.done" || type === "response.completed" || type === "response.incomplete") {
-			const response = (event as { response?: { status?: unknown } }).response;
+			const response = (event as CodexCompletedResponseEvent).response;
 			const normalizedResponse = response
 				? { ...response, status: normalizeCodexStatus(response.status) }
 				: response;
@@ -683,9 +847,39 @@ function normalizeCodexStatus(status: unknown): CodexResponseStatus | undefined 
 // SSE Parsing
 // ============================================================================
 
+function parseCodexSseFrame(frame: string): Record<string, unknown> | undefined {
+	const dataLines = frame
+		.split(/\r\n|\r|\n/)
+		.filter((line) => line.startsWith("data:"))
+		.map((line) => line.slice(5).trim());
+	if (dataLines.length === 0) return undefined;
+	const data = dataLines.join("\n").trim();
+	if (!data || data === "[DONE]") return undefined;
+	try {
+		return JSON.parse(data) as Record<string, unknown>;
+	} catch (cause) {
+		throw new CodexProtocolError(`Invalid Codex SSE JSON: ${formatThrownValue(cause)}`, {
+			cause,
+			payload: data,
+		});
+	}
+}
+
+function* decodeCodexSseFrames(buffer: string): Generator<Record<string, unknown>, string> {
+	const separator = /(?:\r\n|\r|\n)(?:\r\n|\r|\n)/;
+	let match = separator.exec(buffer);
+	while (match) {
+		const frame = buffer.slice(0, match.index);
+		buffer = buffer.slice(match.index + match[0].length);
+		const event = parseCodexSseFrame(frame);
+		if (event) yield event;
+		match = separator.exec(buffer);
+	}
+	return buffer;
+}
+
 async function* parseSSE(response: Response, signal?: AbortSignal): AsyncGenerator<Record<string, unknown>> {
 	if (!response.body) return;
-
 	const reader = response.body.getReader();
 	const decoder = new TextDecoder();
 	let buffer = "";
@@ -693,44 +887,14 @@ async function* parseSSE(response: Response, signal?: AbortSignal): AsyncGenerat
 		void reader.cancel().catch(() => {});
 	};
 	signal?.addEventListener("abort", onAbort, { once: true });
-
 	try {
 		while (true) {
-			if (signal?.aborted) {
-				throw new Error("Request was aborted");
-			}
+			throwIfCodexRequestAborted(signal);
 			const { done, value } = await reader.read();
-			if (signal?.aborted) {
-				throw new Error("Request was aborted");
-			}
+			throwIfCodexRequestAborted(signal);
 			if (done) break;
 			buffer += decoder.decode(value, { stream: true });
-
-			const separator = /(?:\r\n|\r|\n)(?:\r\n|\r|\n)/;
-			let match = separator.exec(buffer);
-			while (match) {
-				const chunk = buffer.slice(0, match.index);
-				buffer = buffer.slice(match.index + match[0].length);
-
-				const dataLines = chunk
-					.split(/\r\n|\r|\n/)
-					.filter((line) => line.startsWith("data:"))
-					.map((line) => line.slice(5).trim());
-				if (dataLines.length > 0) {
-					const data = dataLines.join("\n").trim();
-					if (data && data !== "[DONE]") {
-						try {
-							yield JSON.parse(data) as Record<string, unknown>;
-						} catch (cause) {
-							throw new CodexProtocolError(`Invalid Codex SSE JSON: ${formatThrownValue(cause)}`, {
-								cause,
-								payload: data,
-							});
-						}
-					}
-				}
-				match = separator.exec(buffer);
-			}
+			buffer = yield* decodeCodexSseFrames(buffer);
 		}
 	} finally {
 		signal?.removeEventListener("abort", onAbort);
@@ -875,7 +1039,7 @@ function recordWebSocketFailure(sessionId: string | undefined, error: unknown): 
 
 type WebSocketConstructor = new (
 	url: string,
-	protocols?: string | string[] | { headers?: Record<string, string> },
+	protocols?: string | string[] | WebSocketConstructorInit,
 ) => WebSocketLike;
 
 let _cachedWebsocket: WebSocketConstructor | null = null;
@@ -892,7 +1056,7 @@ async function getWebSocketConstructor(): Promise<WebSocketConstructor | null> {
 		const getProxyForUrl = (m as { getProxyForUrl: (url: string | object | URL) => string }).getProxyForUrl;
 
 		_cachedWebsocket = class extends WebSocket {
-			constructor(url: string | URL, options?: string | string[] | Record<string, unknown>) {
+			constructor(url: string | URL, options?: string | string[] | WebSocketConstructorInit) {
 				let _opts: Record<string, unknown> = {};
 				if (Array.isArray(options) || typeof options === "string") {
 					_opts = { protocols: options };
@@ -917,7 +1081,7 @@ class WebSocketCloseError extends Error {
 	readonly reason?: string;
 	readonly wasClean?: boolean;
 
-	constructor(message: string, options?: { code?: number; reason?: string; wasClean?: boolean }) {
+	constructor(message: string, options?: WebSocketCloseErrorOptions) {
 		super(message);
 		this.name = "WebSocketCloseError";
 		this.code = options?.code;
@@ -1041,12 +1205,7 @@ async function acquireWebSocket(
 	sessionId: string | undefined,
 	signal?: AbortSignal,
 	connectTimeoutMs?: number,
-): Promise<{
-	socket: WebSocketLike;
-	entry?: CachedWebSocketConnection;
-	reused: boolean;
-	release: (options?: { keep?: boolean }) => void;
-}> {
+): Promise<AcquiredWebSocket> {
 	if (!sessionId) {
 		const socket = await connectWebSocket(url, headers, signal, connectTimeoutMs);
 		return {
@@ -1129,44 +1288,45 @@ async function acquireWebSocket(
 	};
 }
 
-function extractWebSocketError(event: unknown): Error {
-	if (event && typeof event === "object") {
-		const message = "message" in event ? (event as { message?: unknown }).message : undefined;
-		if (typeof message === "string" && message.length > 0) {
-			return new Error(message);
-		}
+function extractNonemptyErrorMessage(value: unknown): string | undefined {
+	if (!value || typeof value !== "object" || !("message" in value)) return undefined;
+	const message = (value as { message?: unknown }).message;
+	return typeof message === "string" && message.length > 0 ? message : undefined;
+}
 
-		const nestedError = "error" in event ? (event as { error?: unknown }).error : undefined;
-		if (nestedError instanceof Error && nestedError.message.length > 0) {
-			return nestedError;
-		}
-		if (nestedError && typeof nestedError === "object" && "message" in nestedError) {
-			const nestedMessage = (nestedError as { message?: unknown }).message;
-			if (typeof nestedMessage === "string" && nestedMessage.length > 0) {
-				return new Error(nestedMessage);
-			}
-		}
-	}
-	return new Error("WebSocket error");
+function extractWebSocketError(event: unknown): Error {
+	const message = extractNonemptyErrorMessage(event);
+	if (message) return new Error(message);
+	if (!event || typeof event !== "object" || !("error" in event)) return new Error("WebSocket error");
+
+	const nestedError = (event as { error?: unknown }).error;
+	if (nestedError instanceof Error && nestedError.message.length > 0) return nestedError;
+	const nestedMessage = extractNonemptyErrorMessage(nestedError);
+	return nestedMessage ? new Error(nestedMessage) : new Error("WebSocket error");
+}
+
+function readWebSocketCloseErrorOptions(event: object): WebSocketCloseErrorOptions {
+	const code = "code" in event ? (event as { code?: unknown }).code : undefined;
+	const reason = "reason" in event ? (event as { reason?: unknown }).reason : undefined;
+	const wasClean = "wasClean" in event ? (event as { wasClean?: unknown }).wasClean : undefined;
+	return {
+		code: typeof code === "number" ? code : undefined,
+		reason: typeof reason === "string" && reason.length > 0 ? reason : undefined,
+		wasClean: typeof wasClean === "boolean" ? wasClean : undefined,
+	};
+}
+
+function formatWebSocketCloseReason(options: WebSocketCloseErrorOptions): string {
+	if (options.reason) return ` ${options.reason}`;
+	return options.code === WEBSOCKET_MESSAGE_TOO_BIG_CLOSE_CODE ? " message too big" : "";
 }
 
 function extractWebSocketCloseError(event: unknown): Error {
-	if (event && typeof event === "object") {
-		const code = "code" in event ? (event as { code?: unknown }).code : undefined;
-		const reason = "reason" in event ? (event as { reason?: unknown }).reason : undefined;
-		const wasClean = "wasClean" in event ? (event as { wasClean?: unknown }).wasClean : undefined;
-		const codeText = typeof code === "number" ? ` ${code}` : "";
-		let reasonText = typeof reason === "string" && reason.length > 0 ? ` ${reason}` : "";
-		if (!reasonText && code === WEBSOCKET_MESSAGE_TOO_BIG_CLOSE_CODE) {
-			reasonText = " message too big";
-		}
-		return new WebSocketCloseError(`WebSocket closed${codeText}${reasonText}`.trim(), {
-			code: typeof code === "number" ? code : undefined,
-			reason: typeof reason === "string" && reason.length > 0 ? reason : undefined,
-			wasClean: typeof wasClean === "boolean" ? wasClean : undefined,
-		});
-	}
-	return new Error("WebSocket closed");
+	if (!event || typeof event !== "object") return new Error("WebSocket closed");
+	const options = readWebSocketCloseErrorOptions(event);
+	const codeText = options.code === undefined ? "" : ` ${options.code}`;
+	const reasonText = formatWebSocketCloseReason(options);
+	return new WebSocketCloseError(`WebSocket closed${codeText}${reasonText}`.trim(), options);
 }
 
 async function decodeWebSocketData(data: unknown): Promise<string | null> {
@@ -1186,88 +1346,127 @@ async function decodeWebSocketData(data: unknown): Promise<string | null> {
 	return null;
 }
 
+interface WebSocketParserState {
+	queue: Record<string, unknown>[];
+	pending: (() => void) | null;
+	done: boolean;
+	failed: Error | null;
+	sawCompletion: boolean;
+	processing: Promise<void>;
+}
+
+function wakeWebSocketParser(state: WebSocketParserState): void {
+	if (!state.pending) return;
+	const resolve = state.pending;
+	state.pending = null;
+	resolve();
+}
+
+function enqueueWebSocketEvent(state: WebSocketParserState, processEvent: () => void | Promise<void>): void {
+	state.processing = state.processing.then(processEvent).catch((cause) => {
+		state.failed =
+			cause instanceof CodexProtocolError
+				? cause
+				: new CodexProtocolError(`Invalid Codex WebSocket JSON: ${formatThrownValue(cause)}`, { cause });
+		state.done = true;
+		wakeWebSocketParser(state);
+	});
+}
+
+function parseWebSocketMessageJson(text: string): Record<string, unknown> {
+	try {
+		return JSON.parse(text) as Record<string, unknown>;
+	} catch (cause) {
+		throw new CodexProtocolError(`Invalid Codex WebSocket JSON: ${formatThrownValue(cause)}`, {
+			cause,
+			payload: text,
+		});
+	}
+}
+
+async function processWebSocketMessage(event: unknown, state: WebSocketParserState): Promise<void> {
+	if (!event || typeof event !== "object" || !("data" in event)) return;
+	const text = await decodeWebSocketData((event as { data?: unknown }).data);
+	if (!text) return;
+	const parsed = parseWebSocketMessageJson(text);
+	const type = typeof parsed.type === "string" ? parsed.type : "";
+	if (type === "response.completed" || type === "response.done" || type === "response.incomplete") {
+		state.sawCompletion = true;
+		state.done = true;
+	}
+	state.queue.push(parsed);
+	wakeWebSocketParser(state);
+}
+
+function processWebSocketError(event: unknown, state: WebSocketParserState): void {
+	state.failed = extractWebSocketError(event);
+	state.done = true;
+	wakeWebSocketParser(state);
+}
+
+function processWebSocketClose(event: unknown, state: WebSocketParserState): void {
+	if (state.sawCompletion) {
+		state.done = true;
+		wakeWebSocketParser(state);
+		return;
+	}
+	if (!state.failed) state.failed = extractWebSocketCloseError(event);
+	state.done = true;
+	wakeWebSocketParser(state);
+}
+
+function abortWebSocketParsing(state: WebSocketParserState): void {
+	state.failed = new Error("Request was aborted");
+	state.done = true;
+	wakeWebSocketParser(state);
+}
+
+async function waitForWebSocketActivity(
+	socket: WebSocketLike,
+	state: WebSocketParserState,
+	idleTimeoutMs: number | undefined,
+): Promise<void> {
+	let timeout: ReturnType<typeof setTimeout> | undefined;
+	await new Promise<void>((resolve, reject) => {
+		state.pending = resolve;
+		if (idleTimeoutMs !== undefined && idleTimeoutMs > 0) {
+			timeout = setTimeout(() => {
+				const error = new Error(`WebSocket idle timeout after ${idleTimeoutMs}ms`);
+				state.failed = error;
+				state.done = true;
+				state.pending = null;
+				closeWebSocketSilently(socket, 1000, "idle_timeout");
+				reject(error);
+			}, idleTimeoutMs);
+		}
+	}).finally(() => {
+		if (timeout) clearTimeout(timeout);
+	});
+}
+
 async function* parseWebSocket(
 	socket: WebSocketLike,
 	signal?: AbortSignal,
 	idleTimeoutMs?: number,
 ): AsyncGenerator<Record<string, unknown>> {
-	const queue: Record<string, unknown>[] = [];
-	let pending: (() => void) | null = null;
-	let done = false;
-	let failed: Error | null = null;
-	let sawCompletion = false;
-
-	const wake = () => {
-		if (!pending) return;
-		const resolve = pending;
-		pending = null;
-		resolve();
+	const state: WebSocketParserState = {
+		queue: [],
+		pending: null,
+		done: false,
+		failed: null,
+		sawCompletion: false,
+		processing: Promise.resolve(),
 	};
-
-	const enqueue = (processEvent: () => void | Promise<void>) => {
-		processing = processing.then(processEvent).catch((cause) => {
-			failed =
-				cause instanceof CodexProtocolError
-					? cause
-					: new CodexProtocolError(`Invalid Codex WebSocket JSON: ${formatThrownValue(cause)}`, { cause });
-			done = true;
-			wake();
-		});
-	};
-
-	let processing = Promise.resolve();
 	const onMessage: WebSocketListener = (event) => {
-		enqueue(async () => {
-			if (!event || typeof event !== "object" || !("data" in event)) return;
-			const text = await decodeWebSocketData((event as { data?: unknown }).data);
-			if (!text) return;
-			let parsed: Record<string, unknown>;
-			try {
-				parsed = JSON.parse(text) as Record<string, unknown>;
-			} catch (cause) {
-				throw new CodexProtocolError(`Invalid Codex WebSocket JSON: ${formatThrownValue(cause)}`, {
-					cause,
-					payload: text,
-				});
-			}
-			const type = typeof parsed.type === "string" ? parsed.type : "";
-			if (type === "response.completed" || type === "response.done" || type === "response.incomplete") {
-				sawCompletion = true;
-				done = true;
-			}
-			queue.push(parsed);
-			wake();
-		});
+		enqueueWebSocketEvent(state, () => processWebSocketMessage(event, state));
 	};
-
 	const onError: WebSocketListener = (event) => {
-		enqueue(() => {
-			failed = extractWebSocketError(event);
-			done = true;
-			wake();
-		});
+		enqueueWebSocketEvent(state, () => processWebSocketError(event, state));
 	};
-
 	const onClose: WebSocketListener = (event) => {
-		enqueue(() => {
-			if (sawCompletion) {
-				done = true;
-				wake();
-				return;
-			}
-			if (!failed) {
-				failed = extractWebSocketCloseError(event);
-			}
-			done = true;
-			wake();
-		});
+		enqueueWebSocketEvent(state, () => processWebSocketClose(event, state));
 	};
-
-	const onAbort = () => {
-		failed = new Error("Request was aborted");
-		done = true;
-		wake();
-	};
+	const onAbort = () => abortWebSocketParsing(state);
 
 	socket.addEventListener("message", onMessage);
 	socket.addEventListener("error", onError);
@@ -1276,40 +1475,16 @@ async function* parseWebSocket(
 
 	try {
 		while (true) {
-			if (signal?.aborted) {
-				throw new Error("Request was aborted");
-			}
-			if (queue.length > 0) {
-				yield queue.shift()!;
+			if (signal?.aborted) throw new Error("Request was aborted");
+			if (state.queue.length > 0) {
+				yield* state.queue.splice(0, 1);
 				continue;
 			}
-			if (done) break;
-			let timeout: ReturnType<typeof setTimeout> | undefined;
-			await new Promise<void>((resolve, reject) => {
-				pending = resolve;
-				if (idleTimeoutMs !== undefined && idleTimeoutMs > 0) {
-					timeout = setTimeout(() => {
-						const error = new Error(`WebSocket idle timeout after ${idleTimeoutMs}ms`);
-						failed = error;
-						done = true;
-						pending = null;
-						closeWebSocketSilently(socket, 1000, "idle_timeout");
-						reject(error);
-					}, idleTimeoutMs);
-				}
-			}).finally(() => {
-				if (timeout) {
-					clearTimeout(timeout);
-				}
-			});
+			if (state.done) break;
+			await waitForWebSocketActivity(socket, state, idleTimeoutMs);
 		}
-
-		if (failed) {
-			throw failed;
-		}
-		if (!sawCompletion) {
-			throw new Error("WebSocket stream closed before response.completed");
-		}
+		if (state.failed) throw state.failed;
+		if (!state.sawCompletion) throw new Error("WebSocket stream closed before response.completed");
 	} finally {
 		socket.removeEventListener("message", onMessage);
 		socket.removeEventListener("error", onError);
@@ -1389,6 +1564,51 @@ async function* startWebSocketOutputOnFirstEvent(
 	}
 }
 
+function recordWebSocketRequestStats(
+	stats: OpenAICodexWebSocketDebugStats | undefined,
+	reused: boolean,
+	useCachedContext: boolean,
+	requestBody: RequestBody,
+): void {
+	if (!stats) return;
+	stats.requests++;
+	if (reused) stats.connectionsReused++;
+	else stats.connectionsCreated++;
+	if (useCachedContext) stats.cachedContextRequests++;
+	if (requestBody.store === true) stats.storeTrueRequests++;
+	stats.lastInputItems = requestBody.input?.length ?? 0;
+	if (requestBody.previous_response_id) {
+		stats.deltaRequests++;
+		stats.lastDeltaInputItems = requestBody.input?.length ?? 0;
+		stats.lastPreviousResponseId = requestBody.previous_response_id;
+		return;
+	}
+	stats.fullContextRequests++;
+	stats.lastDeltaInputItems = undefined;
+	stats.lastPreviousResponseId = undefined;
+}
+
+function finishWebSocketRequest(
+	entry: CachedWebSocketConnection | undefined,
+	fullBody: RequestBody,
+	output: AssistantMessage,
+	model: Model<"openai-codex-responses">,
+	useCachedContext: boolean,
+	signal: AbortSignal | undefined,
+): boolean {
+	if (signal?.aborted) return false;
+	if (!useCachedContext || !entry || !output.responseId) return true;
+	const responseItems = convertResponsesMessages(model, { messages: [output] }, CODEX_TOOL_CALL_PROVIDERS, {
+		includeSystemPrompt: false,
+	}).filter((item) => item.type !== "function_call_output");
+	entry.continuation = {
+		lastRequestBody: fullBody,
+		lastResponseId: output.responseId,
+		lastResponseItems: responseItems,
+	};
+	return true;
+}
+
 async function processWebSocketStream(
 	url: string,
 	body: RequestBody,
@@ -1415,23 +1635,7 @@ async function processWebSocketStream(
 	const fullBody = body;
 	const requestBody = useCachedContext && entry ? buildCachedWebSocketRequestBody(entry, fullBody) : fullBody;
 	const stats = options?.sessionId ? getOrCreateWebSocketDebugStats(options.sessionId) : undefined;
-	if (stats) {
-		stats.requests++;
-		if (reused) stats.connectionsReused++;
-		else stats.connectionsCreated++;
-		if (useCachedContext) stats.cachedContextRequests++;
-		if (requestBody.store === true) stats.storeTrueRequests++;
-		stats.lastInputItems = requestBody.input?.length ?? 0;
-		if (requestBody.previous_response_id) {
-			stats.deltaRequests++;
-			stats.lastDeltaInputItems = requestBody.input?.length ?? 0;
-			stats.lastPreviousResponseId = requestBody.previous_response_id;
-		} else {
-			stats.fullContextRequests++;
-			stats.lastDeltaInputItems = undefined;
-			stats.lastPreviousResponseId = undefined;
-		}
-	}
+	recordWebSocketRequestStats(stats, reused, useCachedContext, requestBody);
 	try {
 		socket.send(JSON.stringify({ type: "response.create", ...requestBody }));
 		await processResponsesStream(
@@ -1450,18 +1654,7 @@ async function processWebSocketStream(
 				applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
 			},
 		);
-		if (options?.signal?.aborted) {
-			keepConnection = false;
-		} else if (useCachedContext && entry && output.responseId) {
-			const responseItems = convertResponsesMessages(model, { messages: [output] }, CODEX_TOOL_CALL_PROVIDERS, {
-				includeSystemPrompt: false,
-			}).filter((item) => item.type !== "function_call_output");
-			entry.continuation = {
-				lastRequestBody: fullBody,
-				lastResponseId: output.responseId,
-				lastResponseItems: responseItems,
-			};
-		}
+		keepConnection = finishWebSocketRequest(entry, fullBody, output, model, useCachedContext, options?.signal);
 	} catch (error) {
 		if (entry) {
 			entry.continuation = undefined;
@@ -1477,31 +1670,31 @@ async function processWebSocketStream(
 // Error Handling
 // ============================================================================
 
-async function parseErrorResponse(response: Response): Promise<{ message: string; friendlyMessage?: string }> {
+function describeCodexApiError(error: CodexErrorDetails, status: number, fallbackMessage: string): CodexErrorResponse {
+	const code = error.code || error.type || "";
+	if (!/usage_limit_reached|usage_not_included|rate_limit_exceeded/i.test(code) && status !== 429) {
+		return { message: error.message || fallbackMessage };
+	}
+
+	const plan = error.plan_type ? ` (${error.plan_type.toLowerCase()} plan)` : "";
+	const minutesUntilReset = error.resets_at
+		? Math.max(0, Math.round((error.resets_at * 1000 - Date.now()) / 60000))
+		: undefined;
+	const retryMessage = minutesUntilReset !== undefined ? ` Try again in ~${minutesUntilReset} min.` : "";
+	const friendlyMessage = `You have hit your ChatGPT usage limit${plan}.${retryMessage}`.trim();
+	return { message: error.message || friendlyMessage, friendlyMessage };
+}
+
+async function parseErrorResponse(response: Response): Promise<CodexErrorResponse> {
 	const raw = await response.text();
-	let message = raw || response.statusText || "Request failed";
-	let friendlyMessage: string | undefined;
+	const fallbackMessage = raw || response.statusText || "Request failed";
 
 	try {
-		const parsed = JSON.parse(raw) as {
-			error?: { code?: string; type?: string; message?: string; plan_type?: string; resets_at?: number };
-		};
-		const err = parsed?.error;
-		if (err) {
-			const code = err.code || err.type || "";
-			if (/usage_limit_reached|usage_not_included|rate_limit_exceeded/i.test(code) || response.status === 429) {
-				const plan = err.plan_type ? ` (${err.plan_type.toLowerCase()} plan)` : "";
-				const mins = err.resets_at
-					? Math.max(0, Math.round((err.resets_at * 1000 - Date.now()) / 60000))
-					: undefined;
-				const when = mins !== undefined ? ` Try again in ~${mins} min.` : "";
-				friendlyMessage = `You have hit your ChatGPT usage limit${plan}.${when}`.trim();
-			}
-			message = err.message || friendlyMessage || message;
-		}
+		const error = (JSON.parse(raw) as CodexErrorPayload).error;
+		if (error) return describeCodexApiError(error, response.status, fallbackMessage);
 	} catch {}
 
-	return { message, friendlyMessage };
+	return { message: fallbackMessage };
 }
 
 // ============================================================================

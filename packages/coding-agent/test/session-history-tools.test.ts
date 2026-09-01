@@ -1,22 +1,24 @@
 import type { AgentToolResult } from "@fleetagent/pi-agent-core";
-import { fauxAssistantMessage, fauxToolCall, validateToolArguments } from "@fleetagent/pi-ai";
+import { fauxAssistantMessage, fauxToolCall, type TextContent, validateToolArguments } from "@fleetagent/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { STRUCTURED_RESPONSE_INTERNAL_CUSTOM_TYPE } from "../src/core/messages.ts";
-import type { SessionEntryGetToolDetails, SessionSearchToolDetails } from "../src/core/tools/session-history.ts";
+import type {
+	SessionEntryGetToolDetails,
+	SessionHistoryToolName,
+	SessionSearchToolDetails,
+} from "../src/core/tools/session-history.ts";
 import { createHarness, type Harness } from "./suite/harness.ts";
 
 function textOutput(result: AgentToolResult<unknown>): string {
 	return result.content
-		.filter(
-			(content): content is Extract<(typeof result.content)[number], { type: "text" }> => content.type === "text",
-		)
+		.filter((content): content is TextContent => content.type === "text")
 		.map((content) => content.text)
 		.join("\n");
 }
 
 async function executeTool(
 	harness: Harness,
-	name: "session_search" | "session_entry_get",
+	name: SessionHistoryToolName,
 	arguments_: Record<string, unknown>,
 	toolCallId = `test-${name}`,
 ): Promise<AgentToolResult<unknown>> {

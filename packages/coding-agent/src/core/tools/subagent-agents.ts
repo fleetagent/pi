@@ -2,11 +2,17 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { getAgentDir } from "../../config.ts";
 import { parseFrontmatter } from "../../utils/frontmatter.ts";
-import { dirnamePortablePath, joinPortablePath, pathComparisonValue } from "../lsp/portable-path.ts";
+import {
+	dirnamePortablePath,
+	joinPortablePath,
+	type PortablePathFlavor,
+	pathComparisonValue,
+} from "../lsp/portable-path.ts";
 import type { ToolOperations } from "./operations.ts";
 
 export type AgentScope = "user" | "project" | "both";
-export type AgentSource = "bundled" | "user" | "project" | "session";
+type AgentConfigSource = "user" | "project";
+export type AgentSource = "bundled" | AgentConfigSource | "session";
 
 export interface AgentConfig {
 	name: string;
@@ -73,11 +79,7 @@ Report files reviewed, critical issues, warnings, suggestions, and a concise sum
 	},
 ];
 
-function parseAgentConfig(
-	content: string,
-	filePath: string,
-	source: Exclude<AgentSource, "bundled" | "session">,
-): AgentConfig | undefined {
+function parseAgentConfig(content: string, filePath: string, source: AgentConfigSource): AgentConfig | undefined {
 	const { frontmatter, body } = parseFrontmatter<Record<string, string>>(content);
 	if (!frontmatter.name || !frontmatter.description) return undefined;
 	const tools = frontmatter.tools
@@ -102,7 +104,7 @@ function parseAgentConfig(
 	};
 }
 
-function loadAgentsFromDir(dir: string, source: Exclude<AgentSource, "bundled" | "session">): AgentConfig[] {
+function loadAgentsFromDir(dir: string, source: AgentConfigSource): AgentConfig[] {
 	const agents: AgentConfig[] = [];
 	if (!fs.existsSync(dir)) return agents;
 
@@ -182,7 +184,7 @@ async function findNearestProjectAgentsDirWithOperations(
 	cwd: string,
 	operations: ToolOperations,
 	root: string,
-	pathFlavor: "posix" | "windows",
+	pathFlavor: PortablePathFlavor,
 ): Promise<string | null> {
 	let currentDir = cwd;
 	while (true) {
@@ -219,18 +221,13 @@ export async function discoverAgentsWithOperations(
 	if (backend.type === "remote" && !backend.configured) {
 		return discoverHostOwnedAgents(scope);
 	}
-	const remoteCwd = backend.type === "ssh" ? backend.cwd : backend.workspace.root;
-	const pathFlavor = backend.type === "ssh" ? "posix" : backend.workspace.pathFlavor;
+	const remoteCwd = backend.workspace.root;
+	const pathFlavor = backend.workspace.pathFlavor;
 	const userDir = path.join(getAgentDir(), "agents");
 	const projectAgentsDir =
 		scope === "user"
 			? null
-			: await findNearestProjectAgentsDirWithOperations(
-					remoteCwd,
-					operations,
-					backend.type === "ssh" ? backend.cwd : backend.workspace.root,
-					pathFlavor,
-				);
+			: await findNearestProjectAgentsDirWithOperations(remoteCwd, operations, backend.workspace.root, pathFlavor);
 	const bundledAgents = scope === "project" ? [] : BUNDLED_AGENTS;
 	const userAgents = scope === "project" ? [] : loadAgentsFromDir(userDir, "user");
 	const projectAgents = projectAgentsDir ? await loadAgentsFromDirWithOperations(projectAgentsDir, operations) : [];
@@ -241,7 +238,12 @@ export async function discoverAgentsWithOperations(
 	return { agents: Array.from(agentMap.values()), projectAgentsDir };
 }
 
-export function formatAgentList(agents: AgentConfig[], maxItems: number): { text: string; remaining: number } {
+export interface AgentListFormatResult {
+	text: string;
+	remaining: number;
+}
+
+export function formatAgentList(agents: AgentConfig[], maxItems: number): AgentListFormatResult {
 	if (agents.length === 0) return { text: "none", remaining: 0 };
 	const listed = agents.slice(0, maxItems);
 	return {

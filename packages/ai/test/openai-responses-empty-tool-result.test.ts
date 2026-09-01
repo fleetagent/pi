@@ -1,7 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { getModel } from "../src/models.ts";
 import { convertResponsesMessages } from "../src/providers/openai-responses-shared.ts";
-import type { Api, AssistantMessage, Context, Model, ToolResultMessage, Usage } from "../src/types.ts";
+import type {
+	Api,
+	AssistantMessage,
+	Context,
+	Model,
+	ModelInputModality,
+	ToolResultContent,
+	Usage,
+} from "../src/types.ts";
 
 const usage: Usage = {
 	input: 0,
@@ -12,7 +20,7 @@ const usage: Usage = {
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
 
-function convertToolResult(content: ToolResultMessage["content"], input: Model<Api>["input"]) {
+function convertToolResult(content: ToolResultContent[], input: ModelInputModality[]) {
 	const model = { ...getModel("openai", "gpt-4o-mini"), input } satisfies Model<Api>;
 	const now = Date.now();
 	const assistant: AssistantMessage = {
@@ -50,7 +58,7 @@ function convertToolResult(content: ToolResultMessage["content"], input: Model<A
 
 describe("OpenAI Responses convertResponsesMessages tool result placeholders", () => {
 	it("uses '(no tool output)' only for genuinely empty tool results", () => {
-		const emptyContents: ToolResultMessage["content"][] = [[], [{ type: "text", text: "" }]];
+		const emptyContents: ToolResultContent[][] = [[], [{ type: "text", text: "" }]];
 
 		for (const content of emptyContents) {
 			const output = convertToolResult(content, ["text", "image"]);

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { createInterface } from "node:readline";
+import { createInterface, type Interface } from "node:readline";
 import { chmodSync, existsSync, readFileSync, writeFileSync } from "fs";
 import { getOAuthProvider, getOAuthProviders } from "./utils/oauth/index.ts";
 import type { OAuthCredentials, OAuthProviderId } from "./utils/oauth/types.ts";
@@ -8,11 +8,17 @@ import type { OAuthCredentials, OAuthProviderId } from "./utils/oauth/types.ts";
 const AUTH_FILE = "auth.json";
 const PROVIDERS = getOAuthProviders();
 
-function prompt(rl: ReturnType<typeof createInterface>, question: string): Promise<string> {
+interface StoredOAuthCredentials extends OAuthCredentials {
+	type: "oauth";
+}
+
+type OAuthCredentialStore = Record<string, StoredOAuthCredentials>;
+
+function prompt(rl: Interface, question: string): Promise<string> {
 	return new Promise((resolve) => rl.question(question, resolve));
 }
 
-function loadAuth(): Record<string, { type: "oauth" } & OAuthCredentials> {
+function loadAuth(): OAuthCredentialStore {
 	if (!existsSync(AUTH_FILE)) return {};
 	try {
 		return JSON.parse(readFileSync(AUTH_FILE, "utf-8"));
@@ -21,7 +27,7 @@ function loadAuth(): Record<string, { type: "oauth" } & OAuthCredentials> {
 	}
 }
 
-function saveAuth(auth: Record<string, { type: "oauth" } & OAuthCredentials>): void {
+function saveAuth(auth: OAuthCredentialStore): void {
 	writeFileSync(AUTH_FILE, JSON.stringify(auth, null, 2), { encoding: "utf-8", mode: 0o600 });
 	chmodSync(AUTH_FILE, 0o600);
 }
@@ -64,6 +70,32 @@ async function login(providerId: OAuthProviderId): Promise<void> {
 	}
 }
 
+async function resolveLoginProvider(requestedProvider: OAuthProviderId | undefined): Promise<OAuthProviderId> {
+	let provider = requestedProvider;
+	if (!provider) {
+		const rl = createInterface({ input: process.stdin, output: process.stdout });
+		console.log("Select a provider:\n");
+		for (let i = 0; i < PROVIDERS.length; i++) {
+			console.log(`  ${i + 1}. ${PROVIDERS[i].name}`);
+		}
+		console.log();
+		const choice = await prompt(rl, `Enter number (1-${PROVIDERS.length}): `);
+		rl.close();
+		const index = parseInt(choice, 10) - 1;
+		if (index < 0 || index >= PROVIDERS.length) {
+			console.error("Invalid selection");
+			process.exit(1);
+		}
+		provider = PROVIDERS[index].id;
+	}
+	if (!PROVIDERS.some((candidate) => candidate.id === provider)) {
+		console.error(`Unknown provider: ${provider}`);
+		console.error(`Use 'npx @fleetagent/pi-ai list' to see available providers`);
+		process.exit(1);
+	}
+	return provider;
+}
+
 async function main(): Promise<void> {
 	const args = process.argv.slice(2);
 	const command = args[0];
@@ -96,33 +128,7 @@ Examples:
 	}
 
 	if (command === "login") {
-		let provider = args[1] as OAuthProviderId | undefined;
-
-		if (!provider) {
-			const rl = createInterface({ input: process.stdin, output: process.stdout });
-			console.log("Select a provider:\n");
-			for (let i = 0; i < PROVIDERS.length; i++) {
-				console.log(`  ${i + 1}. ${PROVIDERS[i].name}`);
-			}
-			console.log();
-
-			const choice = await prompt(rl, `Enter number (1-${PROVIDERS.length}): `);
-			rl.close();
-
-			const index = parseInt(choice, 10) - 1;
-			if (index < 0 || index >= PROVIDERS.length) {
-				console.error("Invalid selection");
-				process.exit(1);
-			}
-			provider = PROVIDERS[index].id;
-		}
-
-		if (!PROVIDERS.some((p) => p.id === provider)) {
-			console.error(`Unknown provider: ${provider}`);
-			console.error(`Use 'npx @fleetagent/pi-ai list' to see available providers`);
-			process.exit(1);
-		}
-
+		const provider = await resolveLoginProvider(args[1] as OAuthProviderId | undefined);
 		console.log(`Logging in to ${provider}...`);
 		await login(provider);
 		return;

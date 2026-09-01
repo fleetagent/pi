@@ -1,7 +1,11 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ResponseFunctionCallOutputItemList } from "openai/resources/responses/responses.js";
+import type {
+	ResponseFunctionCallOutputItemList,
+	ResponseInputImageContent,
+	ResponseInputTextContent,
+} from "openai/resources/responses/responses.js";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import type { Api, Context, Model, StreamOptions, Tool, ToolResultMessage } from "../src/index.ts";
@@ -24,25 +28,36 @@ const getImageTool: Tool<typeof getImageSchema> = {
 	parameters: getImageSchema,
 };
 
+interface CapturedResponsesPayload {
+	input: unknown[];
+}
+
+interface CapturedFunctionCallOutput {
+	type: "function_call_output";
+	output: string | ResponseFunctionCallOutputItemList;
+}
+
+interface CapturedInputImage extends ResponseInputImageContent {
+	image_url: string;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null;
 }
 
-function isResponsePayload(value: unknown): value is { input: unknown[] } {
+function isResponsePayload(value: unknown): value is CapturedResponsesPayload {
 	return isRecord(value) && Array.isArray(value.input);
 }
 
-function isFunctionCallOutputItem(
-	value: unknown,
-): value is { type: "function_call_output"; output: string | ResponseFunctionCallOutputItemList } {
+function isFunctionCallOutputItem(value: unknown): value is CapturedFunctionCallOutput {
 	return isRecord(value) && value.type === "function_call_output" && "output" in value;
 }
 
-function isInputTextItem(value: unknown): value is { type: "input_text"; text: string } {
+function isInputTextItem(value: unknown): value is ResponseInputTextContent {
 	return isRecord(value) && value.type === "input_text" && typeof value.text === "string";
 }
 
-function isInputImageItem(value: unknown): value is { type: "input_image"; image_url: string } {
+function isInputImageItem(value: unknown): value is CapturedInputImage {
 	return isRecord(value) && value.type === "input_image" && typeof value.image_url === "string";
 }
 

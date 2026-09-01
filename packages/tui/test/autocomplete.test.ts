@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, it, test } from "node:test";
-import { CombinedAutocompleteProvider } from "../src/autocomplete.ts";
+import { type AutocompleteSuggestions, CombinedAutocompleteProvider } from "../src/autocomplete.ts";
 
 const resolveFdPath = (): string | null => {
 	const command = process.platform === "win32" ? "where" : "which";
@@ -378,7 +378,7 @@ describe("CombinedAutocompleteProvider", () => {
 			const normalResult = await getSuggestions(normalProvider, [query], 0, query.length);
 			const queryInPathResult = await getSuggestions(queryInPathProvider, [query], 0, query.length);
 
-			const normalize = (result: Awaited<ReturnType<typeof getSuggestions>>) =>
+			const normalize = (result: AutocompleteSuggestions | null) =>
 				(result?.items ?? []).map((item) => `${item.label} :: ${item.description ?? ""}`).sort();
 
 			assert.deepStrictEqual(normalize(queryInPathResult), normalize(normalResult));

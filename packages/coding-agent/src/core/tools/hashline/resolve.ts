@@ -15,19 +15,27 @@ export type RHEdit = {
 	content_lines: string[];
 };
 
+type HashAnchorMismatchKind = "not_found" | "ambiguous";
+export type BoundaryDuplicateKind = "trailing" | "leading";
+
 interface HMismatch {
 	ref: Anchor;
-	kind: "not_found" | "ambiguous";
+	kind: HashAnchorMismatchKind;
 	candidates?: number[];
 }
 
 export interface BDupWarn {
-	kind: "trailing" | "leading";
+	kind: BoundaryDuplicateKind;
 	survivingLineContent: string;
 	survivingLineIndex: number;
 	occurrence: number;
 	replacementLineContent: string;
 	editIndex: number;
+}
+interface EditValidationResult {
+	resolved: RHEdit[];
+	mismatches: HMismatch[];
+	boundaryWarnings: BDupWarn[];
 }
 
 export interface NEdit {
@@ -67,6 +75,40 @@ function assertAligned(fileLines: string[], fileHashes: string[], ctx: string): 
 	}
 }
 
+function formatNotFoundMismatches(mismatches: HMismatch[], filePath: string | undefined): string | undefined {
+	const notFound = mismatches.filter((mismatch) => mismatch.kind === "not_found");
+	if (notFound.length === 0) return undefined;
+	const references = notFound.map((mismatch) => `"${mismatch.ref.hash}"`).join(", ");
+	return `[E_STALE_ANCHOR] ${notFound.length} stale anchor${notFound.length > 1 ? "s" : ""}${filePath ? ` in ${filePath}` : ""}: ${references}. Call read() to get fresh anchors, then copy the 3-char HASH of the start and end of the range you are replacing into hash_range_inclusive of your next replace call.`;
+}
+
+function formatAmbiguousMismatchDetail(mismatch: HMismatch, fileLines: string[], fileHashes: string[]): string {
+	const sample = (mismatch.candidates ?? []).slice(0, 5);
+	const candidateCount = mismatch.candidates?.length ?? 0;
+	const more = candidateCount > sample.length ? `, ... (+${candidateCount - sample.length} more)` : "";
+	const lines = sample
+		.map((line) => {
+			const content = fileLines[line - 1] ?? "";
+			return `    ${line}: ${fileHashes[line - 1]}│${content}`;
+		})
+		.join("\n");
+	return `  Hash "${mismatch.ref.hash}" matches lines ${sample.join(", ")}${more}.\n${lines}`;
+}
+
+function formatAmbiguousMismatches(
+	mismatches: HMismatch[],
+	fileLines: string[],
+	fileHashes: string[],
+	filePath: string | undefined,
+): string | undefined {
+	const ambiguous = mismatches.filter((mismatch) => mismatch.kind === "ambiguous");
+	if (ambiguous.length === 0) return undefined;
+	const header = `[E_AMBIGUOUS_ANCHOR] ${ambiguous.length} ambiguous anchor${ambiguous.length > 1 ? "s" : ""}${filePath ? ` in ${filePath}` : ""}. Call read() to get fresh anchors, then copy the 3-char HASH of the start and end of the range you are replacing into hash_range_inclusive of your next replace call.`;
+	return [header, ...ambiguous.map((mismatch) => formatAmbiguousMismatchDetail(mismatch, fileLines, fileHashes))].join(
+		"\n",
+	);
+}
+
 export function fmtMismatch(
 	mismatches: HMismatch[],
 	fileLines: string[],
@@ -74,39 +116,12 @@ export function fmtMismatch(
 	filePath?: string,
 ): string {
 	assertAligned(fileLines, fileHashes, "fmtMismatch");
-
-	const out: string[] = [];
-	const notFound = mismatches.filter((m) => m.kind === "not_found");
-	const ambiguous = mismatches.filter((m) => m.kind === "ambiguous");
-
-	const refList = notFound.map((m) => `"${m.ref.hash}"`).join(", ");
-	if (notFound.length > 0) {
-		out.push(
-			`[E_STALE_ANCHOR] ${notFound.length} stale anchor${notFound.length > 1 ? "s" : ""}${filePath ? ` in ${filePath}` : ""}: ${refList}. Call read() to get fresh anchors, then copy the 3-char HASH of the start and end of the range you are replacing into hash_range_inclusive of your next replace call.`,
-		);
-	}
-	if (ambiguous.length > 0) {
-		if (out.length > 0) out.push("");
-		out.push(
-			`[E_AMBIGUOUS_ANCHOR] ${ambiguous.length} ambiguous anchor${ambiguous.length > 1 ? "s" : ""}${filePath ? ` in ${filePath}` : ""}. Call read() to get fresh anchors, then copy the 3-char HASH of the start and end of the range you are replacing into hash_range_inclusive of your next replace call.`,
-		);
-		for (const m of ambiguous) {
-			const sample = (m.candidates ?? []).slice(0, 5);
-			const more =
-				(m.candidates?.length ?? 0) > sample.length
-					? `, ... (+${(m.candidates?.length ?? 0) - sample.length} more)`
-					: "";
-			const lines = sample
-				.map((line) => {
-					const content = fileLines[line - 1] ?? "";
-					return `    ${line}: ${fileHashes[line - 1]}│${content}`;
-				})
-				.join("\n");
-			out.push(`  Hash "${m.ref.hash}" matches lines ${sample.join(", ")}${more}.\n${lines}`);
-		}
-	}
-
-	return out.join("\n");
+	return [
+		formatNotFoundMismatches(mismatches, filePath),
+		formatAmbiguousMismatches(mismatches, fileLines, fileHashes, filePath),
+	]
+		.filter((section): section is string => section !== undefined)
+		.join("\n\n");
 }
 
 const ITEM_KS = new Set(["hash_range_inclusive", "content_lines"]);
@@ -202,7 +217,7 @@ export function descEdit(edit: RHEdit): string {
 function checkBoundaryDup(
 	adjacentLine: string | undefined,
 	replacementEdge: string | undefined,
-	kind: "trailing" | "leading",
+	kind: BoundaryDuplicateKind,
 	survivingLineIndex: number,
 	fileLines: string[],
 	editIndex: number,
@@ -230,7 +245,7 @@ export function valEdits(
 	fileHashes: string[],
 	_warnings: string[],
 	signal: AbortSignal | undefined,
-): { resolved: RHEdit[]; mismatches: HMismatch[]; boundaryWarnings: BDupWarn[] } {
+): EditValidationResult {
 	assertAligned(fileLines, fileHashes, "valEdits");
 	const resolved: RHEdit[] = [];
 	const mismatches: HMismatch[] = [];

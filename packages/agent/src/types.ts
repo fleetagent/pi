@@ -1,13 +1,15 @@
 import type {
 	AssistantMessage,
 	AssistantMessageEvent,
+	AssistantMessageEventStream,
+	Context,
 	ImageContent,
 	Message,
 	Model,
 	SimpleStreamOptions,
-	streamSimple,
 	TextContent,
 	Tool,
+	ToolCall,
 	ToolResultMessage,
 } from "@fleetagent/pi-ai";
 import type { Static, TSchema } from "typebox";
@@ -22,8 +24,10 @@ import type { Static, TSchema } from "typebox";
  *   final AssistantMessage with stopReason "error" or "aborted" and errorMessage.
  */
 export type StreamFn = (
-	...args: Parameters<typeof streamSimple>
-) => ReturnType<typeof streamSimple> | Promise<ReturnType<typeof streamSimple>>;
+	model: Model<any>,
+	context: Context,
+	options?: SimpleStreamOptions,
+) => AssistantMessageEventStream | Promise<AssistantMessageEventStream>;
 
 /**
  * Configuration for how tool calls from a single assistant message are executed.
@@ -44,7 +48,7 @@ export type ToolExecutionMode = "sequential" | "parallel";
 export type QueueMode = "all" | "one-at-a-time";
 
 /** A single tool call content block emitted by an assistant message. */
-export type AgentToolCall = Extract<AssistantMessage["content"][number], { type: "toolCall" }>;
+export type AgentToolCall = ToolCall;
 
 /**
  * Result returned from `beforeToolCall`.
@@ -423,3 +427,6 @@ export type AgentEvent =
 	| { type: "tool_execution_start"; toolCallId: string; toolName: string; args: any }
 	| { type: "tool_execution_update"; toolCallId: string; toolName: string; args: any; partialResult: any }
 	| { type: "tool_execution_end"; toolCallId: string; toolName: string; result: any; isError: boolean };
+
+/** Agent event selected by its discriminant. */
+export type AgentEventOfType<TType extends AgentEvent["type"]> = Extract<AgentEvent, { type: TType }>;

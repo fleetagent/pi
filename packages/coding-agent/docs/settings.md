@@ -9,6 +9,10 @@ Pi uses JSON settings files with project settings overriding global settings.
 
 Edit directly or use `/settings` for common options.
 
+## Hook settings
+
+Hooks use a Claude Code-compatible schema and are captured as an immutable per-session snapshot. Native Pi settings are preferred: trusted user hooks are read from the active `<agentDir>/settings.json` (normally `~/.pi/agent/settings.json`) before the compatibility source `~/.claude/settings.json`. For local interactive startup, project hooks trigger a **Don't trust / Trust once / Trust always** prompt. Trust once covers only the initial session; Trust always records the canonical repository location in `<agentDir>/trusted-project-hooks.json` and includes all future changes at that location. `--trust-project-hooks` bypasses the prompt. Trusted project sources are read from `.pi/settings.json`, `.claude/settings.json`, and `.claude/settings.local.json` in that order; exact duplicates from later sources are ignored. Approved project command hooks follow the active workspace backend, executing inside a sandbox after the session switches to it; project HTTP hooks are blocked there rather than escaping through host networking. Initial remote project discovery remains disabled. Hook parse/schema/execution problems appear as nonfatal `PiAgent` diagnostics. SDK hosts can disable discovery, inject a trusted snapshot, and restrict HTTP URLs/environment interpolation with `CreatePiAgentOptions.hooks`.
+
 ## All Settings
 
 ### Model & Thinking
@@ -190,8 +194,8 @@ Global and project `tools` settings merge per tool name, so a project can overri
 | `sandbox.dockerBinary` | string | `"docker"` | Docker executable |
 | `sandbox.workspaceMountPath` | string | `"/workspace"` | Container path for the mounted current workspace |
 | `sandbox.containerNamePrefix` | string | `"pi-sandbox"` | Prefix for generated container names |
-| `sandbox.daemonPort` | number | `8787` | Preferred host-network daemon port; an available port is selected when occupied |
-| `sandbox.daemonHostBind` | string | `"127.0.0.1"` | Host-network daemon bind address |
+| `sandbox.daemonPort` | number | `8787` | Preferred loopback-published daemon port; an available port is selected when occupied |
+| `sandbox.daemonHostBind` | string | `"127.0.0.1"` | Host address used to publish the container daemon port |
 | `sandbox.cleanup` | string | `"stop"` | Stop behavior: `"stop"` or `"remove"` |
 
 ```json

@@ -5,11 +5,17 @@ import type {
 	JsonlSessionMetadata,
 	JsonlSessionRepoApi,
 	Session,
+	SessionForkOptions,
 	SessionTreeEntry,
 } from "../types.ts";
 import { SessionError, toError } from "../types.ts";
 import { JsonlDecodeError, JsonlSessionError } from "./jsonl-errors.ts";
-import { JsonlSessionStorage, loadJsonlSessionMetadata } from "./jsonl-storage.ts";
+import {
+	type JsonlSessionCreationPhase,
+	type JsonlSessionLoadPhase,
+	JsonlSessionStorage,
+	loadJsonlSessionMetadata,
+} from "./jsonl-storage.ts";
 import {
 	createSessionId,
 	createTimestamp,
@@ -34,6 +40,17 @@ type JsonlSessionRepoFileSystem = Pick<
 	| "createDir"
 	| "remove"
 >;
+
+/** Options for constructing a JSONL-backed session repository. */
+export interface JsonlSessionRepoOptions {
+	fs: JsonlSessionRepoFileSystem;
+	sessionsRoot: string;
+}
+
+interface JsonlSessionCreateDestination {
+	id: string;
+	cwd: string;
+}
 
 function canonicalClaimCwd(cwd: string): string {
 	if (!/^[A-Za-z]:[/\\]/.test(cwd)) return cwd;
@@ -61,7 +78,7 @@ export class JsonlSessionRepo implements JsonlSessionRepoApi {
 	private readonly activeCreateDestinations = new Set<string>();
 	private sessionsRoot: string | undefined;
 
-	constructor(options: { fs: JsonlSessionRepoFileSystem; sessionsRoot: string }) {
+	constructor(options: JsonlSessionRepoOptions) {
 		this.fs = options.fs;
 		this.sessionsRootInput = options.sessionsRoot;
 	}
@@ -119,7 +136,7 @@ export class JsonlSessionRepo implements JsonlSessionRepoApi {
 
 	private async openWithPhase(
 		metadata: JsonlSessionMetadata,
-		phase: "open" | "fork",
+		phase: JsonlSessionLoadPhase,
 	): Promise<Session<JsonlSessionMetadata>> {
 		if (
 			!getFileSystemResultOrThrow(await this.fs.exists(metadata.path), `Failed to check session ${metadata.path}`)
@@ -156,26 +173,34 @@ export class JsonlSessionRepo implements JsonlSessionRepoApi {
 			: undefined;
 		const dirs = cwd ? [await this.getSessionDir(cwd)] : await this.listSessionDirs();
 		const sessions: JsonlSessionMetadata[] = [];
-		for (const dir of dirs) {
-			if (!getFileSystemResultOrThrow(await this.fs.exists(dir), `Failed to check session directory ${dir}`)) {
-				continue;
-			}
-			const files = getFileSystemResultOrThrow(
-				await this.fs.listDir(dir),
-				`Failed to list sessions in ${dir}`,
-			).filter((file) => file.kind !== "directory" && file.name.endsWith(".jsonl"));
-			for (const file of files) {
-				try {
-					const metadata = await loadJsonlSessionMetadata(this.fs, file.path);
-					if (!cwd || canonicalClaimCwd(metadata.cwd) === canonicalClaimCwd(cwd)) sessions.push(metadata);
-				} catch (error) {
-					const cause = toError(error);
-					if (!(cause instanceof SessionError) || cause.code !== "invalid_session") throw cause;
-				}
-			}
-		}
+		for (const dir of dirs) sessions.push(...(await this.listSessionsInDir(dir, cwd)));
 		sessions.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 		return sessions;
+	}
+
+	private async listSessionsInDir(dir: string, cwd: string | undefined): Promise<JsonlSessionMetadata[]> {
+		if (!getFileSystemResultOrThrow(await this.fs.exists(dir), `Failed to check session directory ${dir}`)) {
+			return [];
+		}
+		const files = getFileSystemResultOrThrow(await this.fs.listDir(dir), `Failed to list sessions in ${dir}`).filter(
+			(file) => file.kind !== "directory" && file.name.endsWith(".jsonl"),
+		);
+		const sessions: JsonlSessionMetadata[] = [];
+		for (const file of files) {
+			const metadata = await this.loadListableSessionMetadata(file.path);
+			if (metadata && (!cwd || canonicalClaimCwd(metadata.cwd) === canonicalClaimCwd(cwd))) sessions.push(metadata);
+		}
+		return sessions;
+	}
+
+	private async loadListableSessionMetadata(path: string): Promise<JsonlSessionMetadata | undefined> {
+		try {
+			return await loadJsonlSessionMetadata(this.fs, path);
+		} catch (error) {
+			const cause = toError(error);
+			if (!(cause instanceof SessionError) || cause.code !== "invalid_session") throw cause;
+			return undefined;
+		}
 	}
 
 	async delete(metadata: JsonlSessionMetadata): Promise<void> {
@@ -187,7 +212,7 @@ export class JsonlSessionRepo implements JsonlSessionRepoApi {
 
 	async fork(
 		sourceMetadata: JsonlSessionMetadata,
-		options: JsonlSessionCreateOptions & { entryId?: string; position?: "before" | "at"; id?: string },
+		options: JsonlSessionCreateOptions & SessionForkOptions,
 	): Promise<Session<JsonlSessionMetadata>> {
 		const source = await this.openWithPhase(sourceMetadata, "fork");
 		let forkedEntries: SessionTreeEntry[];
@@ -227,7 +252,7 @@ export class JsonlSessionRepo implements JsonlSessionRepoApi {
 		});
 	}
 
-	private async resolveCreateDestination(options: JsonlSessionCreateOptions): Promise<{ id: string; cwd: string }> {
+	private async resolveCreateDestination(options: JsonlSessionCreateOptions): Promise<JsonlSessionCreateDestination> {
 		const id = options.id ?? createSessionId();
 		validateSessionId(id);
 		const cwd = getFileSystemResultOrThrow(
@@ -238,8 +263,8 @@ export class JsonlSessionRepo implements JsonlSessionRepoApi {
 	}
 
 	private async claimCreateDestination<T>(
-		destination: { id: string; cwd: string },
-		phase: "create" | "fork",
+		destination: JsonlSessionCreateDestination,
+		phase: JsonlSessionCreationPhase,
 		operation: () => Promise<T>,
 	): Promise<T> {
 		const key = `${canonicalClaimCwd(destination.cwd)}\0${destination.id}`;
@@ -261,8 +286,8 @@ export class JsonlSessionRepo implements JsonlSessionRepoApi {
 	}
 
 	private async rejectExistingSessionId(
-		destination: { id: string; cwd: string },
-		phase: "create" | "fork" = "create",
+		destination: JsonlSessionCreateDestination,
+		phase: JsonlSessionCreationPhase = "create",
 	): Promise<void> {
 		const existing = (await this.list({ cwd: destination.cwd })).find(
 			(session) =>

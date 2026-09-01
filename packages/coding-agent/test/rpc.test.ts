@@ -6,6 +6,14 @@ import type { AgentEvent } from "@fleetagent/pi-agent-core";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { RpcClient } from "../src/modes/rpc/rpc-client.ts";
 
+interface PersistedRpcSessionMessage {
+	role: string;
+}
+
+interface PersistedRpcSessionEntry {
+	type: string;
+	message?: PersistedRpcSessionMessage;
+}
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 /**
@@ -78,10 +86,10 @@ describe.skipIf(!process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_OAUTH_T
 		expect(entries[0].type).toBe("session");
 
 		// Should have user and assistant messages
-		const messages = entries.filter((e: { type: string }) => e.type === "message");
+		const messages = entries.filter((entry: PersistedRpcSessionEntry) => entry.type === "message");
 		expect(messages.length).toBeGreaterThanOrEqual(2);
 
-		const roles = messages.map((m: { message: { role: string } }) => m.message.role);
+		const roles = messages.map((message: PersistedRpcSessionEntry) => message.message?.role);
 		expect(roles).toContain("user");
 		expect(roles).toContain("assistant");
 	}, 90000);
@@ -111,7 +119,7 @@ describe.skipIf(!process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_OAUTH_T
 			.split("\n")
 			.map((line) => JSON.parse(line));
 
-		const compactionEntries = entries.filter((e: { type: string }) => e.type === "compaction");
+		const compactionEntries = entries.filter((entry: PersistedRpcSessionEntry) => entry.type === "compaction");
 		expect(compactionEntries.length).toBe(1);
 		expect(compactionEntries[0].summary).toBeDefined();
 	}, 120000);
@@ -150,8 +158,7 @@ describe.skipIf(!process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_OAUTH_T
 			.map((line) => JSON.parse(line));
 
 		const bashMessages = entries.filter(
-			(e: { type: string; message?: { role: string } }) =>
-				e.type === "message" && e.message?.role === "bashExecution",
+			(entry: PersistedRpcSessionEntry) => entry.type === "message" && entry.message?.role === "bashExecution",
 		);
 		expect(bashMessages.length).toBe(1);
 		expect(bashMessages[0].message.output).toContain(uniqueValue);
@@ -314,7 +321,7 @@ describe.skipIf(!process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_OAUTH_T
 			.split("\n")
 			.map((line) => JSON.parse(line));
 
-		const sessionInfoEntries = entries.filter((e: { type: string }) => e.type === "session_info");
+		const sessionInfoEntries = entries.filter((entry: PersistedRpcSessionEntry) => entry.type === "session_info");
 		expect(sessionInfoEntries.length).toBe(1);
 		expect(sessionInfoEntries[0].name).toBe("my-test-session");
 	}, 60000);

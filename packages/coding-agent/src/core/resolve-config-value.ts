@@ -27,6 +27,22 @@ function appendLiteral(parts: TemplatePart[], value: string): void {
 	parts.push({ type: "literal", value });
 }
 
+function appendBracedTemplatePart(parts: TemplatePart[], config: string, dollarIndex: number): number {
+	const endIndex = config.indexOf("}", dollarIndex + 2);
+	if (endIndex < 0) {
+		appendLiteral(parts, "$");
+		return dollarIndex + 1;
+	}
+
+	const name = config.slice(dollarIndex + 2, endIndex);
+	if (ENV_VAR_NAME_RE.test(name)) {
+		parts.push({ type: "env", name });
+	} else {
+		appendLiteral(parts, config.slice(dollarIndex, endIndex + 1));
+	}
+	return endIndex + 1;
+}
+
 function parseConfigValueTemplate(config: string): TemplatePart[] {
 	const parts: TemplatePart[] = [];
 	let index = 0;
@@ -48,20 +64,7 @@ function parseConfigValueTemplate(config: string): TemplatePart[] {
 		}
 
 		if (nextChar === "{") {
-			const endIndex = config.indexOf("}", dollarIndex + 2);
-			if (endIndex < 0) {
-				appendLiteral(parts, "$");
-				index = dollarIndex + 1;
-				continue;
-			}
-
-			const name = config.slice(dollarIndex + 2, endIndex);
-			if (ENV_VAR_NAME_RE.test(name)) {
-				parts.push({ type: "env", name });
-			} else {
-				appendLiteral(parts, config.slice(dollarIndex, endIndex + 1));
-			}
-			index = endIndex + 1;
+			index = appendBracedTemplatePart(parts, config, dollarIndex);
 			continue;
 		}
 
@@ -93,8 +96,10 @@ function resolveEnvConfigValue(name: string): string | undefined {
 
 function getTemplateEnvVarNames(parts: TemplatePart[]): string[] {
 	const names: string[] = [];
+	const seen = new Set<string>();
 	for (const part of parts) {
-		if (part.type !== "env" || names.includes(part.name)) continue;
+		if (part.type !== "env" || seen.has(part.name)) continue;
+		seen.add(part.name);
 		names.push(part.name);
 	}
 	return names;
@@ -156,7 +161,12 @@ export function resolveConfigValue(config: string): string | undefined {
 	return resolveTemplate(reference.parts);
 }
 
-function executeWithConfiguredShell(command: string): { executed: boolean; value: string | undefined } {
+interface ConfiguredShellExecutionResult {
+	executed: boolean;
+	value: string | undefined;
+}
+
+function executeWithConfiguredShell(command: string): ConfiguredShellExecutionResult {
 	try {
 		const { shell, args } = getShellConfig();
 		const result = spawnSync(shell, [...args, command], {

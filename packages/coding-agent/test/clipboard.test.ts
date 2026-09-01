@@ -49,6 +49,19 @@ const mockedExecSync = vi.mocked(execSync);
 const mockedSpawn = vi.mocked(spawn);
 const mockedPlatform = vi.mocked(platform);
 
+interface WlCopyProcessFixture {
+	events: EventEmitter;
+	stdinEvents: EventEmitter;
+	write: ReturnType<typeof vi.fn>;
+	end: ReturnType<typeof vi.fn>;
+}
+type StdoutWriteCallback = (error: Error | null | undefined) => void;
+type StdoutWriteInvocation = [
+	chunk: unknown,
+	encodingOrCallback?: BufferEncoding | StdoutWriteCallback,
+	callback?: StdoutWriteCallback,
+];
+
 let originalWrite: typeof process.stdout.write;
 let stdoutWrites: string[];
 let nativeResolved = false;
@@ -57,12 +70,7 @@ function osc52Writes(): string[] {
 	return stdoutWrites.filter((write) => write.startsWith("\x1b]52;c;"));
 }
 
-function mockWlCopyProcess(): {
-	events: EventEmitter;
-	stdinEvents: EventEmitter;
-	write: ReturnType<typeof vi.fn>;
-	end: ReturnType<typeof vi.fn>;
-} {
+function mockWlCopyProcess(): WlCopyProcessFixture {
 	const events = new EventEmitter();
 	const stdinEvents = new EventEmitter();
 	const write = vi.fn();
@@ -94,13 +102,13 @@ beforeEach(() => {
 		nativeResolved = true;
 	});
 	originalWrite = process.stdout.write.bind(process.stdout);
-	process.stdout.write = ((...args: Parameters<typeof process.stdout.write>) => {
+	process.stdout.write = ((...args: StdoutWriteInvocation) => {
 		const [chunk] = args;
 		if (typeof chunk === "string" && chunk.startsWith("\x1b]52;c;")) {
 			stdoutWrites.push(chunk);
 			return true;
 		}
-		return originalWrite(...args);
+		return Reflect.apply(originalWrite, undefined, args);
 	}) as typeof process.stdout.write;
 });
 

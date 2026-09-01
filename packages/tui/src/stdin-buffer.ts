@@ -22,11 +22,15 @@ import { EventEmitter } from "events";
 const ESC = "\x1b";
 const BRACKETED_PASTE_START = "\x1b[200~";
 const BRACKETED_PASTE_END = "\x1b[201~";
+const ESCAPE_SEQUENCE_PREFIXES = new Set(["[", "]", "O", "P", "_"]);
+
+type SequenceCompletion = "complete" | "incomplete";
+type EscapeSequenceCompletion = SequenceCompletion | "not-escape";
 
 /**
  * Check if a string is a complete escape sequence or needs more data
  */
-function isCompleteSequence(data: string): "complete" | "incomplete" | "not-escape" {
+function isCompleteSequence(data: string): EscapeSequenceCompletion {
 	if (!data.startsWith(ESC)) {
 		return "not-escape";
 	}
@@ -81,7 +85,16 @@ function isCompleteSequence(data: string): "complete" | "incomplete" | "not-esca
  * Check if CSI sequence is complete
  * CSI sequences: ESC [ ... followed by a final byte (0x40-0x7E)
  */
-function isCompleteCsiSequence(data: string): "complete" | "incomplete" {
+function getSgrMouseSequenceCompletion(payload: string, lastCharacter: string): SequenceCompletion {
+	if (/^<\d+;\d+;\d+[Mm]$/.test(payload)) return "complete";
+	if (lastCharacter === "M" || lastCharacter === "m") {
+		const parts = payload.slice(1, -1).split(";");
+		if (parts.length === 3 && parts.every((part) => /^\d+$/.test(part))) return "complete";
+	}
+	return "incomplete";
+}
+
+function isCompleteCsiSequence(data: string): SequenceCompletion {
 	if (!data.startsWith(`${ESC}[`)) {
 		return "complete";
 	}
@@ -98,38 +111,19 @@ function isCompleteCsiSequence(data: string): "complete" | "incomplete" {
 	const lastChar = payload[payload.length - 1];
 	const lastCharCode = lastChar.charCodeAt(0);
 
-	if (lastCharCode >= 0x40 && lastCharCode <= 0x7e) {
-		// Special handling for SGR mouse sequences
-		// Format: ESC[<B;X;Ym or ESC[<B;X;YM
-		if (payload.startsWith("<")) {
-			// Must have format: <digits;digits;digits[Mm]
-			const mouseMatch = /^<\d+;\d+;\d+[Mm]$/.test(payload);
-			if (mouseMatch) {
-				return "complete";
-			}
-			// If it ends with M or m but doesn't match the pattern, still incomplete
-			if (lastChar === "M" || lastChar === "m") {
-				// Check if we have the right structure
-				const parts = payload.slice(1, -1).split(";");
-				if (parts.length === 3 && parts.every((p) => /^\d+$/.test(p))) {
-					return "complete";
-				}
-			}
+	if (lastCharCode < 0x40 || lastCharCode > 0x7e) return "incomplete";
 
-			return "incomplete";
-		}
+	// Special handling for SGR mouse sequences: ESC[<B;X;Ym or ESC[<B;X;YM
+	if (payload.startsWith("<")) return getSgrMouseSequenceCompletion(payload, lastChar);
 
-		return "complete";
-	}
-
-	return "incomplete";
+	return "complete";
 }
 
 /**
  * Check if OSC sequence is complete
  * OSC sequences: ESC ] ... ST (where ST is ESC \ or BEL)
  */
-function isCompleteOscSequence(data: string): "complete" | "incomplete" {
+function isCompleteOscSequence(data: string): SequenceCompletion {
 	if (!data.startsWith(`${ESC}]`)) {
 		return "complete";
 	}
@@ -147,7 +141,7 @@ function isCompleteOscSequence(data: string): "complete" | "incomplete" {
  * DCS sequences: ESC P ... ST (where ST is ESC \)
  * Used for XTVersion responses like ESC P >| ... ESC \
  */
-function isCompleteDcsSequence(data: string): "complete" | "incomplete" {
+function isCompleteDcsSequence(data: string): SequenceCompletion {
 	if (!data.startsWith(`${ESC}P`)) {
 		return "complete";
 	}
@@ -165,7 +159,7 @@ function isCompleteDcsSequence(data: string): "complete" | "incomplete" {
  * APC sequences: ESC _ ... ST (where ST is ESC \)
  * Used for Kitty graphics responses like ESC _ G ... ESC \
  */
-function isCompleteApcSequence(data: string): "complete" | "incomplete" {
+function isCompleteApcSequence(data: string): SequenceCompletion {
 	if (!data.startsWith(`${ESC}_`)) {
 		return "complete";
 	}
@@ -189,66 +183,54 @@ function parseUnmodifiedKittyPrintableCodepoint(sequence: string): number | unde
 	return codepoint >= 32 ? codepoint : undefined;
 }
 
-function extractCompleteSequences(buffer: string): { sequences: string[]; remainder: string } {
-	const sequences: string[] = [];
-	let pos = 0;
+interface EscapeSequenceExtraction {
+	completion: SequenceCompletion;
+	sequence: string;
+	consumed: number;
+}
 
-	while (pos < buffer.length) {
-		const remaining = buffer.slice(pos);
+interface ExtractedSequences {
+	sequences: string[];
+	remainder: string;
+}
 
-		// Try to extract a sequence starting at this position
-		if (remaining.startsWith(ESC)) {
-			// Find the end of this escape sequence
-			let seqEnd = 1;
-			while (seqEnd <= remaining.length) {
-				const candidate = remaining.slice(0, seqEnd);
-				const status = isCompleteSequence(candidate);
+function shouldSplitAdjacentEscapeSequence(candidate: string, nextCharacter: string | undefined): boolean {
+	return candidate === `${ESC}${ESC}` && nextCharacter !== undefined && ESCAPE_SEQUENCE_PREFIXES.has(nextCharacter);
+}
 
-				if (status === "complete") {
-					// WezTerm with enable_kitty_keyboard sends the Escape key press as a
-					// raw '\x1b' byte (simple text path in encode_kitty, ignoring
-					// DISAMBIGUATE_ESCAPE_CODES) and the release as a full Kitty CSI-u
-					// sequence. These arrive concatenated as '\x1b\x1b[27;...u'.
-					// The buffer would normally treat '\x1b\x1b' as a complete meta-key
-					// sequence (ESC + single char), leaving '[27;...u' to be typed as
-					// plain text. If the character immediately following '\x1b\x1b'
-					// would begin a new escape sequence, emit only the first ESC and
-					// restart from the second.
-					if (candidate === "\x1b\x1b") {
-						const nextChar = remaining[seqEnd];
-						if (
-							nextChar === "[" || // CSI
-							nextChar === "]" || // OSC
-							nextChar === "O" || // SS3
-							nextChar === "P" || // DCS
-							nextChar === "_" // APC
-						) {
-							sequences.push(ESC);
-							pos += 1;
-							break;
-						}
-					}
-					sequences.push(candidate);
-					pos += seqEnd;
-					break;
-				} else if (status === "incomplete") {
-					seqEnd++;
-				} else {
-					// Should not happen when starting with ESC
-					sequences.push(candidate);
-					pos += seqEnd;
-					break;
-				}
-			}
-
-			if (seqEnd > remaining.length) {
-				return { sequences, remainder: remaining };
-			}
-		} else {
-			// Not an escape sequence - take a single character
-			sequences.push(remaining[0]!);
-			pos++;
+function extractEscapeSequence(remaining: string): EscapeSequenceExtraction {
+	let sequenceEnd = 1;
+	while (sequenceEnd <= remaining.length) {
+		const candidate = remaining.slice(0, sequenceEnd);
+		const status = isCompleteSequence(candidate);
+		if (status === "incomplete") {
+			sequenceEnd++;
+			continue;
 		}
+		if (status === "complete" && shouldSplitAdjacentEscapeSequence(candidate, remaining[sequenceEnd])) {
+			return { completion: "complete", sequence: ESC, consumed: 1 };
+		}
+		return { completion: "complete", sequence: candidate, consumed: sequenceEnd };
+	}
+	return { completion: "incomplete", sequence: "", consumed: 0 };
+}
+
+function extractCompleteSequences(buffer: string): ExtractedSequences {
+	const sequences: string[] = [];
+	let position = 0;
+
+	while (position < buffer.length) {
+		const remaining = buffer.slice(position);
+		if (!remaining.startsWith(ESC)) {
+			sequences.push(remaining[0]!);
+			position++;
+			continue;
+		}
+
+		const extraction = extractEscapeSequence(remaining);
+		if (extraction.completion === "incomplete") return { sequences, remainder: remaining };
+		sequences.push(extraction.sequence);
+		position += extraction.consumed;
 	}
 
 	return { sequences, remainder: "" };
@@ -284,106 +266,85 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		this.timeoutMs = options.timeout ?? 10;
 	}
 
+	private clearPendingTimeout(): void {
+		if (!this.timeout) return;
+		clearTimeout(this.timeout);
+		this.timeout = null;
+	}
+
+	private decodeInputChunk(data: string | Buffer): string {
+		if (!Buffer.isBuffer(data)) return data;
+		if (data.length !== 1 || data[0]! <= 127) return data.toString();
+		return `${ESC}${String.fromCharCode(data[0]! - 128)}`;
+	}
+
+	private emitDataSequences(sequences: readonly string[]): void {
+		for (const sequence of sequences) this.emitDataSequence(sequence);
+	}
+
+	private finishBracketedPasteIfComplete(): void {
+		const endIndex = this.pasteBuffer.indexOf(BRACKETED_PASTE_END);
+		if (endIndex === -1) return;
+		const pastedContent = this.pasteBuffer.slice(0, endIndex);
+		const remaining = this.pasteBuffer.slice(endIndex + BRACKETED_PASTE_END.length);
+		this.pasteMode = false;
+		this.pasteBuffer = "";
+		this.pendingKittyPrintableCodepoint = undefined;
+		this.emit("paste", pastedContent);
+		if (remaining.length > 0) this.process(remaining);
+	}
+
+	private continueBracketedPaste(): void {
+		this.pasteBuffer += this.buffer;
+		this.buffer = "";
+		this.finishBracketedPasteIfComplete();
+	}
+
+	private beginBracketedPaste(startIndex: number): void {
+		if (startIndex > 0) {
+			const beforePaste = this.buffer.slice(0, startIndex);
+			this.emitDataSequences(extractCompleteSequences(beforePaste).sequences);
+		}
+		this.pendingKittyPrintableCodepoint = undefined;
+		this.buffer = this.buffer.slice(startIndex + BRACKETED_PASTE_START.length);
+		this.pasteMode = true;
+		this.pasteBuffer = this.buffer;
+		this.buffer = "";
+		this.finishBracketedPasteIfComplete();
+	}
+
+	private emitCompleteBufferedSequences(): void {
+		const result = extractCompleteSequences(this.buffer);
+		this.buffer = result.remainder;
+		this.emitDataSequences(result.sequences);
+	}
+
+	private scheduleIncompleteSequenceFlush(): void {
+		if (this.buffer.length === 0) return;
+		this.timeout = setTimeout(() => this.emitDataSequences(this.flush()), this.timeoutMs);
+	}
+
 	public process(data: string | Buffer): void {
-		// Clear any pending timeout
-		if (this.timeout) {
-			clearTimeout(this.timeout);
-			this.timeout = null;
-		}
-
-		// Handle high-byte conversion (for compatibility with parseKeypress)
-		// If buffer has single byte > 127, convert to ESC + (byte - 128)
-		let str: string;
-		if (Buffer.isBuffer(data)) {
-			if (data.length === 1 && data[0]! > 127) {
-				const byte = data[0]! - 128;
-				str = `\x1b${String.fromCharCode(byte)}`;
-			} else {
-				str = data.toString();
-			}
-		} else {
-			str = data;
-		}
-
-		if (str.length === 0 && this.buffer.length === 0) {
+		this.clearPendingTimeout();
+		const chunk = this.decodeInputChunk(data);
+		if (chunk.length === 0 && this.buffer.length === 0) {
 			this.emitDataSequence("");
 			return;
 		}
-
-		this.buffer += str;
+		this.buffer += chunk;
 
 		if (this.pasteMode) {
-			this.pasteBuffer += this.buffer;
-			this.buffer = "";
-
-			const endIndex = this.pasteBuffer.indexOf(BRACKETED_PASTE_END);
-			if (endIndex !== -1) {
-				const pastedContent = this.pasteBuffer.slice(0, endIndex);
-				const remaining = this.pasteBuffer.slice(endIndex + BRACKETED_PASTE_END.length);
-
-				this.pasteMode = false;
-				this.pasteBuffer = "";
-				this.pendingKittyPrintableCodepoint = undefined;
-
-				this.emit("paste", pastedContent);
-
-				if (remaining.length > 0) {
-					this.process(remaining);
-				}
-			}
+			this.continueBracketedPaste();
+			return;
+		}
+		const pasteStartIndex = this.buffer.indexOf(BRACKETED_PASTE_START);
+		if (pasteStartIndex !== -1) {
+			this.beginBracketedPaste(pasteStartIndex);
 			return;
 		}
 
-		const startIndex = this.buffer.indexOf(BRACKETED_PASTE_START);
-		if (startIndex !== -1) {
-			if (startIndex > 0) {
-				const beforePaste = this.buffer.slice(0, startIndex);
-				const result = extractCompleteSequences(beforePaste);
-				for (const sequence of result.sequences) {
-					this.emitDataSequence(sequence);
-				}
-			}
-
-			this.pendingKittyPrintableCodepoint = undefined;
-			this.buffer = this.buffer.slice(startIndex + BRACKETED_PASTE_START.length);
-			this.pasteMode = true;
-			this.pasteBuffer = this.buffer;
-			this.buffer = "";
-
-			const endIndex = this.pasteBuffer.indexOf(BRACKETED_PASTE_END);
-			if (endIndex !== -1) {
-				const pastedContent = this.pasteBuffer.slice(0, endIndex);
-				const remaining = this.pasteBuffer.slice(endIndex + BRACKETED_PASTE_END.length);
-
-				this.pasteMode = false;
-				this.pasteBuffer = "";
-				this.pendingKittyPrintableCodepoint = undefined;
-
-				this.emit("paste", pastedContent);
-
-				if (remaining.length > 0) {
-					this.process(remaining);
-				}
-			}
-			return;
-		}
-
-		const result = extractCompleteSequences(this.buffer);
-		this.buffer = result.remainder;
-
-		for (const sequence of result.sequences) {
-			this.emitDataSequence(sequence);
-		}
-
-		if (this.buffer.length > 0) {
-			this.timeout = setTimeout(() => {
-				const flushed = this.flush();
-
-				for (const sequence of flushed) {
-					this.emitDataSequence(sequence);
-				}
-			}, this.timeoutMs);
-		}
+		this.emitCompleteBufferedSequences();
+		this.scheduleIncompleteSequenceFlush();
 	}
 
 	private emitDataSequence(sequence: string): void {
@@ -398,10 +359,7 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 	}
 
 	flush(): string[] {
-		if (this.timeout) {
-			clearTimeout(this.timeout);
-			this.timeout = null;
-		}
+		this.clearPendingTimeout();
 
 		if (this.buffer.length === 0) {
 			return [];
@@ -414,10 +372,7 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 	}
 
 	clear(): void {
-		if (this.timeout) {
-			clearTimeout(this.timeout);
-			this.timeout = null;
-		}
+		this.clearPendingTimeout();
 		this.buffer = "";
 		this.pasteMode = false;
 		this.pasteBuffer = "";

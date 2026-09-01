@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
+import type { ActivateSandboxDaemonOptions } from "../src/core/agent-session.ts";
 import { getDefaultActiveToolNames } from "../src/core/agent-session.ts";
 import {
 	formatSandboxList,
@@ -7,108 +8,127 @@ import {
 	formatSandboxStopResult,
 	parseSandboxUserCommand,
 } from "../src/core/sandbox/command.ts";
+import type {
+	SandboxConfig,
+	SandboxContainer,
+	SandboxListOptions,
+	SandboxStartOptions,
+	SandboxStartResult,
+	SandboxStopOptions,
+	SandboxStopResult,
+} from "../src/core/sandbox/docker.ts";
 import { BUILTIN_SLASH_COMMANDS, HIDDEN_BUILTIN_SLASH_COMMAND_NAMES } from "../src/core/slash-commands.ts";
 import { buildSystemPrompt } from "../src/core/system-prompt.ts";
+import type { ToolBackendInfo } from "../src/core/tools/operations.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 
-type SandboxHandlerContext = {
-	session: {
-		activateSandboxDaemon: (options: { url: string; token: string; expectedCwd: string }) => Promise<{
-			type: "remote";
-			cwd: string;
-			url: string;
-			protocol: "ws";
-			configured: true;
-			workspace: { id: string; root: string; pathFlavor: "posix" };
-		}>;
-		configureRemoteSandbox: (options: { type: "ssh"; remote: string; cwd?: string }) => Promise<{
-			type: "ssh";
-			remote: string;
-			cwd: string;
-			configured: true;
-		}>;
-		getToolBackendInfo: () => { type: "local"; cwd: string } | { type: "remote"; cwd: string; configured: false };
-		clearRemoteSandbox: () => Promise<void>;
-	};
-	activeSession: { getCwd: () => string; getSessionId: () => string };
+interface SandboxSessionStub {
+	activateSandboxDaemon(options: ActivateSandboxDaemonOptions): Promise<ToolBackendInfo>;
+	getToolBackendInfo(): ToolBackendInfo;
+	clearRemoteSandbox(): Promise<void>;
+}
+
+interface ActiveSandboxSessionStub {
+	getCwd(): string;
+	getSessionId(): string;
+}
+
+interface SandboxServiceStub {
+	resolveConfig(): Pick<SandboxConfig, "workspaceMountPath">;
+	start(options: SandboxStartOptions): Promise<SandboxStartResult>;
+	list(options: SandboxListOptions): Promise<SandboxContainer[]>;
+	stop(options: SandboxStopOptions): Promise<SandboxStopResult>;
+}
+
+interface SandboxHandlerContext {
+	session: SandboxSessionStub;
+	activeSession: ActiveSandboxSessionStub;
 	sessionSandboxStates: Map<string, unknown>;
 	managedSandboxContainers: Map<string, unknown>;
 	activeSandboxContainerId?: string;
 	activeSandboxBackendConnected?: boolean;
-	createDockerSandboxService: () => {
-		resolveConfig: () => { workspaceMountPath: string };
-		start: (options: {
-			workspaceRoot: string;
-			image?: string;
-			sessionId?: string;
-		}) => Promise<ReturnType<typeof createStartResult>>;
-		list: (options: { workspaceRoot: string }) => Promise<ReturnType<typeof createContainer>[]>;
-		stop: (options: {
-			workspaceRoot: string;
-			target?: string;
-			currentContainerId?: string;
-		}) => Promise<
-			{ status: "stopped"; container: ReturnType<typeof createContainer> } | { status: "not-found"; message: string }
-		>;
-	};
-	refreshUiAfterBackendChange: () => void;
-	updateToolBackendStatus: () => void;
-	formatToolBackendStatus: (info: { type: string; cwd: string; configured?: boolean; url?: string }) => string;
-	showStatus: (message: string) => void;
-	showWarning: (message: string) => void;
-	showError: (message: string) => void;
-};
+	createDockerSandboxService(): SandboxServiceStub;
+	refreshUiAfterBackendChange(): void;
+	updateToolBackendStatus(): void;
+	formatToolBackendStatus(info: ToolBackendInfo): string;
+	showStatus(message: string): void;
+	showWarning(message: string): void;
+	showError(message: string): void;
+}
 
-type InteractiveModePrivate = {
+interface RuntimeHostStub {
+	dispose(): Promise<void>;
+}
+
+interface ManagedSandboxCleanupServiceStub {
+	stopManagedContainers(): Promise<void>;
+}
+
+interface RuntimeResourceDisposalContext {
+	runtimeHost: RuntimeHostStub;
+	createDockerSandboxService(): ManagedSandboxCleanupServiceStub;
+}
+
+interface InteractiveModePrivate {
 	setupEditorSubmitHandler(this: SubmitContext): void;
 	handleSandboxCommand(this: SandboxHandlerContext, text: string): Promise<void>;
 	restoreCurrentSessionSandbox(this: SandboxHandlerContext): Promise<void>;
-	disposeRuntimeResources(this: {
-		runtimeHost: { dispose: () => Promise<void> };
-		createDockerSandboxService: () => { stopManagedContainers: () => Promise<void> };
-	}): Promise<Error[]>;
-};
+	disposeRuntimeResources(this: RuntimeResourceDisposalContext): Promise<Error[]>;
+}
 
-type SubmitContext = {
-	defaultEditor: { onSubmit?: (text: string) => Promise<void> };
-	editor: {
-		addToHistory?: (text: string) => void;
-		setText: (text: string) => void;
-	};
-	session: {
-		isCompacting: boolean;
-		isStreaming: boolean;
-		isBashRunning: boolean;
-		prompt: (text: string, options?: unknown) => Promise<void>;
-	};
+interface SandboxSubmitDefaultEditor {
+	onSubmit?: (text: string) => Promise<void>;
+}
+
+interface SandboxSubmitEditor {
+	addToHistory?: (text: string) => void;
+	setText: (text: string) => void;
+}
+
+interface SandboxSubmitSession {
+	isCompacting: boolean;
+	isStreaming: boolean;
+	isBashRunning: boolean;
+	prompt: (text: string, options?: unknown) => Promise<void>;
+}
+
+interface SubmitContext {
+	defaultEditor: SandboxSubmitDefaultEditor;
+	editor: SandboxSubmitEditor;
+	session: SandboxSubmitSession;
 	flushPendingBashComponents: () => void;
 	handleSandboxCommand: (text: string) => Promise<void>;
 	onInputCallback?: (text: string) => void;
 	pendingUserInputs: string[];
-};
+}
 
 const interactiveModePrototype = InteractiveMode.prototype as unknown as InteractiveModePrivate;
 
 function createSubmitContext(): SubmitContext {
-	return {
-		defaultEditor: {},
-		editor: {
-			addToHistory: vi.fn(),
-			setText: vi.fn(),
-		},
-		session: {
-			isCompacting: false,
-			isStreaming: false,
-			isBashRunning: false,
-			prompt: vi.fn(async () => {}),
-		},
-		flushPendingBashComponents: vi.fn(),
-		handleSandboxCommand: vi.fn(async () => {}),
-		pendingUserInputs: [],
-	};
+	const context = Object.create(InteractiveMode.prototype) as SubmitContext;
+	Object.defineProperties(
+		context,
+		Object.getOwnPropertyDescriptors({
+			defaultEditor: {},
+			editor: {
+				addToHistory: vi.fn(),
+				setText: vi.fn(),
+			},
+			session: {
+				isCompacting: false,
+				isStreaming: false,
+				isBashRunning: false,
+				prompt: vi.fn(async () => {}),
+			},
+			flushPendingBashComponents: vi.fn(),
+			handleSandboxCommand: vi.fn(async () => {}),
+			pendingUserInputs: [],
+		}),
+	);
+	return context;
 }
 
-function createStartResult() {
+function createStartResult(): SandboxStartResult {
 	return {
 		containerId: "abc123",
 		containerName: "pi-sandbox-project-hash",
@@ -121,7 +141,7 @@ function createStartResult() {
 	};
 }
 
-function createContainer() {
+function createContainer(): SandboxContainer {
 	return {
 		id: "abc123",
 		name: "pi-sandbox-project-hash",
@@ -142,15 +162,6 @@ describe("hidden sandbox command", () => {
 		expect(parseSandboxUserCommand("/sandbox")).toEqual({ subcommand: "status" });
 		expect(parseSandboxUserCommand("/sandbox status")).toEqual({ subcommand: "status" });
 		expect(parseSandboxUserCommand("/sandbox clear")).toEqual({ subcommand: "clear" });
-		expect(parseSandboxUserCommand("/sandbox ssh user@host:/srv/workspace")).toEqual({
-			subcommand: "ssh",
-			target: "user@host:/srv/workspace",
-		});
-		expect(parseSandboxUserCommand("/sandbox ssh user@host /srv/workspace")).toEqual({
-			subcommand: "ssh",
-			target: "user@host",
-			cwd: "/srv/workspace",
-		});
 		expect(parseSandboxUserCommand("/sandbox --attach ws://127.0.0.1:8787/pi/workspace")).toEqual({
 			subcommand: "attach",
 			url: "ws://127.0.0.1:8787/pi/workspace",
@@ -164,7 +175,7 @@ describe("hidden sandbox command", () => {
 		expect(parseSandboxUserCommand("/sandbox stop abc123")).toEqual({ subcommand: "stop", target: "abc123" });
 		expect(() => parseSandboxUserCommand("/sandbox --attach")).toThrow("Usage: /sandbox --attach");
 		expect(() => parseSandboxUserCommand("/sandbox --attach one two")).toThrow("Usage: /sandbox --attach");
-		expect(() => parseSandboxUserCommand("/sandbox ssh")).toThrow("Usage: /sandbox ssh");
+		expect(() => parseSandboxUserCommand("/sandbox ssh user@host")).toThrow("Unsupported /sandbox subcommand");
 		expect(() => parseSandboxUserCommand("/sandbox status extra")).toThrow("Usage: /sandbox status");
 		expect(() => parseSandboxUserCommand("/sandbox start --token secret")).toThrow(
 			"Unsupported /sandbox start argument",
@@ -253,7 +264,6 @@ describe("hidden sandbox command", () => {
 		const context: SandboxHandlerContext = {
 			session: {
 				activateSandboxDaemon,
-				configureRemoteSandbox: vi.fn(),
 				getToolBackendInfo: () => ({ type: "local", cwd: "/host/project" }),
 				clearRemoteSandbox: vi.fn(),
 			},
@@ -279,6 +289,7 @@ describe("hidden sandbox command", () => {
 			showWarning: vi.fn(),
 			showError: vi.fn(),
 		};
+		Object.setPrototypeOf(context, InteractiveMode.prototype);
 
 		await interactiveModePrototype.restoreCurrentSessionSandbox.call(context);
 		expect(activateSandboxDaemon).toHaveBeenCalledWith({
@@ -306,16 +317,17 @@ describe("hidden sandbox command", () => {
 	it("blocks replacement backends while a failed-start container awaits cleanup", async () => {
 		const start = vi.fn(async () => createStartResult());
 		const showWarning = vi.fn();
-		const configureRemoteSandbox = vi.fn(async () => ({
-			type: "ssh" as const,
-			remote: "user@host",
-			cwd: "/srv/workspace",
+		const activateSandboxDaemon = vi.fn(async () => ({
+			type: "remote" as const,
+			cwd: "/workspace",
+			url: "ws://daemon.test/pi/workspace",
+			protocol: "ws" as const,
 			configured: true as const,
+			workspace: { id: "workspace", root: "/workspace", pathFlavor: "posix" as const },
 		}));
 		const context: SandboxHandlerContext = {
 			session: {
-				activateSandboxDaemon: vi.fn(),
-				configureRemoteSandbox,
+				activateSandboxDaemon,
 				getToolBackendInfo: () => ({ type: "local", cwd: "/host/project" }),
 				clearRemoteSandbox: vi.fn(),
 			},
@@ -339,6 +351,7 @@ describe("hidden sandbox command", () => {
 			showWarning,
 			showError: vi.fn(),
 		};
+		Object.setPrototypeOf(context, InteractiveMode.prototype);
 
 		await interactiveModePrototype.handleSandboxCommand.call(context, "/sandbox start");
 		context.managedSandboxContainers.clear();
@@ -354,8 +367,11 @@ describe("hidden sandbox command", () => {
 			daemonPort: 49301,
 			ownerId: "session-b",
 		});
-		await interactiveModePrototype.handleSandboxCommand.call(context, "/sandbox ssh user@host:/srv/workspace");
-		expect(configureRemoteSandbox).toHaveBeenCalledOnce();
+		await interactiveModePrototype.handleSandboxCommand.call(
+			context,
+			"/sandbox --attach ws://daemon.test/pi/workspace",
+		);
+		expect(activateSandboxDaemon).toHaveBeenCalledOnce();
 	});
 
 	it("preserves active sandbox guards when backend clearing fails after Docker disappears", async () => {
@@ -366,7 +382,6 @@ describe("hidden sandbox command", () => {
 		const context: SandboxHandlerContext = {
 			session: {
 				activateSandboxDaemon: vi.fn(),
-				configureRemoteSandbox: vi.fn(),
 				getToolBackendInfo: () => ({ type: "local", cwd: "/host/project" }),
 				clearRemoteSandbox,
 			},
@@ -388,6 +403,7 @@ describe("hidden sandbox command", () => {
 			showWarning: vi.fn(),
 			showError,
 		};
+		Object.setPrototypeOf(context, InteractiveMode.prototype);
 
 		await interactiveModePrototype.handleSandboxCommand.call(context, "/sandbox stop");
 		expect(clearRemoteSandbox).toHaveBeenCalledOnce();
@@ -414,7 +430,6 @@ describe("hidden sandbox command", () => {
 		const context: SandboxHandlerContext = {
 			session: {
 				activateSandboxDaemon,
-				configureRemoteSandbox: vi.fn(),
 				getToolBackendInfo: () => ({ type: "local", cwd: "/host/project" }),
 				clearRemoteSandbox,
 			},
@@ -434,6 +449,7 @@ describe("hidden sandbox command", () => {
 			showWarning: vi.fn(),
 			showError: vi.fn(),
 		};
+		Object.setPrototypeOf(context, InteractiveMode.prototype);
 
 		await interactiveModePrototype.handleSandboxCommand.call(context, "/sandbox start --image pi-sandbox:test");
 		await interactiveModePrototype.handleSandboxCommand.call(context, "/sandbox list");
@@ -461,54 +477,6 @@ describe("hidden sandbox command", () => {
 		expect(clearRemoteSandbox).toHaveBeenCalledOnce();
 	});
 
-	it("moves deferred SSH, status, and clear operations under /sandbox", async () => {
-		const configureRemoteSandbox = vi.fn(async () => ({
-			type: "ssh" as const,
-			remote: "user@host",
-			cwd: "/srv/workspace",
-			configured: true as const,
-		}));
-		const clearRemoteSandbox = vi.fn(async () => {});
-		const showStatus = vi.fn();
-		const context: SandboxHandlerContext = {
-			session: {
-				activateSandboxDaemon: vi.fn(),
-				configureRemoteSandbox,
-				getToolBackendInfo: () => ({ type: "local", cwd: "/host/project" }),
-				clearRemoteSandbox,
-			},
-			activeSession: { getCwd: () => "/host/project", getSessionId: () => "session-a" },
-			sessionSandboxStates: new Map(),
-			managedSandboxContainers: new Map(),
-			createDockerSandboxService: () => ({
-				resolveConfig: () => ({ workspaceMountPath: "/workspace" }),
-				start: vi.fn(),
-				list: vi.fn(),
-				stop: vi.fn(),
-			}),
-			refreshUiAfterBackendChange: vi.fn(),
-			updateToolBackendStatus: vi.fn(),
-			formatToolBackendStatus: (info) => `tools: ${info.type} ${info.cwd}`,
-			showStatus,
-			showWarning: vi.fn(),
-			showError: vi.fn(),
-		};
-
-		await interactiveModePrototype.handleSandboxCommand.call(context, "/sandbox status");
-		await interactiveModePrototype.handleSandboxCommand.call(context, "/sandbox ssh user@host:/srv/workspace");
-		await interactiveModePrototype.handleSandboxCommand.call(context, "/sandbox clear");
-
-		expect(configureRemoteSandbox).toHaveBeenCalledWith({
-			type: "ssh",
-			remote: "user@host",
-			cwd: "/srv/workspace",
-		});
-		expect(clearRemoteSandbox).toHaveBeenCalledOnce();
-		expect(showStatus.mock.calls.map((call) => call[0]).join("\n")).toContain("tools: local /host/project");
-		expect(showStatus.mock.calls.map((call) => call[0]).join("\n")).toContain("tools: ssh /srv/workspace");
-		expect(showStatus.mock.calls.map((call) => call[0]).join("\n")).toContain("Sandbox backend cleared");
-	});
-
 	it("attaches and detaches an existing sandbox daemon without using Docker lifecycle commands", async () => {
 		const start = vi.fn(async () => createStartResult());
 		const list = vi.fn(async () => [createContainer()]);
@@ -526,7 +494,6 @@ describe("hidden sandbox command", () => {
 		const context: SandboxHandlerContext = {
 			session: {
 				activateSandboxDaemon,
-				configureRemoteSandbox: vi.fn(),
 				getToolBackendInfo: () => ({
 					type: "remote" as const,
 					cwd: "/custom-workspace",
@@ -550,6 +517,7 @@ describe("hidden sandbox command", () => {
 			showWarning: vi.fn(),
 			showError: vi.fn(),
 		};
+		Object.setPrototypeOf(context, InteractiveMode.prototype);
 
 		await interactiveModePrototype.handleSandboxCommand.call(
 			context,

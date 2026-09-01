@@ -1,4 +1,4 @@
-import type { AssistantMessage } from "@fleetagent/pi-ai";
+import type { AssistantContent, AssistantMessage } from "@fleetagent/pi-ai";
 import { Container, Markdown, type MarkdownTheme, Spacer, Text } from "@fleetagent/pi-tui";
 import type { MarkdownTransformer } from "../../../core/extensions/types.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
@@ -7,6 +7,27 @@ import { createMarkdownTransform } from "./markdown-transform.ts";
 const OSC133_ZONE_START = "\x1b]133;A\x07";
 const OSC133_ZONE_END = "\x1b]133;B\x07";
 const OSC133_ZONE_FINAL = "\x1b]133;C\x07";
+interface AssistantContentVisibility {
+	anyVisible: boolean;
+	visibleAfter: boolean[];
+}
+
+function isVisibleAssistantContent(content: AssistantContent): boolean {
+	return (
+		(content.type === "text" && Boolean(content.text.trim())) ||
+		(content.type === "thinking" && Boolean(content.thinking.trim()))
+	);
+}
+
+function inspectAssistantContentVisibility(content: readonly AssistantContent[]): AssistantContentVisibility {
+	const visibleAfter = new Array<boolean>(content.length);
+	let anyVisible = false;
+	for (let index = content.length - 1; index >= 0; index--) {
+		visibleAfter[index] = anyVisible;
+		if (isVisibleAssistantContent(content[index])) anyVisible = true;
+	}
+	return { anyVisible, visibleAfter };
+}
 
 /**
  * Component that renders a complete assistant message
@@ -85,104 +106,86 @@ export class AssistantMessageComponent extends Container {
 		return lines;
 	}
 
-	updateContent(message: AssistantMessage, isStreaming = this.isStreaming): void {
-		this.lastMessage = message;
-		this.isStreaming = isStreaming;
-		// Clear content container
-		this.contentContainer.clear();
-
-		const hasVisibleContent = message.content.some(
-			(c) => (c.type === "text" && c.text.trim()) || (c.type === "thinking" && c.thinking.trim()),
-		);
-
-		if (hasVisibleContent) {
-			this.contentContainer.addChild(new Spacer(1));
+	private renderThinkingContent(thinking: string, hasVisibleContentAfter: boolean): void {
+		if (this.hideThinkingBlock) {
+			this.contentContainer.addChild(
+				new Text(theme.italic(theme.fg("thinkingText", this.hiddenThinkingLabel)), this.outputPad, 0),
+			);
+		} else {
+			this.contentContainer.addChild(
+				new Markdown(
+					thinking.trim(),
+					this.outputPad,
+					0,
+					this.markdownTheme,
+					{
+						color: (text: string) => theme.fg("thinkingText", text),
+						italic: true,
+					},
+					{
+						transform: createMarkdownTransform("assistant-thinking", this.isStreaming, this.markdownTransformers),
+					},
+				),
+			);
 		}
+		if (hasVisibleContentAfter) this.contentContainer.addChild(new Spacer(1));
+	}
 
-		// Render content in order
-		for (let i = 0; i < message.content.length; i++) {
-			const content = message.content[i];
+	private renderMessageContent(message: AssistantMessage): boolean {
+		const visibility = inspectAssistantContentVisibility(message.content);
+		if (visibility.anyVisible) this.contentContainer.addChild(new Spacer(1));
+		let hasToolCalls = false;
+		for (let index = 0; index < message.content.length; index++) {
+			const content = message.content[index];
+			if (content.type === "toolCall") {
+				hasToolCalls = true;
+				continue;
+			}
 			if (content.type === "text" && content.text.trim()) {
-				// Assistant text messages with no background - trim the text
-				// Set paddingY=0 to avoid extra spacing before tool executions
 				this.contentContainer.addChild(
 					new Markdown(content.text.trim(), this.outputPad, 0, this.markdownTheme, undefined, {
 						transform: createMarkdownTransform("assistant", this.isStreaming, this.markdownTransformers),
 					}),
 				);
 			} else if (content.type === "thinking" && content.thinking.trim()) {
-				// Add spacing only when another visible assistant content block follows.
-				// This avoids a superfluous blank line before separately-rendered tool execution blocks.
-				const hasVisibleContentAfter = message.content
-					.slice(i + 1)
-					.some((c) => (c.type === "text" && c.text.trim()) || (c.type === "thinking" && c.thinking.trim()));
-
-				if (this.hideThinkingBlock) {
-					// Show static thinking label when hidden
-					this.contentContainer.addChild(
-						new Text(theme.italic(theme.fg("thinkingText", this.hiddenThinkingLabel)), this.outputPad, 0),
-					);
-					if (hasVisibleContentAfter) {
-						this.contentContainer.addChild(new Spacer(1));
-					}
-				} else {
-					// Thinking traces in thinkingText color, italic
-					this.contentContainer.addChild(
-						new Markdown(
-							content.thinking.trim(),
-							this.outputPad,
-							0,
-							this.markdownTheme,
-							{
-								color: (text: string) => theme.fg("thinkingText", text),
-								italic: true,
-							},
-							{
-								transform: createMarkdownTransform(
-									"assistant-thinking",
-									this.isStreaming,
-									this.markdownTransformers,
-								),
-							},
-						),
-					);
-					if (hasVisibleContentAfter) {
-						this.contentContainer.addChild(new Spacer(1));
-					}
-				}
+				this.renderThinkingContent(content.thinking, visibility.visibleAfter[index]);
 			}
 		}
+		return hasToolCalls;
+	}
 
-		// Check if incomplete/failed - show after partial content.
-		// For aborted/error tool calls, tool execution components show the error.
-		// Length stops can happen before a tool call is complete, so surface them here too.
-		const hasToolCalls = message.content.some((c) => c.type === "toolCall");
-		this.hasToolCalls = hasToolCalls;
+	private appendCompletionStatus(message: string): void {
+		this.contentContainer.addChild(new Spacer(1));
+		this.contentContainer.addChild(new Text(theme.fg("error", message), this.outputPad, 0));
+	}
+
+	private renderCompletionStatus(message: AssistantMessage, hasToolCalls: boolean): void {
 		if (message.stopReason === "length") {
-			this.contentContainer.addChild(new Spacer(1));
-			this.contentContainer.addChild(
-				new Text(
-					theme.fg(
-						"error",
-						"Error: Model stopped because it reached the maximum output token limit. The response may be incomplete.",
-					),
-					this.outputPad,
-					0,
-				),
+			this.appendCompletionStatus(
+				"Error: Model stopped because it reached the maximum output token limit. The response may be incomplete.",
 			);
-		} else if (!hasToolCalls) {
-			if (message.stopReason === "aborted") {
-				const abortMessage =
-					message.errorMessage && message.errorMessage !== "Request was aborted"
-						? message.errorMessage
-						: "Operation aborted";
-				this.contentContainer.addChild(new Spacer(1));
-				this.contentContainer.addChild(new Text(theme.fg("error", abortMessage), this.outputPad, 0));
-			} else if (message.stopReason === "error") {
-				const errorMsg = message.errorMessage || "Unknown error";
-				this.contentContainer.addChild(new Spacer(1));
-				this.contentContainer.addChild(new Text(theme.fg("error", `Error: ${errorMsg}`), this.outputPad, 0));
-			}
+			return;
 		}
+		if (hasToolCalls) return;
+		if (message.stopReason === "aborted") {
+			const abortMessage =
+				message.errorMessage && message.errorMessage !== "Request was aborted"
+					? message.errorMessage
+					: "Operation aborted";
+			this.appendCompletionStatus(abortMessage);
+		} else if (message.stopReason === "error") {
+			this.appendCompletionStatus(`Error: ${message.errorMessage || "Unknown error"}`);
+		}
+	}
+
+	updateContent(message: AssistantMessage, isStreaming = this.isStreaming): void {
+		this.lastMessage = message;
+		this.isStreaming = isStreaming;
+		// Clear content container
+		this.contentContainer.clear();
+
+		const hasToolCalls = this.renderMessageContent(message);
+		this.hasToolCalls = hasToolCalls;
+		this.renderCompletionStatus(message, hasToolCalls);
 	}
 }

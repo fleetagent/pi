@@ -7,6 +7,10 @@ export type OAuthCredentials = {
 	[key: string]: unknown;
 };
 
+export interface ParsedOAuthAuthorizationInput {
+	code?: string;
+	state?: string;
+}
 export type OAuthProviderId = string;
 
 /** @deprecated Use OAuthProviderId instead */
@@ -40,12 +44,14 @@ export type OAuthSelectPrompt = {
 	options: OAuthSelectOption[];
 };
 
+export type OAuthManualCodeInput = () => Promise<string>;
+
 export interface OAuthLoginCallbacks {
 	onAuth: (info: OAuthAuthInfo) => void;
 	onDeviceCode?: (info: OAuthDeviceCodeInfo) => void;
 	onPrompt: (prompt: OAuthPrompt) => Promise<string>;
 	onProgress?: (message: string) => void;
-	onManualCodeInput?: () => Promise<string>;
+	onManualCodeInput?: OAuthManualCodeInput;
 	/** Show an interactive selector and return the selected option id, or undefined on cancel. */
 	onSelect?: (prompt: OAuthSelectPrompt) => Promise<string | undefined>;
 	signal?: AbortSignal;

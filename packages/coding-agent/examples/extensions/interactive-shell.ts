@@ -109,6 +109,8 @@ function getInteractiveCommands(): string[] {
 function isInteractiveCommand(command: string): boolean {
 	const trimmed = command.trim().toLowerCase();
 	const commands = getInteractiveCommands();
+	const pipeIndex = trimmed.lastIndexOf("|");
+	const afterPipe = pipeIndex === -1 ? undefined : trimmed.slice(pipeIndex + 1).trim();
 
 	for (const cmd of commands) {
 		const cmdLower = cmd.toLowerCase();
@@ -117,12 +119,8 @@ function isInteractiveCommand(command: string): boolean {
 			return true;
 		}
 		// Match after pipe: "cat file | less"
-		const pipeIdx = trimmed.lastIndexOf("|");
-		if (pipeIdx !== -1) {
-			const afterPipe = trimmed.slice(pipeIdx + 1).trim();
-			if (afterPipe === cmdLower || afterPipe.startsWith(`${cmdLower} `)) {
-				return true;
-			}
+		if (afterPipe !== undefined && (afterPipe === cmdLower || afterPipe.startsWith(`${cmdLower} `))) {
+			return true;
 		}
 	}
 	return false;

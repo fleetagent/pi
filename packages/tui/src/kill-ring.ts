@@ -5,6 +5,11 @@
  * into a single entry. Supports yank (paste most recent) and yank-pop
  * (cycle through older entries).
  */
+interface KillRingPushOptions {
+	prepend: boolean;
+	accumulate?: boolean;
+}
+
 export class KillRing {
 	private ring: string[] = [];
 
@@ -16,7 +21,7 @@ export class KillRing {
 	 * @param opts.prepend - If accumulating, prepend (backward deletion) or append (forward deletion)
 	 * @param opts.accumulate - Merge with the most recent entry instead of creating a new one
 	 */
-	push(text: string, opts: { prepend: boolean; accumulate?: boolean }): void {
+	push(text: string, opts: KillRingPushOptions): void {
 		if (!text) return;
 
 		if (opts.accumulate && this.ring.length > 0) {

@@ -227,10 +227,12 @@ export type ImagesFunction<TApi extends ImagesApi = ImagesApi, TOptions extends 
 	options?: TOptions,
 ) => Promise<AssistantImages>;
 
+export type TextSignaturePhase = "commentary" | "final_answer";
+
 export interface TextSignatureV1 {
 	v: 1;
 	id: string;
-	phase?: "commentary" | "final_answer";
+	phase?: TextSignaturePhase;
 }
 
 export interface TextContent {
@@ -255,12 +257,23 @@ export interface ImageContent {
 	mimeType: string; // e.g., "image/jpeg", "image/png"
 }
 
+export type ToolCallArguments = Record<string, any>;
+
 export interface ToolCall {
 	type: "toolCall";
 	id: string;
 	name: string;
-	arguments: Record<string, any>;
+	arguments: ToolCallArguments;
 	thoughtSignature?: string; // Google-specific: opaque signature for reusing thought context
+}
+
+// pi-ignore noNearIdenticalDataStructures: UsageCost stores monetary amounts, while AgentSession token totals store token counts and evolve with session accounting.
+export interface UsageCost {
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+	total: number;
 }
 
 export interface Usage {
@@ -274,13 +287,7 @@ export interface Usage {
 	 */
 	reasoning?: number;
 	totalTokens: number;
-	cost: {
-		input: number;
-		output: number;
-		cacheRead: number;
-		cacheWrite: number;
-		total: number;
-	};
+	cost: UsageCost;
 }
 
 export type StopReason = "pending" | "stop" | "length" | "toolUse" | "error" | "aborted";
@@ -290,10 +297,12 @@ export interface UserMessage {
 	content: string | (TextContent | ImageContent)[];
 	timestamp: number; // Unix timestamp in milliseconds
 }
+export type AssistantContent = TextContent | ThinkingContent | ToolCall;
+export type ToolResultContent = TextContent | ImageContent;
 
 export interface AssistantMessage {
 	role: "assistant";
-	content: (TextContent | ThinkingContent | ToolCall)[];
+	content: AssistantContent[];
 	api: Api;
 	provider: Provider;
 	model: string;
@@ -312,7 +321,7 @@ export interface ToolResultMessage<TDetails = any> {
 	role: "toolResult";
 	toolCallId: string;
 	toolName: string;
-	content: (TextContent | ImageContent)[]; // Supports text and images
+	content: ToolResultContent[]; // Supports text and images
 	details?: TDetails;
 	isError: boolean;
 	timestamp: number; // Unix timestamp in milliseconds
@@ -381,6 +390,18 @@ export type AssistantMessageEvent =
  * Compatibility settings for OpenAI-compatible completions APIs.
  * Use this to override URL-based auto-detection for custom providers.
  */
+export type OpenAICompletionsCacheControlFormat = "anthropic";
+export type OpenAICompletionsMaxTokensField = "max_completion_tokens" | "max_tokens";
+export type OpenAICompletionsThinkingFormat =
+	| "openai"
+	| "openrouter"
+	| "deepseek"
+	| "together"
+	| "zai"
+	| "qwen"
+	| "qwen-chat-template"
+	| "string-thinking";
+
 export interface OpenAICompletionsCompat {
 	/** Whether the provider supports the `store` field. Default: auto-detected from URL. */
 	supportsStore?: boolean;
@@ -391,7 +412,7 @@ export interface OpenAICompletionsCompat {
 	/** Whether the provider supports `stream_options: { include_usage: true }` for token usage in streaming responses. Default: true. */
 	supportsUsageInStreaming?: boolean;
 	/** Which field to use for max tokens. Default: auto-detected from URL. */
-	maxTokensField?: "max_completion_tokens" | "max_tokens";
+	maxTokensField?: OpenAICompletionsMaxTokensField;
 	/** Whether tool results require the `name` field. Default: auto-detected from URL. */
 	requiresToolResultName?: boolean;
 	/** Whether a user message after tool results requires an assistant message in between. Default: auto-detected from URL. */
@@ -401,15 +422,7 @@ export interface OpenAICompletionsCompat {
 	/** Whether all replayed assistant messages must include an empty reasoning_content field when reasoning is enabled. Default: auto-detected from URL. */
 	requiresReasoningContentOnAssistantMessages?: boolean;
 	/** Format for reasoning/thinking parameter. "openai" uses reasoning_effort, "openrouter" uses reasoning: { effort }, "deepseek" uses thinking: { type } plus reasoning_effort when supported, "together" uses reasoning: { enabled } plus reasoning_effort when supported, "zai" uses top-level enable_thinking: boolean, "qwen" uses top-level enable_thinking: boolean, "qwen-chat-template" uses chat_template_kwargs.enable_thinking, and "string-thinking" uses top-level thinking: string. Default: "openai". */
-	thinkingFormat?:
-		| "openai"
-		| "openrouter"
-		| "deepseek"
-		| "together"
-		| "zai"
-		| "qwen"
-		| "qwen-chat-template"
-		| "string-thinking";
+	thinkingFormat?: OpenAICompletionsThinkingFormat;
 	/** OpenRouter-specific routing preferences. Only used when baseUrl points to OpenRouter. */
 	openRouterRouting?: OpenRouterRouting;
 	/** Vercel AI Gateway routing preferences. Only used when baseUrl points to Vercel AI Gateway. */
@@ -419,7 +432,7 @@ export interface OpenAICompletionsCompat {
 	/** Whether the provider supports the `strict` field in tool definitions. Default: true. */
 	supportsStrictMode?: boolean;
 	/** Cache control convention for prompt caching. "anthropic" applies Anthropic-style `cache_control` markers to the system prompt, last tool definition, and last user/assistant text content. */
-	cacheControlFormat?: "anthropic";
+	cacheControlFormat?: OpenAICompletionsCacheControlFormat;
 	/** Whether to send known session-affinity headers (`session_id`, `x-client-request-id`, `x-session-affinity`) from `options.sessionId` when caching is enabled. Default: false. */
 	sendSessionAffinityHeaders?: boolean;
 	/** Whether the provider supports long prompt cache retention (`prompt_cache_retention: "24h"` or Anthropic-style `cache_control.ttl: "1h"`, depending on format). Default: true. */
@@ -484,6 +497,58 @@ export interface AnthropicMessagesCompat {
 	allowEmptySignature?: boolean;
 }
 
+export type OpenRouterDataCollectionPolicy = "deny" | "allow";
+
+export interface OpenRouterSortOptions {
+	/** The sorting metric: "price", "throughput", "latency". */
+	by?: string;
+	/** Partitioning strategy: "model" (default) or "none". */
+	partition?: string | null;
+}
+
+export interface OpenRouterMaxPrice {
+	/** Price per million prompt tokens. */
+	prompt?: number | string;
+	/** Price per million completion tokens. */
+	completion?: number | string;
+	/** Price per image. */
+	image?: number | string;
+	/** Price per audio unit. */
+	audio?: number | string;
+	/** Price per request. */
+	request?: number | string;
+}
+
+// pi-ignore noNearIdenticalDataStructures: Throughput thresholds are minimum tokens/second, while latency thresholds are maximum seconds and have independent routing semantics.
+export interface OpenRouterThroughputPercentiles {
+	/** Minimum tokens/second at the 50th percentile. */
+	p50?: number;
+	/** Minimum tokens/second at the 75th percentile. */
+	p75?: number;
+	/** Minimum tokens/second at the 90th percentile. */
+	p90?: number;
+	/** Minimum tokens/second at the 99th percentile. */
+	p99?: number;
+}
+
+export interface OpenRouterLatencyPercentiles {
+	/** Maximum latency in seconds at the 50th percentile. */
+	p50?: number;
+	/** Maximum latency in seconds at the 75th percentile. */
+	p75?: number;
+	/** Maximum latency in seconds at the 90th percentile. */
+	p90?: number;
+	/** Maximum latency in seconds at the 99th percentile. */
+	p99?: number;
+}
+
+export interface ModelCost {
+	input: number; // $/million tokens
+	output: number; // $/million tokens
+	cacheRead: number; // $/million tokens
+	cacheWrite: number; // $/million tokens
+}
+
 /**
  * OpenRouter provider routing preferences.
  * Controls which upstream providers OpenRouter routes requests to.
@@ -496,7 +561,7 @@ export interface OpenRouterRouting {
 	/** Whether to filter providers to only those that support all parameters in the request. Default: false. */
 	require_parameters?: boolean;
 	/** Data collection setting. "allow" (default): allow providers that may store/train on data. "deny": only use providers that don't collect user data. */
-	data_collection?: "deny" | "allow";
+	data_collection?: OpenRouterDataCollectionPolicy;
 	/** Whether to restrict routing to only ZDR (Zero Data Retention) endpoints. */
 	zdr?: boolean;
 	/** Whether to restrict routing to only models that allow text distillation. */
@@ -510,53 +575,13 @@ export interface OpenRouterRouting {
 	/** A list of quantization levels to filter providers by (e.g., ["fp16", "bf16", "fp8", "fp6", "int8", "int4", "fp4", "fp32"]). */
 	quantizations?: string[];
 	/** Sorting strategy. Can be a string (e.g., "price", "throughput", "latency") or an object with `by` and `partition`. */
-	sort?:
-		| string
-		| {
-				/** The sorting metric: "price", "throughput", "latency". */
-				by?: string;
-				/** Partitioning strategy: "model" (default) or "none". */
-				partition?: string | null;
-		  };
+	sort?: string | OpenRouterSortOptions;
 	/** Maximum price per million tokens (USD). */
-	max_price?: {
-		/** Price per million prompt tokens. */
-		prompt?: number | string;
-		/** Price per million completion tokens. */
-		completion?: number | string;
-		/** Price per image. */
-		image?: number | string;
-		/** Price per audio unit. */
-		audio?: number | string;
-		/** Price per request. */
-		request?: number | string;
-	};
+	max_price?: OpenRouterMaxPrice;
 	/** Preferred minimum throughput (tokens/second). Can be a number (applies to p50) or an object with percentile-specific cutoffs. */
-	preferred_min_throughput?:
-		| number
-		| {
-				/** Minimum tokens/second at the 50th percentile. */
-				p50?: number;
-				/** Minimum tokens/second at the 75th percentile. */
-				p75?: number;
-				/** Minimum tokens/second at the 90th percentile. */
-				p90?: number;
-				/** Minimum tokens/second at the 99th percentile. */
-				p99?: number;
-		  };
+	preferred_min_throughput?: number | OpenRouterThroughputPercentiles;
 	/** Preferred maximum latency (seconds). Can be a number (applies to p50) or an object with percentile-specific cutoffs. */
-	preferred_max_latency?:
-		| number
-		| {
-				/** Maximum latency in seconds at the 50th percentile. */
-				p50?: number;
-				/** Maximum latency in seconds at the 75th percentile. */
-				p75?: number;
-				/** Maximum latency in seconds at the 90th percentile. */
-				p90?: number;
-				/** Maximum latency in seconds at the 99th percentile. */
-				p99?: number;
-		  };
+	preferred_max_latency?: number | OpenRouterLatencyPercentiles;
 }
 
 /**
@@ -571,6 +596,9 @@ export interface VercelGatewayRouting {
 	order?: string[];
 }
 
+export type ModelInputModality = "text" | "image";
+export type ImagesModelOutputModality = "text" | "image";
+
 // Model interface for the unified model system
 export interface Model<TApi extends Api> {
 	id: string;
@@ -584,13 +612,8 @@ export interface Model<TApi extends Api> {
 	 * Missing keys use provider defaults. null marks a level as unsupported.
 	 */
 	thinkingLevelMap?: ThinkingLevelMap;
-	input: ("text" | "image")[];
-	cost: {
-		input: number; // $/million tokens
-		output: number; // $/million tokens
-		cacheRead: number; // $/million tokens
-		cacheWrite: number; // $/million tokens
-	};
+	input: ModelInputModality[];
+	cost: ModelCost;
 	contextWindow: number;
 	maxTokens: number;
 	headers?: Record<string, string>;
@@ -608,5 +631,5 @@ export interface ImagesModel<TApi extends ImagesApi>
 	extends Omit<Model<Api>, "api" | "provider" | "reasoning" | "contextWindow" | "maxTokens" | "compat"> {
 	api: TApi;
 	provider: ImagesProvider;
-	output: ("text" | "image")[];
+	output: ImagesModelOutputModality[];
 }

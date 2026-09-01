@@ -37,6 +37,11 @@ export interface SelectListLayoutOptions {
 	truncatePrimary?: (context: SelectListTruncatePrimaryContext) => string;
 }
 
+interface SelectListPrimaryColumnBounds {
+	min: number;
+	max: number;
+}
+
 export class SelectList implements Component {
 	private items: SelectItem[] = [];
 	private filteredItems: SelectItem[] = [];
@@ -184,7 +189,7 @@ export class SelectList implements Component {
 		return clamp(widestPrimary, min, max);
 	}
 
-	private getPrimaryColumnBounds(): { min: number; max: number } {
+	private getPrimaryColumnBounds(): SelectListPrimaryColumnBounds {
 		const rawMin =
 			this.layout.minPrimaryColumnWidth ?? this.layout.maxPrimaryColumnWidth ?? DEFAULT_PRIMARY_COLUMN_WIDTH;
 		const rawMax =

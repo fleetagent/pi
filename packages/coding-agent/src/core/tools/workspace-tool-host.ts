@@ -3,27 +3,33 @@ import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@fleet
 import { validateToolArguments } from "@fleetagent/pi-ai";
 import type { Static, TSchema } from "typebox";
 import type { ExtensionContext, ToolDefinition } from "../extensions/types.ts";
-import { type BashToolOptions, createBashToolDefinition } from "./bash.ts";
-import { createEditToolDefinition, type EditToolOptions } from "./edit.ts";
-import { createFindToolDefinition, type FindToolOptions } from "./find.ts";
-import { createGrepToolDefinition, type GrepToolOptions } from "./grep.ts";
-import { createLsToolDefinition, type LsToolOptions } from "./ls.ts";
-import { LocalToolOperations, type ToolOperations, type WorkspaceToolRemoteInvocation } from "./operations.ts";
+import { type BashToolDefinition, type BashToolOptions, createBashToolDefinition } from "./bash.ts";
+import { createEditToolDefinition, type EditToolDefinition, type EditToolOptions } from "./edit.ts";
+import { createFindToolDefinition, type FindToolDefinition, type FindToolOptions } from "./find.ts";
+import { createGrepToolDefinition, type GrepToolDefinition, type GrepToolOptions } from "./grep.ts";
+import { createLsToolDefinition, type LsToolDefinition, type LsToolOptions } from "./ls.ts";
+import { LocalToolOperations, type ToolOperations, type WorkspaceToolExecutionOptions } from "./operations.ts";
 import { resolveToCwd } from "./path-utils.ts";
-import { createReadToolDefinition, type ReadToolOperations, type ReadToolOptions } from "./read.ts";
+import {
+	createReadToolDefinition,
+	type ReadToolDefinition,
+	type ReadToolOperations,
+	type ReadToolOptions,
+} from "./read.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
-import { createWriteToolDefinition, type WriteToolOptions } from "./write.ts";
+import { createWriteToolDefinition, type WriteToolDefinition, type WriteToolOptions } from "./write.ts";
 
 export const WORKSPACE_TOOL_NAMES = Object.freeze(["read", "bash", "edit", "write", "grep", "find", "ls"] as const);
+const WORKSPACE_TOOL_NAME_SET = new Set<string>(WORKSPACE_TOOL_NAMES);
 export type WorkspaceToolName = (typeof WORKSPACE_TOOL_NAMES)[number];
 export type WorkspaceToolDefinition =
-	| ReturnType<typeof createReadToolDefinition>
-	| ReturnType<typeof createBashToolDefinition>
-	| ReturnType<typeof createEditToolDefinition>
-	| ReturnType<typeof createWriteToolDefinition>
-	| ReturnType<typeof createGrepToolDefinition>
-	| ReturnType<typeof createFindToolDefinition>
-	| ReturnType<typeof createLsToolDefinition>;
+	| ReadToolDefinition
+	| BashToolDefinition
+	| EditToolDefinition
+	| WriteToolDefinition
+	| GrepToolDefinition
+	| FindToolDefinition
+	| LsToolDefinition;
 
 // Heterogeneous tool registries erase per-tool schema/detail types at the lookup boundary.
 type AnyAgentTool = AgentTool<any, any>;
@@ -69,7 +75,22 @@ export interface WorkspaceToolInvocation {
 	arguments: unknown;
 	signal?: AbortSignal;
 	onUpdate?: AgentToolUpdateCallback<unknown>;
-	executionOptions?: WorkspaceToolRemoteInvocation["executionOptions"];
+	executionOptions?: WorkspaceToolExecutionOptions;
+}
+
+interface WorkspaceExecutionSelection {
+	executeRemotely: boolean;
+	readOperations: ReadToolOperations | undefined;
+}
+
+interface HostedToolExecution<TParams extends TSchema, TDetails> {
+	name: string;
+	toolCallId: string;
+	params: Static<TParams>;
+	signal: AbortSignal;
+	onUpdate: AgentToolUpdateCallback<TDetails> | undefined;
+	context: ExtensionContext;
+	executionOptions: WorkspaceToolExecutionOptions | undefined;
 }
 
 function cloneObjectGraph<T>(value: T, seen = new Map<object, object>()): T {
@@ -105,6 +126,15 @@ function validateDisposeTimeout(value: number | undefined): number {
 	return resolved;
 }
 
+function createRemoteExecutionOptions(toolOptions: WorkspaceToolOptions | undefined): WorkspaceToolExecutionOptions {
+	return Object.freeze({
+		...(toolOptions?.read?.autoResizeImages === undefined
+			? {}
+			: { imageAutoResize: toolOptions.read.autoResizeImages }),
+		...(toolOptions?.bash?.commandPrefix === undefined ? {} : { shellCommandPrefix: toolOptions.bash.commandPrefix }),
+	});
+}
+
 /**
  * Canonical workspace-scoped tool construction and execution without an AgentSession.
  *
@@ -121,7 +151,7 @@ export class WorkspaceToolHost {
 	private readonly tools = new Map<string, AnyAgentTool>();
 	private readonly ownsOperations: boolean;
 	private readonly toolOptions: WorkspaceToolOptions | undefined;
-	private readonly remoteExecutionOptions: WorkspaceToolRemoteInvocation["executionOptions"];
+	private readonly remoteExecutionOptions: WorkspaceToolExecutionOptions;
 	private unsubscribeCatalog: (() => void) | undefined;
 	private readonly disposeTimeoutMs: number;
 	private readonly disposeController = new AbortController();
@@ -136,32 +166,14 @@ export class WorkspaceToolHost {
 		this.operations = options.operations ?? new LocalToolOperations(options.cwd, { shellPath: options.shellPath });
 		this.ownsOperations = options.operations ? options.ownsOperations === true : true;
 		this.toolOptions = options.tools;
-		this.remoteExecutionOptions = Object.freeze({
-			...(options.tools?.read?.autoResizeImages === undefined
-				? {}
-				: { imageAutoResize: options.tools.read.autoResizeImages }),
-			...(options.tools?.bash?.commandPrefix === undefined
-				? {}
-				: { shellCommandPrefix: options.tools.bash.commandPrefix }),
-		});
+		this.remoteExecutionOptions = createRemoteExecutionOptions(options.tools);
 		this.disposeTimeoutMs = validateDisposeTimeout(options.disposeTimeoutMs);
 		const enabledNames = new Set(options.toolNames ?? WORKSPACE_TOOL_NAMES);
 		for (const name of enabledNames) {
-			if (!WORKSPACE_TOOL_NAMES.includes(name)) throw new Error(`Unknown workspace tool: ${name}`);
+			if (!WORKSPACE_TOOL_NAME_SET.has(name)) throw new Error(`Unknown workspace tool: ${name}`);
 		}
-		const toolOptions = options.tools;
-		if (enabledNames.has("read")) this.register("read", createReadToolDefinition(this.operations, toolOptions?.read));
-		if (enabledNames.has("bash")) this.register("bash", createBashToolDefinition(this.operations, toolOptions?.bash));
-		if (enabledNames.has("edit")) this.register("edit", createEditToolDefinition(this.operations, toolOptions?.edit));
-		if (enabledNames.has("write"))
-			this.register("write", createWriteToolDefinition(this.operations, toolOptions?.write));
-		if (enabledNames.has("grep")) this.register("grep", createGrepToolDefinition(this.operations, toolOptions?.grep));
-		if (enabledNames.has("find")) this.register("find", createFindToolDefinition(this.operations, toolOptions?.find));
-		if (enabledNames.has("ls")) this.register("ls", createLsToolDefinition(this.operations, toolOptions?.ls));
-		for (const definition of options.additionalDefinitions ?? []) {
-			if (this.definitions.has(definition.name)) throw new Error(`Duplicate hosted tool: ${definition.name}`);
-			this.register(definition.name, definition);
-		}
+		this.registerConfiguredTools(enabledNames);
+		this.registerAdditionalDefinitions(options.additionalDefinitions ?? []);
 		this.unsubscribeCatalog = options.onCatalogChanged
 			? this.operations.onWorkspaceToolCatalogChanged?.(options.onCatalogChanged)
 			: undefined;
@@ -259,6 +271,98 @@ export class WorkspaceToolHost {
 		return this.disposePromise;
 	}
 
+	private registerConfiguredTools(enabledNames: ReadonlySet<WorkspaceToolName>): void {
+		const toolOptions = this.toolOptions;
+		if (enabledNames.has("read")) this.register("read", createReadToolDefinition(this.operations, toolOptions?.read));
+		if (enabledNames.has("bash")) this.register("bash", createBashToolDefinition(this.operations, toolOptions?.bash));
+		if (enabledNames.has("edit")) this.register("edit", createEditToolDefinition(this.operations, toolOptions?.edit));
+		if (enabledNames.has("write"))
+			this.register("write", createWriteToolDefinition(this.operations, toolOptions?.write));
+		if (enabledNames.has("grep")) this.register("grep", createGrepToolDefinition(this.operations, toolOptions?.grep));
+		if (enabledNames.has("find")) this.register("find", createFindToolDefinition(this.operations, toolOptions?.find));
+		if (enabledNames.has("ls")) this.register("ls", createLsToolDefinition(this.operations, toolOptions?.ls));
+	}
+	private selectWorkspaceExecution(name: string, params: unknown): WorkspaceExecutionSelection {
+		const executeRemotely = this.remoteToolNames.has(name);
+		const operationsForPath = this.toolOptions?.read?.operationsForPath;
+		if (!executeRemotely || name !== "read" || !operationsForPath) {
+			return { executeRemotely, readOperations: undefined };
+		}
+		const readPath = (params as { path?: unknown }).path;
+		if (typeof readPath !== "string" || !isAbsolute(readPath)) {
+			return { executeRemotely, readOperations: undefined };
+		}
+		const absolutePath = resolveToCwd(readPath, this.operations.cwd);
+		const readOperations = operationsForPath(absolutePath);
+		return { executeRemotely: !readOperations, readOperations };
+	}
+
+	private resolveLocalDefinition<TParams extends TSchema, TDetails>(
+		request: HostedToolExecution<TParams, TDetails>,
+		definition: ToolDefinition<TParams, TDetails>,
+		readOperations: ReadToolOperations | undefined,
+	): ToolDefinition<TParams, TDetails> {
+		if (request.name === "read" && (readOperations || request.executionOptions?.imageAutoResize !== undefined)) {
+			return createReadToolDefinition(this.operations, {
+				...this.toolOptions?.read,
+				...(request.executionOptions?.imageAutoResize === undefined
+					? {}
+					: { autoResizeImages: request.executionOptions.imageAutoResize }),
+				...(readOperations ? { operationsForPath: () => readOperations } : {}),
+			}) as unknown as ToolDefinition<TParams, TDetails>;
+		}
+		if (request.executionOptions?.shellCommandPrefix !== undefined && request.name === "bash") {
+			return createBashToolDefinition(this.operations, {
+				...this.toolOptions?.bash,
+				commandPrefix: request.executionOptions.shellCommandPrefix,
+			}) as unknown as ToolDefinition<TParams, TDetails>;
+		}
+		return definition;
+	}
+
+	private startRemoteExecution<TParams extends TSchema, TDetails>(
+		request: HostedToolExecution<TParams, TDetails>,
+	): Promise<AgentToolResult<TDetails>> {
+		if (!this.operations.executeWorkspaceTool) {
+			throw new Error(`Remote workspace executor is unavailable: ${request.name}`);
+		}
+		return Promise.resolve().then(
+			async () =>
+				(await this.operations.executeWorkspaceTool!(request.name, {
+					toolCallId: request.toolCallId,
+					arguments: request.params,
+					signal: request.signal,
+					onUpdate: request.onUpdate as AgentToolUpdateCallback<unknown> | undefined,
+					executionOptions: request.executionOptions ?? this.remoteExecutionOptions,
+				})) as AgentToolResult<TDetails>,
+		);
+	}
+
+	private startLocalExecution<TParams extends TSchema, TDetails>(
+		request: HostedToolExecution<TParams, TDetails>,
+		definition: ToolDefinition<TParams, TDetails>,
+	): Promise<AgentToolResult<TDetails>> {
+		return Promise.resolve().then(() =>
+			definition.execute(request.toolCallId, request.params, request.signal, request.onUpdate, request.context),
+		);
+	}
+
+	private trackExecution<TDetails>(execution: Promise<AgentToolResult<TDetails>>): Promise<AgentToolResult<TDetails>> {
+		this.activeInvocations.add(execution);
+		void execution.then(
+			() => this.activeInvocations.delete(execution),
+			() => this.activeInvocations.delete(execution),
+		);
+		return execution;
+	}
+
+	private registerAdditionalDefinitions(definitions: readonly AnyToolDefinition[]): void {
+		for (const definition of definitions) {
+			if (this.definitions.has(definition.name)) throw new Error(`Duplicate hosted tool: ${definition.name}`);
+			this.register(definition.name, definition);
+		}
+	}
+
 	private register<TParams extends TSchema, TDetails, TState>(
 		name: string,
 		definition: ToolDefinition<TParams, TDetails, TState>,
@@ -294,68 +398,31 @@ export class WorkspaceToolHost {
 		signal: AbortSignal | undefined,
 		onUpdate: AgentToolUpdateCallback<TDetails> | undefined,
 		context: ExtensionContext,
-		executionOptions: WorkspaceToolRemoteInvocation["executionOptions"] | undefined,
+		executionOptions: WorkspaceToolExecutionOptions | undefined,
 	): Promise<AgentToolResult<TDetails>> {
 		if (this.disposed) throw new Error("Workspace tool host is disposed");
-		let definition = this.requireRawDefinition(name) as ToolDefinition<TParams, TDetails>;
+		const definition = this.requireRawDefinition(name) as ToolDefinition<TParams, TDetails>;
 		const combinedSignal = signal
 			? AbortSignal.any([signal, this.disposeController.signal])
 			: this.disposeController.signal;
 		if (combinedSignal.aborted) throw new Error("Operation aborted");
-		let execution: Promise<AgentToolResult<TDetails>>;
-		let selectedReadOperations: ReadToolOperations | undefined;
-		let executeRemotely = this.remoteToolNames.has(name);
-		if (
-			executeRemotely &&
-			name === "read" &&
-			this.toolOptions?.read?.operationsForPath &&
-			(params as unknown as { path?: unknown }).path !== undefined
-		) {
-			const readPath = (params as unknown as { path: unknown }).path;
-			if (typeof readPath === "string" && isAbsolute(readPath)) {
-				const absolutePath = resolveToCwd(readPath, this.operations.cwd);
-				selectedReadOperations = this.toolOptions.read.operationsForPath(absolutePath);
-				if (selectedReadOperations) executeRemotely = false;
-			}
-		}
-		if (executeRemotely) {
-			if (!this.operations.executeWorkspaceTool)
-				throw new Error(`Remote workspace executor is unavailable: ${name}`);
-			execution = Promise.resolve().then(
-				async () =>
-					(await this.operations.executeWorkspaceTool!(name, {
-						toolCallId,
-						arguments: params,
-						signal: combinedSignal,
-						onUpdate: onUpdate as AgentToolUpdateCallback<unknown> | undefined,
-						executionOptions: executionOptions ?? this.remoteExecutionOptions,
-					})) as AgentToolResult<TDetails>,
-			);
-		} else {
-			if (name === "read" && (selectedReadOperations || executionOptions?.imageAutoResize !== undefined)) {
-				definition = createReadToolDefinition(this.operations, {
-					...this.toolOptions?.read,
-					...(executionOptions?.imageAutoResize === undefined
-						? {}
-						: { autoResizeImages: executionOptions.imageAutoResize }),
-					...(selectedReadOperations ? { operationsForPath: () => selectedReadOperations } : {}),
-				}) as unknown as ToolDefinition<TParams, TDetails>;
-			} else if (executionOptions?.shellCommandPrefix !== undefined && name === "bash") {
-				definition = createBashToolDefinition(this.operations, {
-					...this.toolOptions?.bash,
-					commandPrefix: executionOptions.shellCommandPrefix,
-				}) as unknown as ToolDefinition<TParams, TDetails>;
-			}
-			execution = Promise.resolve().then(() =>
-				definition.execute(toolCallId, params, combinedSignal, onUpdate, context),
-			);
-		}
-		this.activeInvocations.add(execution);
-		void execution.then(
-			() => this.activeInvocations.delete(execution),
-			() => this.activeInvocations.delete(execution),
-		);
-		return await execution;
+		const selection = this.selectWorkspaceExecution(name, params);
+		const request: HostedToolExecution<TParams, TDetails> = {
+			name,
+			toolCallId,
+			params,
+			signal: combinedSignal,
+			onUpdate,
+			context,
+			executionOptions,
+		};
+		const execution = selection.executeRemotely
+			? this.startRemoteExecution(request)
+			: this.startLocalExecution(
+					request,
+					this.resolveLocalDefinition(request, definition, selection.readOperations),
+				);
+		return await this.trackExecution(execution);
 	}
 
 	private async disposeHost(): Promise<void> {

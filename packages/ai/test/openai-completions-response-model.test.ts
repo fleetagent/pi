@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { complete } from "../src/stream.ts";
 import type { Model } from "../src/types.ts";
+import type { MockCompletionPromise } from "./openai-mock-types.ts";
 
 // Router/virtual ids (e.g. OpenRouter `auto`) keep `model` pinned to the
 // requested id and surface the routed concrete id on `responseModel`.
@@ -20,12 +21,7 @@ vi.mock("openai", () => {
 							for (const chunk of chunks) yield chunk;
 						},
 					};
-					const promise = Promise.resolve(stream) as Promise<typeof stream> & {
-						withResponse: () => Promise<{
-							data: typeof stream;
-							response: { status: number; headers: Headers };
-						}>;
-					};
+					const promise = Promise.resolve(stream) as MockCompletionPromise<typeof stream>;
 					promise.withResponse = async () => ({
 						data: stream,
 						response: { status: 200, headers: new Headers() },

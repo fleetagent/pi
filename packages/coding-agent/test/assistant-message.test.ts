@@ -1,4 +1,4 @@
-import type { AssistantMessage } from "@fleetagent/pi-ai";
+import type { AssistantContent, AssistantMessage } from "@fleetagent/pi-ai";
 import { describe, expect, test } from "vitest";
 import { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
@@ -7,7 +7,7 @@ const OSC133_ZONE_START = "\x1b]133;A\x07";
 const OSC133_ZONE_END = "\x1b]133;B\x07";
 const OSC133_ZONE_FINAL = "\x1b]133;C\x07";
 
-function createAssistantMessage(content: AssistantMessage["content"]): AssistantMessage {
+function createAssistantMessage(content: AssistantContent[]): AssistantMessage {
 	return {
 		role: "assistant",
 		content,

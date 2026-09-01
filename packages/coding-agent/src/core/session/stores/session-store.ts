@@ -1,10 +1,24 @@
 import type { JsonlErrorPhase } from "../jsonl-errors.ts";
 import type { FileEntry, SessionEntry, SessionHeader, SessionTreeNode } from "../types.ts";
 
+export interface SessionReferenceOptions {
+	allowExistingEmptyFile?: boolean;
+}
+
+export interface SessionSnapshotOptions {
+	phase?: JsonlErrorPhase;
+}
+
+export interface SessionLabelSnapshot {
+	targetId: string;
+	label: string;
+	timestamp: string;
+}
+
 export interface SessionStore {
 	isPersisted(): boolean;
 	getSessionReference(): string | undefined;
-	setSessionReference(reference: string, options?: { allowExistingEmptyFile?: boolean }): void;
+	setSessionReference(reference: string, options?: SessionReferenceOptions): void;
 	exists(path: string): boolean;
 	ensureDir(path: string): void;
 	load(filePath: string): FileEntry[];
@@ -15,7 +29,7 @@ export interface SessionStore {
 	getEntryIndex(): Map<string, SessionEntry>;
 	has(id: string): boolean;
 	appendEntry(entry: SessionEntry): void;
-	saveSnapshot(options?: { phase?: JsonlErrorPhase }): void;
+	saveSnapshot(options?: SessionSnapshotOptions): void;
 	commitSnapshot(): void;
 	getLeafId(): string | null;
 	setLeafId(leafId: string | null): void;
@@ -26,6 +40,6 @@ export interface SessionStore {
 	getBranch(fromId?: string): SessionEntry[];
 	getTree(): SessionTreeNode[];
 	getSessionName(): string | undefined;
-	getLabelsForEntryIds(entryIds: Set<string>): Array<{ targetId: string; label: string; timestamp: string }>;
+	getLabelsForEntryIds(entryIds: Set<string>): SessionLabelSnapshot[];
 	hasAssistantMessage(): boolean;
 }

@@ -1,5 +1,5 @@
-import { spawn } from "node:child_process";
-import { createHash, randomBytes } from "node:crypto";
+import { type ChildProcess, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { constants, createReadStream, createWriteStream, type Stats, type WriteStream } from "node:fs";
 import {
 	access as fsAccess,
@@ -22,6 +22,7 @@ import {
 	trackDetachedChildPid,
 	untrackDetachedChildPid,
 } from "../../utils/shell.ts";
+import type { PortablePathFlavor } from "../lsp/portable-path.ts";
 import {
 	DEFAULT_REMOTE_WORKSPACE_PROTOCOL_LIMITS,
 	decodeCanonicalBase64,
@@ -29,6 +30,7 @@ import {
 	parseRemoteWorkspaceToolResult,
 	type RemoteLspStatus,
 	type RemoteWorkspaceClientMessage,
+	type RemoteWorkspaceMethod,
 } from "../remote-workspace-protocol/contract.ts";
 import {
 	RemoteWorkspaceClientProtocol,
@@ -38,6 +40,8 @@ import {
 import type { WorkspaceIdentity } from "../workspace-identity.ts";
 
 export type ToolAccessMode = "exists" | "read" | "write" | "readwrite";
+export type WorkspaceToolExecutionTarget = "local" | "remote" | "unavailable";
+export type RemoteWorkspaceToolExecutionTarget = Exclude<WorkspaceToolExecutionTarget, "local">;
 
 export interface ToolFileStat {
 	isDirectory: () => boolean;
@@ -50,6 +54,14 @@ export interface ToolExecOptions {
 	signal?: AbortSignal;
 	timeout?: number;
 	env?: NodeJS.ProcessEnv;
+}
+
+export interface ToolExecResult {
+	exitCode: number | null;
+}
+
+export interface ToolMkdirOptions {
+	recursive?: boolean;
 }
 
 export interface ToolGlobOptions {
@@ -79,7 +91,6 @@ export interface ToolGrepResult {
 
 export type ToolBackendInfo =
 	| { type: "local"; cwd: string }
-	| { type: "ssh"; cwd: string; remote: string; configured: true }
 	| { type: "remote"; cwd: string; configured: false }
 	| {
 			type: "remote";
@@ -90,12 +101,27 @@ export type ToolBackendInfo =
 			workspace: WorkspaceIdentity;
 	  };
 
+// pi-ignore noNearIdenticalDataStructures: Remote backend invocations require host-normalized execution options, while public host invocations accept omitted options and apply defaults.
 export interface WorkspaceToolRemoteInvocation {
 	toolCallId: string;
 	arguments: unknown;
 	signal?: AbortSignal;
 	onUpdate?: AgentToolUpdateCallback<unknown>;
-	executionOptions: { imageAutoResize?: boolean; shellCommandPrefix?: string };
+	executionOptions: WorkspaceToolExecutionOptions;
+}
+
+export interface WorkspaceToolExecutionOptions {
+	imageAutoResize?: boolean;
+	shellCommandPrefix?: string;
+}
+
+interface NormalizedRemoteWorkspaceUrl {
+	url: string;
+	protocol: "ws";
+}
+
+export interface DeferredRemoteToolOperationsConnectOptions extends RemoteToolOperationsConnectOptions {
+	expectedCwd?: string;
 }
 
 export type BorrowedToolOperations = Omit<ToolOperations, "dispose">;
@@ -122,21 +148,21 @@ export function borrowToolOperations(operations: ToolOperations): BorrowedToolOp
 
 export interface ToolOperations {
 	cwd: string;
-	exec(command: string, options: ToolExecOptions): Promise<{ exitCode: number | null }>;
+	exec(command: string, options: ToolExecOptions): Promise<ToolExecResult>;
 	access(path: string, mode?: ToolAccessMode): Promise<void>;
 	readFile(path: string): Promise<Buffer>;
 	writeFile(path: string, content: string | Buffer): Promise<void>;
 	readResource?(path: string): Promise<Buffer>;
 	uploadFile?(sourcePath: string, destinationPath: string): Promise<void>;
 	downloadFile?(sourcePath: string, destinationPath: string): Promise<void>;
-	mkdir(path: string, options?: { recursive?: boolean }): Promise<void>;
+	mkdir(path: string, options?: ToolMkdirOptions): Promise<void>;
 	stat(path: string): Promise<ToolFileStat>;
 	readdir(path: string): Promise<string[]>;
 	glob?(pattern: string, cwd: string, options: ToolGlobOptions): Promise<string[]>;
 	grep?(options: ToolGrepOptions): Promise<ToolGrepResult>;
 	detectImageMimeType?(path: string): Promise<string | null | undefined>;
 	getBackendInfo?(): ToolBackendInfo;
-	resolveWorkspaceToolExecution?(name: string, parameterSchema: unknown): "local" | "remote" | "unavailable";
+	resolveWorkspaceToolExecution?(name: string, parameterSchema: unknown): WorkspaceToolExecutionTarget;
 	executeWorkspaceTool?(name: string, invocation: WorkspaceToolRemoteInvocation): Promise<AgentToolResult<unknown>>;
 	onWorkspaceToolCatalogChanged?(listener: () => void | Promise<void>): () => void;
 	getRemoteLspStatus?(): RemoteLspStatus;
@@ -147,22 +173,7 @@ export interface LocalToolOperationsOptions {
 	shellPath?: string;
 }
 
-export interface SshToolOperationsOptions {
-	remote: string;
-	cwd: string;
-}
-
-export interface DeferredRemoteToolOperationsConfigureSshOptions {
-	remote: string;
-	cwd?: string;
-}
-
-export interface ParsedSshTarget {
-	remote: string;
-	cwd?: string;
-}
-
-function workspaceRootsEqual(left: string, right: string, pathFlavor: "posix" | "windows"): boolean {
+function workspaceRootsEqual(left: string, right: string, pathFlavor: PortablePathFlavor): boolean {
 	if (pathFlavor === "windows") return win32.normalize(left).toLowerCase() === win32.normalize(right).toLowerCase();
 	return posix.normalize(left) === posix.normalize(right);
 }
@@ -181,10 +192,6 @@ function accessModeToFsMode(mode: ToolAccessMode | undefined): number {
 	}
 }
 
-function shellQuote(value: string): string {
-	return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
 const MAX_TIMEOUT_MS = 2_147_483_647;
 const MAX_TIMEOUT_SECONDS = MAX_TIMEOUT_MS / 1000;
 
@@ -201,54 +208,32 @@ function resolveTimeoutMs(timeout: number | undefined): number | undefined {
 	return timeoutMs;
 }
 
-function parseSshTarget(value: string): ParsedSshTarget {
-	const separatorIndex = value.indexOf(":");
-	if (separatorIndex === -1) {
-		return { remote: value };
-	}
-	const remote = value.slice(0, separatorIndex);
-	const cwd = value.slice(separatorIndex + 1);
-	return cwd ? { remote, cwd } : { remote };
+function registerChildProcessAbort(signal: AbortSignal | undefined, child: ChildProcess): () => void {
+	const onAbort = (): void => {
+		if (child.pid) killProcessTree(child.pid);
+	};
+	if (!signal) return () => undefined;
+	if (signal.aborted) onAbort();
+	else signal.addEventListener("abort", onAbort, { once: true });
+	return () => signal.removeEventListener("abort", onAbort);
 }
 
-function validateSshRemote(remote: string): void {
-	if (!remote) {
-		throw new Error("--ssh requires a remote target like user@host or user@host:/path");
-	}
-	if (remote.startsWith("-")) {
-		throw new Error("--ssh remote target must not start with '-'");
-	}
+function terminateLingeringProcessGroup(child: ChildProcess): void {
+	if (!child.pid || process.platform === "win32") return;
+	try {
+		process.kill(-child.pid, 0);
+		killProcessTree(child.pid);
+	} catch {}
 }
 
-function sshArgs(remote: string, command: string): string[] {
-	validateSshRemote(remote);
-	return ["--", remote, command];
-}
-
-function buildFdArgs(pattern: string, searchPath: string, limit: number): string[] {
-	const args: string[] = ["--glob", "--color=never", "--hidden", "--no-require-git", "--max-results", String(limit)];
-	let effectivePattern = pattern;
-	if (pattern.includes("/")) {
-		args.push("--full-path");
-		if (!pattern.startsWith("/") && !pattern.startsWith("**/") && pattern !== "**") {
-			effectivePattern = `**/${pattern}`;
-		}
-	}
-	args.push("--", effectivePattern, searchPath);
-	return args;
-}
-
-function buildRgArgs(options: ToolGrepOptions): string[] {
-	const args: string[] = ["--json", "--line-number", "--color=never", "--hidden"];
-	if (options.ignoreCase) args.push("--ignore-case");
-	if (options.literal) args.push("--fixed-strings");
-	if (options.glob) args.push("--glob", options.glob);
-	args.push("--", options.pattern, options.path);
-	return args;
-}
-
-function commandWithArgs(command: string, args: string[]): string {
-	return [command, ...args.map(shellQuote)].join(" ");
+function cleanupChildExecution(
+	child: ChildProcess,
+	timeoutHandle: NodeJS.Timeout | undefined,
+	removeAbortListener: () => void,
+): void {
+	if (child.pid) untrackDetachedChildPid(child.pid);
+	if (timeoutHandle) clearTimeout(timeoutHandle);
+	removeAbortListener();
 }
 
 async function copyFileStream(sourcePath: string, destinationPath: string): Promise<void> {
@@ -287,105 +272,6 @@ function endWriteStream(stream: WriteStream): Promise<void> {
 	});
 }
 
-function waitForSshFileTransfer(
-	remote: string,
-	command: string,
-	wireStreams: (child: ReturnType<typeof spawn>) => Promise<void>,
-): Promise<void> {
-	return new Promise((resolve, reject) => {
-		const child = spawn("ssh", sshArgs(remote, command), { stdio: ["pipe", "pipe", "pipe"] });
-		const stderr: Buffer[] = [];
-		child.stderr.on("data", (data: Buffer) => stderr.push(data));
-		child.on("error", reject);
-		wireStreams(child).catch((error: unknown) => {
-			child.kill();
-			reject(error instanceof Error ? error : new Error(String(error)));
-		});
-		child.on("close", (code) => {
-			if (code !== 0) {
-				reject(new Error(Buffer.concat(stderr).toString("utf-8").trim() || `ssh exited with code ${code}`));
-				return;
-			}
-			resolve();
-		});
-	});
-}
-
-async function runSshBuffer(
-	remote: string,
-	command: string,
-	options: { input?: Buffer | string; signal?: AbortSignal; timeout?: number } = {},
-): Promise<Buffer> {
-	const timeoutMs = resolveTimeoutMs(options.timeout);
-	return new Promise((resolve, reject) => {
-		const child = spawn("ssh", sshArgs(remote, command), { stdio: ["pipe", "pipe", "pipe"] });
-		const stdout: Buffer[] = [];
-		const stderr: Buffer[] = [];
-		let timedOut = false;
-		let timeoutHandle: NodeJS.Timeout | undefined;
-		if (timeoutMs !== undefined) {
-			timeoutHandle = setTimeout(() => {
-				timedOut = true;
-				child.kill();
-			}, timeoutMs);
-		}
-		child.stdout.on("data", (data: Buffer) => stdout.push(data));
-		child.stderr.on("data", (data: Buffer) => stderr.push(data));
-		child.on("error", reject);
-		const onAbort = () => child.kill();
-		options.signal?.addEventListener("abort", onAbort, { once: true });
-		if (options.input !== undefined) {
-			child.stdin.end(options.input);
-		} else {
-			child.stdin.end();
-		}
-		child.on("close", (code) => {
-			if (timeoutHandle) clearTimeout(timeoutHandle);
-			options.signal?.removeEventListener("abort", onAbort);
-			if (options.signal?.aborted) {
-				reject(new Error("aborted"));
-				return;
-			}
-			if (timedOut) {
-				reject(new Error(`timeout:${options.timeout}`));
-				return;
-			}
-			if (code !== 0) {
-				reject(new Error(Buffer.concat(stderr).toString("utf-8").trim() || `ssh exited with code ${code}`));
-				return;
-			}
-			resolve(Buffer.concat(stdout));
-		});
-	});
-}
-
-async function cancelSshCommand(remote: string, pidFile: string): Promise<void> {
-	const attempts = Array.from({ length: 20 }, (_, index) => index + 1).join(" ");
-	const waits = Array.from({ length: 10 }, (_, index) => index + 1).join(" ");
-	const quotedPidFile = shellQuote(pidFile);
-	const quotedPendingPidFile = shellQuote(`${pidFile}.pending`);
-	const command = [
-		`is_running() { pid_alive=0; group_alive=0; kill -0 "$pid" 2>/dev/null && pid_alive=1; kill -0 -- "-$pid" 2>/dev/null && group_alive=1; if test "$pid_alive" -eq 0 && test "$group_alive" -eq 0; then return 1; fi; if test "$pid_alive" -eq 1; then state=$(ps -o stat= -p "$pid" 2>/dev/null) || return 0; state=\${state//[[:space:]]/}; case "$state" in Z*) ;; '') return 0 ;; *) return 0 ;; esac; fi; process_group=$(ps -eo pgid=,stat= 2>/dev/null) || return 0; printf '%s\\n' "$process_group" | awk -v target="$pid" '$1 ~ /^[0-9]+$/ { parsed=1 } $1 == target && $2 !~ /^Z/ { found=1 } END { if (!parsed || found) exit 0; exit 1 }'; }`,
-		'terminate() { pkill -TERM -P "$pid" 2>/dev/null || true; kill -TERM -- "-$pid" 2>/dev/null || true; kill -TERM "$pid" 2>/dev/null || true; }',
-		'terminate_forcefully() { pkill -KILL -P "$pid" 2>/dev/null || true; kill -KILL -- "-$pid" 2>/dev/null || true; kill -KILL "$pid" 2>/dev/null || true; }',
-		`for attempt in ${attempts}; do`,
-		`if test -r ${quotedPidFile}; then`,
-		`pid=$(cat ${quotedPidFile} 2>/dev/null)`,
-		`case "$pid" in ''|*[!0-9]*) rm -f ${quotedPidFile} ${quotedPendingPidFile}; exit 2 ;; esac`,
-		"terminate",
-		`for wait_attempt in ${waits}; do if ! is_running; then rm -f ${quotedPidFile} ${quotedPendingPidFile}; exit 0; fi; sleep 0.05; done`,
-		"terminate_forcefully",
-		`for wait_attempt in ${waits}; do if ! is_running; then rm -f ${quotedPidFile} ${quotedPendingPidFile}; exit 0; fi; sleep 0.05; done`,
-		`rm -f ${quotedPidFile} ${quotedPendingPidFile}`,
-		"exit 1",
-		"fi",
-		"sleep 0.05",
-		"done",
-		`rm -f ${quotedPendingPidFile}`,
-	].join("\n");
-	await runSshBuffer(remote, `bash -c ${shellQuote(command)}`, { timeout: 3 });
-}
-
 export class LocalToolOperations implements ToolOperations {
 	cwd: string;
 	private shellPath: string | undefined;
@@ -399,7 +285,7 @@ export class LocalToolOperations implements ToolOperations {
 		this.shellPath = shellPath;
 	}
 
-	async exec(command: string, options: ToolExecOptions): Promise<{ exitCode: number | null }> {
+	async exec(command: string, options: ToolExecOptions): Promise<ToolExecResult> {
 		const timeoutMs = resolveTimeoutMs(options.timeout);
 		const cwd = options.cwd ?? this.cwd;
 		const { shell, args } = getShellConfig(this.shellPath);
@@ -430,24 +316,11 @@ export class LocalToolOperations implements ToolOperations {
 			}
 			child.stdout?.on("data", options.onData);
 			child.stderr?.on("data", options.onData);
-			const onAbort = () => {
-				if (child.pid) killProcessTree(child.pid);
-			};
-			if (options.signal) {
-				if (options.signal.aborted) onAbort();
-				else options.signal.addEventListener("abort", onAbort, { once: true });
-			}
+			const removeAbortListener = registerChildProcessAbort(options.signal, child);
 			waitForChildProcess(child)
 				.then((code) => {
-					if (child.pid && process.platform !== "win32") {
-						try {
-							process.kill(-child.pid, 0);
-							killProcessTree(child.pid);
-						} catch {}
-					}
-					if (child.pid) untrackDetachedChildPid(child.pid);
-					if (timeoutHandle) clearTimeout(timeoutHandle);
-					if (options.signal) options.signal.removeEventListener("abort", onAbort);
+					terminateLingeringProcessGroup(child);
+					cleanupChildExecution(child, timeoutHandle, removeAbortListener);
 					if (options.signal?.aborted) {
 						reject(new Error("aborted"));
 						return;
@@ -459,9 +332,7 @@ export class LocalToolOperations implements ToolOperations {
 					resolve({ exitCode: code });
 				})
 				.catch((error: unknown) => {
-					if (child.pid) untrackDetachedChildPid(child.pid);
-					if (timeoutHandle) clearTimeout(timeoutHandle);
-					if (options.signal) options.signal.removeEventListener("abort", onAbort);
+					cleanupChildExecution(child, timeoutHandle, removeAbortListener);
 					reject(error);
 				});
 		});
@@ -487,7 +358,7 @@ export class LocalToolOperations implements ToolOperations {
 		await copyFileStream(sourcePath, destinationPath);
 	}
 
-	async mkdir(path: string, options: { recursive?: boolean } = {}): Promise<void> {
+	async mkdir(path: string, options: ToolMkdirOptions = {}): Promise<void> {
 		await fsMkdir(path, { recursive: options.recursive ?? false });
 	}
 
@@ -508,241 +379,10 @@ export class LocalToolOperations implements ToolOperations {
 	}
 }
 
-export class SshToolOperations implements ToolOperations {
-	readonly remote: string;
-	cwd: string;
-
-	constructor(options: SshToolOperationsOptions) {
-		this.remote = options.remote;
-		this.cwd = options.cwd;
-	}
-
-	static async fromTarget(target: string): Promise<SshToolOperations> {
-		const parsed = parseSshTarget(target);
-		validateSshRemote(parsed.remote);
-		const cwd = parsed.cwd ?? (await runSshBuffer(parsed.remote, "pwd")).toString("utf-8").trim();
-		return new SshToolOperations({ remote: parsed.remote, cwd });
-	}
-
-	async exec(command: string, options: ToolExecOptions): Promise<{ exitCode: number | null }> {
-		if (options.signal?.aborted) throw new Error("aborted");
-		const timeoutMs = resolveTimeoutMs(options.timeout);
-		const cwd = options.cwd ?? this.cwd;
-		const commandId = randomBytes(16).toString("hex");
-		const pidFile = `/tmp/pi-ssh-command-${commandId}.pid`;
-		const pendingPidFile = `${pidFile}.pending`;
-		const readyMarker = `pi-ssh-ready-${commandId}`;
-		const worker = [
-			`if ! printf '%s\\n' "$$" > ${shellQuote(pendingPidFile)} || ! mv -f ${shellQuote(pendingPidFile)} ${shellQuote(pidFile)} || ! printf '%s\\n' ${shellQuote(readyMarker)}; then`,
-			`rm -f ${shellQuote(pidFile)} ${shellQuote(pendingPidFile)}`,
-			"exit 125",
-			"fi",
-			"exec bash -s",
-		].join("\n");
-		const supervisor = [
-			"exec 3<&0 4>&2",
-			"if command -v setsid >/dev/null 2>&1 && setsid --wait true >/dev/null 2>&1; then",
-			`setsid --wait bash -c ${shellQuote(worker)} <&3 2>&4 &`,
-			"else",
-			"set -m",
-			`bash -c ${shellQuote(worker)} <&3 2>&4 &`,
-			"fi",
-			"child=$!",
-			"exec 2>/dev/null",
-			'wait "$child"',
-			"status=$?",
-			`rm -f ${shellQuote(pidFile)} ${shellQuote(pendingPidFile)}`,
-			'exit "$status"',
-		].join("\n");
-		const remoteCommand = `cd ${shellQuote(cwd)} && bash -c ${shellQuote(supervisor)}`;
-		return new Promise((resolve, reject) => {
-			const child = spawn("ssh", sshArgs(this.remote, remoteCommand), {
-				stdio: ["pipe", "pipe", "pipe"],
-			});
-			let timedOut = false;
-			let timeoutHandle: NodeJS.Timeout | undefined;
-			let cancellationPromise: Promise<void> | undefined;
-			let ready = false;
-			let stdoutBuffer = Buffer.alloc(0);
-			const cancelRemote = () => {
-				cancellationPromise ??= cancelSshCommand(this.remote, pidFile).finally(() => child.kill());
-			};
-			if (timeoutMs !== undefined) {
-				timeoutHandle = setTimeout(() => {
-					timedOut = true;
-					cancelRemote();
-				}, timeoutMs);
-			}
-			child.stdout?.on("data", (data: Buffer) => {
-				if (ready) {
-					options.onData(data);
-					return;
-				}
-				stdoutBuffer = Buffer.concat([stdoutBuffer, data]);
-				const newline = stdoutBuffer.indexOf(0x0a);
-				if (newline === -1) return;
-				const firstLine = stdoutBuffer.subarray(0, newline).toString("utf-8").replace(/\r$/, "");
-				if (firstLine !== readyMarker) {
-					options.onData(stdoutBuffer);
-					stdoutBuffer = Buffer.alloc(0);
-					cancelRemote();
-					return;
-				}
-				ready = true;
-				const remainder = stdoutBuffer.subarray(newline + 1);
-				stdoutBuffer = Buffer.alloc(0);
-				if (remainder.length > 0) options.onData(remainder);
-				child.stdin.end(cancellationPromise ? undefined : command);
-			});
-			child.stderr?.on("data", options.onData);
-			child.on("error", reject);
-			const onAbort = () => cancelRemote();
-			options.signal?.addEventListener("abort", onAbort, { once: true });
-			child.on("close", (code) => {
-				void (async () => {
-					if (timeoutHandle) clearTimeout(timeoutHandle);
-					options.signal?.removeEventListener("abort", onAbort);
-					await cancellationPromise;
-					if (options.signal?.aborted) {
-						reject(new Error("aborted"));
-						return;
-					}
-					if (timedOut) {
-						reject(new Error(`timeout:${options.timeout}`));
-						return;
-					}
-					if (!ready) {
-						reject(new Error("SSH command supervisor failed to initialize"));
-						return;
-					}
-					resolve({ exitCode: code });
-				})().catch(reject);
-			});
-		});
-	}
-
-	async access(path: string, mode?: ToolAccessMode): Promise<void> {
-		const remotePath = shellQuote(path);
-		if (mode === "readwrite") {
-			await runSshBuffer(this.remote, `test -r ${remotePath} && test -w ${remotePath}`);
-			return;
-		}
-		const flag = mode === "read" ? "-r" : mode === "write" ? "-w" : "-e";
-		await runSshBuffer(this.remote, `test ${flag} ${remotePath}`);
-	}
-
-	async readFile(path: string): Promise<Buffer> {
-		return runSshBuffer(this.remote, `cat ${shellQuote(path)}`);
-	}
-
-	async writeFile(path: string, content: string | Buffer): Promise<void> {
-		await runSshBuffer(this.remote, `base64 -d > ${shellQuote(path)}`, {
-			input: Buffer.from(content).toString("base64"),
-		});
-	}
-
-	async uploadFile(sourcePath: string, destinationPath: string): Promise<void> {
-		await waitForSshFileTransfer(this.remote, `cat > ${shellQuote(destinationPath)}`, async (child) => {
-			if (!child.stdin) throw new Error("ssh stdin is unavailable");
-			await pipeline(createReadStream(sourcePath), child.stdin);
-		});
-	}
-
-	async downloadFile(sourcePath: string, destinationPath: string): Promise<void> {
-		await waitForSshFileTransfer(this.remote, `cat ${shellQuote(sourcePath)}`, async (child) => {
-			if (!child.stdout) throw new Error("ssh stdout is unavailable");
-			await pipeline(child.stdout, createWriteStream(destinationPath));
-		});
-	}
-
-	async mkdir(path: string, options: { recursive?: boolean } = {}): Promise<void> {
-		const flag = options.recursive ? "-p " : "";
-		await runSshBuffer(this.remote, `mkdir ${flag}${shellQuote(path)}`);
-	}
-
-	async stat(path: string): Promise<ToolFileStat> {
-		const output = await runSshBuffer(
-			this.remote,
-			`if test -d ${shellQuote(path)}; then echo d; elif test -f ${shellQuote(path)}; then echo f; else test -e ${shellQuote(path)} && echo o || exit 1; fi`,
-		);
-		const kind = output.toString("utf-8").trim();
-		return {
-			isDirectory: () => kind === "d",
-			isFile: () => kind === "f",
-		};
-	}
-
-	async readdir(path: string): Promise<string[]> {
-		const output = await runSshBuffer(
-			this.remote,
-			`find ${shellQuote(path)} -maxdepth 1 -mindepth 1 -printf '%f\\n'`,
-		);
-		return output.toString("utf-8").split("\n").filter(Boolean);
-	}
-
-	async glob(pattern: string, cwd: string, options: ToolGlobOptions): Promise<string[]> {
-		const command = commandWithArgs("fd", buildFdArgs(pattern, cwd, options.limit));
-		const output = await runSshBuffer(this.remote, command);
-		return output.toString("utf-8").split("\n").filter(Boolean);
-	}
-
-	async grep(options: ToolGrepOptions): Promise<ToolGrepResult> {
-		const isDirectory = (await this.stat(options.path)).isDirectory();
-		const command = commandWithArgs("rg", buildRgArgs(options));
-		const output = await runSshBuffer(this.remote, command).catch((error: unknown) => {
-			if (error instanceof Error && error.message.includes("ssh exited with code 1")) {
-				return Buffer.alloc(0);
-			}
-			throw error;
-		});
-		const matches: ToolGrepMatch[] = [];
-		for (const line of output.toString("utf-8").split("\n")) {
-			if (!line.trim() || matches.length >= options.limit) continue;
-			let event: unknown;
-			try {
-				event = JSON.parse(line);
-			} catch {
-				continue;
-			}
-			if (!event || typeof event !== "object" || !("type" in event) || event.type !== "match") continue;
-			const data = "data" in event && event.data && typeof event.data === "object" ? event.data : undefined;
-			const filePath =
-				data && "path" in data && data.path && typeof data.path === "object" && "text" in data.path
-					? data.path.text
-					: undefined;
-			const lineNumber = data && "line_number" in data ? data.line_number : undefined;
-			const lineText =
-				data && "lines" in data && data.lines && typeof data.lines === "object" && "text" in data.lines
-					? data.lines.text
-					: undefined;
-			if (typeof filePath === "string" && typeof lineNumber === "number") {
-				matches.push({ filePath, lineNumber, lineText: typeof lineText === "string" ? lineText : undefined });
-			}
-		}
-		return { isDirectory, matches };
-	}
-
-	async detectImageMimeType(path: string): Promise<string | null | undefined> {
-		try {
-			const output = await runSshBuffer(this.remote, `file --mime-type -b ${shellQuote(path)}`);
-			const mimeType = output.toString("utf-8").trim();
-			return ["image/jpeg", "image/png", "image/gif", "image/webp"].includes(mimeType) ? mimeType : null;
-		} catch {
-			return null;
-		}
-	}
-
-	getBackendInfo(): ToolBackendInfo {
-		return { type: "ssh", remote: this.remote, cwd: this.cwd, configured: true };
-	}
-
-	async dispose(): Promise<void> {}
-}
-
 export class DeferredRemoteToolOperations implements ToolOperations {
 	cwd: string;
 	private readonly expectedCwd: string;
-	private operations: SshToolOperations | RemoteToolOperations | undefined;
+	private operations: RemoteToolOperations | undefined;
 	private remoteCatalogUnsubscribe: (() => void) | undefined;
 	private readonly catalogListeners = new Set<() => void | Promise<void>>();
 	private disposePromise: Promise<void> | undefined;
@@ -752,20 +392,9 @@ export class DeferredRemoteToolOperations implements ToolOperations {
 		this.expectedCwd = cwd;
 	}
 
-	async configure(options: DeferredRemoteToolOperationsConfigureSshOptions): Promise<ToolBackendInfo> {
-		const next = new SshToolOperations({ remote: options.remote, cwd: options.cwd ?? this.cwd });
-		const stat = await next.stat(next.cwd);
-		if (!stat.isDirectory()) {
-			await next.dispose();
-			throw new Error(`SSH backend cwd is not a directory: ${next.cwd}`);
-		}
-		await this.replaceOperations(next);
-		return this.getBackendInfo();
-	}
-
 	async configureRemote(
 		url: string,
-		options: RemoteToolOperationsConnectOptions & { expectedCwd?: string } = {},
+		options: DeferredRemoteToolOperationsConnectOptions = {},
 	): Promise<ToolBackendInfo> {
 		const next = await createRemoteToolOperations(url, options);
 		try {
@@ -791,7 +420,7 @@ export class DeferredRemoteToolOperations implements ToolOperations {
 		await previous?.dispose?.();
 	}
 
-	private requireOperations(): SshToolOperations | RemoteToolOperations {
+	private requireOperations(): RemoteToolOperations {
 		if (!this.operations) {
 			throw new Error(
 				"Remote backend is not configured. Configure it over RPC or with /sandbox before using tools.",
@@ -800,7 +429,7 @@ export class DeferredRemoteToolOperations implements ToolOperations {
 		return this.operations;
 	}
 
-	async exec(command: string, options: ToolExecOptions): Promise<{ exitCode: number | null }> {
+	async exec(command: string, options: ToolExecOptions): Promise<ToolExecResult> {
 		return this.requireOperations().exec(command, options);
 	}
 
@@ -828,7 +457,7 @@ export class DeferredRemoteToolOperations implements ToolOperations {
 		await operations.downloadFile(sourcePath, destinationPath);
 	}
 
-	async mkdir(path: string, options?: { recursive?: boolean }): Promise<void> {
+	async mkdir(path: string, options?: ToolMkdirOptions): Promise<void> {
 		await this.requireOperations().mkdir(path, options);
 	}
 
@@ -856,23 +485,16 @@ export class DeferredRemoteToolOperations implements ToolOperations {
 		return this.operations?.getBackendInfo() ?? { type: "remote", cwd: this.cwd, configured: false };
 	}
 
-	resolveWorkspaceToolExecution(name: string, parameterSchema: unknown): "local" | "remote" | "unavailable" {
-		return this.operations instanceof RemoteToolOperations
-			? this.operations.resolveWorkspaceToolExecution(name, parameterSchema)
-			: "local";
+	resolveWorkspaceToolExecution(name: string, parameterSchema: unknown): RemoteWorkspaceToolExecutionTarget {
+		return this.operations ? this.operations.resolveWorkspaceToolExecution(name, parameterSchema) : "unavailable";
 	}
 
 	executeWorkspaceTool(name: string, invocation: WorkspaceToolRemoteInvocation): Promise<AgentToolResult<unknown>> {
-		if (!(this.operations instanceof RemoteToolOperations)) {
-			return Promise.reject(new Error(`Remote workspace tool is not configured: ${name}`));
-		}
-		return this.operations.executeWorkspaceTool(name, invocation);
+		return this.requireOperations().executeWorkspaceTool(name, invocation);
 	}
 
 	getRemoteLspStatus(): RemoteLspStatus {
-		return this.operations instanceof RemoteToolOperations
-			? this.operations.getRemoteLspStatus()
-			: { enabled: false, servers: [] };
+		return this.operations?.getRemoteLspStatus() ?? { enabled: false, servers: [] };
 	}
 
 	onWorkspaceToolCatalogChanged(listener: () => void | Promise<void>): () => void {
@@ -891,7 +513,7 @@ export class DeferredRemoteToolOperations implements ToolOperations {
 		return this.disposePromise;
 	}
 
-	private async replaceOperations(next: SshToolOperations | RemoteToolOperations): Promise<void> {
+	private async replaceOperations(next: RemoteToolOperations): Promise<void> {
 		if (this.disposePromise) {
 			await next.dispose?.();
 			throw new Error("Deferred remote backend is disposed");
@@ -901,11 +523,9 @@ export class DeferredRemoteToolOperations implements ToolOperations {
 		this.remoteCatalogUnsubscribe = undefined;
 		this.operations = next;
 		this.cwd = next.cwd;
-		if (next instanceof RemoteToolOperations) {
-			this.remoteCatalogUnsubscribe = next.onWorkspaceToolCatalogChanged(() =>
-				Promise.all([...this.catalogListeners].map((listener) => listener())).then(() => undefined),
-			);
-		}
+		this.remoteCatalogUnsubscribe = next.onWorkspaceToolCatalogChanged(() =>
+			Promise.all([...this.catalogListeners].map((listener) => listener())).then(() => undefined),
+		);
 		await previous?.dispose?.();
 	}
 }
@@ -924,7 +544,7 @@ function requireString(value: unknown, label: string): string {
 	return value;
 }
 
-function normalizeRemoteUrl(url: string): { url: string; protocol: "ws" } {
+function normalizeRemoteUrl(url: string): NormalizedRemoteWorkspaceUrl {
 	const parsed = new URL(url);
 	if (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") {
 		throw new Error(`--remote supports ws:// and wss:// URLs, got ${parsed.protocol}`);
@@ -964,7 +584,7 @@ export class RemoteToolOperations implements ToolOperations {
 	readonly url: string;
 	readonly protocol: "ws";
 	cwd: string;
-	workspacePathFlavor: "posix" | "windows" = "posix";
+	workspacePathFlavor: PortablePathFlavor = "posix";
 	private workspaceId = "";
 	private readonly socket: WebSocket;
 	private readonly client: RemoteWorkspaceClientProtocol;
@@ -1058,7 +678,7 @@ export class RemoteToolOperations implements ToolOperations {
 		}
 	}
 
-	resolveWorkspaceToolExecution(name: string, parameterSchema: unknown): "remote" | "unavailable" {
+	resolveWorkspaceToolExecution(name: string, parameterSchema: unknown): RemoteWorkspaceToolExecutionTarget {
 		const schemaHash = hashRemoteWorkspaceJson(parameterSchema);
 		const catalogTool = this.client.handshake?.catalog.tools.find((tool) => tool.name === name);
 		if (!catalogTool) return "unavailable";
@@ -1145,11 +765,11 @@ export class RemoteToolOperations implements ToolOperations {
 		this.remoteLspStatus = (await this.client.request("lsp.status", {})) as RemoteLspStatus;
 	}
 
-	private request(method: Parameters<RemoteWorkspaceClientProtocol["request"]>[0], params: unknown) {
+	private request(method: RemoteWorkspaceMethod, params: unknown) {
 		return this.client.request(method, params);
 	}
 
-	async exec(command: string, options: ToolExecOptions): Promise<{ exitCode: number | null }> {
+	async exec(command: string, options: ToolExecOptions): Promise<ToolExecResult> {
 		const result = requireRecord(
 			await this.client.request(
 				"workspace.exec",
@@ -1228,7 +848,7 @@ export class RemoteToolOperations implements ToolOperations {
 		}
 	}
 
-	async mkdir(path: string, options: { recursive?: boolean } = {}): Promise<void> {
+	async mkdir(path: string, options: ToolMkdirOptions = {}): Promise<void> {
 		await this.request("workspace.mkdir", { path, recursive: options.recursive ?? false });
 	}
 
@@ -1304,8 +924,4 @@ export function createRemoteToolOperations(
 	options?: RemoteToolOperationsConnectOptions,
 ): Promise<RemoteToolOperations> {
 	return RemoteToolOperations.connect(url, options);
-}
-
-export function createSshToolOperations(target: string): Promise<SshToolOperations> {
-	return SshToolOperations.fromTarget(target);
 }

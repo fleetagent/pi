@@ -121,10 +121,12 @@ function createModelChangeEntry(provider: string, modelId: string, parentId: str
 	};
 }
 
-function createFauxModel(
-	reasoning: boolean,
-	maxTokens = 8192,
-): { faux: FauxProviderRegistration; model: Model<string> } {
+interface FauxModelFixture {
+	faux: FauxProviderRegistration;
+	model: Model<string>;
+}
+
+function createFauxModel(reasoning: boolean, maxTokens = 8192): FauxModelFixture {
 	const faux = registerFauxProvider({
 		models: [
 			{
@@ -432,6 +434,33 @@ describe("harness compaction", () => {
 		const result = serializeConversation(messages);
 		expect(result).toContain("[Tool result]:");
 		expect(result).toContain("[... 3000 more characters truncated]");
+	});
+
+	it("serializes user, assistant, and tool-call content in conversation order", () => {
+		const assistant: AssistantMessage = {
+			...createAssistantMessage("unused"),
+			content: [
+				{ type: "text", text: "answer" },
+				{ type: "thinking", thinking: "plan" },
+				{ type: "toolCall", id: "tc1", name: "read", arguments: { path: "a.ts" } },
+			],
+		};
+		const messages = convertMessages([
+			{ role: "user", content: [{ type: "text", text: "hello" }], timestamp: Date.now() },
+			assistant,
+			{
+				role: "toolResult",
+				toolCallId: "tc1",
+				toolName: "read",
+				content: [{ type: "text", text: "done" }],
+				isError: false,
+				timestamp: Date.now(),
+			},
+		]);
+
+		expect(serializeConversation(messages)).toBe(
+			'[User]: hello\n\n[Assistant thinking]: plan\n\n[Assistant]: answer\n\n[Assistant tool calls]: read(path="a.ts")\n\n[Tool result]: done',
+		);
 	});
 
 	it("passes reasoning through generateSummary only for reasoning models with thinking enabled", async () => {

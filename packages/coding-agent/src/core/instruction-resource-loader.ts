@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { type Dirent, existsSync, readdirSync, readFileSync, type Stats, statSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import ignore from "ignore";
 import { CONFIG_DIR_NAME, getAgentDir } from "../config.ts";
@@ -9,20 +9,21 @@ import {
 	dirnamePortablePath,
 	joinPortablePath,
 	normalizePortablePath,
+	type PortablePathFlavor,
 	pathComparisonValue,
 	relativePortablePath,
 	relativeWithin,
 	resolvePortablePath,
 } from "./lsp/portable-path.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
-import type { ToolOperations } from "./tools/operations.ts";
+import type { ToolFileStat, ToolOperations } from "./tools/operations.ts";
 
 const MAX_NAME_LENGTH = 64;
 const MAX_DESCRIPTION_LENGTH = 1024;
 const IGNORE_FILE_NAMES = [".gitignore", ".ignore", ".fdignore"];
 
-type IgnoreMatcher = ReturnType<typeof ignore>;
-type ResourceSource = "user" | "project" | "path" | string;
+type ConfiguredResourceSource = "user" | "project" | "path";
+type ResourceSource = ConfiguredResourceSource | string;
 
 export interface InstructionResourceFrontmatter {
 	name?: string;
@@ -46,6 +47,46 @@ export interface InstructionResource {
 export interface InstructionResourceLoadResult<TResource extends InstructionResource> {
 	resources: TResource[];
 	diagnostics: ResourceDiagnostic[];
+}
+
+export interface InstructionResourceDirectoryOptions {
+	/** Directory to scan for instruction resources. */
+	dir: string;
+	/** Source identifier for these instruction resources. */
+	source: string;
+}
+interface LocalResourceTraversal<TResource extends InstructionResource> {
+	entries: Dirent[];
+	dir: string;
+	source: string;
+	includeRootFiles: boolean;
+	ignoreMatcher: ignore.Ignore;
+	rootDir: string;
+	resources: TResource[];
+	diagnostics: ResourceDiagnostic[];
+}
+
+interface BackendResourceTraversal<TResource extends InstructionResource> {
+	entries: string[];
+	operations: ToolOperations;
+	dir: string;
+	source: string;
+	includeRootFiles: boolean;
+	ignoreMatcher: ignore.Ignore;
+	rootDir: string;
+	resources: TResource[];
+	diagnostics: ResourceDiagnostic[];
+}
+
+interface InstructionResourceParseResult<TResource extends InstructionResource> {
+	resource: TResource | null;
+	diagnostics: ResourceDiagnostic[];
+}
+
+interface InstructionResourcePromptFormatOptions {
+	intro: string[];
+	containerTag: string;
+	itemTag: string;
 }
 
 export interface InstructionResourceLoaderOptions {
@@ -116,10 +157,14 @@ function validateDescription(description: string | undefined): string[] {
 function normalizeFrontmatterTools(value: unknown): string[] {
 	const raw = Array.isArray(value) ? value : typeof value === "string" ? value.split(/[\s,]+/) : [];
 	const tools: string[] = [];
+	const seen = new Set<string>();
 	for (const entry of raw) {
 		if (typeof entry !== "string") continue;
 		const trimmed = entry.trim();
-		if (trimmed.length > 0 && !tools.includes(trimmed)) tools.push(trimmed);
+		if (trimmed.length > 0 && !seen.has(trimmed)) {
+			seen.add(trimmed);
+			tools.push(trimmed);
+		}
 	}
 	return tools;
 }
@@ -173,6 +218,43 @@ export abstract class InstructionResourceLoader<
 		return this.loadResourcesFromDirInternal(dir, source, true);
 	}
 
+	private loadResourcesFromConfiguredPath(
+		resolvedPath: string,
+		source: ConfiguredResourceSource,
+	): InstructionResourceLoadResult<TResource> {
+		if (!existsSync(resolvedPath)) {
+			return {
+				resources: [],
+				diagnostics: [{ type: "warning", message: `${this.resourceType} path does not exist`, path: resolvedPath }],
+			};
+		}
+		try {
+			const stats = statSync(resolvedPath);
+			if (stats.isDirectory()) return this.loadResourcesFromDirInternal(resolvedPath, source, true);
+			if (!stats.isFile() || !resolvedPath.endsWith(".md")) {
+				return {
+					resources: [],
+					diagnostics: [
+						{ type: "warning", message: `${this.resourceType} path is not a markdown file`, path: resolvedPath },
+					],
+				};
+			}
+			const result = this.loadResourceFromFile(resolvedPath, source);
+			return { resources: result.resource ? [result.resource] : [], diagnostics: result.diagnostics };
+		} catch (error) {
+			return {
+				resources: [],
+				diagnostics: [
+					{
+						type: "warning",
+						message: error instanceof Error ? error.message : `failed to read ${this.resourceType} path`,
+						path: resolvedPath,
+					},
+				],
+			};
+		}
+	}
+
 	protected loadResources(options: InstructionResourceLoaderOptions): InstructionResourceLoadResult<TResource> {
 		const resolvedCwd = resolvePath(options.cwd);
 		const resolvedAgentDir = resolvePath(options.agentDir ?? getAgentDir());
@@ -211,7 +293,7 @@ export abstract class InstructionResourceLoader<
 
 		const userDir = join(resolvedAgentDir, this.defaultDirectoryName);
 		const projectDir = resolve(resolvedCwd, CONFIG_DIR_NAME, this.defaultDirectoryName);
-		const getSource = (resolvedPath: string): "user" | "project" | "path" => {
+		const getSource = (resolvedPath: string): ConfiguredResourceSource => {
 			if (!options.includeDefaults) {
 				if (isUnderPath(resolvedPath, userDir)) return "user";
 				if (isUnderPath(resolvedPath, projectDir)) return "project";
@@ -221,43 +303,57 @@ export abstract class InstructionResourceLoader<
 
 		for (const rawPath of options.resourcePaths) {
 			const resolvedPath = resolvePath(rawPath, resolvedCwd, { trim: true });
-			if (!existsSync(resolvedPath)) {
-				allDiagnostics.push({
-					type: "warning",
-					message: `${this.resourceType} path does not exist`,
-					path: resolvedPath,
-				});
-				continue;
-			}
-			try {
-				const stats = statSync(resolvedPath);
-				const source = getSource(resolvedPath);
-				if (stats.isDirectory()) {
-					addResources(this.loadResourcesFromDirInternal(resolvedPath, source, true));
-				} else if (stats.isFile() && resolvedPath.endsWith(".md")) {
-					const result = this.loadResourceFromFile(resolvedPath, source);
-					if (result.resource) addResources({ resources: [result.resource], diagnostics: result.diagnostics });
-					else allDiagnostics.push(...result.diagnostics);
-				} else {
-					allDiagnostics.push({
-						type: "warning",
-						message: `${this.resourceType} path is not a markdown file`,
-						path: resolvedPath,
-					});
-				}
-			} catch (error) {
-				allDiagnostics.push({
-					type: "warning",
-					message: error instanceof Error ? error.message : `failed to read ${this.resourceType} path`,
-					path: resolvedPath,
-				});
-			}
+			addResources(this.loadResourcesFromConfiguredPath(resolvedPath, getSource(resolvedPath)));
 		}
 
 		return {
 			resources: Array.from(resourceMap.values()),
 			diagnostics: [...allDiagnostics, ...collisionDiagnostics],
 		};
+	}
+
+	private async loadResourcesFromConfiguredPathWithOperations(
+		operations: ToolOperations,
+		resolvedPath: string,
+		source: ConfiguredResourceSource,
+	): Promise<InstructionResourceLoadResult<TResource>> {
+		if (!(await backendPathExists(operations, resolvedPath))) {
+			return {
+				resources: [],
+				diagnostics: [{ type: "warning", message: `${this.resourceType} path does not exist`, path: resolvedPath }],
+			};
+		}
+		try {
+			const stats = await operations.stat(resolvedPath);
+			if (stats.isDirectory()) {
+				return this.loadResourcesFromDirInternalWithOperations(operations, resolvedPath, source, true);
+			}
+			if (!stats.isFile() || !resolvedPath.endsWith(".md")) {
+				return {
+					resources: [],
+					diagnostics: [
+						{
+							type: "warning",
+							message: `${this.resourceType} path is not a markdown file`,
+							path: resolvedPath,
+						},
+					],
+				};
+			}
+			const result = await this.loadResourceFromFileWithOperations(operations, resolvedPath, source);
+			return { resources: result.resource ? [result.resource] : [], diagnostics: result.diagnostics };
+		} catch (error) {
+			return {
+				resources: [],
+				diagnostics: [
+					{
+						type: "warning",
+						message: error instanceof Error ? error.message : `failed to read ${this.resourceType} path`,
+						path: resolvedPath,
+					},
+				],
+			};
+		}
 	}
 
 	protected async loadResourcesWithOperations(
@@ -308,7 +404,7 @@ export abstract class InstructionResourceLoader<
 
 		const userDir = joinPortablePath(resolvedAgentDir, this.defaultDirectoryName);
 		const projectDir = joinPortablePath(resolvedCwd, CONFIG_DIR_NAME, this.defaultDirectoryName);
-		const getSource = (resolvedPath: string): "user" | "project" | "path" => {
+		const getSource = (resolvedPath: string): ConfiguredResourceSource => {
 			if (!options.includeDefaults) {
 				if (relativeWithin(userDir, resolvedPath) !== undefined) return "user";
 				if (relativeWithin(projectDir, resolvedPath) !== undefined) return "project";
@@ -318,39 +414,13 @@ export abstract class InstructionResourceLoader<
 
 		for (const rawPath of options.resourcePaths) {
 			const resolvedPath = resolvePortablePath(resolvedCwd, rawPath.trim());
-			if (!(await backendPathExists(options.operations, resolvedPath))) {
-				allDiagnostics.push({
-					type: "warning",
-					message: `${this.resourceType} path does not exist`,
-					path: resolvedPath,
-				});
-				continue;
-			}
-			try {
-				const stats = await options.operations.stat(resolvedPath);
-				const source = getSource(resolvedPath);
-				if (stats.isDirectory()) {
-					addResources(
-						await this.loadResourcesFromDirInternalWithOperations(options.operations, resolvedPath, source, true),
-					);
-				} else if (stats.isFile() && resolvedPath.endsWith(".md")) {
-					const result = await this.loadResourceFromFileWithOperations(options.operations, resolvedPath, source);
-					if (result.resource) addResources({ resources: [result.resource], diagnostics: result.diagnostics });
-					else allDiagnostics.push(...result.diagnostics);
-				} else {
-					allDiagnostics.push({
-						type: "warning",
-						message: `${this.resourceType} path is not a markdown file`,
-						path: resolvedPath,
-					});
-				}
-			} catch (error) {
-				allDiagnostics.push({
-					type: "warning",
-					message: error instanceof Error ? error.message : `failed to read ${this.resourceType} path`,
-					path: resolvedPath,
-				});
-			}
+			addResources(
+				await this.loadResourcesFromConfiguredPathWithOperations(
+					options.operations,
+					resolvedPath,
+					getSource(resolvedPath),
+				),
+			);
 		}
 
 		return {
@@ -373,7 +443,7 @@ export abstract class InstructionResourceLoader<
 		};
 	}
 
-	private addIgnoreRules(ig: IgnoreMatcher, dir: string, rootDir: string): void {
+	private addIgnoreRules(ig: ignore.Ignore, dir: string, rootDir: string): void {
 		const relativeDir = relative(rootDir, dir);
 		const prefix = relativeDir ? `${toPosixPath(relativeDir)}/` : "";
 		for (const filename of IGNORE_FILE_NAMES) {
@@ -391,7 +461,7 @@ export abstract class InstructionResourceLoader<
 
 	private async addIgnoreRulesWithOperations(
 		operations: ToolOperations,
-		ig: IgnoreMatcher,
+		ig: ignore.Ignore,
 		dir: string,
 		rootDir: string,
 	): Promise<void> {
@@ -411,11 +481,67 @@ export abstract class InstructionResourceLoader<
 		}
 	}
 
+	private getLocalResourceEntry(entry: Dirent, fullPath: string): Dirent | Stats | undefined {
+		if (!entry.isSymbolicLink()) return entry;
+		try {
+			return statSync(fullPath);
+		} catch {
+			return undefined;
+		}
+	}
+
+	private loadRootResourceFromEntries(
+		entries: Dirent[],
+		dir: string,
+		source: string,
+		ignoreMatcher: ignore.Ignore,
+		rootDir: string,
+	): InstructionResourceLoadResult<TResource> | undefined {
+		for (const entry of entries) {
+			if (entry.name !== this.rootFileName) continue;
+			const fullPath = join(dir, entry.name);
+			const resourceEntry = this.getLocalResourceEntry(entry, fullPath);
+			if (!resourceEntry?.isFile() || ignoreMatcher.ignores(toPosixPath(relative(rootDir, fullPath)))) continue;
+			const result = this.loadResourceFromFile(fullPath, source);
+			return { resources: result.resource ? [result.resource] : [], diagnostics: result.diagnostics };
+		}
+		return undefined;
+	}
+
+	private loadNestedResourceEntry(entry: Dirent, context: LocalResourceTraversal<TResource>): void {
+		if (entry.name.startsWith(".") || entry.name === "node_modules") return;
+		const fullPath = join(context.dir, entry.name);
+		const resourceEntry = this.getLocalResourceEntry(entry, fullPath);
+		if (!resourceEntry) return;
+		const relativePath = toPosixPath(relative(context.rootDir, fullPath));
+		if (context.ignoreMatcher.ignores(resourceEntry.isDirectory() ? `${relativePath}/` : relativePath)) return;
+		if (resourceEntry.isDirectory()) {
+			const nested = this.loadResourcesFromDirInternal(
+				fullPath,
+				context.source,
+				false,
+				context.ignoreMatcher,
+				context.rootDir,
+			);
+			context.resources.push(...nested.resources);
+			context.diagnostics.push(...nested.diagnostics);
+			return;
+		}
+		if (!resourceEntry.isFile() || !context.includeRootFiles || !entry.name.endsWith(".md")) return;
+		const result = this.loadResourceFromFile(fullPath, context.source);
+		if (result.resource) context.resources.push(result.resource);
+		context.diagnostics.push(...result.diagnostics);
+	}
+
+	private loadNestedResourcesFromEntries(context: LocalResourceTraversal<TResource>): void {
+		for (const entry of context.entries) this.loadNestedResourceEntry(entry, context);
+	}
+
 	private loadResourcesFromDirInternal(
 		dir: string,
 		source: string,
 		includeRootFiles: boolean,
-		ignoreMatcher?: IgnoreMatcher,
+		ignoreMatcher?: ignore.Ignore,
 		rootDir?: string,
 	): InstructionResourceLoadResult<TResource> {
 		const resources: TResource[] = [];
@@ -427,53 +553,82 @@ export abstract class InstructionResourceLoader<
 		this.addIgnoreRules(ig, dir, root);
 		try {
 			const entries = readdirSync(dir, { withFileTypes: true });
-			for (const entry of entries) {
-				if (entry.name !== this.rootFileName) continue;
-				const fullPath = join(dir, entry.name);
-				let isFile = entry.isFile();
-				if (entry.isSymbolicLink()) {
-					try {
-						isFile = statSync(fullPath).isFile();
-					} catch {
-						continue;
-					}
-				}
-				if (!isFile || ig.ignores(toPosixPath(relative(root, fullPath)))) continue;
-				const result = this.loadResourceFromFile(fullPath, source);
-				if (result.resource) resources.push(result.resource);
-				diagnostics.push(...result.diagnostics);
-				return { resources, diagnostics };
-			}
-
-			for (const entry of entries) {
-				if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
-				const fullPath = join(dir, entry.name);
-				let isDirectory = entry.isDirectory();
-				let isFile = entry.isFile();
-				if (entry.isSymbolicLink()) {
-					try {
-						const stats = statSync(fullPath);
-						isDirectory = stats.isDirectory();
-						isFile = stats.isFile();
-					} catch {
-						continue;
-					}
-				}
-				const relPath = toPosixPath(relative(root, fullPath));
-				if (ig.ignores(isDirectory ? `${relPath}/` : relPath)) continue;
-				if (isDirectory) {
-					const nested = this.loadResourcesFromDirInternal(fullPath, source, false, ig, root);
-					resources.push(...nested.resources);
-					diagnostics.push(...nested.diagnostics);
-					continue;
-				}
-				if (!isFile || !includeRootFiles || !entry.name.endsWith(".md")) continue;
-				const result = this.loadResourceFromFile(fullPath, source);
-				if (result.resource) resources.push(result.resource);
-				diagnostics.push(...result.diagnostics);
-			}
+			const rootResource = this.loadRootResourceFromEntries(entries, dir, source, ig, root);
+			if (rootResource) return rootResource;
+			this.loadNestedResourcesFromEntries({
+				entries,
+				dir,
+				source,
+				includeRootFiles,
+				ignoreMatcher: ig,
+				rootDir: root,
+				resources,
+				diagnostics,
+			});
 		} catch {}
 		return { resources, diagnostics };
+	}
+
+	private async getBackendResourceEntry(
+		operations: ToolOperations,
+		fullPath: string,
+	): Promise<ToolFileStat | undefined> {
+		try {
+			return await operations.stat(fullPath);
+		} catch {
+			return undefined;
+		}
+	}
+
+	private async loadRootResourceWithOperations(
+		context: BackendResourceTraversal<TResource>,
+	): Promise<InstructionResourceLoadResult<TResource> | undefined> {
+		for (const name of context.entries) {
+			if (name !== this.rootFileName) continue;
+			const fullPath = joinPortablePath(context.dir, name);
+			const resourceEntry = await this.getBackendResourceEntry(context.operations, fullPath);
+			if (
+				!resourceEntry?.isFile() ||
+				context.ignoreMatcher.ignores(relativePortablePath(context.rootDir, fullPath).replace(/\\/g, "/"))
+			)
+				continue;
+			const result = await this.loadResourceFromFileWithOperations(context.operations, fullPath, context.source);
+			return { resources: result.resource ? [result.resource] : [], diagnostics: result.diagnostics };
+		}
+		return undefined;
+	}
+
+	private async loadNestedResourceWithOperations(
+		name: string,
+		context: BackendResourceTraversal<TResource>,
+	): Promise<void> {
+		if (name.startsWith(".") || name === "node_modules") return;
+		const fullPath = joinPortablePath(context.dir, name);
+		const resourceEntry = await this.getBackendResourceEntry(context.operations, fullPath);
+		if (!resourceEntry) return;
+		const relativePath = relativePortablePath(context.rootDir, fullPath).replace(/\\/g, "/");
+		if (context.ignoreMatcher.ignores(resourceEntry.isDirectory() ? `${relativePath}/` : relativePath)) return;
+		if (resourceEntry.isDirectory()) {
+			const nested = await this.loadResourcesFromDirInternalWithOperations(
+				context.operations,
+				fullPath,
+				context.source,
+				false,
+				context.ignoreMatcher,
+				context.rootDir,
+			);
+			context.resources.push(...nested.resources);
+			context.diagnostics.push(...nested.diagnostics);
+			return;
+		}
+		if (!resourceEntry.isFile() || !context.includeRootFiles || !name.endsWith(".md")) return;
+		const result = await this.loadResourceFromFileWithOperations(context.operations, fullPath, context.source);
+		if (result.resource) context.resources.push(result.resource);
+		context.diagnostics.push(...result.diagnostics);
+	}
+
+	private async loadNestedResourcesWithOperations(context: BackendResourceTraversal<TResource>): Promise<void> {
+		for (const name of context.entries) await this.loadNestedResourceWithOperations(name, context);
 	}
 
 	private async loadResourcesFromDirInternalWithOperations(
@@ -481,7 +636,7 @@ export abstract class InstructionResourceLoader<
 		dir: string,
 		source: string,
 		includeRootFiles: boolean,
-		ignoreMatcher?: IgnoreMatcher,
+		ignoreMatcher?: ignore.Ignore,
 		rootDir?: string,
 	): Promise<InstructionResourceLoadResult<TResource>> {
 		const resources: TResource[] = [];
@@ -492,63 +647,25 @@ export abstract class InstructionResourceLoader<
 		const ig = ignoreMatcher ?? ignore();
 		await this.addIgnoreRulesWithOperations(operations, ig, dir, root);
 		try {
-			const entries = await operations.readdir(dir);
-			for (const name of entries) {
-				if (name !== this.rootFileName) continue;
-				const fullPath = joinPortablePath(dir, name);
-				let isFile = false;
-				try {
-					isFile = (await operations.stat(fullPath)).isFile();
-				} catch {
-					continue;
-				}
-				if (!isFile || ig.ignores(relativePortablePath(root, fullPath).replace(/\\/g, "/"))) continue;
-				const result = await this.loadResourceFromFileWithOperations(operations, fullPath, source);
-				if (result.resource) resources.push(result.resource);
-				diagnostics.push(...result.diagnostics);
-				return { resources, diagnostics };
-			}
-
-			for (const name of entries) {
-				if (name.startsWith(".") || name === "node_modules") continue;
-				const fullPath = joinPortablePath(dir, name);
-				let isDirectory = false;
-				let isFile = false;
-				try {
-					const stats = await operations.stat(fullPath);
-					isDirectory = stats.isDirectory();
-					isFile = stats.isFile();
-				} catch {
-					continue;
-				}
-				const relPath = relativePortablePath(root, fullPath).replace(/\\/g, "/");
-				if (ig.ignores(isDirectory ? `${relPath}/` : relPath)) continue;
-				if (isDirectory) {
-					const nested = await this.loadResourcesFromDirInternalWithOperations(
-						operations,
-						fullPath,
-						source,
-						false,
-						ig,
-						root,
-					);
-					resources.push(...nested.resources);
-					diagnostics.push(...nested.diagnostics);
-					continue;
-				}
-				if (!isFile || !includeRootFiles || !name.endsWith(".md")) continue;
-				const result = await this.loadResourceFromFileWithOperations(operations, fullPath, source);
-				if (result.resource) resources.push(result.resource);
-				diagnostics.push(...result.diagnostics);
-			}
+			const context: BackendResourceTraversal<TResource> = {
+				entries: await operations.readdir(dir),
+				operations,
+				dir,
+				source,
+				includeRootFiles,
+				ignoreMatcher: ig,
+				rootDir: root,
+				resources,
+				diagnostics,
+			};
+			const rootResource = await this.loadRootResourceWithOperations(context);
+			if (rootResource) return rootResource;
+			await this.loadNestedResourcesWithOperations(context);
 		} catch {}
 		return { resources, diagnostics };
 	}
 
-	private loadResourceFromFile(
-		filePath: string,
-		source: string,
-	): { resource: TResource | null; diagnostics: ResourceDiagnostic[] } {
+	private loadResourceFromFile(filePath: string, source: string): InstructionResourceParseResult<TResource> {
 		try {
 			return this.parseResource(readFileSync(filePath, "utf-8"), filePath, source);
 		} catch (error) {
@@ -560,7 +677,7 @@ export abstract class InstructionResourceLoader<
 		operations: ToolOperations,
 		filePath: string,
 		source: string,
-	): Promise<{ resource: TResource | null; diagnostics: ResourceDiagnostic[] }> {
+	): Promise<InstructionResourceParseResult<TResource>> {
 		try {
 			const backend = operations.getBackendInfo?.();
 			const pathFlavor = backend?.type === "remote" && backend.configured ? backend.workspace.pathFlavor : undefined;
@@ -579,8 +696,8 @@ export abstract class InstructionResourceLoader<
 		rawContent: string,
 		filePath: string,
 		source: string,
-		pathFlavor?: "posix" | "windows",
-	): { resource: TResource | null; diagnostics: ResourceDiagnostic[] } {
+		pathFlavor?: PortablePathFlavor,
+	): InstructionResourceParseResult<TResource> {
 		const diagnostics: ResourceDiagnostic[] = [];
 		const { frontmatter } = parseFrontmatter<TFrontmatter>(rawContent);
 		for (const error of validateDescription(frontmatter.description)) {
@@ -611,7 +728,7 @@ export abstract class InstructionResourceLoader<
 		return { resource: this.createResource(resource, frontmatter), diagnostics };
 	}
 
-	private createParseError(error: unknown, filePath: string): { resource: null; diagnostics: ResourceDiagnostic[] } {
+	private createParseError(error: unknown, filePath: string): InstructionResourceParseResult<TResource> {
 		return {
 			resource: null,
 			diagnostics: [
@@ -627,11 +744,7 @@ export abstract class InstructionResourceLoader<
 
 export function formatInstructionResourcesForPrompt(
 	resources: InstructionResource[],
-	options: {
-		intro: string[];
-		containerTag: string;
-		itemTag: string;
-	},
+	options: InstructionResourcePromptFormatOptions,
 ): string {
 	const visibleResources = resources.filter((resource) => !resource.disableModelInvocation);
 	if (visibleResources.length === 0) return "";

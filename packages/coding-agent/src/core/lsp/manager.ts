@@ -1,9 +1,21 @@
 import type { ServerCapabilities } from "vscode-languageserver-protocol";
 import type { ToolBackendInfo, ToolOperations } from "../tools/operations.ts";
 import { waitForAbort } from "./abort.ts";
-import { LspClient, type LspClientOptions, type LspConnectionState } from "./client.ts";
-import type { LspServerFeatures, ResolvedLspConfiguration } from "./config.ts";
-import { type LspRouteResult, LspRouter, type LspRouterOptions, type LspRouteTarget } from "./language-map.ts";
+import {
+	LspClient,
+	type LspClientOptions,
+	type LspClientOwnership,
+	type LspConnectionState,
+	type LspShutdownMode,
+} from "./client.ts";
+import type { LspConfiguredServer, LspServerFeatures, LspTransport, ResolvedLspConfiguration } from "./config.ts";
+import {
+	type LspRouteFailure,
+	type LspRouteResult,
+	LspRouter,
+	type LspRouterOptions,
+	type LspRouteTarget,
+} from "./language-map.ts";
 import { resolvePortablePath } from "./portable-path.ts";
 import {
 	type LspConnectionFactory,
@@ -19,8 +31,8 @@ export interface LspServerStatus {
 	workspaceRoot?: string;
 	endpoint?: string;
 	rootUri?: string;
-	ownership: "managed" | "attached";
-	shutdownMode: "protocol" | "disconnect";
+	ownership: LspClientOwnership;
+	shutdownMode: LspShutdownMode;
 	state: LspConnectionState;
 	reconnectEligible: boolean;
 	capabilities?: ServerCapabilities;
@@ -33,11 +45,13 @@ export interface LspServerStatus {
 	synchronizationError?: string;
 }
 
+export type LspConnectionFactoryResolver = (transport: LspTransport) => LspConnectionFactory;
+
 export interface LspManagerOptions extends LspRouterOptions {
 	configuration?: ResolvedLspConfiguration;
 	createClient?: (options: LspClientOptions) => LspClient;
 	connectionFactories?: LspConnectionFactoryRegistry;
-	resolveConnectionFactory?: (transport: LspRouteTarget["server"]["transport"]) => LspConnectionFactory;
+	resolveConnectionFactory?: LspConnectionFactoryResolver;
 	getToolBackendInfo?: () => ToolBackendInfo;
 	getToolOperations?: () => ToolOperations;
 }
@@ -49,10 +63,7 @@ export interface LspClientRoute {
 
 export type LspToolFeature = keyof LspServerFeatures;
 
-export interface LspClientRouteFailure {
-	serverId: string;
-	reason: string;
-}
+export type LspClientRouteFailure = LspRouteFailure;
 
 export interface LspClientRouteCollection {
 	routes: LspClientRoute[];
@@ -84,9 +95,7 @@ export class LspManager {
 	private rootDir: string;
 	private readonly createClient: (options: LspClientOptions) => LspClient;
 	private readonly connectionFactories: LspConnectionFactoryRegistry;
-	private readonly resolveConnectionFactory: (
-		transport: LspRouteTarget["server"]["transport"],
-	) => LspConnectionFactory;
+	private readonly resolveConnectionFactory: LspConnectionFactoryResolver;
 	private readonly getToolBackendInfo: (() => ToolBackendInfo) | undefined;
 	private readonly getToolOperations: (() => ToolOperations) | undefined;
 	private toolBackendInfo: ToolBackendInfo | undefined;
@@ -455,45 +464,55 @@ export class LspManager {
 		return `No running LSP server for ${filePath}. Call an LSP tool for this file to start it.`;
 	}
 
+	private shutdownModeForServer(server: LspConfiguredServer): LspShutdownMode {
+		return server.lifecycle.type === "attached" && server.lifecycle.shutdown !== "protocol"
+			? "disconnect"
+			: "protocol";
+	}
+
+	private countClientDiagnostics(client: LspClient | undefined): number {
+		if (!client) return 0;
+		let count = 0;
+		for (const diagnostics of client.getAllDiagnostics().values()) count += diagnostics.length;
+		return count;
+	}
+
+	private createRunningServerStatus(instanceKey: string, target: LspRouteTarget): LspServerStatus {
+		const client = this.clients.get(instanceKey);
+		const transportStatus = this.transportStatuses.get(instanceKey);
+		const status: LspServerStatus = {
+			serverId: target.serverId,
+			languageIds: [...new Set(target.server.selectors.map((selector) => selector.languageId))],
+			transport: target.server.transport.type,
+			instanceKey,
+			workspaceRoot: target.workspaceRoot,
+			rootUri: target.workspaceUri,
+			ownership: target.server.lifecycle.type,
+			shutdownMode: this.shutdownModeForServer(target.server),
+			state: client?.connectionState ?? transportStatus?.state ?? "idle",
+			reconnectEligible: !this.shuttingDown && (client === undefined || !client.isDisposed),
+			running: client?.isInitialized === true && !client.isDisposed,
+			starting: this.starting.has(instanceKey),
+			diagnosticsCount: this.countClientDiagnostics(client),
+		};
+		if (client?.connectionEndpoint || transportStatus?.endpoint) {
+			status.endpoint = client?.connectionEndpoint?.description ?? transportStatus?.endpoint;
+		}
+		if (client?.serverCapabilities || transportStatus?.capabilities) {
+			status.capabilities = client?.serverCapabilities ?? transportStatus?.capabilities;
+		}
+		if (transportStatus?.lastError) status.lastError = transportStatus.lastError;
+		if (transportStatus?.lastRequestError) status.lastRequestError = transportStatus.lastRequestError;
+		if (transportStatus?.stderr) status.stderr = transportStatus.stderr;
+		const synchronizationError = this.synchronizationErrors.get(instanceKey);
+		if (synchronizationError) status.synchronizationError = synchronizationError;
+		return status;
+	}
+
 	getStatus(): LspServerStatus[] {
-		const runningStatuses = [...this.targets.entries()].map(([instanceKey, target]): LspServerStatus => {
-			const client = this.clients.get(instanceKey);
-			const transportStatus = this.transportStatuses.get(instanceKey);
-			let diagnosticsCount = 0;
-			if (client) {
-				for (const diagnostics of client.getAllDiagnostics().values()) diagnosticsCount += diagnostics.length;
-			}
-			return {
-				serverId: target.serverId,
-				languageIds: [...new Set(target.server.selectors.map((selector) => selector.languageId))],
-				transport: target.server.transport.type,
-				instanceKey,
-				workspaceRoot: target.workspaceRoot,
-				rootUri: target.workspaceUri,
-				ownership: target.server.lifecycle.type,
-				shutdownMode:
-					target.server.lifecycle.type === "attached" && target.server.lifecycle.shutdown !== "protocol"
-						? ("disconnect" as const)
-						: ("protocol" as const),
-				state: client?.connectionState ?? transportStatus?.state ?? "idle",
-				reconnectEligible: !this.shuttingDown && (client === undefined || !client.isDisposed),
-				...(client?.connectionEndpoint || transportStatus?.endpoint
-					? { endpoint: client?.connectionEndpoint?.description ?? transportStatus?.endpoint }
-					: {}),
-				...(client?.serverCapabilities || transportStatus?.capabilities
-					? { capabilities: client?.serverCapabilities ?? transportStatus?.capabilities }
-					: {}),
-				running: client?.isInitialized === true && !client.isDisposed,
-				starting: this.starting.has(instanceKey),
-				diagnosticsCount,
-				...(transportStatus?.lastError ? { lastError: transportStatus.lastError } : {}),
-				...(transportStatus?.lastRequestError ? { lastRequestError: transportStatus.lastRequestError } : {}),
-				...(transportStatus?.stderr ? { stderr: transportStatus.stderr } : {}),
-				...(this.synchronizationErrors.get(instanceKey)
-					? { synchronizationError: this.synchronizationErrors.get(instanceKey) }
-					: {}),
-			};
-		});
+		const runningStatuses = [...this.targets.entries()].map(([instanceKey, target]) =>
+			this.createRunningServerStatus(instanceKey, target),
+		);
 		const instantiated = new Set(runningStatuses.map((status) => status.serverId));
 		const statuses = [
 			...runningStatuses,
@@ -505,10 +524,7 @@ export class LspManager {
 						languageIds: [...new Set(server.selectors.map((selector) => selector.languageId))],
 						transport: server.transport.type,
 						ownership: server.lifecycle.type,
-						shutdownMode:
-							server.lifecycle.type === "attached" && server.lifecycle.shutdown !== "protocol"
-								? ("disconnect" as const)
-								: ("protocol" as const),
+						shutdownMode: this.shutdownModeForServer(server),
 						state: "idle" as const,
 						reconnectEligible: !this.shuttingDown,
 						running: false,
@@ -655,6 +671,17 @@ export class LspManager {
 		});
 	}
 
+	private async discardClientIfStartupStale(
+		target: LspRouteTarget,
+		client: LspClient,
+		generation: number,
+	): Promise<boolean> {
+		if (this.isStartupCurrent(target, client, generation)) return false;
+		await client.shutdown().catch(() => undefined);
+		if (this.clients.get(target.instanceKey) === client) this.clients.delete(target.instanceKey);
+		return true;
+	}
+
 	private async startClient(target: LspRouteTarget, generation: number): Promise<LspClient | undefined> {
 		this.targets.set(target.instanceKey, target);
 		const transportStatus: LspTransportStatus = { stderr: "", state: "connecting" };
@@ -707,21 +734,13 @@ export class LspManager {
 		this.clients.set(target.instanceKey, client);
 		try {
 			const result = await client.start();
-			if (!this.isStartupCurrent(target, client, generation)) {
-				await client.shutdown().catch(() => undefined);
-				if (this.clients.get(target.instanceKey) === client) this.clients.delete(target.instanceKey);
-				return undefined;
-			}
+			if (await this.discardClientIfStartupStale(target, client, generation)) return undefined;
 			transportStatus.lastError = undefined;
 			transportStatus.state = "running";
 			transportStatus.endpoint = result.endpoint.description;
 			transportStatus.capabilities = result.capabilities;
 			await this.notifyClientStarted({ client, target }, generation, this.recoverySignals.get(target.instanceKey));
-			if (!this.isStartupCurrent(target, client, generation)) {
-				await client.shutdown().catch(() => undefined);
-				if (this.clients.get(target.instanceKey) === client) this.clients.delete(target.instanceKey);
-				return undefined;
-			}
+			if (await this.discardClientIfStartupStale(target, client, generation)) return undefined;
 			return client;
 		} catch (error) {
 			if (this.lifecycleGeneration === generation) {

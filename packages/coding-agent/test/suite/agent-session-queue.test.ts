@@ -1,23 +1,27 @@
 import type { AgentTool } from "@fleetagent/pi-agent-core";
-import { fauxAssistantMessage, fauxToolCall } from "@fleetagent/pi-ai";
+import { fauxAssistantMessage, fauxToolCall, type TextContent } from "@fleetagent/pi-ai";
 import type { ExtensionAPI } from "@fleetagent/pi-coding-agent";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
-import { createHarness, getAssistantTexts, getMessageText, getUserTexts, type Harness } from "./harness.ts";
+import {
+	createHarness,
+	getAssistantTexts,
+	getMessageText,
+	getUserTexts,
+	type Harness,
+	type HarnessOptions,
+} from "./harness.ts";
 
-async function createWaitingHarness(
-	options: {
-		tools?: AgentTool[];
-		extensionFactories?: Harness["session"]["extensionRunner"] extends never
-			? never
-			: Array<(pi: ExtensionAPI) => void>;
-	} = {},
-): Promise<{
+type WaitingHarnessOptions = Pick<HarnessOptions, "tools" | "extensionFactories">;
+
+interface WaitingHarnessFixture {
 	harness: Harness;
 	releaseToolExecution: () => void;
 	promptPromise: Promise<void>;
 	waitForToolStart: Promise<void>;
-}> {
+}
+
+async function createWaitingHarness(options: WaitingHarnessOptions = {}): Promise<WaitingHarnessFixture> {
 	let releaseToolExecution: (() => void) | undefined;
 	const toolRelease = new Promise<void>((resolve) => {
 		releaseToolExecution = resolve;
@@ -136,7 +140,7 @@ describe("AgentSession queue characterization", () => {
 						.filter((message) => message.role === "assistant")
 						.map((message) =>
 							message.content
-								.filter((part): part is { type: "text"; text: string } => part.type === "text")
+								.filter((part): part is TextContent => part.type === "text")
 								.map((part) => part.text)
 								.join("\n"),
 						),

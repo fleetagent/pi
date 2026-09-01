@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { type Static, Type } from "typebox";
-import { Compile } from "typebox/compile";
+import { Compile, type Validator } from "typebox/compile";
 
 export const REMOTE_WORKSPACE_PROTOCOL_VERSIONS = [{ major: 1, minMinor: 0, maxMinor: 0 }] as const;
 
@@ -678,20 +678,13 @@ export class RemoteWorkspaceValidationError extends Error {
 	}
 }
 
-function validationMessage(
-	validator: { Errors(value: unknown): { instancePath: string; message: string }[] },
-	value: unknown,
-): string {
+function validationMessage(validator: Validator, value: unknown): string {
 	const error = validator.Errors(value)[0];
 	if (!error) return "value does not match the protocol schema";
 	return `${error.instancePath || "/"}: ${error.message}`;
 }
 
-function parseWithValidator<T>(
-	validator: { Check(value: unknown): boolean; Errors(value: unknown): { instancePath: string; message: string }[] },
-	value: unknown,
-	label: string,
-): T {
+function parseWithValidator<T>(validator: Validator, value: unknown, label: string): T {
 	if (!validator.Check(value)) {
 		throw new RemoteWorkspaceValidationError(`Invalid ${label}: ${validationMessage(validator, value)}`);
 	}
@@ -715,65 +708,92 @@ export function validateRemoteWorkspaceProtocolLimits(value: unknown): RemoteWor
 	return limits;
 }
 
+interface RemoteWorkspacePendingValue {
+	value: unknown;
+	depth: number;
+}
+
+interface RemoteWorkspaceStructureState {
+	pending: RemoteWorkspacePendingValue[];
+	nodes: number;
+	objectKeys: number;
+	limits: RemoteWorkspaceStructuralLimits;
+}
+
+function validateRemoteWorkspaceNodeBudget(depth: number, state: RemoteWorkspaceStructureState): void {
+	state.nodes++;
+	if (state.nodes > state.limits.maxNodes)
+		throw new RemoteWorkspaceValidationError("Protocol value exceeds node limit");
+	if (depth > state.limits.maxDepth) throw new RemoteWorkspaceValidationError("Protocol value exceeds depth limit");
+}
+
+function validateRemoteWorkspaceScalar(value: unknown, limits: RemoteWorkspaceStructuralLimits): boolean {
+	if (value === null || typeof value === "boolean") return true;
+	if (typeof value === "number") {
+		if (!Number.isFinite(value)) throw new RemoteWorkspaceValidationError("Protocol numbers must be finite");
+		return true;
+	}
+	if (typeof value !== "string") return false;
+	if (Buffer.byteLength(value, "utf8") > limits.maxStringBytes) {
+		throw new RemoteWorkspaceValidationError("Protocol string exceeds byte limit");
+	}
+	return true;
+}
+
+function enqueueRemoteWorkspaceArray(value: unknown[], depth: number, state: RemoteWorkspaceStructureState): void {
+	if (value.length > state.limits.maxArrayLength) {
+		throw new RemoteWorkspaceValidationError("Protocol array exceeds item limit");
+	}
+	for (let index = value.length - 1; index >= 0; index--) {
+		state.pending.push({ value: value[index], depth: depth + 1 });
+	}
+}
+
+function enqueueRemoteWorkspaceObject(value: unknown, depth: number, state: RemoteWorkspaceStructureState): void {
+	if (value === null || typeof value !== "object")
+		throw new RemoteWorkspaceValidationError("Protocol values must be JSON-compatible");
+	const prototype = Object.getPrototypeOf(value);
+	if (prototype !== Object.prototype && prototype !== null) {
+		throw new RemoteWorkspaceValidationError("Protocol objects must be plain JSON objects");
+	}
+	const entries = Object.entries(value);
+	if (entries.length > state.limits.maxObjectKeys) {
+		throw new RemoteWorkspaceValidationError("Protocol object exceeds key limit");
+	}
+	state.objectKeys += entries.length;
+	if (state.objectKeys > state.limits.maxObjectKeys) {
+		throw new RemoteWorkspaceValidationError("Protocol value exceeds total key limit");
+	}
+	for (let index = entries.length - 1; index >= 0; index--) {
+		const entry = entries[index];
+		if (!entry) continue;
+		if (Buffer.byteLength(entry[0], "utf8") > state.limits.maxStringBytes) {
+			throw new RemoteWorkspaceValidationError("Protocol object key exceeds byte limit");
+		}
+		state.pending.push({ value: entry[1], depth: depth + 1 });
+	}
+}
+
 export function assertRemoteWorkspaceJsonStructure(
 	value: unknown,
 	limits: RemoteWorkspaceStructuralLimits = DEFAULT_REMOTE_WORKSPACE_PROTOCOL_LIMITS,
 ): void {
-	const pending: { value: unknown; depth: number }[] = [{ value, depth: 1 }];
-	let nodes = 0;
-	let objectKeys = 0;
-	while (pending.length > 0) {
-		const current = pending.pop();
+	const state: RemoteWorkspaceStructureState = {
+		pending: [{ value, depth: 1 }],
+		nodes: 0,
+		objectKeys: 0,
+		limits,
+	};
+	while (state.pending.length > 0) {
+		const current = state.pending.pop();
 		if (!current) break;
-		nodes++;
-		if (nodes > limits.maxNodes) throw new RemoteWorkspaceValidationError("Protocol value exceeds node limit");
-		if (current.depth > limits.maxDepth)
-			throw new RemoteWorkspaceValidationError("Protocol value exceeds depth limit");
-		const currentValue = current.value;
-		if (currentValue === null || typeof currentValue === "boolean") continue;
-		if (typeof currentValue === "number") {
-			if (!Number.isFinite(currentValue))
-				throw new RemoteWorkspaceValidationError("Protocol numbers must be finite");
+		validateRemoteWorkspaceNodeBudget(current.depth, state);
+		if (validateRemoteWorkspaceScalar(current.value, limits)) continue;
+		if (Array.isArray(current.value)) {
+			enqueueRemoteWorkspaceArray(current.value, current.depth, state);
 			continue;
 		}
-		if (typeof currentValue === "string") {
-			if (Buffer.byteLength(currentValue, "utf8") > limits.maxStringBytes) {
-				throw new RemoteWorkspaceValidationError("Protocol string exceeds byte limit");
-			}
-			continue;
-		}
-		if (Array.isArray(currentValue)) {
-			if (currentValue.length > limits.maxArrayLength) {
-				throw new RemoteWorkspaceValidationError("Protocol array exceeds item limit");
-			}
-			for (let index = currentValue.length - 1; index >= 0; index--) {
-				pending.push({ value: currentValue[index], depth: current.depth + 1 });
-			}
-			continue;
-		}
-		if (typeof currentValue !== "object") {
-			throw new RemoteWorkspaceValidationError("Protocol values must be JSON-compatible");
-		}
-		const prototype = Object.getPrototypeOf(currentValue);
-		if (prototype !== Object.prototype && prototype !== null) {
-			throw new RemoteWorkspaceValidationError("Protocol objects must be plain JSON objects");
-		}
-		const entries = Object.entries(currentValue);
-		if (entries.length > limits.maxObjectKeys) {
-			throw new RemoteWorkspaceValidationError("Protocol object exceeds key limit");
-		}
-		objectKeys += entries.length;
-		if (objectKeys > limits.maxObjectKeys) {
-			throw new RemoteWorkspaceValidationError("Protocol value exceeds total key limit");
-		}
-		for (let index = entries.length - 1; index >= 0; index--) {
-			const entry = entries[index];
-			if (!entry) continue;
-			if (Buffer.byteLength(entry[0], "utf8") > limits.maxStringBytes) {
-				throw new RemoteWorkspaceValidationError("Protocol object key exceeds byte limit");
-			}
-			pending.push({ value: entry[1], depth: current.depth + 1 });
-		}
+		enqueueRemoteWorkspaceObject(current.value, current.depth, state);
 	}
 }
 
@@ -945,8 +965,9 @@ export function validateRemoteWorkspaceHandshakeAck(
 			throw new RemoteWorkspaceValidationError(`Server selected an unoffered capability: ${capability}`);
 		}
 	}
+	const selectedCapabilities = new Set(parsed.capabilities);
 	for (const capability of offer.requiredCapabilities) {
-		if (!parsed.capabilities.includes(capability)) {
+		if (!selectedCapabilities.has(capability)) {
 			throw new RemoteWorkspaceValidationError(`Server omitted required capability: ${capability}`);
 		}
 	}
@@ -977,10 +998,12 @@ export interface RemoteWorkspaceNegotiationResult {
 	limits: RemoteWorkspaceProtocolLimits;
 }
 
-export class RemoteWorkspaceNegotiationError extends Error {
-	readonly code: "incompatible_version" | "capability_mismatch";
+export type RemoteWorkspaceNegotiationErrorCode = "incompatible_version" | "capability_mismatch";
 
-	constructor(code: "incompatible_version" | "capability_mismatch", message: string) {
+export class RemoteWorkspaceNegotiationError extends Error {
+	readonly code: RemoteWorkspaceNegotiationErrorCode;
+
+	constructor(code: RemoteWorkspaceNegotiationErrorCode, message: string) {
 		super(message);
 		this.name = "RemoteWorkspaceNegotiationError";
 		this.code = code;
@@ -995,6 +1018,27 @@ function validateVersionRanges(ranges: readonly RemoteWorkspaceVersionRange[], l
 	}
 }
 
+function findCompatibleRemoteWorkspaceVersions(
+	clientVersions: readonly RemoteWorkspaceVersionRange[],
+	serverVersions: readonly RemoteWorkspaceVersionRange[],
+): RemoteWorkspaceVersion[] {
+	const serverVersionsByMajor = new Map<number, RemoteWorkspaceVersionRange[]>();
+	for (const server of serverVersions) {
+		const ranges = serverVersionsByMajor.get(server.major) ?? [];
+		ranges.push(server);
+		serverVersionsByMajor.set(server.major, ranges);
+	}
+	const candidates: RemoteWorkspaceVersion[] = [];
+	for (const client of clientVersions) {
+		for (const server of serverVersionsByMajor.get(client.major) ?? []) {
+			const minMinor = Math.max(client.minMinor, server.minMinor);
+			const maxMinor = Math.min(client.maxMinor, server.maxMinor);
+			if (minMinor <= maxMinor) candidates.push({ major: client.major, minor: maxMinor });
+		}
+	}
+	return candidates;
+}
+
 export function negotiateRemoteWorkspaceHandshake(
 	handshake: RemoteWorkspaceHandshake,
 	options: RemoteWorkspaceNegotiationOptions,
@@ -1005,24 +1049,15 @@ export function negotiateRemoteWorkspaceHandshake(
 	validateVersionRanges(options.serverVersions, "Server version offer");
 	assertUnique(handshake.requiredCapabilities, "Required capabilities");
 	assertUnique(handshake.optionalCapabilities, "Optional capabilities");
-	const duplicateOffer = handshake.requiredCapabilities.find((capability) =>
-		handshake.optionalCapabilities.includes(capability),
-	);
+	const optionalCapabilities = new Set(handshake.optionalCapabilities);
+	const duplicateOffer = handshake.requiredCapabilities.find((capability) => optionalCapabilities.has(capability));
 	if (duplicateOffer) {
 		throw new RemoteWorkspaceNegotiationError(
 			"capability_mismatch",
 			`Capability is both required and optional: ${duplicateOffer}`,
 		);
 	}
-	const candidates: RemoteWorkspaceVersion[] = [];
-	for (const client of handshake.versions) {
-		for (const server of options.serverVersions) {
-			if (client.major !== server.major) continue;
-			const minMinor = Math.max(client.minMinor, server.minMinor);
-			const maxMinor = Math.min(client.maxMinor, server.maxMinor);
-			if (minMinor <= maxMinor) candidates.push({ major: client.major, minor: maxMinor });
-		}
-	}
+	const candidates = findCompatibleRemoteWorkspaceVersions(handshake.versions, options.serverVersions);
 	candidates.sort((left, right) => right.major - left.major || right.minor - left.minor);
 	const version = candidates[0];
 	if (!version) {

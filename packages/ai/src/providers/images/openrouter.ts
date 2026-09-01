@@ -5,6 +5,7 @@ import type {
 	ChatCompletionContentPartImage,
 	ChatCompletionContentPartText,
 	ChatCompletionCreateParamsNonStreaming,
+	ChatCompletionMessage,
 } from "openai/resources/chat/completions.js";
 import { getEnvApiKey } from "../../env-api-keys.ts";
 import type {
@@ -20,21 +21,70 @@ import { headersToRecord } from "../../utils/headers.ts";
 import { retryProviderRequest } from "../../utils/provider-retry.ts";
 import { sanitizeSurrogates } from "../../utils/sanitize-unicode.ts";
 
-interface OpenRouterGeneratedImage {
-	image_url?: string | { url?: string };
+interface OpenRouterGeneratedImageUrl {
+	url?: string;
 }
 
-type OpenRouterImageGenerationMessage = ChatCompletion["choices"][number]["message"] & {
-	images?: OpenRouterGeneratedImage[];
-};
+interface OpenRouterGeneratedImage {
+	image_url?: string | OpenRouterGeneratedImageUrl;
+}
 
-type OpenRouterImageGenerationChoice = ChatCompletion["choices"][number] & {
+interface OpenRouterImageGenerationMessage extends ChatCompletionMessage {
+	images?: OpenRouterGeneratedImage[];
+}
+
+interface OpenRouterImageGenerationChoice extends ChatCompletion.Choice {
 	message: OpenRouterImageGenerationMessage;
-};
+}
 
 type OpenRouterImageGenerationResponse = ChatCompletion & {
 	choices: OpenRouterImageGenerationChoice[];
 };
+
+// pi-ignore noNearIdenticalDataStructures: OpenRouter image responses and OpenAI-compatible completion streams are separate provider wire payloads and may evolve independently.
+interface OpenRouterPromptTokenDetails {
+	cached_tokens?: number;
+	cache_write_tokens?: number;
+}
+
+interface OpenRouterImageUsage {
+	prompt_tokens?: number;
+	completion_tokens?: number;
+	prompt_tokens_details?: OpenRouterPromptTokenDetails;
+}
+
+function parseOpenRouterDataImage(image: OpenRouterGeneratedImage): ImageContent | undefined {
+	const imageUrl = typeof image.image_url === "string" ? image.image_url : image.image_url?.url;
+	if (!imageUrl?.startsWith("data:")) return undefined;
+	const matches = imageUrl.match(/^data:([^;]+);base64,(.+)$/);
+	if (!matches) return undefined;
+	return { type: "image", mimeType: matches[1], data: matches[2] };
+}
+
+function appendOpenRouterChoiceOutput(
+	output: AssistantImages,
+	choice: OpenRouterImageGenerationChoice | undefined,
+): void {
+	if (!choice) return;
+	const content = choice.message.content;
+	if (typeof content === "string" && content.length > 0) {
+		output.output.push({ type: "text", text: content } satisfies TextContent);
+	}
+	for (const image of choice.message.images ?? []) {
+		const parsedImage = parseOpenRouterDataImage(image);
+		if (parsedImage) output.output.push(parsedImage);
+	}
+}
+
+function applyOpenRouterImageResponse(
+	output: AssistantImages,
+	response: OpenRouterImageGenerationResponse,
+	model: ImagesModel<"openrouter-images">,
+): void {
+	output.responseId = response.id;
+	if (response.usage) output.usage = parseUsage(response.usage, model);
+	appendOpenRouterChoiceOutput(output, response.choices[0]);
+}
 
 export const generateImagesOpenRouter: ImagesFunction<"openrouter-images", ImagesOptions> = async (
 	model: ImagesModel<"openrouter-images">,
@@ -80,30 +130,7 @@ export const generateImagesOpenRouter: ImagesFunction<"openrouter-images", Image
 		await options?.onResponse?.({ status: rawResponse.status, headers: headersToRecord(rawResponse.headers) }, model);
 
 		const imageResponse = response as OpenRouterImageGenerationResponse;
-		output.responseId = imageResponse.id;
-		if (imageResponse.usage) {
-			output.usage = parseUsage(imageResponse.usage, model);
-		}
-
-		const choice = imageResponse.choices[0];
-		if (choice) {
-			const content = choice.message.content;
-			if (typeof content === "string" && content.length > 0) {
-				output.output.push({ type: "text", text: content } satisfies TextContent);
-			}
-
-			for (const image of choice.message.images ?? []) {
-				const imageUrl = typeof image.image_url === "string" ? image.image_url : image.image_url?.url;
-				if (!imageUrl?.startsWith("data:")) continue;
-				const matches = imageUrl.match(/^data:([^;]+);base64,(.+)$/);
-				if (!matches) continue;
-				output.output.push({
-					type: "image",
-					mimeType: matches[1],
-					data: matches[2],
-				} satisfies ImageContent);
-			}
-		}
+		applyOpenRouterImageResponse(output, imageResponse, model);
 
 		return output;
 	} catch (error) {
@@ -162,14 +189,7 @@ function buildParams(model: ImagesModel<"openrouter-images">, context: ImagesCon
 	};
 }
 
-function parseUsage(
-	rawUsage: {
-		prompt_tokens?: number;
-		completion_tokens?: number;
-		prompt_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
-	},
-	model: ImagesModel<"openrouter-images">,
-) {
+function parseUsage(rawUsage: OpenRouterImageUsage, model: ImagesModel<"openrouter-images">) {
 	const promptTokens = rawUsage.prompt_tokens || 0;
 	const reportedCachedTokens = rawUsage.prompt_tokens_details?.cached_tokens || 0;
 	const cacheWriteTokens = rawUsage.prompt_tokens_details?.cache_write_tokens || 0;

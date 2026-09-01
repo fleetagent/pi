@@ -48,6 +48,15 @@ import { getModel } from "../src/models.ts";
 import { streamBedrock } from "../src/providers/amazon-bedrock.ts";
 import type { Context, Message } from "../src/types.ts";
 
+interface CapturedBedrockMessage {
+	role: string;
+	content: unknown[];
+}
+
+interface CapturedBedrockPayload {
+	messages: CapturedBedrockMessage[];
+}
+
 const baseModel = getModel("amazon-bedrock", "us.anthropic.claude-sonnet-4-5-20250929-v1:0");
 
 async function capturePayload(context: Context): Promise<unknown> {
@@ -80,7 +89,7 @@ describe("bedrock convertMessages skips unknown content types", () => {
 		];
 		const payload = await capturePayload({ messages });
 		expect(payload).toBeDefined();
-		const p = payload as { messages: Array<{ role: string; content: unknown[] }> };
+		const p = payload as CapturedBedrockPayload;
 		expect(p.messages).toHaveLength(1);
 		expect(p.messages[0].content).toHaveLength(1);
 		expect(p.messages[0].content[0]).toEqual({ text: "hello" });
@@ -111,7 +120,7 @@ describe("bedrock convertMessages skips unknown content types", () => {
 		];
 		const payload = await capturePayload({ messages });
 		expect(payload).toBeDefined();
-		const p = payload as { messages: Array<{ role: string; content: unknown[] }> };
+		const p = payload as CapturedBedrockPayload;
 		expect(p.messages).toHaveLength(1);
 		expect(p.messages[0].content).toHaveLength(1);
 		expect(p.messages[0].content[0]).toEqual({ text: "hello" });
@@ -127,7 +136,7 @@ describe("bedrock convertMessages skips unknown content types", () => {
 		];
 		const payload = await capturePayload({ messages });
 		expect(payload).toBeDefined();
-		const p = payload as { messages: Array<{ role: string; content: unknown[] }> };
+		const p = payload as CapturedBedrockPayload;
 		expect(p.messages).toHaveLength(0);
 	});
 
@@ -153,7 +162,7 @@ describe("bedrock convertMessages skips unknown content types", () => {
 		];
 		const payload = await capturePayload({ messages });
 		expect(payload).toBeDefined();
-		const p = payload as { messages: Array<{ role: string; content: unknown[] }> };
+		const p = payload as CapturedBedrockPayload;
 		expect(p.messages).toHaveLength(0);
 	});
 });

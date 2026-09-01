@@ -3,13 +3,17 @@ import type { Theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyHint } from "./keybinding-hints.ts";
 
+interface BorderedLoaderOptions {
+	cancellable?: boolean;
+}
+
 /** Loader wrapped with borders for extension UI */
 export class BorderedLoader extends Container {
 	private loader: CancellableLoader | Loader;
 	private cancellable: boolean;
 	private signalController?: AbortController;
 
-	constructor(tui: TUI, theme: Theme, message: string, options?: { cancellable?: boolean }) {
+	constructor(tui: TUI, theme: Theme, message: string, options?: BorderedLoaderOptions) {
 		super();
 		this.cancellable = options?.cancellable ?? true;
 		const borderColor = (s: string) => theme.fg("border", s);

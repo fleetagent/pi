@@ -1,5 +1,10 @@
 import { type TUnsafe, Type } from "typebox";
 
+export interface StringEnumOptions<TValue extends string> {
+	description?: string;
+	default?: TValue;
+}
+
 /**
  * Creates a string enum schema compatible with Google's API and other providers
  * that don't support anyOf/const patterns.
@@ -13,7 +18,7 @@ import { type TUnsafe, Type } from "typebox";
  */
 export function StringEnum<T extends readonly string[]>(
 	values: T,
-	options?: { description?: string; default?: T[number] },
+	options?: StringEnumOptions<T[number]>,
 ): TUnsafe<T[number]> {
 	return Type.Unsafe<T[number]>({
 		type: "string",

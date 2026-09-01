@@ -22,6 +22,11 @@ export interface ToolHtmlRendererDeps {
 	width?: number;
 }
 
+interface RenderedToolResultHtml {
+	collapsed?: string;
+	expanded?: string;
+}
+
 export interface ToolHtmlRenderer {
 	/** Render a tool call to HTML. Returns undefined if tool has no custom renderer. */
 	renderCall(toolCallId: string, toolName: string, args: unknown): string | undefined;
@@ -29,10 +34,10 @@ export interface ToolHtmlRenderer {
 	renderResult(
 		toolCallId: string,
 		toolName: string,
-		result: Array<{ type: string; text?: string; data?: string; mimeType?: string }>,
+		result: Array<TextContent | ImageContent>,
 		details: unknown,
 		isError: boolean,
-	): { collapsed?: string; expanded?: string } | undefined;
+	): RenderedToolResultHtml | undefined;
 }
 
 /**
@@ -121,10 +126,10 @@ export function createToolHtmlRenderer(deps: ToolHtmlRendererDeps): ToolHtmlRend
 		renderResult(
 			toolCallId: string,
 			toolName: string,
-			result: Array<{ type: string; text?: string; data?: string; mimeType?: string }>,
+			result: Array<TextContent | ImageContent>,
 			details: unknown,
 			isError: boolean,
-		): { collapsed?: string; expanded?: string } | undefined {
+		): RenderedToolResultHtml | undefined {
 			try {
 				const toolDef = getToolDefinition(toolName);
 				if (!toolDef?.renderResult) {
@@ -134,7 +139,7 @@ export function createToolHtmlRenderer(deps: ToolHtmlRendererDeps): ToolHtmlRend
 				// Build AgentToolResult from content array
 				// Cast content since session storage uses generic object types
 				const agentToolResult = {
-					content: result as (TextContent | ImageContent)[],
+					content: result,
 					details,
 					isError,
 				};

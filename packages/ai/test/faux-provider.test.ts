@@ -9,9 +9,9 @@ import {
 	stream,
 	Type,
 } from "../src/index.ts";
-import type { AssistantMessageEvent, Context } from "../src/types.ts";
+import type { AssistantMessageEvent, AssistantMessageEventStream, Context } from "../src/types.ts";
 
-async function collectEvents(streamResult: ReturnType<typeof stream>): Promise<AssistantMessageEvent[]> {
+async function collectEvents(streamResult: AssistantMessageEventStream): Promise<AssistantMessageEvent[]> {
 	const events: AssistantMessageEvent[] = [];
 	for await (const event of streamResult) {
 		events.push(event);

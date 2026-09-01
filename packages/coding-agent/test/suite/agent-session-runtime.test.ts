@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fauxAssistantMessage, registerFauxProvider } from "@fleetagent/pi-ai";
+import { fauxAssistantMessage, registerFauxProvider, type TextContent } from "@fleetagent/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { AuthStorage } from "../../src/core/auth-storage.ts";
 import type { LspConnectionFactory } from "../../src/core/lsp/transport.ts";
@@ -23,6 +23,39 @@ type RecordedSessionEvent =
 	| SessionShutdownEvent
 	| SessionStartEvent;
 
+interface ReplacementBuildFailureControl {
+	current: boolean;
+}
+
+interface DisposableToolOperations {
+	dispose(): Promise<void>;
+}
+
+interface LspShutdownManager {
+	shutdownAll(): Promise<void>;
+}
+
+interface LspRuntimeShutdownState {
+	manager: LspShutdownManager;
+}
+
+interface LspClientManager {
+	getClientForFile(path: string): Promise<unknown>;
+}
+
+interface LspRuntimeClientState {
+	manager: LspClientManager;
+}
+
+interface RuntimeTestOptions {
+	cwd?: string;
+	bootstrapModel?: boolean;
+	bootstrapThinkingLevel?: boolean;
+	failReplacementBuild?: ReplacementBuildFailureControl;
+	lsp?: PiAgentSessionOptions["lsp"];
+	lspConnectionFactories?: PiAgentSessionOptions["lspConnectionFactories"];
+}
+
 describe("PiAgent session replacement characterization", () => {
 	const cleanups: Array<() => Promise<void> | void> = [];
 
@@ -32,17 +65,7 @@ describe("PiAgent session replacement characterization", () => {
 		}
 	});
 
-	async function createRuntimeForTest(
-		extensionFactory: ExtensionFactory,
-		options?: {
-			cwd?: string;
-			bootstrapModel?: boolean;
-			bootstrapThinkingLevel?: boolean;
-			failReplacementBuild?: { current: boolean };
-			lsp?: PiAgentSessionOptions["lsp"];
-			lspConnectionFactories?: PiAgentSessionOptions["lspConnectionFactories"];
-		},
-	) {
+	async function createRuntimeForTest(extensionFactory: ExtensionFactory, options?: RuntimeTestOptions) {
 		const tempDir =
 			options?.cwd ?? join(tmpdir(), `pi-runtime-suite-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });
@@ -295,8 +318,8 @@ describe("PiAgent session replacement characterization", () => {
 			resolveLsp = resolve;
 		});
 		const sessionInternals = runtime.session as unknown as {
-			_localResourceToolOperations?: { dispose(): Promise<void> };
-			_lspRuntimeState?: { manager: { shutdownAll(): Promise<void> } };
+			_localResourceToolOperations?: DisposableToolOperations;
+			_lspRuntimeState?: LspRuntimeShutdownState;
 		};
 		sessionInternals._localResourceToolOperations = { dispose: () => toolsDisposed };
 		sessionInternals._lspRuntimeState = { manager: { shutdownAll: () => lspDisposed } };
@@ -447,7 +470,7 @@ describe("PiAgent session replacement characterization", () => {
 					? typeof message.content === "string"
 						? message.content
 						: message.content
-								.filter((part): part is { type: "text"; text: string } => part.type === "text")
+								.filter((part): part is TextContent => part.type === "text")
 								.map((part) => part.text)
 								.join("")
 					: undefined,
@@ -467,7 +490,7 @@ describe("PiAgent session replacement characterization", () => {
 						? typeof message.content === "string"
 							? message.content
 							: message.content
-									.filter((part): part is { type: "text"; text: string } => part.type === "text")
+									.filter((part): part is TextContent => part.type === "text")
 									.map((part) => part.text)
 									.join("")
 						: undefined,
@@ -541,7 +564,7 @@ describe("PiAgent session replacement characterization", () => {
 					? typeof message.content === "string"
 						? message.content
 						: message.content
-								.filter((part): part is { type: "text"; text: string } => part.type === "text")
+								.filter((part): part is TextContent => part.type === "text")
 								.map((part) => part.text)
 								.join("")
 					: undefined,
@@ -561,7 +584,7 @@ describe("PiAgent session replacement characterization", () => {
 						? typeof message.content === "string"
 							? message.content
 							: message.content
-									.filter((part): part is { type: "text"; text: string } => part.type === "text")
+									.filter((part): part is TextContent => part.type === "text")
 									.map((part) => part.text)
 									.join("")
 						: undefined,
@@ -607,7 +630,7 @@ describe("PiAgent session replacement characterization", () => {
 		const getManager = () => {
 			const state = (
 				runtime.session as unknown as {
-					_lspRuntimeState?: { manager: { getClientForFile(path: string): Promise<unknown> } };
+					_lspRuntimeState?: LspRuntimeClientState;
 				}
 			)._lspRuntimeState;
 			if (!state) throw new Error("expected AgentSession-owned LSP runtime");

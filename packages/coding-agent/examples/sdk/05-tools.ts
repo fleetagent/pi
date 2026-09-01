@@ -12,7 +12,11 @@
 
 import { InMemorySessionManager, PiAgent } from "@fleetagent/pi-coding-agent";
 
-async function createToolSession(options: { cwd?: string; tools: string[] }) {
+interface ToolSessionOptions {
+	cwd?: string;
+	tools: string[];
+}
+async function createToolSession(options: ToolSessionOptions) {
 	const cwd = options.cwd ?? process.cwd();
 	const pi = await PiAgent.create({
 		cwd,

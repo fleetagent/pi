@@ -12,6 +12,12 @@ export {
 	prepareBranchEntries,
 } from "./harness/compaction/branch-summarization.ts";
 export {
+	type CompactionDetails,
+	type CompactionPreparation,
+	type CompactionResult,
+	type CompactionSettings,
+	type ContextUsageEstimate,
+	type CutPointResult,
 	calculateContextTokens,
 	compact,
 	DEFAULT_COMPACTION_SETTINGS,
@@ -24,11 +30,12 @@ export {
 	prepareCompaction,
 	shouldCompact,
 } from "./harness/compaction/compaction.ts";
-export { serializeConversation } from "./harness/compaction/utils.ts";
+export { type FileOperationLists, type FileOperations, serializeConversation } from "./harness/compaction/utils.ts";
 export * from "./harness/messages.ts";
 export * from "./harness/prompt-templates.ts";
 export * from "./harness/session/jsonl-errors.ts";
 export * from "./harness/session/jsonl-repo.ts";
+export type { JsonlPhysicalRecord } from "./harness/session/jsonl-storage.ts";
 export * from "./harness/session/memory-repo.ts";
 export * from "./harness/session/repo-utils.ts";
 export * from "./harness/session/session.ts";

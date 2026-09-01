@@ -52,11 +52,14 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/export [file]` | Export session to HTML |
 | `/share` | Upload as private GitHub gist with shareable HTML link |
 | `/reload` | Reload keybindings, extensions, skills, rules, prompts, and context files |
+| `/hooks <enable|disable>` | Enable or disable subsequent hooks for the current session |
 | `/hotkeys` | Show all keyboard shortcuts |
 | `/changelog` | Display version history |
 | `/quit` | Quit pi |
 
-`/sandbox` is the sole user-only interactive backend command and is hidden from model-visible command catalogs. It shows or clears the current backend, configures deferred SSH, attaches a sandbox daemon, and manages local Docker sandbox containers; see [Workspace Sandbox](sandbox.md).
+`/hooks disable` immediately prevents subsequent hook events in the current session; a hook execution already in progress is allowed to finish. `/hooks enable` resumes dispatch. Skipped events are not replayed, and a newly created or resumed session starts with hooks enabled.
+
+`/hooks` and `/sandbox` are user-only interactive commands hidden from model-visible command catalogs. `/sandbox` shows or clears the current backend, attaches a sandbox daemon, and manages local Docker sandbox containers; see [Workspace Sandbox](sandbox.md).
 
 ## Message Queue
 
@@ -193,7 +196,7 @@ cat README.md | pi -p "Summarize this text"
 | `--tools <list>`, `-t <list>` | Allowlist specific built-in, extension, and custom tools |
 | `--no-builtin-tools`, `-nbt` | Disable built-in tools but keep extension/custom tools enabled |
 | `--no-tools`, `-nt` | Disable all tools |
-| `--remote <url>` | Run built-in tools through a remote commander (`ws://` or `wss://`) |
+| `--remote <url>` | Run built-in tools through a `pi --daemon` backend (`ws://` or `wss://`) |
 
 Built-in tools: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`, `subagent`, and—when configured—`lsp_diagnostics`, `lsp_hover`, `lsp_definition`, `lsp_references`, `lsp_rename`, and `lsp_code_actions`.
 
@@ -201,7 +204,7 @@ LSP servers are external and disabled when no configuration is present. See [Lan
 
 The `subagent` tool runs fresh in-memory agent sessions in single, parallel, or chained mode. Each session has an isolated conversation while sharing parent authentication and model services, avoiding separate process startup. Each task can provide an optional named preset, persona (`systemPrompt`), output contract (`responseFormat`), model, tool allowlist, and working directory. Without a model it inherits the parent model; the parent receives authenticated same-family model metadata including context and token costs. Bundled presets are `explore`, `worker`, and `reviewer`. User definitions in `~/.pi/agent/agents/*.md` override bundled presets; project definitions in `.pi/agents/*.md` are opt-in through `agentScope` and require interactive confirmation by default.
 
-Use `--remote-deferred --remote-cwd <path>` to start without a connected tool backend, then connect from interactive mode with `/sandbox ssh <user@host[:/path]> [path]` or `/sandbox --attach <ws://url>`. Connecting reloads project instruction resources from the selected backend.
+Use `--remote-deferred --remote-cwd <path>` to start without a connected tool backend, then connect from interactive mode with `/sandbox --attach <ws://url>`. Connecting reloads project instruction resources from the selected daemon backend.
 
 ### Resource Options
 
@@ -225,7 +228,7 @@ Combine `--no-*` with explicit flags to load exactly what you need, ignoring set
 pi --no-extensions -e ./my-extension.ts
 ```
 
-With `--ssh` or `--remote`, project instruction resources are loaded from the tool backend cwd: `.pi/skills`, `.pi/rules`, `.pi/prompts`, ancestor `.agents/skills` and `.agents/rules`, and per-directory `AGENTS.override.md`/`AGENTS.md`/`CLAUDE.md` context. `AGENTS.override.md` replaces the other context candidates only in its own directory. Extension loading, themes, user resources, and package resources remain local.
+With `--remote`, project instruction resources are loaded from the daemon workspace cwd: `.pi/skills`, `.pi/rules`, `.pi/prompts`, ancestor `.agents/skills` and `.agents/rules`, and per-directory `AGENTS.override.md`/`AGENTS.md`/`CLAUDE.md` context. `AGENTS.override.md` replaces the other context candidates only in its own directory. Extension loading, themes, user resources, and package resources remain local.
 
 ### Other Options
 

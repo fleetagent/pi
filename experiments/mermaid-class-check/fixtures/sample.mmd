@@ -1,0 +1,53 @@
+classDiagram
+    class Identifiable {
+        +string id
+    }
+    <<interface>> Identifiable
+    <<export>> Identifiable
+
+    class Clock
+    <<interface>> Clock
+    <<import>> Clock
+    %% pi:import Clock from "./clock.ts"
+
+    class User {
+        +string id
+        +string name
+        -string token
+        +Session[] sessions
+        +boolean login(string password)
+        +async refresh(): Promise~void~
+    }
+    <<export>> User
+
+    class Session {
+        +string id
+        +Date createdAt
+        +Message[] messages
+        +void addMessage(Message message)
+    }
+    <<export>> Session
+
+    class BaseMessage {
+        +Date timestamp
+    }
+    <<export>> BaseMessage
+
+    class Message {
+        +string content
+        +void send()
+    }
+    <<export>> Message
+
+    class createSession {
+        +createSession(User user, Clock clock): Promise~Session~
+    }
+    <<function>> createSession
+    <<export>> createSession
+    <<async>> createSession
+
+    Identifiable <|.. User : implements
+    Identifiable <|.. Session : implements
+    BaseMessage <|-- Message : extends
+    User "1" --> "*" Session : creates
+    Session "1" *-- "*" Message : contains

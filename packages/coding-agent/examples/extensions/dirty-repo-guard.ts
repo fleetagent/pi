@@ -7,11 +7,14 @@
 
 import type { ExtensionAPI, ExtensionContext } from "@fleetagent/pi-coding-agent";
 
+interface DirtyRepoCheckResult {
+	cancel: boolean;
+}
 async function checkDirtyRepo(
 	pi: ExtensionAPI,
 	ctx: ExtensionContext,
 	action: string,
-): Promise<{ cancel: boolean } | undefined> {
+): Promise<DirtyRepoCheckResult | undefined> {
 	// Check for uncommitted changes
 	const { stdout, code } = await pi.exec("git", ["status", "--porcelain"]);
 

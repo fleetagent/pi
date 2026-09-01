@@ -326,7 +326,7 @@ The retired `@fleetagent/pi-daemon` package and `pi-daemon` binary are not suppo
 
 ## Docker Sandbox
 
-Interactive `/sandbox` is the sole command for inspecting, connecting, clearing, starting, listing, and stopping workspace tool backends. It supports deferred SSH, existing sandbox daemons, and Pi-owned Docker containers. The command is user-only and appears in slash-command completion, but is hidden from model-visible command catalogs, tools, prompts, skills, and rules. Local Pi keeps model/session/UI orchestration while workspace tools/resources use the selected backend. See [docs/sandbox.md](docs/sandbox.md) for command syntax, image configuration, local base-image builds, troubleshooting, and security limits.
+Interactive `/sandbox` is the sole command for inspecting, connecting, clearing, starting, listing, and stopping workspace tool backends. It supports existing sandbox daemons and Pi-owned Docker containers. The command is user-only and appears in slash-command completion, but is hidden from model-visible command catalogs, tools, prompts, skills, and rules. Local Pi keeps model/session/UI orchestration while workspace tools/resources use the selected backend. See [docs/sandbox.md](docs/sandbox.md) for command syntax, image configuration, local base-image builds, troubleshooting, and security limits.
 
 ---
 
@@ -337,7 +337,7 @@ Pi loads `AGENTS.md` (or `CLAUDE.md`) at startup from:
 - Parent directories (walking up from cwd)
 - Current directory
 
-If a directory contains `AGENTS.override.md`, Pi loads it instead of `AGENTS.md` or `CLAUDE.md` from that directory. Context files from other directories still layer normally, including when project instructions come from SSH or daemon tool backends.
+If a directory contains `AGENTS.override.md`, Pi loads it instead of `AGENTS.md` or `CLAUDE.md` from that directory. Context files from other directories still layer normally, including when project instructions come from a daemon tool backend.
 
 Use for project instructions, conventions, common commands. All selected files are concatenated.
 
@@ -422,7 +422,7 @@ The default export can also be `async`. pi waits for async extension factories b
 - Custom editors and UI components
 - Status lines, headers, footers
 - Git checkpointing and auto-commit
-- SSH and sandbox execution
+- Remote daemon and sandbox execution
 - MCP server integration
 - Make pi look like Claude Code
 - Games while waiting (yes, Doom runs)
@@ -613,11 +613,8 @@ cat README.md | pi -p "Summarize this text"
 | `--tools <list>`, `-t <list>` | Allowlist specific tool names across built-in, extension, and custom tools |
 | `--no-builtin-tools`, `-nbt` | Disable built-in tools by default but keep extension/custom tools enabled |
 | `--no-tools`, `-nt` | Disable all tools by default |
-| `--ssh <target>` | Run built-in tools over SSH (`user@host` or `user@host:/path`) |
-| `--ssh-deferred` | Start in SSH sandbox mode and configure the target later |
-| `--ssh-cwd <path>` | Stable remote cwd for `--ssh-deferred` |
 | `--remote <url>` | Run built-in workspace tools through a `pi --daemon` WebSocket backend |
-| `--remote-deferred` | Start with a deferred backend and connect later with `/sandbox ssh ...` or `/sandbox --attach <ws://url>` |
+| `--remote-deferred` | Start with a deferred daemon backend and connect later with `/sandbox --attach <ws://url>` |
 | `--remote-cwd <path>` | Stable daemon workspace cwd for deferred remote mode |
 | `--daemon` | Start the integrated remote workspace daemon instead of a normal Pi session |
 Available built-in tools: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`, `websearch`, `session_search`, `session_entry_get`, `subagent`, `subagent_runs`, `create_subagent`, and—when externally configured—`lsp_diagnostics`, `lsp_hover`, `lsp_definition`, `lsp_references`, `lsp_rename`, and `lsp_code_actions`.
@@ -690,16 +687,13 @@ pi --models "claude-*,gpt-4o"
 # Read-only mode
 pi --tools read,grep,find,ls -p "Review the code"
 
-# Run tools over SSH
-pi --ssh user@host:/workspace "Review the code"
-
 # Start an integrated remote workspace daemon
 PI_DAEMON_TOKEN='long-random-token' pi --daemon --daemon-cwd /workspace --daemon-port 8787
 
 # Connect to that daemon from the orchestrating Pi
 PI_REMOTE_TOKEN='long-random-token' pi --remote ws://127.0.0.1:8787/pi/workspace
-# Start in deferred SSH sandbox mode
-pi --ssh-deferred --ssh-cwd /workspace --mode rpc
+# Start with a deferred daemon backend for later RPC or /sandbox attachment
+pi --remote-deferred --remote-cwd /workspace --mode rpc
 
 # High thinking level
 pi --thinking high "Solve this complex problem"

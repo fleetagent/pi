@@ -1,6 +1,7 @@
+import type * as PhotonNode from "@silvia-odwyer/photon-node";
 import type { PhotonImageType } from "./photon.ts";
 
-type Photon = typeof import("@silvia-odwyer/photon-node");
+type PhotonModule = typeof PhotonNode;
 
 function readOrientationFromTiff(bytes: Uint8Array, tiffStart: number): number {
 	if (tiffStart + 8 > bytes.length) return 1;
@@ -35,6 +36,19 @@ function readOrientationFromTiff(bytes: Uint8Array, tiffStart: number): number {
 
 	return 1;
 }
+function findTiffOffsetInJpegExifSegment(bytes: Uint8Array, offset: number): number {
+	if (offset + 4 >= bytes.length) return -1;
+	const segmentStart = offset + 4;
+	if (segmentStart + 6 > bytes.length) return -1;
+	if (!hasExifHeader(bytes, segmentStart)) return -1;
+	return segmentStart + 6;
+}
+
+function nextJpegSegmentOffset(bytes: Uint8Array, offset: number): number {
+	if (offset + 4 > bytes.length) return -1;
+	const length = (bytes[offset + 2] << 8) | bytes[offset + 3];
+	return offset + 2 + length;
+}
 
 function findJpegTiffOffset(bytes: Uint8Array): number {
 	let offset = 2;
@@ -46,17 +60,10 @@ function findJpegTiffOffset(bytes: Uint8Array): number {
 			continue;
 		}
 
-		if (marker === 0xe1) {
-			if (offset + 4 >= bytes.length) return -1;
-			const segmentStart = offset + 4;
-			if (segmentStart + 6 > bytes.length) return -1;
-			if (!hasExifHeader(bytes, segmentStart)) return -1;
-			return segmentStart + 6;
-		}
+		if (marker === 0xe1) return findTiffOffsetInJpegExifSegment(bytes, offset);
 
-		if (offset + 4 > bytes.length) return -1;
-		const length = (bytes[offset + 2] << 8) | bytes[offset + 3];
-		offset += 2 + length;
+		offset = nextJpegSegmentOffset(bytes, offset);
+		if (offset === -1) return -1;
 	}
 
 	return -1;
@@ -123,21 +130,22 @@ function getExifOrientation(bytes: Uint8Array): number {
 
 type DstIndexFn = (x: number, y: number, w: number, h: number) => number;
 
-function rotate90(photon: Photon, image: PhotonImageType, dstIndex: DstIndexFn): PhotonImageType {
+function rotate90(photon: PhotonModule, image: PhotonImageType, dstIndex: DstIndexFn): PhotonImageType {
 	const w = image.get_width();
 	const h = image.get_height();
 	const src = image.get_raw_pixels();
 	const dst = new Uint8Array(src.length);
 
-	for (let y = 0; y < h; y++) {
-		for (let x = 0; x < w; x++) {
-			const srcIdx = (y * w + x) * 4;
-			const dstIdx = dstIndex(x, y, w, h) * 4;
-			dst[dstIdx] = src[srcIdx];
-			dst[dstIdx + 1] = src[srcIdx + 1];
-			dst[dstIdx + 2] = src[srcIdx + 2];
-			dst[dstIdx + 3] = src[srcIdx + 3];
-		}
+	const pixelCount = w * h;
+	for (let pixelIndex = 0; pixelIndex < pixelCount; pixelIndex++) {
+		const x = pixelIndex % w;
+		const y = Math.floor(pixelIndex / w);
+		const srcIdx = pixelIndex * 4;
+		const dstIdx = dstIndex(x, y, w, h) * 4;
+		dst[dstIdx] = src[srcIdx];
+		dst[dstIdx + 1] = src[srcIdx + 1];
+		dst[dstIdx + 2] = src[srcIdx + 2];
+		dst[dstIdx + 3] = src[srcIdx + 3];
 	}
 
 	return new photon.PhotonImage(dst, h, w);
@@ -145,7 +153,7 @@ function rotate90(photon: Photon, image: PhotonImageType, dstIndex: DstIndexFn):
 
 // Flip orientations mutate in-place. Rotations return a new image (caller must free the old one if different).
 export function applyExifOrientation(
-	photon: Photon,
+	photon: PhotonModule,
 	image: PhotonImageType,
 	originalBytes: Uint8Array,
 ): PhotonImageType {

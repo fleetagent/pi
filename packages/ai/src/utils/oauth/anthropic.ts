@@ -5,20 +5,37 @@
  * It is only intended for CLI use, not browser environments.
  */
 
-import type { Server } from "node:http";
+import type { createServer as createHttpServer, Server, ServerResponse } from "node:http";
 import { oauthErrorHtml, oauthSuccessHtml } from "./oauth-page.ts";
 import { generatePKCE } from "./pkce.ts";
-import type { OAuthCredentials, OAuthLoginCallbacks, OAuthPrompt, OAuthProviderInterface } from "./types.ts";
+import type {
+	OAuthCredentials,
+	OAuthLoginCallbacks,
+	OAuthManualCodeInput,
+	OAuthProviderInterface,
+	ParsedOAuthAuthorizationInput,
+} from "./types.ts";
+
+// pi-ignore noNearIdenticalDataStructures: Browser callback values are state-validated and required; manually parsed OAuth input remains partial and untrusted.
+interface AuthorizationCallbackResult {
+	code: string;
+	state: string;
+}
 
 type CallbackServerInfo = {
 	server: Server;
 	redirectUri: string;
 	cancelWait: () => void;
-	waitForCode: () => Promise<{ code: string; state: string } | null>;
+	waitForCode: () => Promise<AuthorizationCallbackResult | null>;
 };
 
+export type AnthropicLoginOptions = Pick<
+	OAuthLoginCallbacks,
+	"onAuth" | "onPrompt" | "onProgress" | "onManualCodeInput"
+>;
+
 type NodeApis = {
-	createServer: typeof import("node:http").createServer;
+	createServer: typeof createHttpServer;
 };
 
 let nodeApis: NodeApis | null = null;
@@ -48,7 +65,7 @@ async function getNodeApis(): Promise<NodeApis> {
 	return nodeApis;
 }
 
-function parseAuthorizationInput(input: string): { code?: string; state?: string } {
+function parseAuthorizationInput(input: string): ParsedOAuthAuthorizationInput {
 	const value = input.trim();
 	if (!value) return {};
 
@@ -95,12 +112,49 @@ function formatErrorDetails(error: unknown): string {
 	return String(error);
 }
 
+type AuthorizationCallbackSettler = (value: AuthorizationCallbackResult | null) => void;
+
+function handleAuthorizationCallbackRequest(
+	requestUrl: string | undefined,
+	response: ServerResponse,
+	expectedState: string,
+	settleWait: AuthorizationCallbackSettler | undefined,
+): void {
+	const url = new URL(requestUrl || "", "http://localhost");
+	if (url.pathname !== CALLBACK_PATH) {
+		response.writeHead(404, { "Content-Type": "text/html; charset=utf-8" });
+		response.end(oauthErrorHtml("Callback route not found."));
+		return;
+	}
+	const code = url.searchParams.get("code");
+	const state = url.searchParams.get("state");
+	const error = url.searchParams.get("error");
+	if (error) {
+		response.writeHead(400, { "Content-Type": "text/html; charset=utf-8" });
+		response.end(oauthErrorHtml("Anthropic authentication did not complete.", `Error: ${error}`));
+		return;
+	}
+	if (!code || !state) {
+		response.writeHead(400, { "Content-Type": "text/html; charset=utf-8" });
+		response.end(oauthErrorHtml("Missing code or state parameter."));
+		return;
+	}
+	if (state !== expectedState) {
+		response.writeHead(400, { "Content-Type": "text/html; charset=utf-8" });
+		response.end(oauthErrorHtml("State mismatch."));
+		return;
+	}
+	response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+	response.end(oauthSuccessHtml("Anthropic authentication completed. You can close this window."));
+	settleWait?.({ code, state });
+}
+
 async function startCallbackServer(expectedState: string): Promise<CallbackServerInfo> {
 	const { createServer } = await getNodeApis();
 
 	return new Promise((resolve, reject) => {
-		let settleWait: ((value: { code: string; state: string } | null) => void) | undefined;
-		const waitForCodePromise = new Promise<{ code: string; state: string } | null>((resolveWait) => {
+		let settleWait: AuthorizationCallbackSettler | undefined;
+		const waitForCodePromise = new Promise<AuthorizationCallbackResult | null>((resolveWait) => {
 			let settled = false;
 			settleWait = (value) => {
 				if (settled) return;
@@ -111,38 +165,7 @@ async function startCallbackServer(expectedState: string): Promise<CallbackServe
 
 		const server = createServer((req, res) => {
 			try {
-				const url = new URL(req.url || "", "http://localhost");
-				if (url.pathname !== CALLBACK_PATH) {
-					res.writeHead(404, { "Content-Type": "text/html; charset=utf-8" });
-					res.end(oauthErrorHtml("Callback route not found."));
-					return;
-				}
-
-				const code = url.searchParams.get("code");
-				const state = url.searchParams.get("state");
-				const error = url.searchParams.get("error");
-
-				if (error) {
-					res.writeHead(400, { "Content-Type": "text/html; charset=utf-8" });
-					res.end(oauthErrorHtml("Anthropic authentication did not complete.", `Error: ${error}`));
-					return;
-				}
-
-				if (!code || !state) {
-					res.writeHead(400, { "Content-Type": "text/html; charset=utf-8" });
-					res.end(oauthErrorHtml("Missing code or state parameter."));
-					return;
-				}
-
-				if (state !== expectedState) {
-					res.writeHead(400, { "Content-Type": "text/html; charset=utf-8" });
-					res.end(oauthErrorHtml("State mismatch."));
-					return;
-				}
-
-				res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-				res.end(oauthSuccessHtml("Anthropic authentication completed. You can close this window."));
-				settleWait?.({ code, state });
+				handleAuthorizationCallbackRequest(req.url, res, expectedState, settleWait);
 			} catch {
 				res.writeHead(500, { "Content-Type": "text/plain; charset=utf-8" });
 				res.end("Internal error");
@@ -224,119 +247,103 @@ async function exchangeAuthorizationCode(
 	};
 }
 
+// pi-ignore noNearIdenticalDataStructures: Authorization selection is state-validated and may be empty before prompt fallback; parsed OAuth input remains partial and untrusted.
+interface AuthorizationSelection {
+	code?: string;
+	state?: string;
+}
+
+function createAnthropicAuthorizationUrl(challenge: string, state: string): string {
+	const params = new URLSearchParams({
+		code: "true",
+		client_id: CLIENT_ID,
+		response_type: "code",
+		redirect_uri: REDIRECT_URI,
+		scope: SCOPES,
+		code_challenge: challenge,
+		code_challenge_method: "S256",
+		state,
+	});
+	return `${AUTHORIZE_URL}?${params.toString()}`;
+}
+
+function parseVerifiedAuthorizationInput(input: string, expectedState: string): AuthorizationSelection {
+	const parsed = parseAuthorizationInput(input);
+	if (parsed.state && parsed.state !== expectedState) throw new Error("OAuth state mismatch");
+	return { code: parsed.code, state: parsed.state ?? expectedState };
+}
+
+async function waitForCallbackOrManualAuthorization(
+	server: CallbackServerInfo,
+	onManualCodeInput: OAuthManualCodeInput,
+	expectedState: string,
+): Promise<AuthorizationSelection> {
+	let manualInput: string | undefined;
+	let manualError: Error | undefined;
+	const manualPromise = onManualCodeInput()
+		.then((input) => {
+			manualInput = input;
+			server.cancelWait();
+		})
+		.catch((error) => {
+			manualError = error instanceof Error ? error : new Error(String(error));
+			server.cancelWait();
+		});
+
+	const callbackResult = await server.waitForCode();
+	if (manualError) throw manualError;
+	if (callbackResult?.code) return callbackResult;
+	if (manualInput) return parseVerifiedAuthorizationInput(manualInput, expectedState);
+
+	await manualPromise;
+	if (manualError) throw manualError;
+	return manualInput ? parseVerifiedAuthorizationInput(manualInput, expectedState) : {};
+}
+
+async function waitForAnthropicAuthorization(
+	server: CallbackServerInfo,
+	options: AnthropicLoginOptions,
+	expectedState: string,
+): Promise<AuthorizationSelection> {
+	if (options.onManualCodeInput) {
+		return waitForCallbackOrManualAuthorization(server, options.onManualCodeInput, expectedState);
+	}
+	const callbackResult = await server.waitForCode();
+	return callbackResult?.code ? callbackResult : {};
+}
+
+async function promptForAnthropicAuthorization(
+	options: AnthropicLoginOptions,
+	expectedState: string,
+): Promise<AuthorizationSelection> {
+	const input = await options.onPrompt({
+		message: "Paste the authorization code or full redirect URL:",
+		placeholder: REDIRECT_URI,
+	});
+	return parseVerifiedAuthorizationInput(input, expectedState);
+}
+
 /**
  * Login with Anthropic OAuth (authorization code + PKCE)
  */
-export async function loginAnthropic(options: {
-	onAuth: (info: { url: string; instructions?: string }) => void;
-	onPrompt: (prompt: OAuthPrompt) => Promise<string>;
-	onProgress?: (message: string) => void;
-	onManualCodeInput?: () => Promise<string>;
-}): Promise<OAuthCredentials> {
+export async function loginAnthropic(options: AnthropicLoginOptions): Promise<OAuthCredentials> {
 	const { verifier, challenge } = await generatePKCE();
 	const server = await startCallbackServer(verifier);
 
-	let code: string | undefined;
-	let state: string | undefined;
-	let redirectUriForExchange = REDIRECT_URI;
-
 	try {
-		const authParams = new URLSearchParams({
-			code: "true",
-			client_id: CLIENT_ID,
-			response_type: "code",
-			redirect_uri: REDIRECT_URI,
-			scope: SCOPES,
-			code_challenge: challenge,
-			code_challenge_method: "S256",
-			state: verifier,
-		});
-
 		options.onAuth({
-			url: `${AUTHORIZE_URL}?${authParams.toString()}`,
+			url: createAnthropicAuthorizationUrl(challenge, verifier),
 			instructions:
 				"Complete login in your browser. If the browser is on another machine, paste the final redirect URL here.",
 		});
 
-		if (options.onManualCodeInput) {
-			let manualInput: string | undefined;
-			let manualError: Error | undefined;
-			const manualPromise = options
-				.onManualCodeInput()
-				.then((input) => {
-					manualInput = input;
-					server.cancelWait();
-				})
-				.catch((err) => {
-					manualError = err instanceof Error ? err : new Error(String(err));
-					server.cancelWait();
-				});
-
-			const result = await server.waitForCode();
-
-			if (manualError) {
-				throw manualError;
-			}
-
-			if (result?.code) {
-				code = result.code;
-				state = result.state;
-				redirectUriForExchange = REDIRECT_URI;
-			} else if (manualInput) {
-				const parsed = parseAuthorizationInput(manualInput);
-				if (parsed.state && parsed.state !== verifier) {
-					throw new Error("OAuth state mismatch");
-				}
-				code = parsed.code;
-				state = parsed.state ?? verifier;
-			}
-
-			if (!code) {
-				await manualPromise;
-				if (manualError) {
-					throw manualError;
-				}
-				if (manualInput) {
-					const parsed = parseAuthorizationInput(manualInput);
-					if (parsed.state && parsed.state !== verifier) {
-						throw new Error("OAuth state mismatch");
-					}
-					code = parsed.code;
-					state = parsed.state ?? verifier;
-				}
-			}
-		} else {
-			const result = await server.waitForCode();
-			if (result?.code) {
-				code = result.code;
-				state = result.state;
-				redirectUriForExchange = REDIRECT_URI;
-			}
-		}
-
-		if (!code) {
-			const input = await options.onPrompt({
-				message: "Paste the authorization code or full redirect URL:",
-				placeholder: REDIRECT_URI,
-			});
-			const parsed = parseAuthorizationInput(input);
-			if (parsed.state && parsed.state !== verifier) {
-				throw new Error("OAuth state mismatch");
-			}
-			code = parsed.code;
-			state = parsed.state ?? verifier;
-		}
-
-		if (!code) {
-			throw new Error("Missing authorization code");
-		}
-
-		if (!state) {
-			throw new Error("Missing OAuth state");
-		}
+		let authorization = await waitForAnthropicAuthorization(server, options, verifier);
+		if (!authorization.code) authorization = await promptForAnthropicAuthorization(options, verifier);
+		if (!authorization.code) throw new Error("Missing authorization code");
+		if (!authorization.state) throw new Error("Missing OAuth state");
 
 		options.onProgress?.("Exchanging authorization code for tokens...");
-		return exchangeAuthorizationCode(code, state, verifier, redirectUriForExchange);
+		return exchangeAuthorizationCode(authorization.code, authorization.state, verifier, REDIRECT_URI);
 	} finally {
 		server.server.close();
 	}

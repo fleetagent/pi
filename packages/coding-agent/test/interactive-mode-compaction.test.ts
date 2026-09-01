@@ -1,4 +1,5 @@
 import { describe, expect, test, vi } from "vitest";
+import type { AgentSessionEvent } from "../src/core/agent-session.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 
 describe("InteractiveMode compaction events", () => {
@@ -19,23 +20,18 @@ describe("InteractiveMode compaction events", () => {
 			settingsManager: { getShowTerminalProgress: () => false },
 			ui: { requestRender: vi.fn(), terminal: { setProgress: vi.fn() } },
 		};
+		Object.setPrototypeOf(fakeThis, InteractiveMode.prototype);
 
 		const handleEvent = Reflect.get(InteractiveMode.prototype, "handleEvent") as (
 			this: typeof fakeThis,
-			event: {
-				type: "compaction_end";
-				reason: "manual" | "threshold" | "overflow";
-				result: { tokensBefore: number; summary: string } | undefined;
-				aborted: boolean;
-				willRetry: boolean;
-				errorMessage?: string;
-			},
+			event: AgentSessionEvent,
 		) => Promise<void>;
 
 		await handleEvent.call(fakeThis, {
 			type: "compaction_end",
 			reason: "manual",
 			result: {
+				firstKeptEntryId: "entry-1",
 				tokensBefore: 123,
 				summary: "summary",
 			},
@@ -59,6 +55,7 @@ describe("InteractiveMode compaction events", () => {
 			type: "compaction_end",
 			reason: "threshold",
 			result: {
+				firstKeptEntryId: "entry-2",
 				tokensBefore: 456,
 				summary: "auto summary",
 			},

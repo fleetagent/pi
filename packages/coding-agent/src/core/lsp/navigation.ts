@@ -1,6 +1,14 @@
 import { Text } from "@fleetagent/pi-tui";
 import { type Static, Type } from "typebox";
-import type { Hover, Location, LocationLink, MarkedString, MarkupContent } from "vscode-languageserver-protocol";
+import type {
+	Hover,
+	Location,
+	LocationLink,
+	MarkedString,
+	MarkupContent,
+	Position,
+	Range,
+} from "vscode-languageserver-protocol";
 import type { ToolDefinition } from "../extensions/types.ts";
 import type { ToolOperations } from "../tools/operations.ts";
 import { throwIfAborted } from "./abort.ts";
@@ -44,6 +52,7 @@ export interface LspLocationDetails {
 }
 
 type DefinitionResult = Location | Location[] | LocationLink[] | null;
+type LspHoverContents = MarkupContent | MarkedString | MarkedString[];
 
 interface NormalizedLocation {
 	key: string;
@@ -55,7 +64,12 @@ interface AttributedLocation {
 	serverIds: string[];
 }
 
-function toPosition(input: PositionInput): { line: number; character: number } {
+interface ServerNormalizedLocations {
+	serverId: string;
+	values: NormalizedLocation[];
+}
+
+function toPosition(input: PositionInput): Position {
 	return { line: input.line - 1, character: input.character - 1 };
 }
 
@@ -64,7 +78,7 @@ function formatMappedUri(manager: LspManager, route: LspClientRoute, uri: string
 	return mapped.ok ? relativePortablePath(manager.cwd, mapped.value) : `[unmapped URI: ${mapped.reason}]`;
 }
 
-function formatRangeStart(range: { start: { line: number; character: number } }): string {
+function formatRangeStart(range: Range): string {
 	return `${range.start.line + 1}:${range.start.character + 1}`;
 }
 
@@ -108,7 +122,7 @@ function markedStringToText(value: MarkedString): string {
 	return typeof value === "string" ? value : value.value;
 }
 
-function hoverContentsToText(contents: Hover["contents"]): string {
+function hoverContentsToText(contents: LspHoverContents): string {
 	if (typeof contents === "string") return contents;
 	if (Array.isArray(contents)) return contents.map(markedStringToText).join("\n\n");
 	if ("kind" in contents) return (contents as MarkupContent).value;
@@ -178,9 +192,7 @@ function rethrowIfAborted(signal: AbortSignal | undefined): void {
 	throwIfAborted(signal);
 }
 
-function mergeAttributedLocations(
-	entries: Array<{ serverId: string; values: NormalizedLocation[] }>,
-): AttributedLocation[] {
+function mergeAttributedLocations(entries: ServerNormalizedLocations[]): AttributedLocation[] {
 	const merged = new Map<string, AttributedLocation>();
 	for (const entry of entries) {
 		for (const location of entry.values) {
@@ -197,6 +209,48 @@ function mergeAttributedLocations(
 
 function attributedLine(location: AttributedLocation, attribute: boolean): string {
 	return attribute ? `[${location.serverIds.join(", ")}] ${location.value}` : location.value;
+}
+
+interface HoverSearchResult {
+	hover?: string;
+	serverId?: string;
+	failures: LspClientRouteFailure[];
+}
+
+async function requestHover(
+	route: LspClientRoute,
+	input: PositionInput,
+	signal: AbortSignal | undefined,
+): Promise<string | undefined> {
+	const result = await route.client.sendRequest<Hover | null>(
+		"textDocument/hover",
+		{ textDocument: { uri: route.target.serverUri }, position: toPosition(input) },
+		signal,
+	);
+	if (!result) return undefined;
+	const hover = hoverContentsToText(result.contents).trim();
+	return hover || undefined;
+}
+
+async function findHover(
+	collection: LspClientRouteCollection,
+	input: PositionInput,
+	signal: AbortSignal | undefined,
+): Promise<HoverSearchResult> {
+	const failures = [...collection.failures];
+	for (const route of collection.routes) {
+		try {
+			const hover = await requestHover(route, input, signal);
+			if (hover) return { hover, serverId: route.target.serverId, failures };
+		} catch (error) {
+			rethrowIfAborted(signal);
+			failures.push({
+				serverId: route.target.serverId,
+				reason: error instanceof Error ? error.message : String(error),
+			});
+		}
+	}
+	return { failures };
 }
 
 export function createLspHoverTool(
@@ -225,33 +279,17 @@ export function createLspHoverTool(
 					details: { found: false },
 				};
 			}
-			const failures = [...collection.failures];
-			for (const route of collection.routes) {
-				try {
-					const result = await route.client.sendRequest<Hover | null>(
-						"textDocument/hover",
-						{ textDocument: { uri: route.target.serverUri }, position: toPosition(input) },
-						signal,
-					);
-					if (!result) continue;
-					const hover = hoverContentsToText(result.contents).trim();
-					if (!hover) continue;
-					const prefix = collection.matchedServerCount > 1 ? `Hover from ${route.target.serverId}:\n` : "";
-					return {
-						content: [{ type: "text", text: `${prefix}${hover}${failureText(failures)}` }],
-						details: { found: true },
-					};
-				} catch (error) {
-					rethrowIfAborted(signal);
-					failures.push({
-						serverId: route.target.serverId,
-						reason: error instanceof Error ? error.message : String(error),
-					});
-				}
+			const result = await findHover(collection, input, signal);
+			if (!result.hover) {
+				return {
+					content: [{ type: "text", text: `No hover information.${failureText(result.failures)}` }],
+					details: { found: false },
+				};
 			}
+			const prefix = collection.matchedServerCount > 1 ? `Hover from ${result.serverId}:\n` : "";
 			return {
-				content: [{ type: "text", text: `No hover information.${failureText(failures)}` }],
-				details: { found: false },
+				content: [{ type: "text", text: `${prefix}${result.hover}${failureText(result.failures)}` }],
+				details: { found: true },
 			};
 		},
 		renderCall(args, theme) {

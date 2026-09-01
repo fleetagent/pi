@@ -6,7 +6,11 @@
 
 import { AuthStorage, InMemorySessionManager, ModelRegistry, PiAgent } from "@fleetagent/pi-coding-agent";
 
-async function createAuthExample(options: { authStorage: AuthStorage; modelRegistry: ModelRegistry }) {
+interface AuthExampleOptions {
+	authStorage: AuthStorage;
+	modelRegistry: ModelRegistry;
+}
+async function createAuthExample(options: AuthExampleOptions) {
 	const pi = await PiAgent.create({
 		authStorage: options.authStorage,
 		modelRegistry: options.modelRegistry,

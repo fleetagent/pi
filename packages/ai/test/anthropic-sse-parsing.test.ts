@@ -5,7 +5,12 @@ import { getModel } from "../src/models.ts";
 import { streamAnthropic } from "../src/providers/anthropic.ts";
 import type { Context, ToolCall } from "../src/types.ts";
 
-function createSseResponse(events: Array<{ event: string; data: string }>): Response {
+interface AnthropicSseEvent {
+	event: string;
+	data: string;
+}
+
+function createSseResponse(events: AnthropicSseEvent[]): Response {
 	const body = events.map(({ event, data }) => `event: ${event}\ndata: ${data}\n`).join("\n");
 	return new Response(body, {
 		status: 200,

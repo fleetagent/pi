@@ -1,8 +1,11 @@
 import {
+	type Candidate,
 	type GenerateContentConfig,
 	type GenerateContentParameters,
+	type GenerateContentResponse,
 	GoogleGenAI,
 	type HttpOptions,
+	type Part,
 	ResourceScope,
 	type ThinkingConfig,
 	ThinkingLevel,
@@ -26,7 +29,12 @@ import type {
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { providerHeadersToRecord } from "../utils/headers.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
-import type { GoogleThinkingLevel } from "./google-shared.ts";
+import type {
+	GoogleStreamState,
+	GoogleThinkingLevel,
+	GoogleThinkingOptions,
+	GoogleToolChoice,
+} from "./google-shared.ts";
 import {
 	convertMessages,
 	convertTools,
@@ -39,12 +47,8 @@ import {
 import { buildBaseOptions } from "./simple-options.ts";
 
 export interface GoogleVertexOptions extends StreamOptions {
-	toolChoice?: "auto" | "none" | "any";
-	thinking?: {
-		enabled: boolean;
-		budgetTokens?: number; // -1 for dynamic, 0 to disable
-		level?: GoogleThinkingLevel;
-	};
+	toolChoice?: GoogleToolChoice;
+	thinking?: GoogleThinkingOptions;
 	project?: string;
 	location?: string;
 }
@@ -60,6 +64,213 @@ const THINKING_LEVEL_MAP: Record<GoogleThinkingLevel, ThinkingLevel> = {
 	HIGH: ThinkingLevel.HIGH,
 };
 
+type GoogleVertexStreamState = GoogleStreamState;
+
+function createGoogleVertexOutput(model: Model<"google-vertex">): AssistantMessage {
+	return {
+		role: "assistant",
+		content: [],
+		api: "google-vertex" as Api,
+		provider: model.provider,
+		model: model.id,
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "stop",
+		timestamp: Date.now(),
+	};
+}
+
+function googleVertexBlockIndex(state: GoogleVertexStreamState): number {
+	return state.output.content.length - 1;
+}
+
+function endGoogleVertexBlock(state: GoogleVertexStreamState): void {
+	const block = state.currentBlock;
+	if (!block) return;
+	if (block.type === "text") {
+		state.stream.push({
+			type: "text_end",
+			contentIndex: googleVertexBlockIndex(state),
+			content: block.text,
+			partial: state.output,
+		});
+	} else {
+		state.stream.push({
+			type: "thinking_end",
+			contentIndex: googleVertexBlockIndex(state),
+			content: block.thinking,
+			partial: state.output,
+		});
+	}
+	state.currentBlock = null;
+}
+
+function ensureGoogleVertexTextBlock(
+	state: GoogleVertexStreamState,
+	isThinking: boolean,
+): TextContent | ThinkingContent {
+	const current = state.currentBlock;
+	if (current && ((isThinking && current.type === "thinking") || (!isThinking && current.type === "text"))) {
+		return current;
+	}
+	endGoogleVertexBlock(state);
+	if (isThinking) {
+		const block: ThinkingContent = { type: "thinking", thinking: "", thinkingSignature: undefined };
+		state.currentBlock = block;
+		state.output.content.push(block);
+		state.stream.push({ type: "thinking_start", contentIndex: googleVertexBlockIndex(state), partial: state.output });
+		return block;
+	}
+	const block: TextContent = { type: "text", text: "" };
+	state.currentBlock = block;
+	state.output.content.push(block);
+	state.stream.push({ type: "text_start", contentIndex: googleVertexBlockIndex(state), partial: state.output });
+	return block;
+}
+
+function appendGoogleVertexTextPart(state: GoogleVertexStreamState, part: Part): void {
+	if (part.text === undefined) return;
+	const block = ensureGoogleVertexTextBlock(state, isThinkingPart(part));
+	if (block.type === "thinking") {
+		block.thinking += part.text;
+		block.thinkingSignature = retainThoughtSignature(block.thinkingSignature, part.thoughtSignature);
+		state.stream.push({
+			type: "thinking_delta",
+			contentIndex: googleVertexBlockIndex(state),
+			delta: part.text,
+			partial: state.output,
+		});
+		return;
+	}
+	block.text += part.text;
+	block.textSignature = retainThoughtSignature(block.textSignature, part.thoughtSignature);
+	state.stream.push({
+		type: "text_delta",
+		contentIndex: googleVertexBlockIndex(state),
+		delta: part.text,
+		partial: state.output,
+	});
+}
+
+function appendGoogleVertexToolCall(state: GoogleVertexStreamState, part: Part): void {
+	if (!part.functionCall) return;
+	endGoogleVertexBlock(state);
+	const providedId = part.functionCall.id;
+	const needsNewId =
+		!providedId || state.output.content.some((block) => block.type === "toolCall" && block.id === providedId);
+	const toolCall: ToolCall = {
+		type: "toolCall",
+		id: needsNewId ? `${part.functionCall.name}_${Date.now()}_${++toolCallCounter}` : providedId,
+		name: part.functionCall.name || "",
+		arguments: (part.functionCall.args as Record<string, any>) ?? {},
+		...(part.thoughtSignature && { thoughtSignature: part.thoughtSignature }),
+	};
+	state.output.content.push(toolCall);
+	state.stream.push({ type: "toolcall_start", contentIndex: googleVertexBlockIndex(state), partial: state.output });
+	state.stream.push({
+		type: "toolcall_delta",
+		contentIndex: googleVertexBlockIndex(state),
+		delta: JSON.stringify(toolCall.arguments),
+		partial: state.output,
+	});
+	state.stream.push({
+		type: "toolcall_end",
+		contentIndex: googleVertexBlockIndex(state),
+		toolCall,
+		partial: state.output,
+	});
+}
+
+function applyGoogleVertexFinishReason(output: AssistantMessage, candidate: Candidate | undefined): void {
+	if (!candidate?.finishReason) return;
+	output.stopReason = mapStopReason(candidate.finishReason);
+	if (output.content.some((block) => block.type === "toolCall")) output.stopReason = "toolUse";
+}
+
+function applyGoogleVertexUsage(
+	output: AssistantMessage,
+	chunk: GenerateContentResponse,
+	model: Model<"google-vertex">,
+): void {
+	if (!chunk.usageMetadata) return;
+	output.usage = {
+		input: (chunk.usageMetadata.promptTokenCount || 0) - (chunk.usageMetadata.cachedContentTokenCount || 0),
+		output: (chunk.usageMetadata.candidatesTokenCount || 0) + (chunk.usageMetadata.thoughtsTokenCount || 0),
+		cacheRead: chunk.usageMetadata.cachedContentTokenCount || 0,
+		cacheWrite: 0,
+		totalTokens: chunk.usageMetadata.totalTokenCount || 0,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+	};
+	calculateCost(model, output.usage);
+}
+
+function processGoogleVertexChunk(
+	state: GoogleVertexStreamState,
+	chunk: GenerateContentResponse,
+	model: Model<"google-vertex">,
+): void {
+	state.output.responseId ||= chunk.responseId;
+	const candidate = chunk.candidates?.[0];
+	for (const part of candidate?.content?.parts ?? []) {
+		appendGoogleVertexTextPart(state, part);
+		appendGoogleVertexToolCall(state, part);
+	}
+	applyGoogleVertexFinishReason(state.output, candidate);
+	applyGoogleVertexUsage(state.output, chunk, model);
+}
+
+function completeGoogleVertexStream(state: GoogleVertexStreamState, signal: AbortSignal | undefined): void {
+	endGoogleVertexBlock(state);
+	if (signal?.aborted) throw new Error("Request was aborted");
+	if (state.output.stopReason === "pending") {
+		throw new Error("Google Vertex stream ended without a finish reason");
+	}
+	if (state.output.stopReason === "aborted" || state.output.stopReason === "error") {
+		throw new Error("An unknown error occurred");
+	}
+	state.stream.push({ type: "done", reason: state.output.stopReason, message: state.output });
+	state.stream.end();
+}
+
+function failGoogleVertexStream(state: GoogleVertexStreamState, error: unknown, signal: AbortSignal | undefined): void {
+	for (const block of state.output.content) {
+		if ("index" in block) delete (block as { index?: number }).index;
+	}
+	state.output.stopReason = signal?.aborted ? "aborted" : "error";
+	state.output.errorMessage = error instanceof Error ? error.message : JSON.stringify(error);
+	state.stream.push({ type: "error", reason: state.output.stopReason, error: state.output });
+	state.stream.end();
+}
+
+async function runGoogleVertexStream(
+	model: Model<"google-vertex">,
+	context: Context,
+	options: GoogleVertexOptions | undefined,
+	state: GoogleVertexStreamState,
+): Promise<void> {
+	try {
+		const apiKey = resolveApiKey(options);
+		const client = apiKey
+			? createClientWithApiKey(model, apiKey, options?.headers)
+			: createClient(model, resolveProject(options), resolveLocation(options), options?.headers);
+		let params = buildParams(model, context, options);
+		const nextParams = await options?.onPayload?.(params, model);
+		if (nextParams !== undefined) params = nextParams as GenerateContentParameters;
+		const googleStream = await retryGoogleRequest(() => client.models.generateContentStream(params), options);
+		state.stream.push({ type: "start", partial: state.output });
+		for await (const chunk of googleStream) processGoogleVertexChunk(state, chunk, model);
+		completeGoogleVertexStream(state, options?.signal);
+	} catch (error) {
+		failGoogleVertexStream(state, error, options?.signal);
+	}
+}
+
 // Counter for generating unique tool call IDs
 let toolCallCounter = 0;
 
@@ -69,232 +280,12 @@ export const streamGoogleVertex: StreamFunction<"google-vertex", GoogleVertexOpt
 	options?: GoogleVertexOptions,
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
-
-	(async () => {
-		const output: AssistantMessage = {
-			role: "assistant",
-			content: [],
-			api: "google-vertex" as Api,
-			provider: model.provider,
-			model: model.id,
-			usage: {
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			stopReason: "stop",
-			timestamp: Date.now(),
-		};
-
-		try {
-			const apiKey = resolveApiKey(options);
-			// Create the client using either a Vertex API key, if provided, or ADC with project and location
-			const client = apiKey
-				? createClientWithApiKey(model, apiKey, options?.headers)
-				: createClient(model, resolveProject(options), resolveLocation(options), options?.headers);
-			let params = buildParams(model, context, options);
-			const nextParams = await options?.onPayload?.(params, model);
-			if (nextParams !== undefined) {
-				params = nextParams as GenerateContentParameters;
-			}
-			const googleStream = await retryGoogleRequest(() => client.models.generateContentStream(params), options);
-
-			stream.push({ type: "start", partial: output });
-			let currentBlock: TextContent | ThinkingContent | null = null;
-			const blocks = output.content;
-			const blockIndex = () => blocks.length - 1;
-			for await (const chunk of googleStream) {
-				// Vertex uses the same @google/genai GenerateContentResponse type as Gemini.
-				// responseId is documented there as an output-only identifier for each response.
-				output.responseId ||= chunk.responseId;
-				const candidate = chunk.candidates?.[0];
-				if (candidate?.content?.parts) {
-					for (const part of candidate.content.parts) {
-						if (part.text !== undefined) {
-							const isThinking = isThinkingPart(part);
-							if (
-								!currentBlock ||
-								(isThinking && currentBlock.type !== "thinking") ||
-								(!isThinking && currentBlock.type !== "text")
-							) {
-								if (currentBlock) {
-									if (currentBlock.type === "text") {
-										stream.push({
-											type: "text_end",
-											contentIndex: blocks.length - 1,
-											content: currentBlock.text,
-											partial: output,
-										});
-									} else {
-										stream.push({
-											type: "thinking_end",
-											contentIndex: blockIndex(),
-											content: currentBlock.thinking,
-											partial: output,
-										});
-									}
-								}
-								if (isThinking) {
-									currentBlock = { type: "thinking", thinking: "", thinkingSignature: undefined };
-									output.content.push(currentBlock);
-									stream.push({ type: "thinking_start", contentIndex: blockIndex(), partial: output });
-								} else {
-									currentBlock = { type: "text", text: "" };
-									output.content.push(currentBlock);
-									stream.push({ type: "text_start", contentIndex: blockIndex(), partial: output });
-								}
-							}
-							if (currentBlock.type === "thinking") {
-								currentBlock.thinking += part.text;
-								currentBlock.thinkingSignature = retainThoughtSignature(
-									currentBlock.thinkingSignature,
-									part.thoughtSignature,
-								);
-								stream.push({
-									type: "thinking_delta",
-									contentIndex: blockIndex(),
-									delta: part.text,
-									partial: output,
-								});
-							} else {
-								currentBlock.text += part.text;
-								currentBlock.textSignature = retainThoughtSignature(
-									currentBlock.textSignature,
-									part.thoughtSignature,
-								);
-								stream.push({
-									type: "text_delta",
-									contentIndex: blockIndex(),
-									delta: part.text,
-									partial: output,
-								});
-							}
-						}
-
-						if (part.functionCall) {
-							if (currentBlock) {
-								if (currentBlock.type === "text") {
-									stream.push({
-										type: "text_end",
-										contentIndex: blockIndex(),
-										content: currentBlock.text,
-										partial: output,
-									});
-								} else {
-									stream.push({
-										type: "thinking_end",
-										contentIndex: blockIndex(),
-										content: currentBlock.thinking,
-										partial: output,
-									});
-								}
-								currentBlock = null;
-							}
-
-							const providedId = part.functionCall.id;
-							const needsNewId =
-								!providedId || output.content.some((b) => b.type === "toolCall" && b.id === providedId);
-							const toolCallId = needsNewId
-								? `${part.functionCall.name}_${Date.now()}_${++toolCallCounter}`
-								: providedId;
-
-							const toolCall: ToolCall = {
-								type: "toolCall",
-								id: toolCallId,
-								name: part.functionCall.name || "",
-								arguments: (part.functionCall.args as Record<string, any>) ?? {},
-								...(part.thoughtSignature && { thoughtSignature: part.thoughtSignature }),
-							};
-
-							output.content.push(toolCall);
-							stream.push({ type: "toolcall_start", contentIndex: blockIndex(), partial: output });
-							stream.push({
-								type: "toolcall_delta",
-								contentIndex: blockIndex(),
-								delta: JSON.stringify(toolCall.arguments),
-								partial: output,
-							});
-							stream.push({ type: "toolcall_end", contentIndex: blockIndex(), toolCall, partial: output });
-						}
-					}
-				}
-
-				if (candidate?.finishReason) {
-					output.stopReason = mapStopReason(candidate.finishReason);
-					if (output.content.some((b) => b.type === "toolCall")) {
-						output.stopReason = "toolUse";
-					}
-				}
-
-				if (chunk.usageMetadata) {
-					output.usage = {
-						input:
-							(chunk.usageMetadata.promptTokenCount || 0) - (chunk.usageMetadata.cachedContentTokenCount || 0),
-						output:
-							(chunk.usageMetadata.candidatesTokenCount || 0) + (chunk.usageMetadata.thoughtsTokenCount || 0),
-						cacheRead: chunk.usageMetadata.cachedContentTokenCount || 0,
-						cacheWrite: 0,
-						totalTokens: chunk.usageMetadata.totalTokenCount || 0,
-						cost: {
-							input: 0,
-							output: 0,
-							cacheRead: 0,
-							cacheWrite: 0,
-							total: 0,
-						},
-					};
-					calculateCost(model, output.usage);
-				}
-			}
-
-			if (currentBlock) {
-				if (currentBlock.type === "text") {
-					stream.push({
-						type: "text_end",
-						contentIndex: blockIndex(),
-						content: currentBlock.text,
-						partial: output,
-					});
-				} else {
-					stream.push({
-						type: "thinking_end",
-						contentIndex: blockIndex(),
-						content: currentBlock.thinking,
-						partial: output,
-					});
-				}
-			}
-
-			if (options?.signal?.aborted) {
-				throw new Error("Request was aborted");
-			}
-
-			if (output.stopReason === "pending") {
-				throw new Error("Google Vertex stream ended without a finish reason");
-			}
-			if (output.stopReason === "aborted" || output.stopReason === "error") {
-				throw new Error("An unknown error occurred");
-			}
-
-			stream.push({ type: "done", reason: output.stopReason, message: output });
-			stream.end();
-		} catch (error) {
-			// Remove internal index property used during streaming
-			for (const block of output.content) {
-				if ("index" in block) {
-					delete (block as { index?: number }).index;
-				}
-			}
-			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-			output.errorMessage = error instanceof Error ? error.message : JSON.stringify(error);
-			stream.push({ type: "error", reason: output.stopReason, error: output });
-			stream.end();
-		}
-	})();
-
+	const state: GoogleVertexStreamState = {
+		output: createGoogleVertexOutput(model),
+		stream,
+		currentBlock: null,
+	};
+	void runGoogleVertexStream(model, context, options, state);
 	return stream;
 };
 
@@ -428,6 +419,23 @@ function resolveLocation(options?: GoogleVertexOptions): string {
 	return location;
 }
 
+function resolveGoogleVertexThinkingConfig(
+	model: Model<"google-vertex">,
+	thinking: GoogleThinkingOptions | undefined,
+): ThinkingConfig | undefined {
+	if (thinking?.enabled && model.reasoning) {
+		const config: ThinkingConfig = { includeThoughts: true };
+		if (thinking.level !== undefined) {
+			config.thinkingLevel = THINKING_LEVEL_MAP[thinking.level];
+		} else if (thinking.budgetTokens !== undefined) {
+			config.thinkingBudget = thinking.budgetTokens;
+		}
+		return config;
+	}
+	if (model.reasoning && thinking && !thinking.enabled) return getDisabledThinkingConfig(model);
+	return undefined;
+}
+
 function buildParams(
 	model: Model<"google-vertex">,
 	context: Context,
@@ -459,17 +467,8 @@ function buildParams(
 		config.toolConfig = undefined;
 	}
 
-	if (options.thinking?.enabled && model.reasoning) {
-		const thinkingConfig: ThinkingConfig = { includeThoughts: true };
-		if (options.thinking.level !== undefined) {
-			thinkingConfig.thinkingLevel = THINKING_LEVEL_MAP[options.thinking.level];
-		} else if (options.thinking.budgetTokens !== undefined) {
-			thinkingConfig.thinkingBudget = options.thinking.budgetTokens;
-		}
-		config.thinkingConfig = thinkingConfig;
-	} else if (model.reasoning && options.thinking && !options.thinking.enabled) {
-		config.thinkingConfig = getDisabledThinkingConfig(model);
-	}
+	const thinkingConfig = resolveGoogleVertexThinkingConfig(model, options.thinking);
+	if (thinkingConfig) config.thinkingConfig = thinkingConfig;
 
 	if (options.signal) {
 		if (options.signal.aborted) {

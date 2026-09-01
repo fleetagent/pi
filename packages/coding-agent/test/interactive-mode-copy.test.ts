@@ -11,45 +11,72 @@ vi.mock("../src/utils/clipboard.ts", () => ({
 
 import type { SessionTreeNode } from "../src/core/session/types.ts";
 import type { TreeSelectorComponent } from "../src/modes/interactive/components/tree-selector.ts";
-import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
+import {
+	type CopyCommandOptions,
+	InteractiveMode,
+	type SelectorFactory,
+} from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 
+interface SetupKeyHandlersEditor {
+	onAction(action: string, handler: () => void): void;
+	onEscape?(): void;
+	onCtrlD?(): void;
+	onChange?(text: string): void;
+	onPasteImage?(): void;
+}
+
+interface DebugUi {
+	onDebug?(): void;
+}
+
+interface CopyCommandSession {
+	getLastAssistantText(): string | undefined;
+}
+
+interface TreeSession {
+	getTree(): SessionTreeNode[];
+	getLeafId(): string | null;
+	appendLabelChange(entryId: string, label: string | undefined): void;
+}
+
+interface TreeSettingsManager {
+	getTreeFilterMode(): "default";
+}
+
+interface TreeTerminal {
+	rows: number;
+}
+
+interface TreeUi {
+	terminal: TreeTerminal;
+	requestRender(): void;
+}
+
 type SetupKeyHandlersContext = {
-	defaultEditor: {
-		onAction: (action: string, handler: () => void) => void;
-		onEscape?: () => void;
-		onCtrlD?: () => void;
-		onChange?: (text: string) => void;
-		onPasteImage?: () => void;
-	};
-	ui: { onDebug?: () => void };
-	handleCopyCommand: (options?: { flashConfirmation?: boolean }) => Promise<void>;
+	defaultEditor: SetupKeyHandlersEditor;
+	ui: DebugUi;
+	handleCopyCommand: (options?: CopyCommandOptions) => Promise<void>;
 };
 
 type CopyCommandContext = {
-	session: { getLastAssistantText: () => string | undefined };
+	session: CopyCommandSession;
 	showStatus: (message: string) => void;
 	showError: (message: string) => void;
 };
 
 type ShowTreeContext = {
-	activeSession: {
-		getTree: () => SessionTreeNode[];
-		getLeafId: () => string | null;
-		appendLabelChange: (entryId: string, label: string | undefined) => void;
-	};
-	settingsManager: { getTreeFilterMode: () => "default" };
-	ui: { terminal: { rows: number }; requestRender: () => void };
-	showSelector: (
-		factory: (done: () => void) => { component: TreeSelectorComponent; focus: TreeSelectorComponent },
-	) => void;
+	activeSession: TreeSession;
+	settingsManager: TreeSettingsManager;
+	ui: TreeUi;
+	showSelector: (factory: SelectorFactory) => void;
 	showStatus: (message: string) => void;
 	showError: (message: string) => void;
 };
 
 type InteractiveModePrivate = {
 	setupKeyHandlers(this: SetupKeyHandlersContext): void;
-	handleCopyCommand(this: CopyCommandContext, options?: { flashConfirmation?: boolean }): Promise<void>;
+	handleCopyCommand(this: CopyCommandContext, options?: CopyCommandOptions): Promise<void>;
 	showTreeSelector(this: ShowTreeContext): void;
 };
 
@@ -146,7 +173,7 @@ describe("InteractiveMode message copy", () => {
 			settingsManager: { getTreeFilterMode: () => "default" },
 			ui: { terminal: { rows: 24 }, requestRender: vi.fn() },
 			showSelector: (factory) => {
-				selector = factory(vi.fn()).component;
+				selector = factory(vi.fn()).component as TreeSelectorComponent;
 			},
 			showStatus,
 			showError,

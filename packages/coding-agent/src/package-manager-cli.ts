@@ -12,7 +12,7 @@ import {
 	type SelfUpdateCommand,
 	VERSION,
 } from "./config.ts";
-import { DefaultPackageManager } from "./core/package-manager.ts";
+import { type ConfiguredPackage, DefaultPackageManager } from "./core/package-manager.ts";
 import { SettingsManager } from "./core/settings-manager.ts";
 import { spawnProcess } from "./utils/child-process.ts";
 import { getLatestPiRelease, isNewerPackageVersion } from "./utils/version-check.ts";
@@ -54,6 +54,27 @@ interface PackageCommandOptions {
 	missingOptionValue?: string;
 	conflictingOptions?: string;
 }
+
+type UpdateFlag = "self" | "extensions" | "force";
+
+interface PackageCommandParseState {
+	command: PackageCommand;
+	local: boolean;
+	help: boolean;
+	invalidOption?: string;
+	invalidArgument?: string;
+	missingOptionValue?: string;
+	conflictingOptions?: string;
+	source?: string;
+	updateFlags: Record<UpdateFlag, boolean>;
+	extensionFlagSource?: string;
+}
+
+const UPDATE_FLAG_OPTIONS: ReadonlyMap<string, UpdateFlag> = new Map([
+	["--self", "self"],
+	["--extensions", "extensions"],
+	["--force", "force"],
+]);
 
 function reportSettingsErrors(settingsManager: SettingsManager, context: string): void {
 	const errors = settingsManager.drainErrors();
@@ -144,147 +165,122 @@ List installed packages from user and project settings.
 	}
 }
 
+function parsePackageCommandName(rawCommand: string | undefined): PackageCommand | undefined {
+	if (rawCommand === "uninstall") return "remove";
+	if (rawCommand === "install" || rawCommand === "remove" || rawCommand === "update" || rawCommand === "list") {
+		return rawCommand;
+	}
+	return undefined;
+}
+
+function consumeExtensionOption(rest: string[], index: number, state: PackageCommandParseState): number {
+	if (state.command !== "update") {
+		state.invalidOption ??= "--extension";
+		return index;
+	}
+
+	const value = rest[index + 1];
+	if (!value || value.startsWith("-")) {
+		state.missingOptionValue ??= "--extension";
+		return index;
+	}
+	if (state.extensionFlagSource) {
+		state.conflictingOptions ??= "--extension can only be provided once";
+		return index + 1;
+	}
+	state.extensionFlagSource = value;
+	return index + 1;
+}
+
+function recordUnrecognizedPackageArgument(arg: string, state: PackageCommandParseState): void {
+	if (arg.startsWith("-")) {
+		state.invalidOption ??= arg;
+		return;
+	}
+	if (!state.source) state.source = arg;
+	else state.invalidArgument ??= arg;
+}
+
+function consumePackageCommandArgument(rest: string[], index: number, state: PackageCommandParseState): number {
+	const arg = rest[index];
+	if (arg === "-h" || arg === "--help") {
+		state.help = true;
+		return index;
+	}
+	if (arg === "-l" || arg === "--local") {
+		if (state.command === "install" || state.command === "remove") state.local = true;
+		else state.invalidOption ??= arg;
+		return index;
+	}
+
+	const updateFlag = UPDATE_FLAG_OPTIONS.get(arg);
+	if (updateFlag) {
+		if (state.command === "update") state.updateFlags[updateFlag] = true;
+		else state.invalidOption ??= arg;
+		return index;
+	}
+	if (arg === "--extension") return consumeExtensionOption(rest, index, state);
+	recordUnrecognizedPackageArgument(arg, state);
+	return index;
+}
+
+function resolveExtensionFlagUpdateTarget(state: PackageCommandParseState): UpdateTarget {
+	if (state.updateFlags.self || state.updateFlags.extensions) {
+		state.conflictingOptions ??= "--extension cannot be combined with --self or --extensions";
+	}
+	if (state.source) {
+		state.conflictingOptions ??= "--extension cannot be combined with a positional source";
+	}
+	return { type: "extensions", source: state.extensionFlagSource };
+}
+
+function resolvePositionalUpdateTarget(state: PackageCommandParseState): UpdateTarget {
+	const source = state.source!;
+	if (source === "self" || source === "pi") {
+		return state.updateFlags.extensions ? { type: "all" } : { type: "self" };
+	}
+	if (state.updateFlags.extensions || state.updateFlags.self) {
+		state.conflictingOptions ??= "positional update targets cannot be combined with --self or --extensions";
+	}
+	return { type: "extensions", source };
+}
+
+function resolveUpdateTarget(state: PackageCommandParseState): UpdateTarget | undefined {
+	if (state.command !== "update") return undefined;
+	if (state.extensionFlagSource) return resolveExtensionFlagUpdateTarget(state);
+	if (state.source) return resolvePositionalUpdateTarget(state);
+	if (state.updateFlags.self && state.updateFlags.extensions) return { type: "all" };
+	if (state.updateFlags.self) return { type: "self" };
+	if (state.updateFlags.extensions) return { type: "extensions" };
+	return { type: "all" };
+}
+
 function parsePackageCommand(args: string[]): PackageCommandOptions | undefined {
 	const [rawCommand, ...rest] = args;
-	let command: PackageCommand | undefined;
-	if (rawCommand === "uninstall") {
-		command = "remove";
-	} else if (rawCommand === "install" || rawCommand === "remove" || rawCommand === "update" || rawCommand === "list") {
-		command = rawCommand;
-	}
-	if (!command) {
-		return undefined;
-	}
+	const command = parsePackageCommandName(rawCommand);
+	if (!command) return undefined;
 
-	let local = false;
-	let force = false;
-	let help = false;
-	let invalidOption: string | undefined;
-	let invalidArgument: string | undefined;
-	let missingOptionValue: string | undefined;
-	let conflictingOptions: string | undefined;
-	let source: string | undefined;
-	let selfFlag = false;
-	let extensionsFlag = false;
-	let extensionFlagSource: string | undefined;
-
+	const state: PackageCommandParseState = {
+		command,
+		local: false,
+		help: false,
+		updateFlags: { self: false, extensions: false, force: false },
+	};
 	for (let index = 0; index < rest.length; index++) {
-		const arg = rest[index];
-		if (arg === "-h" || arg === "--help") {
-			help = true;
-			continue;
-		}
-
-		if (arg === "-l" || arg === "--local") {
-			if (command === "install" || command === "remove") {
-				local = true;
-			} else {
-				invalidOption = invalidOption ?? arg;
-			}
-			continue;
-		}
-
-		if (arg === "--self") {
-			if (command === "update") {
-				selfFlag = true;
-			} else {
-				invalidOption = invalidOption ?? arg;
-			}
-			continue;
-		}
-
-		if (arg === "--extensions") {
-			if (command === "update") {
-				extensionsFlag = true;
-			} else {
-				invalidOption = invalidOption ?? arg;
-			}
-			continue;
-		}
-
-		if (arg === "--force") {
-			if (command === "update") {
-				force = true;
-			} else {
-				invalidOption = invalidOption ?? arg;
-			}
-			continue;
-		}
-
-		if (arg === "--extension") {
-			if (command !== "update") {
-				invalidOption = invalidOption ?? arg;
-				continue;
-			}
-
-			const value = rest[index + 1];
-			if (!value || value.startsWith("-")) {
-				missingOptionValue = missingOptionValue ?? arg;
-			} else if (extensionFlagSource) {
-				conflictingOptions = conflictingOptions ?? "--extension can only be provided once";
-				index++;
-			} else {
-				extensionFlagSource = value;
-				index++;
-			}
-			continue;
-		}
-
-		if (arg.startsWith("-")) {
-			invalidOption = invalidOption ?? arg;
-			continue;
-		}
-
-		if (!source) {
-			source = arg;
-		} else {
-			invalidArgument = invalidArgument ?? arg;
-		}
-	}
-
-	let updateTarget: UpdateTarget | undefined;
-	if (command === "update") {
-		if (extensionFlagSource) {
-			if (selfFlag || extensionsFlag) {
-				conflictingOptions = conflictingOptions ?? "--extension cannot be combined with --self or --extensions";
-			}
-			if (source) {
-				conflictingOptions = conflictingOptions ?? "--extension cannot be combined with a positional source";
-			}
-			updateTarget = { type: "extensions", source: extensionFlagSource };
-		} else if (source) {
-			const sourceIsSelf = source === "self" || source === "pi";
-			if (sourceIsSelf) {
-				updateTarget = extensionsFlag ? { type: "all" } : { type: "self" };
-			} else {
-				if (extensionsFlag || selfFlag) {
-					conflictingOptions =
-						conflictingOptions ?? "positional update targets cannot be combined with --self or --extensions";
-				}
-				updateTarget = { type: "extensions", source };
-			}
-		} else if (selfFlag && extensionsFlag) {
-			updateTarget = { type: "all" };
-		} else if (selfFlag) {
-			updateTarget = { type: "self" };
-		} else if (extensionsFlag) {
-			updateTarget = { type: "extensions" };
-		} else {
-			updateTarget = { type: "all" };
-		}
+		index = consumePackageCommandArgument(rest, index, state);
 	}
 
 	return {
 		command,
-		source,
-		updateTarget,
-		local,
-		force,
-		help,
-		invalidOption,
-		invalidArgument,
-		missingOptionValue,
-		conflictingOptions,
+		source: state.source,
+		updateTarget: resolveUpdateTarget(state),
+		local: state.local,
+		force: state.updateFlags.force,
+		help: state.help,
+		invalidOption: state.invalidOption,
+		invalidArgument: state.invalidArgument,
+		missingOptionValue: state.missingOptionValue,
+		conflictingOptions: state.conflictingOptions,
 	};
 }
 
@@ -394,6 +390,129 @@ function prepareWindowsNpmSelfUpdate(): void {
 	quarantineWindowsNativeDependencies(packageDir);
 }
 
+function handlePackageCommandPreflight(options: PackageCommandOptions): boolean {
+	if (options.help) {
+		printPackageCommandHelp(options.command);
+		return true;
+	}
+	if (options.invalidOption) {
+		console.error(chalk.red(`Unknown option ${options.invalidOption} for "${options.command}".`));
+		console.error(chalk.dim(`Use "${APP_NAME} --help" or "${getPackageCommandUsage(options.command)}".`));
+	} else if (options.missingOptionValue) {
+		console.error(chalk.red(`Missing value for ${options.missingOptionValue}.`));
+		console.error(chalk.dim(`Usage: ${getPackageCommandUsage(options.command)}`));
+	} else if (options.invalidArgument) {
+		console.error(chalk.red(`Unexpected argument ${options.invalidArgument}.`));
+		console.error(chalk.dim(`Usage: ${getPackageCommandUsage(options.command)}`));
+	} else if (options.conflictingOptions) {
+		console.error(chalk.red(options.conflictingOptions));
+		console.error(chalk.dim(`Usage: ${getPackageCommandUsage(options.command)}`));
+	} else if ((options.command === "install" || options.command === "remove") && !options.source) {
+		console.error(chalk.red(`Missing ${options.command} source.`));
+		console.error(chalk.dim(`Usage: ${getPackageCommandUsage(options.command)}`));
+	} else {
+		return false;
+	}
+	process.exitCode = 1;
+	return true;
+}
+
+function printConfiguredPackage(pkg: ConfiguredPackage): void {
+	const display = pkg.filtered ? `${pkg.source} (filtered)` : pkg.source;
+	console.log(`  ${display}`);
+	if (pkg.installedPath) console.log(chalk.dim(`    ${pkg.installedPath}`));
+}
+
+function listConfiguredPackages(packageManager: DefaultPackageManager): void {
+	const configuredPackages = packageManager.listConfiguredPackages();
+	const userPackages = configuredPackages.filter((pkg) => pkg.scope === "user");
+	const projectPackages = configuredPackages.filter((pkg) => pkg.scope === "project");
+	if (configuredPackages.length === 0) {
+		console.log(chalk.dim("No packages installed."));
+		return;
+	}
+	if (userPackages.length > 0) {
+		console.log(chalk.bold("User packages:"));
+		for (const pkg of userPackages) printConfiguredPackage(pkg);
+	}
+	if (projectPackages.length > 0) {
+		if (userPackages.length > 0) console.log();
+		console.log(chalk.bold("Project packages:"));
+		for (const pkg of projectPackages) printConfiguredPackage(pkg);
+	}
+}
+
+async function updateConfiguredPackages(packageManager: DefaultPackageManager, target: UpdateTarget): Promise<void> {
+	if (!updateTargetIncludesExtensions(target)) return;
+	const updateSource = target.type === "extensions" ? target.source : undefined;
+	await packageManager.update(updateSource);
+	console.log(chalk.green(updateSource ? `Updated ${updateSource}` : "Updated packages"));
+}
+
+async function updateSelf(force: boolean, npmCommand?: string[]): Promise<void> {
+	const selfUpdatePlan = await getSelfUpdatePlan(force);
+	if (!selfUpdatePlan.shouldRun) return;
+	const installMethod = detectInstallMethod();
+	if (process.platform === "win32" && installMethod !== "npm" && installMethod !== "pnpm") {
+		console.error(chalk.red(`${APP_NAME} self-update on Windows is only supported for npm and pnpm installs.`));
+		console.error(chalk.dim(`Detected install method: ${installMethod}. Update ${APP_NAME} manually.`));
+		process.exitCode = 1;
+		return;
+	}
+	const selfUpdateCommand = getSelfUpdateCommand(PACKAGE_NAME, npmCommand, selfUpdatePlan.packageName);
+	if (!selfUpdateCommand) {
+		printSelfUpdateUnavailable(npmCommand, selfUpdatePlan.packageName);
+		process.exitCode = 1;
+		return;
+	}
+	if (selfUpdatePlan.note) printSelfUpdateNote(selfUpdatePlan.note);
+	try {
+		if (installMethod === "npm") prepareWindowsNpmSelfUpdate();
+		await runSelfUpdate(selfUpdateCommand);
+	} catch (error: unknown) {
+		const message = error instanceof Error ? error.message : "Unknown package command error";
+		console.error(chalk.red(`Error: ${message}`));
+		if (installMethod === "pnpm") printPnpmSelfUpdateMetadataHint();
+		printSelfUpdateFallback(selfUpdateCommand);
+		process.exitCode = 1;
+		return;
+	}
+	console.log(chalk.green(`Updated ${APP_NAME}`));
+}
+
+async function executePackageCommand(
+	options: PackageCommandOptions,
+	packageManager: DefaultPackageManager,
+	selfUpdateNpmCommand: string[] | undefined,
+): Promise<boolean> {
+	const source = options.source;
+	switch (options.command) {
+		case "install":
+			await packageManager.installAndPersist(source!, { local: options.local });
+			console.log(chalk.green(`Installed ${source}`));
+			return true;
+		case "remove": {
+			const removed = await packageManager.removeAndPersist(source!, { local: options.local });
+			if (!removed) {
+				console.error(chalk.red(`No matching package found for ${source}`));
+				process.exitCode = 1;
+				return true;
+			}
+			console.log(chalk.green(`Removed ${source}`));
+			return true;
+		}
+		case "list":
+			listConfiguredPackages(packageManager);
+			return true;
+		case "update": {
+			const target = options.updateTarget ?? { type: "all" };
+			await updateConfiguredPackages(packageManager, target);
+			if (updateTargetIncludesSelf(target)) await updateSelf(options.force, selfUpdateNpmCommand);
+			return true;
+		}
+	}
+}
+
 export async function handleConfigCommand(args: string[]): Promise<boolean> {
 	if (args[0] !== "config") {
 		return false;
@@ -418,177 +537,21 @@ export async function handleConfigCommand(args: string[]): Promise<boolean> {
 
 export async function handlePackageCommand(args: string[]): Promise<boolean> {
 	const options = parsePackageCommand(args);
-	if (!options) {
-		return false;
-	}
-
-	if (options.help) {
-		printPackageCommandHelp(options.command);
-		return true;
-	}
-
-	if (options.invalidOption) {
-		console.error(chalk.red(`Unknown option ${options.invalidOption} for "${options.command}".`));
-		console.error(chalk.dim(`Use "${APP_NAME} --help" or "${getPackageCommandUsage(options.command)}".`));
-		process.exitCode = 1;
-		return true;
-	}
-
-	if (options.missingOptionValue) {
-		console.error(chalk.red(`Missing value for ${options.missingOptionValue}.`));
-		console.error(chalk.dim(`Usage: ${getPackageCommandUsage(options.command)}`));
-		process.exitCode = 1;
-		return true;
-	}
-
-	if (options.invalidArgument) {
-		console.error(chalk.red(`Unexpected argument ${options.invalidArgument}.`));
-		console.error(chalk.dim(`Usage: ${getPackageCommandUsage(options.command)}`));
-		process.exitCode = 1;
-		return true;
-	}
-
-	if (options.conflictingOptions) {
-		console.error(chalk.red(options.conflictingOptions));
-		console.error(chalk.dim(`Usage: ${getPackageCommandUsage(options.command)}`));
-		process.exitCode = 1;
-		return true;
-	}
-
-	const source = options.source;
-	if ((options.command === "install" || options.command === "remove") && !source) {
-		console.error(chalk.red(`Missing ${options.command} source.`));
-		console.error(chalk.dim(`Usage: ${getPackageCommandUsage(options.command)}`));
-		process.exitCode = 1;
-		return true;
-	}
+	if (!options) return false;
+	if (handlePackageCommandPreflight(options)) return true;
 
 	const cwd = process.cwd();
 	const agentDir = getAgentDir();
 	const settingsManager = SettingsManager.create(cwd, agentDir);
 	reportSettingsErrors(settingsManager, "package command");
 	const selfUpdateNpmCommand = settingsManager.getGlobalSettings().npmCommand;
-
 	const packageManager = new DefaultPackageManager({ cwd, agentDir, settingsManager });
-
 	packageManager.setProgressCallback((event) => {
-		if (event.type === "start") {
-			process.stdout.write(chalk.dim(`${event.message}\n`));
-		}
+		if (event.type === "start") process.stdout.write(chalk.dim(`${event.message}\n`));
 	});
 
 	try {
-		switch (options.command) {
-			case "install":
-				await packageManager.installAndPersist(source!, { local: options.local });
-				console.log(chalk.green(`Installed ${source}`));
-				return true;
-
-			case "remove": {
-				const removed = await packageManager.removeAndPersist(source!, { local: options.local });
-				if (!removed) {
-					console.error(chalk.red(`No matching package found for ${source}`));
-					process.exitCode = 1;
-					return true;
-				}
-				console.log(chalk.green(`Removed ${source}`));
-				return true;
-			}
-
-			case "list": {
-				const configuredPackages = packageManager.listConfiguredPackages();
-				const userPackages = configuredPackages.filter((pkg) => pkg.scope === "user");
-				const projectPackages = configuredPackages.filter((pkg) => pkg.scope === "project");
-
-				if (configuredPackages.length === 0) {
-					console.log(chalk.dim("No packages installed."));
-					return true;
-				}
-
-				const formatPackage = (pkg: (typeof configuredPackages)[number]) => {
-					const display = pkg.filtered ? `${pkg.source} (filtered)` : pkg.source;
-					console.log(`  ${display}`);
-					if (pkg.installedPath) {
-						console.log(chalk.dim(`    ${pkg.installedPath}`));
-					}
-				};
-
-				if (userPackages.length > 0) {
-					console.log(chalk.bold("User packages:"));
-					for (const pkg of userPackages) {
-						formatPackage(pkg);
-					}
-				}
-
-				if (projectPackages.length > 0) {
-					if (userPackages.length > 0) console.log();
-					console.log(chalk.bold("Project packages:"));
-					for (const pkg of projectPackages) {
-						formatPackage(pkg);
-					}
-				}
-
-				return true;
-			}
-
-			case "update": {
-				const target = options.updateTarget ?? { type: "all" };
-				if (updateTargetIncludesExtensions(target)) {
-					const updateSource = target.type === "extensions" ? target.source : undefined;
-					await packageManager.update(updateSource);
-					if (updateSource) {
-						console.log(chalk.green(`Updated ${updateSource}`));
-					} else {
-						console.log(chalk.green("Updated packages"));
-					}
-				}
-				if (updateTargetIncludesSelf(target)) {
-					const selfUpdatePlan = await getSelfUpdatePlan(options.force);
-					if (!selfUpdatePlan.shouldRun) {
-						return true;
-					}
-					const installMethod = detectInstallMethod();
-					if (process.platform === "win32" && installMethod !== "npm" && installMethod !== "pnpm") {
-						console.error(
-							chalk.red(`${APP_NAME} self-update on Windows is only supported for npm and pnpm installs.`),
-						);
-						console.error(chalk.dim(`Detected install method: ${installMethod}. Update ${APP_NAME} manually.`));
-						process.exitCode = 1;
-						return true;
-					}
-					const selfUpdateCommand = getSelfUpdateCommand(
-						PACKAGE_NAME,
-						selfUpdateNpmCommand,
-						selfUpdatePlan.packageName,
-					);
-					if (!selfUpdateCommand) {
-						printSelfUpdateUnavailable(selfUpdateNpmCommand, selfUpdatePlan.packageName);
-						process.exitCode = 1;
-						return true;
-					}
-					if (selfUpdatePlan.note) {
-						printSelfUpdateNote(selfUpdatePlan.note);
-					}
-					try {
-						if (installMethod === "npm") {
-							prepareWindowsNpmSelfUpdate();
-						}
-						await runSelfUpdate(selfUpdateCommand);
-					} catch (error: unknown) {
-						const message = error instanceof Error ? error.message : "Unknown package command error";
-						console.error(chalk.red(`Error: ${message}`));
-						if (installMethod === "pnpm") {
-							printPnpmSelfUpdateMetadataHint();
-						}
-						printSelfUpdateFallback(selfUpdateCommand);
-						process.exitCode = 1;
-						return true;
-					}
-					console.log(chalk.green(`Updated ${APP_NAME}`));
-				}
-				return true;
-			}
-		}
+		return await executePackageCommand(options, packageManager, selfUpdateNpmCommand);
 	} catch (error: unknown) {
 		const message = error instanceof Error ? error.message : "Unknown package command error";
 		console.error(chalk.red(`Error: ${message}`));

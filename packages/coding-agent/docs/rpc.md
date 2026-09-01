@@ -511,10 +511,6 @@ Response:
 
 Configure a deferred tool backend started with `--remote-deferred --remote-cwd <path>`.
 
-SSH backend:
-```json
-{"type": "set_remote_sandbox", "backend": "ssh", "remote": "user@host", "cwd": "/workspace"}
-```
 
 Daemon backend:
 ```json

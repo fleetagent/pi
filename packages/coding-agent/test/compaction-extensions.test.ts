@@ -14,6 +14,7 @@ import { createExtensionRuntime } from "../src/core/extensions/loader.ts";
 import type {
 	Extension,
 	SessionBeforeCompactEvent,
+	SessionBeforeCompactResult,
 	SessionCompactEvent,
 	SessionEvent,
 } from "../src/core/extensions/types.ts";
@@ -47,7 +48,7 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 	});
 
 	function createExtension(
-		onBeforeCompact?: (event: SessionBeforeCompactEvent) => { cancel?: boolean; compaction?: any } | undefined,
+		onBeforeCompact?: (event: SessionBeforeCompactEvent) => SessionBeforeCompactResult | undefined,
 		onCompact?: (event: SessionCompactEvent) => void,
 	): Extension {
 		const handlers = new Map<string, ((event: any, ctx: any) => Promise<any>)[]>();
@@ -224,7 +225,7 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 		if (afterEvent.type === "session_compact") {
 			// sessionManager is now on ctx, use session.session directly
 			const entries = session.session.getEntries();
-			const hasCompactionEntry = entries.some((e: { type: string }) => e.type === "compaction");
+			const hasCompactionEntry = entries.some((entry) => entry.type === "compaction");
 			expect(hasCompactionEntry).toBe(true);
 		}
 	}, 120000);

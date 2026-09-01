@@ -133,10 +133,15 @@ export interface SessionTreeNode {
 	labelTimestamp?: string;
 }
 
+export interface SessionModelReference {
+	provider: string;
+	modelId: string;
+}
+
 export interface SessionContext {
 	messages: AgentMessage[];
 	thinkingLevel: string;
-	model: { provider: string; modelId: string } | null;
+	model: SessionModelReference | null;
 }
 
 export interface SessionInfo {

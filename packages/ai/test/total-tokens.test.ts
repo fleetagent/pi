@@ -19,6 +19,11 @@ import type { Api, Context, Model, StreamOptions, Usage } from "../src/types.ts"
 
 type StreamOptionsWithExtras = StreamOptions & Record<string, unknown>;
 
+interface CacheProbeUsage {
+	first: Usage;
+	second: Usage;
+}
+
 import { hasAzureOpenAICredentials, resolveAzureDeploymentName } from "./azure-utils.ts";
 import { hasBedrockCredentials } from "./bedrock-utils.ts";
 import { hasCloudflareAiGatewayCredentials, hasCloudflareWorkersAICredentials } from "./cloudflare-utils.ts";
@@ -48,7 +53,7 @@ Remember: Always be helpful and concise.`;
 async function testTotalTokensWithCache<TApi extends Api>(
 	llm: Model<TApi>,
 	options: StreamOptionsWithExtras = {},
-): Promise<{ first: Usage; second: Usage }> {
+): Promise<CacheProbeUsage> {
 	// First request - no cache
 	const context1: Context = {
 		systemPrompt: LONG_SYSTEM_PROMPT,

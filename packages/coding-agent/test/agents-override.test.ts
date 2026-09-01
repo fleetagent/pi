@@ -3,16 +3,24 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
-import type { ToolAccessMode, ToolBackendInfo, ToolExecOptions, ToolOperations } from "../src/core/tools/operations.ts";
+import type {
+	ToolAccessMode,
+	ToolBackendInfo,
+	ToolExecOptions,
+	ToolExecResult,
+	ToolOperations,
+} from "../src/core/tools/operations.ts";
 
-class FilesystemSshOperations implements ToolOperations {
+class FilesystemRemoteOperations implements ToolOperations {
 	cwd: string;
+	private readonly workspaceRoot: string;
 
-	constructor(cwd: string) {
+	constructor(cwd: string, workspaceRoot = cwd) {
 		this.cwd = cwd;
+		this.workspaceRoot = workspaceRoot;
 	}
 
-	async exec(_command: string, _options: ToolExecOptions): Promise<{ exitCode: number | null }> {
+	async exec(_command: string, _options: ToolExecOptions): Promise<ToolExecResult> {
 		return { exitCode: 0 };
 	}
 
@@ -38,17 +46,24 @@ class FilesystemSshOperations implements ToolOperations {
 	}
 
 	getBackendInfo(): ToolBackendInfo {
-		return { type: "ssh", cwd: this.cwd, remote: "test@example", configured: true };
+		return {
+			type: "remote",
+			cwd: this.cwd,
+			url: "ws://remote.test/pi/workspace",
+			protocol: "ws",
+			configured: true,
+			workspace: { id: "remote-workspace", root: this.workspaceRoot, pathFlavor: "posix" },
+		};
 	}
 }
 
-class PermissiveDirectorySshOperations extends FilesystemSshOperations {
+class PermissiveDirectoryRemoteOperations extends FilesystemRemoteOperations {
 	override async readFile(path: string): Promise<Buffer> {
 		return statSync(path).isDirectory() ? Buffer.from("directory content") : super.readFile(path);
 	}
 }
 
-class FilesystemDaemonOperations extends FilesystemSshOperations {
+class FilesystemDaemonOperations extends FilesystemRemoteOperations {
 	async readResource(path: string): Promise<Buffer> {
 		if (path !== "SANDBOX.md") throw new Error(`missing resource: ${path}`);
 		return Buffer.from("Sandbox instructions.", "utf8");
@@ -103,7 +118,7 @@ describe("AGENTS.override.md", () => {
 		]);
 	});
 
-	it("applies the same per-directory selection through SSH ToolOperations", async () => {
+	it("applies the same per-directory selection through remote daemon ToolOperations", async () => {
 		const remoteRoot = join(tempDir, "remote-project");
 		const remoteService = join(remoteRoot, "service");
 		mkdirSync(remoteService, { recursive: true });
@@ -117,7 +132,7 @@ describe("AGENTS.override.md", () => {
 		const loader = new DefaultResourceLoader({
 			cwd: localProject,
 			agentDir,
-			toolOperations: new FilesystemSshOperations(remoteService),
+			toolOperations: new FilesystemRemoteOperations(remoteService, remoteRoot),
 		});
 		await loader.reload();
 
@@ -130,7 +145,7 @@ describe("AGENTS.override.md", () => {
 			loader
 				.getAgentsFiles()
 				.agentsFiles.slice(1)
-				.every((file) => file.sourceInfo?.source === "ssh"),
+				.every((file) => file.sourceInfo?.source === "remote"),
 		).toBe(true);
 	});
 
@@ -185,7 +200,7 @@ describe("AGENTS.override.md", () => {
 		const loader = new DefaultResourceLoader({
 			cwd: localProject,
 			agentDir,
-			toolOperations: new PermissiveDirectorySshOperations(remoteProject),
+			toolOperations: new PermissiveDirectoryRemoteOperations(remoteProject),
 		});
 		await loader.reload();
 

@@ -19,12 +19,14 @@ import {
 	getModel,
 	type Model,
 	type SimpleStreamOptions,
+	type TextContent,
 	Type,
 } from "@fleetagent/pi-ai";
 import {
 	getOpenAICodexWebSocketDebugStats,
 	streamSimpleOpenAICodexResponses,
 } from "../../ai/src/providers/openai-codex-responses.ts";
+import type { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { createExtensionRuntime } from "../src/core/extensions/loader.ts";
 import type { ToolDefinition } from "../src/core/extensions/types.ts";
@@ -62,10 +64,38 @@ interface SubrequestRecord {
 	text: string;
 }
 
+interface ProbeTurnResult {
+	elapsedMs: number;
+	latestCacheRead: number | null;
+}
+
+interface CacheReadViolation {
+	turn: number;
+	subrequest: number;
+	previous: number;
+	current: number;
+}
+
 const DEFAULT_TURNS = 20;
 const MIN_TURNS = 20;
 const MAX_TURNS = 50;
 const DEFAULT_MAX_TOKENS = 64;
+
+function parseTransport(value: string | undefined): Transport {
+	if (value !== "sse" && value !== "websocket" && value !== "websocket-cached" && value !== "auto") {
+		throw new Error(`Invalid --transport value: ${value}`);
+	}
+	return value;
+}
+
+function validateArgs(args: Args): void {
+	if (!Number.isInteger(args.turns) || args.turns < MIN_TURNS || args.turns > MAX_TURNS) {
+		throw new Error(`--turns must be an integer between ${MIN_TURNS} and ${MAX_TURNS}`);
+	}
+	if (!Number.isInteger(args.maxTokens) || args.maxTokens <= 0) {
+		throw new Error("--max-tokens must be a positive integer");
+	}
+}
 
 function parseArgs(argv: string[]): Args {
 	let turns = DEFAULT_TURNS;
@@ -89,11 +119,7 @@ function parseArgs(argv: string[]): Args {
 				break;
 			}
 			case "--transport": {
-				const value = argv[++i];
-				if (value !== "sse" && value !== "websocket" && value !== "websocket-cached" && value !== "auto") {
-					throw new Error(`Invalid --transport value: ${value}`);
-				}
-				transport = value;
+				transport = parseTransport(argv[++i]);
 				break;
 			}
 			case "--max-tokens": {
@@ -112,14 +138,9 @@ function parseArgs(argv: string[]): Args {
 		}
 	}
 
-	if (!Number.isInteger(turns) || turns < MIN_TURNS || turns > MAX_TURNS) {
-		throw new Error(`--turns must be an integer between ${MIN_TURNS} and ${MAX_TURNS}`);
-	}
-	if (!Number.isInteger(maxTokens) || maxTokens <= 0) {
-		throw new Error("--max-tokens must be a positive integer");
-	}
-
-	return { turns, sessionPath, transport, maxTokens };
+	const args = { turns, sessionPath, transport, maxTokens };
+	validateArgs(args);
+	return args;
 }
 
 function printHelp(): void {
@@ -235,7 +256,7 @@ function formatWebSocketStats(label: string, stats: WebSocketStatsSnapshot): str
 
 function getAssistantText(message: AssistantMessage): string {
 	return message.content
-		.filter((block): block is Extract<AssistantMessage["content"][number], { type: "text" }> => block.type === "text")
+		.filter((block): block is TextContent => block.type === "text")
 		.map((block) => block.text)
 		.join("\n")
 		.trim();
@@ -269,6 +290,173 @@ function deterministicProbeTool(): ToolDefinition<typeof deterministicProbeParam
 			details: { turn: params.turn, marker: params.marker, fixed: "OK" },
 		}),
 	};
+}
+async function runProbeTurn(
+	session: AgentSession,
+	turn: number,
+	previousCacheRead: number | null,
+	records: SubrequestRecord[],
+): Promise<ProbeTurnResult> {
+	const prompt = buildPrompt(turn);
+	const promptTokens = estimateTokens(prompt);
+	const previousMessagesLength = session.messages.length;
+	const websocketStatsBefore = getWebSocketStatsSnapshot(session.sessionId);
+	const startedAt = Date.now();
+	await session.prompt(prompt);
+	const elapsedMs = Date.now() - startedAt;
+
+	const newMessages = session.messages.slice(previousMessagesLength);
+	const assistantMessages = newMessages.filter((message): message is AssistantMessage =>
+		Boolean(message && typeof message === "object" && (message as { role?: unknown }).role === "assistant"),
+	);
+	const toolResults = newMessages.filter((message) =>
+		Boolean(message && typeof message === "object" && (message as { role?: unknown }).role === "toolResult"),
+	);
+
+	if (assistantMessages.length < 2 || toolResults.length < 1) {
+		throw new Error(
+			`Turn ${turn} did not execute the expected tool loop. assistants=${assistantMessages.length} toolResults=${toolResults.length}`,
+		);
+	}
+
+	let turnInput = 0;
+	let turnOutput = 0;
+	let turnCacheRead = 0;
+	let turnCacheWrite = 0;
+	let turnTotal = 0;
+	let latestCacheRead = previousCacheRead;
+
+	for (let i = 0; i < assistantMessages.length; i++) {
+		const assistant = assistantMessages[i];
+		const record: SubrequestRecord = {
+			turn,
+			subrequest: i + 1,
+			elapsedMs,
+			usage: assistant.usage,
+			stopReason: assistant.stopReason,
+			text: getAssistantText(assistant),
+		};
+		records.push(record);
+
+		turnInput += assistant.usage.input;
+		turnOutput += assistant.usage.output;
+		turnCacheRead += assistant.usage.cacheRead;
+		turnCacheWrite += assistant.usage.cacheWrite;
+		turnTotal += assistant.usage.totalTokens;
+
+		const monotonic = latestCacheRead === null ? "n/a" : assistant.usage.cacheRead >= latestCacheRead ? "yes" : "NO";
+		console.log(
+			[
+				`turn ${String(turn).padStart(2, "0")}.${i + 1}`,
+				`elapsed ${(elapsedMs / 1000).toFixed(1)}s`,
+				`prompt~${promptTokens}`,
+				`stop ${assistant.stopReason}`,
+				`in ${assistant.usage.input}`,
+				`out ${assistant.usage.output}`,
+				`cache ${assistant.usage.cacheRead}/${assistant.usage.cacheWrite}`,
+				`total ${assistant.usage.totalTokens}`,
+				`cache>=prev ${monotonic}`,
+			].join(" | "),
+		);
+
+		if (assistant.stopReason === "error" || assistant.stopReason === "aborted") {
+			throw new Error(
+				`Turn ${turn}.${i + 1} ended with stopReason=${assistant.stopReason}: ${assistant.errorMessage || "unknown error"}`,
+			);
+		}
+		latestCacheRead = assistant.usage.cacheRead;
+	}
+
+	const websocketStatsAfter = getWebSocketStatsSnapshot(session.sessionId);
+	const websocketStatsForTurn = diffWebSocketStats(websocketStatsAfter, websocketStatsBefore);
+	console.log(
+		[
+			`turn ${String(turn).padStart(2, "0")} agg`,
+			`assistants ${assistantMessages.length}`,
+			`toolResults ${toolResults.length}`,
+			`in ${turnInput}`,
+			`out ${turnOutput}`,
+			`cache ${turnCacheRead}/${turnCacheWrite}`,
+			`total ${turnTotal}`,
+		].join(" | "),
+	);
+	console.log(formatWebSocketStats(`turn ${String(turn).padStart(2, "0")}`, websocketStatsForTurn));
+	return { elapsedMs, latestCacheRead };
+}
+
+function findCacheReadViolations(records: SubrequestRecord[]): CacheReadViolation[] {
+	const violations: CacheReadViolation[] = [];
+	for (let index = 1; index < records.length; index++) {
+		const previous = records[index - 1];
+		const record = records[index];
+		if (record.usage.cacheRead >= previous.usage.cacheRead) continue;
+		violations.push({
+			turn: record.turn,
+			subrequest: record.subrequest,
+			previous: previous.usage.cacheRead,
+			current: record.usage.cacheRead,
+		});
+	}
+	return violations;
+}
+
+function printTimingSummary(turnElapsedMs: number[]): void {
+	const totalElapsedMs = turnElapsedMs.reduce((sum, value) => sum + value, 0);
+	console.log("");
+	console.log(
+		[
+			"timing",
+			`turns ${turnElapsedMs.length}`,
+			`total ${(totalElapsedMs / 1000).toFixed(1)}s`,
+			`avg ${(average(turnElapsedMs) / 1000).toFixed(2)}s`,
+			`p50 ${(percentile(turnElapsedMs, 50) / 1000).toFixed(2)}s`,
+			`p95 ${(percentile(turnElapsedMs, 95) / 1000).toFixed(2)}s`,
+			`max ${(Math.max(...turnElapsedMs) / 1000).toFixed(2)}s`,
+		].join(" | "),
+	);
+}
+
+function printTransportSummary(args: Args, sessionId: string): void {
+	const websocketStats = getOpenAICodexWebSocketDebugStats(sessionId);
+	const requestedWebsocket =
+		args.transport === "websocket" || args.transport === "websocket-cached" || args.transport === "auto";
+	const observedWebsocket = Boolean(websocketStats && websocketStats.requests > 0);
+	console.log(
+		[
+			"transport summary",
+			`requested ${args.transport}`,
+			`observed ${observedWebsocket ? "websocket" : "sse/no-websocket"}`,
+			`sseFallbackSuspected ${requestedWebsocket && !observedWebsocket ? "yes" : "no"}`,
+			`cachedContext ${websocketStats?.cachedContextRequests ? "yes" : "no"}`,
+			`storeTrue ${websocketStats ? `${websocketStats.storeTrueRequests}/${websocketStats.requests}` : "0/0"}`,
+			`delta ${websocketStats ? `${websocketStats.deltaRequests}/${websocketStats.requests}` : "0/0"}`,
+			`full ${websocketStats ? `${websocketStats.fullContextRequests}/${websocketStats.requests}` : "0/0"}`,
+		].join(" | "),
+	);
+	if (!websocketStats) return;
+	console.log(
+		[
+			"websocket details",
+			`requests ${websocketStats.requests}`,
+			`connections created/reused ${websocketStats.connectionsCreated}/${websocketStats.connectionsReused}`,
+			`cachedContext ${websocketStats.cachedContextRequests}`,
+			`storeTrue ${websocketStats.storeTrueRequests}`,
+			`full/delta ${websocketStats.fullContextRequests}/${websocketStats.deltaRequests}`,
+			`lastInputItems ${websocketStats.lastInputItems}`,
+			`lastDeltaItems ${websocketStats.lastDeltaInputItems ?? "n/a"}`,
+			`lastPreviousResponseId ${websocketStats.lastPreviousResponseId ?? "n/a"}`,
+		].join(" | "),
+	);
+}
+
+function printCacheReadSummary(records: SubrequestRecord[]): void {
+	const violations = findCacheReadViolations(records);
+	console.log(`subrequest cache read monotonic: ${violations.length === 0 ? "yes" : "NO"}`);
+	if (violations.length === 0) return;
+	console.log("violations:");
+	for (const violation of violations) {
+		console.log(`  turn ${violation.turn}.${violation.subrequest}: ${violation.previous} -> ${violation.current}`);
+	}
 }
 
 async function main(): Promise<void> {
@@ -335,158 +523,14 @@ async function main(): Promise<void> {
 	console.log("");
 
 	for (let turn = 1; turn <= args.turns; turn++) {
-		const prompt = buildPrompt(turn);
-		const promptTokens = estimateTokens(prompt);
-		const previousMessagesLength = session.messages.length;
-		const websocketStatsBefore = getWebSocketStatsSnapshot(session.sessionId);
-		const startedAt = Date.now();
-		await session.prompt(prompt);
-		const elapsedMs = Date.now() - startedAt;
-		turnElapsedMs.push(elapsedMs);
-
-		const newMessages = session.messages.slice(previousMessagesLength);
-		const assistantMessages = newMessages.filter((message): message is AssistantMessage =>
-			Boolean(message && typeof message === "object" && (message as { role?: unknown }).role === "assistant"),
-		);
-		const toolResults = newMessages.filter((message) =>
-			Boolean(message && typeof message === "object" && (message as { role?: unknown }).role === "toolResult"),
-		);
-
-		if (assistantMessages.length < 2 || toolResults.length < 1) {
-			throw new Error(
-				`Turn ${turn} did not execute the expected tool loop. assistants=${assistantMessages.length} toolResults=${toolResults.length}`,
-			);
-		}
-
-		let turnInput = 0;
-		let turnOutput = 0;
-		let turnCacheRead = 0;
-		let turnCacheWrite = 0;
-		let turnTotal = 0;
-
-		for (let i = 0; i < assistantMessages.length; i++) {
-			const assistant = assistantMessages[i];
-			const record: SubrequestRecord = {
-				turn,
-				subrequest: i + 1,
-				elapsedMs,
-				usage: assistant.usage,
-				stopReason: assistant.stopReason,
-				text: getAssistantText(assistant),
-			};
-			records.push(record);
-
-			turnInput += assistant.usage.input;
-			turnOutput += assistant.usage.output;
-			turnCacheRead += assistant.usage.cacheRead;
-			turnCacheWrite += assistant.usage.cacheWrite;
-			turnTotal += assistant.usage.totalTokens;
-
-			const monotonic =
-				previousCacheRead === null ? "n/a" : assistant.usage.cacheRead >= previousCacheRead ? "yes" : "NO";
-			console.log(
-				[
-					`turn ${String(turn).padStart(2, "0")}.${i + 1}`,
-					`elapsed ${(elapsedMs / 1000).toFixed(1)}s`,
-					`prompt~${promptTokens}`,
-					`stop ${assistant.stopReason}`,
-					`in ${assistant.usage.input}`,
-					`out ${assistant.usage.output}`,
-					`cache ${assistant.usage.cacheRead}/${assistant.usage.cacheWrite}`,
-					`total ${assistant.usage.totalTokens}`,
-					`cache>=prev ${monotonic}`,
-				].join(" | "),
-			);
-
-			if (assistant.stopReason === "error" || assistant.stopReason === "aborted") {
-				throw new Error(
-					`Turn ${turn}.${i + 1} ended with stopReason=${assistant.stopReason}: ${assistant.errorMessage || "unknown error"}`,
-				);
-			}
-			previousCacheRead = assistant.usage.cacheRead;
-		}
-
-		const websocketStatsAfter = getWebSocketStatsSnapshot(session.sessionId);
-		const websocketStatsForTurn = diffWebSocketStats(websocketStatsAfter, websocketStatsBefore);
-		console.log(
-			[
-				`turn ${String(turn).padStart(2, "0")} agg`,
-				`assistants ${assistantMessages.length}`,
-				`toolResults ${toolResults.length}`,
-				`in ${turnInput}`,
-				`out ${turnOutput}`,
-				`cache ${turnCacheRead}/${turnCacheWrite}`,
-				`total ${turnTotal}`,
-			].join(" | "),
-		);
-		console.log(formatWebSocketStats(`turn ${String(turn).padStart(2, "0")}`, websocketStatsForTurn));
+		const result = await runProbeTurn(session, turn, previousCacheRead, records);
+		turnElapsedMs.push(result.elapsedMs);
+		previousCacheRead = result.latestCacheRead;
 	}
 
-	const violations = records
-		.map((record, index) => {
-			if (index === 0) return null;
-			const previous = records[index - 1];
-			if (record.usage.cacheRead >= previous.usage.cacheRead) return null;
-			return {
-				turn: record.turn,
-				subrequest: record.subrequest,
-				previous: previous.usage.cacheRead,
-				current: record.usage.cacheRead,
-			};
-		})
-		.filter((value): value is NonNullable<typeof value> => value !== null);
-
-	const totalElapsedMs = turnElapsedMs.reduce((sum, value) => sum + value, 0);
-	console.log("");
-	console.log(
-		[
-			"timing",
-			`turns ${turnElapsedMs.length}`,
-			`total ${(totalElapsedMs / 1000).toFixed(1)}s`,
-			`avg ${(average(turnElapsedMs) / 1000).toFixed(2)}s`,
-			`p50 ${(percentile(turnElapsedMs, 50) / 1000).toFixed(2)}s`,
-			`p95 ${(percentile(turnElapsedMs, 95) / 1000).toFixed(2)}s`,
-			`max ${(Math.max(...turnElapsedMs) / 1000).toFixed(2)}s`,
-		].join(" | "),
-	);
-	const websocketStats = getOpenAICodexWebSocketDebugStats(session.sessionId);
-	const requestedWebsocket =
-		args.transport === "websocket" || args.transport === "websocket-cached" || args.transport === "auto";
-	const observedWebsocket = Boolean(websocketStats && websocketStats.requests > 0);
-	console.log(
-		[
-			"transport summary",
-			`requested ${args.transport}`,
-			`observed ${observedWebsocket ? "websocket" : "sse/no-websocket"}`,
-			`sseFallbackSuspected ${requestedWebsocket && !observedWebsocket ? "yes" : "no"}`,
-			`cachedContext ${websocketStats?.cachedContextRequests ? "yes" : "no"}`,
-			`storeTrue ${websocketStats ? `${websocketStats.storeTrueRequests}/${websocketStats.requests}` : "0/0"}`,
-			`delta ${websocketStats ? `${websocketStats.deltaRequests}/${websocketStats.requests}` : "0/0"}`,
-			`full ${websocketStats ? `${websocketStats.fullContextRequests}/${websocketStats.requests}` : "0/0"}`,
-		].join(" | "),
-	);
-	if (websocketStats) {
-		console.log(
-			[
-				"websocket details",
-				`requests ${websocketStats.requests}`,
-				`connections created/reused ${websocketStats.connectionsCreated}/${websocketStats.connectionsReused}`,
-				`cachedContext ${websocketStats.cachedContextRequests}`,
-				`storeTrue ${websocketStats.storeTrueRequests}`,
-				`full/delta ${websocketStats.fullContextRequests}/${websocketStats.deltaRequests}`,
-				`lastInputItems ${websocketStats.lastInputItems}`,
-				`lastDeltaItems ${websocketStats.lastDeltaInputItems ?? "n/a"}`,
-				`lastPreviousResponseId ${websocketStats.lastPreviousResponseId ?? "n/a"}`,
-			].join(" | "),
-		);
-	}
-	console.log(`subrequest cache read monotonic: ${violations.length === 0 ? "yes" : "NO"}`);
-	if (violations.length > 0) {
-		console.log("violations:");
-		for (const violation of violations) {
-			console.log(`  turn ${violation.turn}.${violation.subrequest}: ${violation.previous} -> ${violation.current}`);
-		}
-	}
+	printTimingSummary(turnElapsedMs);
+	printTransportSummary(args, session.sessionId);
+	printCacheReadSummary(records);
 	console.log(`session file: ${session.sessionFile}`);
 
 	unsubscribe();

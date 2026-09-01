@@ -7,8 +7,8 @@
  * 3. Loads the result into the editor for user to fill in answers
  */
 
-import { complete, type UserMessage } from "@fleetagent/pi-ai";
-import type { ExtensionAPI } from "@fleetagent/pi-coding-agent";
+import { complete, type StopReason, type TextContent, type UserMessage } from "@fleetagent/pi-ai";
+import type { ExtensionAPI, ExtensionContext } from "@fleetagent/pi-coding-agent";
 import { BorderedLoader } from "@fleetagent/pi-coding-agent";
 
 const SYSTEM_PROMPT = `You are a question extractor. Given text from a conversation, extract any questions that need answering and format them for the user to fill in.
@@ -27,6 +27,27 @@ A:
 
 Keep questions in the order they appeared. Be concise.`;
 
+type AssistantTextLookup =
+	| { status: "found"; text: string }
+	| { status: "incomplete"; stopReason: StopReason }
+	| { status: "missing" };
+
+function findLastAssistantText(ctx: ExtensionContext): AssistantTextLookup {
+	const branch = ctx.session.getBranch();
+	for (let index = branch.length - 1; index >= 0; index--) {
+		const entry = branch[index];
+		if (entry.type !== "message") continue;
+		const message = entry.message;
+		if (!("role" in message) || message.role !== "assistant") continue;
+		if (message.stopReason !== "stop") return { status: "incomplete", stopReason: message.stopReason };
+		const textParts = message.content
+			.filter((content): content is TextContent => content.type === "text")
+			.map((content) => content.text);
+		if (textParts.length > 0) return { status: "found", text: textParts.join("\n") };
+	}
+	return { status: "missing" };
+}
+
 export default function (pi: ExtensionAPI) {
 	pi.registerCommand("qna", {
 		description: "Extract questions from last assistant message into editor",
@@ -41,34 +62,16 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			// Find the last assistant message on the current branch
-			const branch = ctx.session.getBranch();
-			let lastAssistantText: string | undefined;
-
-			for (let i = branch.length - 1; i >= 0; i--) {
-				const entry = branch[i];
-				if (entry.type === "message") {
-					const msg = entry.message;
-					if ("role" in msg && msg.role === "assistant") {
-						if (msg.stopReason !== "stop") {
-							ctx.ui.notify(`Last assistant message incomplete (${msg.stopReason})`, "error");
-							return;
-						}
-						const textParts = msg.content
-							.filter((c): c is { type: "text"; text: string } => c.type === "text")
-							.map((c) => c.text);
-						if (textParts.length > 0) {
-							lastAssistantText = textParts.join("\n");
-							break;
-						}
-					}
-				}
+			const assistantText = findLastAssistantText(ctx);
+			if (assistantText.status === "incomplete") {
+				ctx.ui.notify(`Last assistant message incomplete (${assistantText.stopReason})`, "error");
+				return;
 			}
-
-			if (!lastAssistantText) {
+			if (assistantText.status === "missing" || !assistantText.text) {
 				ctx.ui.notify("No assistant messages found", "error");
 				return;
 			}
+			const lastAssistantText = assistantText.text;
 
 			// Run extraction with loader UI
 			const result = await ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
@@ -98,7 +101,7 @@ export default function (pi: ExtensionAPI) {
 					}
 
 					return response.content
-						.filter((c): c is { type: "text"; text: string } => c.type === "text")
+						.filter((c): c is TextContent => c.type === "text")
 						.map((c) => c.text)
 						.join("\n");
 				};

@@ -9,7 +9,9 @@ import type {
 	ThinkingLevelChangeEntry,
 } from "../../src/core/session/types.ts";
 
-function msg(id: string, parentId: string | null, role: "user" | "assistant", text: string): SessionMessageEntry {
+type SessionConversationRole = "user" | "assistant";
+
+function msg(id: string, parentId: string | null, role: SessionConversationRole, text: string): SessionMessageEntry {
 	const base = { type: "message" as const, id, parentId, timestamp: "2025-01-01T00:00:00Z" };
 	if (role === "user") {
 		return { ...base, message: { role, content: text, timestamp: 1 } };

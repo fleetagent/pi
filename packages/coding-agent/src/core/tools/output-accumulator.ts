@@ -9,6 +9,9 @@ export interface OutputAccumulatorOptions {
 	maxBytes?: number;
 	tempFilePrefix?: string;
 }
+interface OutputSnapshotOptions {
+	persistIfTruncated?: boolean;
+}
 
 export interface OutputSnapshot {
 	content: string;
@@ -88,7 +91,7 @@ export class OutputAccumulator {
 		}
 	}
 
-	snapshot(options: { persistIfTruncated?: boolean } = {}): OutputSnapshot {
+	snapshot(options: OutputSnapshotOptions = {}): OutputSnapshot {
 		const tailTruncation = truncateTail(this.getSnapshotText(), {
 			maxLines: this.maxLines,
 			maxBytes: this.maxBytes,

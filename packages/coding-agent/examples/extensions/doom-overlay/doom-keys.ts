@@ -34,71 +34,71 @@ export const DoomKeys = {
 	KEY_RALT: 0x80 + 0x38,
 } as const;
 
-import { Key, matchesKey, parseKey } from "@fleetagent/pi-tui";
+import { Key, type KeyId, matchesKey, parseKey } from "@fleetagent/pi-tui";
+
+interface DoomKeyBinding {
+	rawInputs: readonly string[];
+	keyInputs: readonly KeyId[];
+	doomKeys: readonly number[];
+}
+
+const CONTROL_KEY_BINDINGS: readonly DoomKeyBinding[] = [
+	{ rawInputs: [], keyInputs: [Key.up], doomKeys: [DoomKeys.KEY_UPARROW] },
+	{ rawInputs: [], keyInputs: [Key.down], doomKeys: [DoomKeys.KEY_DOWNARROW] },
+	{ rawInputs: [], keyInputs: [Key.right], doomKeys: [DoomKeys.KEY_RIGHTARROW] },
+	{ rawInputs: [], keyInputs: [Key.left], doomKeys: [DoomKeys.KEY_LEFTARROW] },
+	{ rawInputs: ["w"], keyInputs: ["w"], doomKeys: [DoomKeys.KEY_UPARROW] },
+	{ rawInputs: ["W"], keyInputs: [Key.shift("w")], doomKeys: [DoomKeys.KEY_UPARROW, DoomKeys.KEY_RSHIFT] },
+	{ rawInputs: ["s"], keyInputs: ["s"], doomKeys: [DoomKeys.KEY_DOWNARROW] },
+	{ rawInputs: ["S"], keyInputs: [Key.shift("s")], doomKeys: [DoomKeys.KEY_DOWNARROW, DoomKeys.KEY_RSHIFT] },
+	{ rawInputs: ["a"], keyInputs: ["a"], doomKeys: [DoomKeys.KEY_STRAFE_L] },
+	{ rawInputs: ["A"], keyInputs: [Key.shift("a")], doomKeys: [DoomKeys.KEY_STRAFE_L, DoomKeys.KEY_RSHIFT] },
+	{ rawInputs: ["d"], keyInputs: ["d"], doomKeys: [DoomKeys.KEY_STRAFE_R] },
+	{ rawInputs: ["D"], keyInputs: [Key.shift("d")], doomKeys: [DoomKeys.KEY_STRAFE_R, DoomKeys.KEY_RSHIFT] },
+	{ rawInputs: ["f", "F"], keyInputs: ["f", Key.shift("f")], doomKeys: [DoomKeys.KEY_FIRE] },
+	{ rawInputs: [" "], keyInputs: [Key.space], doomKeys: [DoomKeys.KEY_USE] },
+	{ rawInputs: [], keyInputs: [Key.enter], doomKeys: [DoomKeys.KEY_ENTER] },
+	{ rawInputs: [], keyInputs: [Key.escape], doomKeys: [DoomKeys.KEY_ESCAPE] },
+	{ rawInputs: [], keyInputs: [Key.tab], doomKeys: [DoomKeys.KEY_TAB] },
+	{ rawInputs: [], keyInputs: [Key.backspace], doomKeys: [DoomKeys.KEY_BACKSPACE] },
+];
+
+const PROMPT_KEY_BINDINGS: readonly DoomKeyBinding[] = [
+	{ rawInputs: ["y", "Y"], keyInputs: ["y", Key.shift("y")], doomKeys: ["y".charCodeAt(0)] },
+	{ rawInputs: ["n", "N"], keyInputs: ["n", Key.shift("n")], doomKeys: ["n".charCodeAt(0)] },
+];
+
+function findMatchingDoomBinding(data: string, bindings: readonly DoomKeyBinding[]): number[] | undefined {
+	for (const binding of bindings) {
+		if (binding.rawInputs.includes(data)) return [...binding.doomKeys];
+		if (binding.keyInputs.some((key) => matchesKey(data, key))) return [...binding.doomKeys];
+	}
+	return undefined;
+}
+
+function isLegacyFireInput(data: string): boolean {
+	const parsed = parseKey(data);
+	if (parsed?.startsWith("ctrl+") && parsed !== "ctrl+c") return true;
+	return data.length === 1 && data.charCodeAt(0) < 32 && data !== "\x03";
+}
+
+function mapPrintableKeyToDoom(data: string): number[] {
+	if (data >= "0" && data <= "9") return [data.charCodeAt(0)];
+	if (data === "+" || data === "=") return [DoomKeys.KEY_EQUALS];
+	if (data === "-") return [DoomKeys.KEY_MINUS];
+	const promptKey = findMatchingDoomBinding(data, PROMPT_KEY_BINDINGS);
+	if (promptKey) return promptKey;
+	if (data.length === 1 && data.charCodeAt(0) >= 32) return [data.toLowerCase().charCodeAt(0)];
+	return [];
+}
 
 /**
  * Map terminal key input to DOOM key codes
  * Supports both raw terminal input and Kitty protocol sequences
  */
 export function mapKeyToDoom(data: string): number[] {
-	// Arrow keys
-	if (matchesKey(data, Key.up)) return [DoomKeys.KEY_UPARROW];
-	if (matchesKey(data, Key.down)) return [DoomKeys.KEY_DOWNARROW];
-	if (matchesKey(data, Key.right)) return [DoomKeys.KEY_RIGHTARROW];
-	if (matchesKey(data, Key.left)) return [DoomKeys.KEY_LEFTARROW];
-
-	// WASD - check both raw char and Kitty sequences
-	if (data === "w" || matchesKey(data, "w")) return [DoomKeys.KEY_UPARROW];
-	if (data === "W" || matchesKey(data, Key.shift("w"))) return [DoomKeys.KEY_UPARROW, DoomKeys.KEY_RSHIFT];
-	if (data === "s" || matchesKey(data, "s")) return [DoomKeys.KEY_DOWNARROW];
-	if (data === "S" || matchesKey(data, Key.shift("s"))) return [DoomKeys.KEY_DOWNARROW, DoomKeys.KEY_RSHIFT];
-	if (data === "a" || matchesKey(data, "a")) return [DoomKeys.KEY_STRAFE_L];
-	if (data === "A" || matchesKey(data, Key.shift("a"))) return [DoomKeys.KEY_STRAFE_L, DoomKeys.KEY_RSHIFT];
-	if (data === "d" || matchesKey(data, "d")) return [DoomKeys.KEY_STRAFE_R];
-	if (data === "D" || matchesKey(data, Key.shift("d"))) return [DoomKeys.KEY_STRAFE_R, DoomKeys.KEY_RSHIFT];
-
-	// Fire - F key
-	if (data === "f" || data === "F" || matchesKey(data, "f") || matchesKey(data, Key.shift("f"))) {
-		return [DoomKeys.KEY_FIRE];
-	}
-
-	// Use/Open
-	if (data === " " || matchesKey(data, Key.space)) return [DoomKeys.KEY_USE];
-
-	// Menu/UI keys
-	if (matchesKey(data, Key.enter)) return [DoomKeys.KEY_ENTER];
-	if (matchesKey(data, Key.escape)) return [DoomKeys.KEY_ESCAPE];
-	if (matchesKey(data, Key.tab)) return [DoomKeys.KEY_TAB];
-	if (matchesKey(data, Key.backspace)) return [DoomKeys.KEY_BACKSPACE];
-
-	// Ctrl keys (except Ctrl+C) = fire (legacy support)
-	const parsed = parseKey(data);
-	if (parsed?.startsWith("ctrl+") && parsed !== "ctrl+c") {
-		return [DoomKeys.KEY_FIRE];
-	}
-	if (data.length === 1 && data.charCodeAt(0) < 32 && data !== "\x03") {
-		return [DoomKeys.KEY_FIRE];
-	}
-
-	// Weapon selection (0-9)
-	if (data >= "0" && data <= "9") return [data.charCodeAt(0)];
-
-	// Plus/minus for screen size
-	if (data === "+" || data === "=") return [DoomKeys.KEY_EQUALS];
-	if (data === "-") return [DoomKeys.KEY_MINUS];
-
-	// Y/N for prompts
-	if (data === "y" || data === "Y" || matchesKey(data, "y") || matchesKey(data, Key.shift("y"))) {
-		return ["y".charCodeAt(0)];
-	}
-	if (data === "n" || data === "N" || matchesKey(data, "n") || matchesKey(data, Key.shift("n"))) {
-		return ["n".charCodeAt(0)];
-	}
-
-	// Other printable characters (for cheats)
-	if (data.length === 1 && data.charCodeAt(0) >= 32) {
-		return [data.toLowerCase().charCodeAt(0)];
-	}
-
-	return [];
+	const controlKey = findMatchingDoomBinding(data, CONTROL_KEY_BINDINGS);
+	if (controlKey) return controlKey;
+	if (isLegacyFireInput(data)) return [DoomKeys.KEY_FIRE];
+	return mapPrintableKeyToDoom(data);
 }

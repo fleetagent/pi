@@ -1,9 +1,10 @@
-import { Compile } from "typebox/compile";
+import type { TSchema } from "typebox";
+import { Compile, type Validator } from "typebox/compile";
 import type { TLocalizedValidationError } from "typebox/error";
 import { Value } from "typebox/value";
 import type { Tool, ToolCall } from "../types.ts";
 
-const validatorCache = new WeakMap<object, ReturnType<typeof Compile>>();
+const validatorCache = new WeakMap<object, Validator>();
 const TYPEBOX_KIND = Symbol.for("TypeBox.Kind");
 
 interface JsonSchemaObject {
@@ -62,11 +63,11 @@ function matchesJsonType(value: unknown, type: string): boolean {
 	}
 }
 
-function isValidatorSchema(value: unknown): value is Tool["parameters"] {
+function isValidatorSchema(value: unknown): value is TSchema {
 	return isRecord(value);
 }
 
-function getSubSchemaValidator(schema: JsonSchemaObject): ReturnType<typeof Compile> | undefined {
+function getSubSchemaValidator(schema: JsonSchemaObject): Validator | undefined {
 	if (!isValidatorSchema(schema)) {
 		return undefined;
 	}
@@ -77,75 +78,55 @@ function getSubSchemaValidator(schema: JsonSchemaObject): ReturnType<typeof Comp
 	}
 }
 
+function coerceJsonNumber(value: unknown): unknown {
+	if (value === null) return 0;
+	if (typeof value === "string" && value.trim() !== "") {
+		const parsed = Number(value);
+		if (Number.isFinite(parsed)) return parsed;
+	}
+	if (typeof value === "boolean") return value ? 1 : 0;
+	return value;
+}
+
+function coerceJsonInteger(value: unknown): unknown {
+	if (value === null) return 0;
+	if (typeof value === "string" && value.trim() !== "") {
+		const parsed = Number(value);
+		if (Number.isInteger(parsed)) return parsed;
+	}
+	if (typeof value === "boolean") return value ? 1 : 0;
+	return value;
+}
+
+function coerceJsonBoolean(value: unknown): unknown {
+	if (value === null) return false;
+	if (value === "true" || value === 1) return true;
+	if (value === "false" || value === 0) return false;
+	return value;
+}
+
+function coerceJsonString(value: unknown): unknown {
+	if (value === null) return "";
+	if (typeof value === "number" || typeof value === "boolean") return String(value);
+	return value;
+}
+
+function coerceJsonNull(value: unknown): unknown {
+	return value === "" || value === 0 || value === false ? null : value;
+}
+
 function coercePrimitiveByType(value: unknown, type: string): unknown {
 	switch (type) {
-		case "number": {
-			if (value === null) {
-				return 0;
-			}
-			if (typeof value === "string" && value.trim() !== "") {
-				const parsed = Number(value);
-				if (Number.isFinite(parsed)) {
-					return parsed;
-				}
-			}
-			if (typeof value === "boolean") {
-				return value ? 1 : 0;
-			}
-			return value;
-		}
-		case "integer": {
-			if (value === null) {
-				return 0;
-			}
-			if (typeof value === "string" && value.trim() !== "") {
-				const parsed = Number(value);
-				if (Number.isInteger(parsed)) {
-					return parsed;
-				}
-			}
-			if (typeof value === "boolean") {
-				return value ? 1 : 0;
-			}
-			return value;
-		}
-		case "boolean": {
-			if (value === null) {
-				return false;
-			}
-			if (typeof value === "string") {
-				if (value === "true") {
-					return true;
-				}
-				if (value === "false") {
-					return false;
-				}
-			}
-			if (typeof value === "number") {
-				if (value === 1) {
-					return true;
-				}
-				if (value === 0) {
-					return false;
-				}
-			}
-			return value;
-		}
-		case "string": {
-			if (value === null) {
-				return "";
-			}
-			if (typeof value === "number" || typeof value === "boolean") {
-				return String(value);
-			}
-			return value;
-		}
-		case "null": {
-			if (value === "" || value === 0 || value === false) {
-				return null;
-			}
-			return value;
-		}
+		case "number":
+			return coerceJsonNumber(value);
+		case "integer":
+			return coerceJsonInteger(value);
+		case "boolean":
+			return coerceJsonBoolean(value);
+		case "string":
+			return coerceJsonString(value);
+		case "null":
+			return coerceJsonNull(value);
 		default:
 			return value;
 	}
@@ -212,35 +193,31 @@ function coerceWithUnionSchema(value: unknown, schemas: JsonSchemaObject[]): unk
 	return value;
 }
 
-function coerceWithJsonSchema(value: unknown, schema: JsonSchemaObject): unknown {
+function applyCombinedSchemaCoercion(value: unknown, schema: JsonSchemaObject): unknown {
 	let nextValue = value;
-
 	if (Array.isArray(schema.allOf)) {
-		for (const nested of schema.allOf) {
-			nextValue = coerceWithJsonSchema(nextValue, nested);
-		}
+		for (const nested of schema.allOf) nextValue = coerceWithJsonSchema(nextValue, nested);
 	}
+	if (Array.isArray(schema.anyOf)) nextValue = coerceWithUnionSchema(nextValue, schema.anyOf);
+	if (Array.isArray(schema.oneOf)) nextValue = coerceWithUnionSchema(nextValue, schema.oneOf);
+	return nextValue;
+}
 
-	if (Array.isArray(schema.anyOf)) {
-		nextValue = coerceWithUnionSchema(nextValue, schema.anyOf);
-	}
-
-	if (Array.isArray(schema.oneOf)) {
-		nextValue = coerceWithUnionSchema(nextValue, schema.oneOf);
-	}
-
-	const schemaTypes = getSchemaTypes(schema);
+function coerceToDeclaredSchemaType(value: unknown, schemaTypes: string[]): unknown {
 	const matchesUnionMember =
-		schemaTypes.length > 1 && schemaTypes.some((schemaType) => matchesJsonType(nextValue, schemaType));
-	if (schemaTypes.length > 0 && !matchesUnionMember) {
-		for (const schemaType of schemaTypes) {
-			const candidate = coercePrimitiveByType(nextValue, schemaType);
-			if (candidate !== nextValue) {
-				nextValue = candidate;
-				break;
-			}
-		}
+		schemaTypes.length > 1 && schemaTypes.some((schemaType) => matchesJsonType(value, schemaType));
+	if (schemaTypes.length === 0 || matchesUnionMember) return value;
+	for (const schemaType of schemaTypes) {
+		const candidate = coercePrimitiveByType(value, schemaType);
+		if (candidate !== value) return candidate;
 	}
+	return value;
+}
+
+function coerceWithJsonSchema(value: unknown, schema: JsonSchemaObject): unknown {
+	let nextValue = applyCombinedSchemaCoercion(value, schema);
+	const schemaTypes = getSchemaTypes(schema);
+	nextValue = coerceToDeclaredSchemaType(nextValue, schemaTypes);
 
 	if (schemaTypes.includes("object") && isRecord(nextValue) && !Array.isArray(nextValue)) {
 		applySchemaObjectCoercion(nextValue, schema);
@@ -253,7 +230,7 @@ function coerceWithJsonSchema(value: unknown, schema: JsonSchemaObject): unknown
 	return nextValue;
 }
 
-function getValidator(schema: Tool["parameters"]): ReturnType<typeof Compile> {
+function getValidator(schema: TSchema): Validator {
 	const key = schema as object;
 	const cached = validatorCache.get(key);
 	if (cached) {
@@ -292,6 +269,29 @@ export function validateToolCall(tools: Tool[], toolCall: ToolCall): any {
 	return validateToolArguments(tool, toolCall);
 }
 
+interface SerializedSchemaValidationResult {
+	valid: boolean;
+	value: unknown;
+}
+
+function validateSerializedSchemaArguments(
+	args: unknown,
+	schema: TSchema,
+	validator: Validator,
+): SerializedSchemaValidationResult {
+	if (hasTypeBoxMetadata(schema) || !isJsonSchemaObject(schema)) return { valid: false, value: args };
+	const coerced = coerceWithJsonSchema(args, schema);
+	if (coerced !== args) {
+		if (isRecord(args) && isRecord(coerced)) {
+			for (const key of Object.keys(args)) delete args[key];
+			Object.assign(args, coerced);
+		} else if (validator.Check(coerced)) {
+			return { valid: true, value: coerced };
+		}
+	}
+	return { valid: validator.Check(args), value: args };
+}
+
 /**
  * Validates tool call arguments against the tool's TypeBox schema
  * @param tool The tool definition with TypeBox schema
@@ -305,22 +305,8 @@ export function validateToolArguments(tool: Tool, toolCall: ToolCall): any {
 
 	// Serialized schemas use the compatibility coercer first so valid union arms are not changed
 	// by TypeBox conversion before the schema-specific checks can preserve them.
-	if (!hasTypeBoxMetadata(tool.parameters) && isJsonSchemaObject(tool.parameters)) {
-		const coerced = coerceWithJsonSchema(args, tool.parameters);
-		if (coerced !== args) {
-			if (isRecord(args) && isRecord(coerced)) {
-				for (const key of Object.keys(args)) {
-					delete args[key];
-				}
-				Object.assign(args, coerced);
-			} else if (validator.Check(coerced)) {
-				return coerced;
-			}
-		}
-		if (validator.Check(args)) {
-			return args;
-		}
-	}
+	const serializedValidation = validateSerializedSchemaArguments(args, tool.parameters, validator);
+	if (serializedValidation.valid) return serializedValidation.value;
 
 	Value.Convert(tool.parameters, args);
 	if (validator.Check(args)) {

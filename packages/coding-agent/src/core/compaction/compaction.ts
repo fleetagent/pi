@@ -5,15 +5,29 @@
  * and after compaction the session is reloaded.
  */
 
-import { type AgentMessage, type StreamFn, type ThinkingLevel, uuidv7 } from "@fleetagent/pi-agent-core";
+import {
+	type AgentMessage,
+	type CompactionDetails,
+	type CompactionPreparation,
+	type CompactionResult,
+	type CompactionSettings,
+	type ContextUsageEstimate,
+	type CutPointResult,
+	type StreamFn,
+	type ThinkingLevel,
+	uuidv7,
+} from "@fleetagent/pi-agent-core";
 import type {
 	AssistantMessage,
+	AssistantUsageInfo,
 	Context,
+	ImageContent,
 	Model,
 	ProviderHeaders,
 	RetryCallbacks,
 	RetryPolicy,
 	SimpleStreamOptions,
+	TextContent,
 	Usage,
 } from "@fleetagent/pi-ai";
 import { completeSimple, retryAssistantCall } from "@fleetagent/pi-ai";
@@ -30,14 +44,28 @@ import {
 	serializeConversation,
 } from "./utils.ts";
 
+export type {
+	CompactionDetails,
+	CompactionPreparation,
+	CompactionResult,
+	CompactionSettings,
+	ContextUsageEstimate,
+	CutPointResult,
+} from "@fleetagent/pi-agent-core";
+
 // ============================================================================
 // File Operation Tracking
 // ============================================================================
 
-/** Details stored in CompactionEntry.details for file tracking */
-export interface CompactionDetails {
-	readFiles: string[];
-	modifiedFiles: string[];
+function getPreviousCompactionDetails(
+	entries: SessionEntry[],
+	prevCompactionIndex: number,
+): CompactionDetails | undefined {
+	if (prevCompactionIndex < 0) return undefined;
+	const previousCompaction = entries[prevCompactionIndex] as CompactionEntry;
+	// fromHook field is kept for session file compatibility.
+	if (previousCompaction.fromHook || !previousCompaction.details) return undefined;
+	return previousCompaction.details as CompactionDetails;
 }
 
 /**
@@ -50,19 +78,12 @@ function extractFileOperations(
 ): FileOperations {
 	const fileOps = createFileOps();
 
-	// Collect from previous compaction's details (if pi-generated)
-	if (prevCompactionIndex >= 0) {
-		const prevCompaction = entries[prevCompactionIndex] as CompactionEntry;
-		if (!prevCompaction.fromHook && prevCompaction.details) {
-			// fromHook field kept for session file compatibility
-			const details = prevCompaction.details as CompactionDetails;
-			if (Array.isArray(details.readFiles)) {
-				for (const f of details.readFiles) fileOps.read.add(f);
-			}
-			if (Array.isArray(details.modifiedFiles)) {
-				for (const f of details.modifiedFiles) fileOps.edited.add(f);
-			}
-		}
+	const previousDetails = getPreviousCompactionDetails(entries, prevCompactionIndex);
+	if (Array.isArray(previousDetails?.readFiles)) {
+		for (const file of previousDetails.readFiles) fileOps.read.add(file);
+	}
+	if (Array.isArray(previousDetails?.modifiedFiles)) {
+		for (const file of previousDetails.modifiedFiles) fileOps.edited.add(file);
 	}
 
 	// Extract from tool calls in messages
@@ -89,24 +110,9 @@ function getMessagesFromEntryForCompaction(entry: SessionEntry): AgentMessage[] 
 	return getVisibleContextMessages(entry);
 }
 
-/** Result from compact() - Session adds uuid/parentUuid when saving */
-export interface CompactionResult<T = unknown> {
-	summary: string;
-	firstKeptEntryId: string;
-	tokensBefore: number;
-	/** Extension-specific data (e.g., ArtifactIndex, version markers for structured compaction) */
-	details?: T;
-}
-
 // ============================================================================
 // Types
 // ============================================================================
-
-export interface CompactionSettings {
-	enabled: boolean;
-	reserveTokens: number;
-	keepRecentTokens: number;
-}
 
 export const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = {
 	enabled: true,
@@ -159,14 +165,7 @@ export function getLastAssistantUsage(entries: SessionEntry[]): Usage | undefine
 	return undefined;
 }
 
-export interface ContextUsageEstimate {
-	tokens: number;
-	usageTokens: number;
-	trailingTokens: number;
-	lastUsageIndex: number | null;
-}
-
-function getLastAssistantUsageInfo(messages: AgentMessage[]): { usage: Usage; index: number } | undefined {
+function getLastAssistantUsageInfo(messages: AgentMessage[]): AssistantUsageInfo | undefined {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const usage = getAssistantUsage(messages[i]);
 		if (usage) return { usage, index: i };
@@ -224,7 +223,7 @@ export function shouldCompact(contextTokens: number, contextWindow: number, sett
  * Estimate token count for a message using chars/4 heuristic.
  * This is conservative (overestimates tokens).
  */
-function estimateContentChars(content: string | Array<{ type: string; text?: string }>): number {
+function estimateContentChars(content: string | Array<TextContent | ImageContent>): number {
 	if (typeof content === "string") return content.length;
 	let chars = 0;
 	for (const block of content) {
@@ -320,13 +319,49 @@ export function findTurnStartIndex(entries: SessionEntry[], entryIndex: number, 
 	return -1;
 }
 
-export interface CutPointResult {
-	/** Index of first entry to keep */
-	firstKeptEntryIndex: number;
-	/** Index of user message that starts the turn being split, or -1 if not splitting */
-	turnStartIndex: number;
-	/** Whether this cut splits a turn (cut point is not a user message) */
-	isSplitTurn: boolean;
+function findCutPointAtOrAfter(cutPoints: number[], entryIndex: number): number | undefined {
+	for (const cutPoint of cutPoints) {
+		if (cutPoint >= entryIndex) return cutPoint;
+	}
+	return undefined;
+}
+
+function findCutPointAtOrBefore(cutPoints: number[], entryIndex: number): number | undefined {
+	for (let index = cutPoints.length - 1; index >= 0; index--) {
+		if (cutPoints[index] <= entryIndex) return cutPoints[index];
+	}
+	return undefined;
+}
+
+function selectTokenBudgetCutIndex(
+	entries: SessionEntry[],
+	startIndex: number,
+	endIndex: number,
+	keepRecentTokens: number,
+	cutPoints: number[],
+): number {
+	let accumulatedTokens = 0;
+	for (let index = endIndex - 1; index >= startIndex; index--) {
+		const messageTokens = getVisibleContextMessages(entries[index]).reduce(
+			(sum, message) => sum + estimateTokens(message),
+			0,
+		);
+		if (messageTokens === 0) continue;
+		accumulatedTokens += messageTokens;
+		if (accumulatedTokens < keepRecentTokens) continue;
+		return findCutPointAtOrAfter(cutPoints, index) ?? findCutPointAtOrBefore(cutPoints, index) ?? cutPoints[0];
+	}
+	return cutPoints[0];
+}
+
+function includeLeadingMetadataEntries(entries: SessionEntry[], startIndex: number, cutIndex: number): number {
+	let normalizedCutIndex = cutIndex;
+	while (normalizedCutIndex > startIndex) {
+		const previousEntry = entries[normalizedCutIndex - 1];
+		if (previousEntry.type === "compaction" || getVisibleContextMessages(previousEntry).length > 0) break;
+		normalizedCutIndex--;
+	}
+	return normalizedCutIndex;
 }
 
 /**
@@ -357,48 +392,8 @@ export function findCutPoint(
 		return { firstKeptEntryIndex: startIndex, turnStartIndex: -1, isSplitTurn: false };
 	}
 
-	// Walk backwards from newest, accumulating estimated message sizes
-	let accumulatedTokens = 0;
-	let cutIndex = cutPoints[0]; // Default: keep from first message (not header)
-
-	for (let i = endIndex - 1; i >= startIndex; i--) {
-		const messageTokens = getVisibleContextMessages(entries[i]).reduce(
-			(sum, message) => sum + estimateTokens(message),
-			0,
-		);
-		if (messageTokens === 0) continue;
-		accumulatedTokens += messageTokens;
-
-		if (accumulatedTokens >= keepRecentTokens) {
-			let foundCutPoint = false;
-			for (let c = 0; c < cutPoints.length; c++) {
-				if (cutPoints[c] >= i) {
-					cutIndex = cutPoints[c];
-					foundCutPoint = true;
-					break;
-				}
-			}
-			// A terminal tool result has no later cut point. Retain it together with
-			// the nearest preceding assistant call rather than falling back to the
-			// oldest turn and making compaction ineffective.
-			if (!foundCutPoint) {
-				for (let c = cutPoints.length - 1; c >= 0; c--) {
-					if (cutPoints[c] <= i) {
-						cutIndex = cutPoints[c];
-						break;
-					}
-				}
-			}
-			break;
-		}
-	}
-
-	// Include adjacent metadata entries that do not affect provider context.
-	while (cutIndex > startIndex) {
-		const prevEntry = entries[cutIndex - 1];
-		if (prevEntry.type === "compaction" || getVisibleContextMessages(prevEntry).length > 0) break;
-		cutIndex--;
-	}
+	const selectedCutIndex = selectTokenBudgetCutIndex(entries, startIndex, endIndex, keepRecentTokens, cutPoints);
+	const cutIndex = includeLeadingMetadataEntries(entries, startIndex, selectedCutIndex);
 
 	// User-like context entries start a turn; assistant cut points split one.
 	const cutEntry = entries[cutIndex];
@@ -589,7 +584,7 @@ export async function generateSummary(
 	}
 
 	const textContent = response.content
-		.filter((c): c is { type: "text"; text: string } => c.type === "text")
+		.filter((content): content is TextContent => content.type === "text")
 		.map((c) => c.text)
 		.join("\n");
 
@@ -598,24 +593,13 @@ export async function generateSummary(
 
 // ============================================================================
 // Compaction Preparation (for extensions)
-// ============================================================================
 
-export interface CompactionPreparation {
-	/** UUID of first entry to keep */
-	firstKeptEntryId: string;
-	/** Messages that will be summarized and discarded */
-	messagesToSummarize: AgentMessage[];
-	/** Messages that will be turned into turn prefix summary (if splitting) */
-	turnPrefixMessages: AgentMessage[];
-	/** Whether this is a split turn (cut point in middle of turn) */
-	isSplitTurn: boolean;
-	tokensBefore: number;
-	/** Summary from previous compaction, for iterative update */
-	previousSummary?: string;
-	/** File operations extracted from messagesToSummarize */
-	fileOps: FileOperations;
-	/** Compaction settions from settings.jsonl	*/
-	settings: CompactionSettings;
+function collectMessagesForCompaction(entries: SessionEntry[], startIndex: number, endIndex: number): AgentMessage[] {
+	const messages: AgentMessage[] = [];
+	for (let index = startIndex; index < endIndex; index++) {
+		messages.push(...getMessagesFromEntryForCompaction(entries[index]));
+	}
+	return messages;
 }
 
 export function prepareCompaction(
@@ -657,28 +641,17 @@ export function prepareCompaction(
 
 	const historyEnd = cutPoint.isSplitTurn ? cutPoint.turnStartIndex : cutPoint.firstKeptEntryIndex;
 
-	// Messages to summarize (will be discarded after summary)
-	const messagesToSummarize: AgentMessage[] = [];
-	for (let i = boundaryStart; i < historyEnd; i++) {
-		messagesToSummarize.push(...getMessagesFromEntryForCompaction(pathEntries[i]));
-	}
-
-	// Messages for turn prefix summary (if splitting a turn)
-	const turnPrefixMessages: AgentMessage[] = [];
-	if (cutPoint.isSplitTurn) {
-		for (let i = cutPoint.turnStartIndex; i < cutPoint.firstKeptEntryIndex; i++) {
-			turnPrefixMessages.push(...getMessagesFromEntryForCompaction(pathEntries[i]));
-		}
-	}
+	const messagesToSummarize = collectMessagesForCompaction(pathEntries, boundaryStart, historyEnd);
+	const turnPrefixMessages = cutPoint.isSplitTurn
+		? collectMessagesForCompaction(pathEntries, cutPoint.turnStartIndex, cutPoint.firstKeptEntryIndex)
+		: [];
 
 	// Extract file operations from messages and previous compaction
 	const fileOps = extractFileOperations(messagesToSummarize, pathEntries, prevCompactionIndex);
 
-	// Also extract file ops from turn prefix if splitting
-	if (cutPoint.isSplitTurn) {
-		for (const msg of turnPrefixMessages) {
-			extractFileOpsFromMessage(msg, fileOps);
-		}
+	// Include file operations from a split turn's prefix.
+	for (const message of turnPrefixMessages) {
+		extractFileOpsFromMessage(message, fileOps);
 	}
 
 	return {
@@ -855,7 +828,7 @@ async function generateTurnPrefixSummary(
 	}
 
 	return response.content
-		.filter((c): c is { type: "text"; text: string } => c.type === "text")
+		.filter((content): content is TextContent => content.type === "text")
 		.map((c) => c.text)
 		.join("\n");
 }

@@ -16,8 +16,14 @@ import {
 	visibleWidth,
 } from "@fleetagent/pi-tui";
 import { CONFIG_DIR_NAME } from "../../../config.ts";
-import type { PathMetadata, ResolvedPaths, ResolvedResource } from "../../../core/package-manager.ts";
+import type {
+	InstalledSourceScope,
+	PathMetadata,
+	ResolvedPaths,
+	ResolvedResource,
+} from "../../../core/package-manager.ts";
 import type { PackageSource, SettingsManager } from "../../../core/settings-manager.ts";
+import type { SourceOrigin, SourceScope } from "../../../core/source-info.ts";
 import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { rawKeyHint } from "./keybinding-hints.ts";
@@ -51,8 +57,8 @@ interface ResourceSubgroup {
 interface ResourceGroup {
 	key: string;
 	label: string;
-	scope: "user" | "project" | "temporary";
-	origin: "package" | "top-level";
+	scope: SourceScope;
+	origin: SourceOrigin;
 	source: string;
 	subgroups: ResourceSubgroup[];
 }
@@ -89,6 +95,14 @@ function getGroupLabel(metadata: PathMetadata): string {
 	}
 	return metadata.scope === "user" ? "User settings" : "Project settings";
 }
+function getResourceDisplayName(path: string, resourceType: ResourceType): string {
+	const fileName = basename(path);
+	const parentFolder = basename(dirname(path));
+	if (resourceType === "extensions" && parentFolder !== "extensions") return `${parentFolder}/${fileName}`;
+	if (resourceType === "skills" && fileName === "SKILL.md") return parentFolder;
+	if (resourceType === "rules" && fileName === "RULES.md") return parentFolder;
+	return fileName;
+}
 
 function buildGroups(resolved: ResolvedPaths): ResourceGroup[] {
 	const groupMap = new Map<string, ResourceGroup>();
@@ -122,19 +136,7 @@ function buildGroups(resolved: ResolvedPaths): ResourceGroup[] {
 				group.subgroups.push(subgroup);
 			}
 
-			const fileName = basename(path);
-			const parentFolder = basename(dirname(path));
-			let displayName: string;
-			if (resourceType === "extensions" && parentFolder !== "extensions") {
-				displayName = `${parentFolder}/${fileName}`;
-			} else if (
-				(resourceType === "skills" && fileName === "SKILL.md") ||
-				(resourceType === "rules" && fileName === "RULES.md")
-			) {
-				displayName = parentFolder;
-			} else {
-				displayName = fileName;
-			}
+			const displayName = getResourceDisplayName(path, resourceType);
 			subgroup.items.push({
 				path,
 				enabled,
@@ -181,6 +183,66 @@ type FlatEntry =
 	| { type: "group"; group: ResourceGroup }
 	| { type: "subgroup"; subgroup: ResourceSubgroup; group: ResourceGroup }
 	| { type: "item"; item: ResourceItem };
+
+interface ResourceFilterMatches {
+	items: Set<ResourceItem>;
+	subgroups: Set<ResourceSubgroup>;
+	groups: Set<ResourceGroup>;
+}
+
+function collectMatchingResourceItems(entries: FlatEntry[], query: string): Set<ResourceItem> {
+	const items = new Set<ResourceItem>();
+	for (const entry of entries) {
+		if (entry.type !== "item") continue;
+		const item = entry.item;
+		if (
+			item.displayName.toLowerCase().includes(query) ||
+			item.resourceType.toLowerCase().includes(query) ||
+			item.path.toLowerCase().includes(query)
+		) {
+			items.add(item);
+		}
+	}
+	return items;
+}
+
+function collectMatchingResourceHierarchy(groups: ResourceGroup[], items: Set<ResourceItem>): ResourceFilterMatches {
+	const subgroups = new Set<ResourceSubgroup>();
+	const matchingGroups = new Set<ResourceGroup>();
+	for (const group of groups) {
+		for (const subgroup of group.subgroups) {
+			for (const item of subgroup.items) {
+				if (!items.has(item)) continue;
+				subgroups.add(subgroup);
+				matchingGroups.add(group);
+			}
+		}
+	}
+	return { items, subgroups, groups: matchingGroups };
+}
+
+function filterResourceEntries(entries: FlatEntry[], matches: ResourceFilterMatches): FlatEntry[] {
+	return entries.filter((entry) => {
+		if (entry.type === "group") return matches.groups.has(entry.group);
+		if (entry.type === "subgroup") return matches.subgroups.has(entry.subgroup);
+		return matches.items.has(entry.item);
+	});
+}
+
+function renderResourceEntry(entry: FlatEntry, isSelected: boolean, width: number): string {
+	if (entry.type === "group") {
+		const groupLine = theme.fg("accent", theme.bold(entry.group.label));
+		return truncateToWidth(`  ${groupLine}`, width, "");
+	}
+	if (entry.type === "subgroup") {
+		const subgroupLine = theme.fg("muted", entry.subgroup.label);
+		return truncateToWidth(`    ${subgroupLine}`, width, "");
+	}
+	const cursor = isSelected ? "> " : "  ";
+	const checkbox = entry.item.enabled ? theme.fg("success", "[x]") : theme.fg("dim", "[ ]");
+	const name = isSelected ? theme.bold(entry.item.displayName) : entry.item.displayName;
+	return truncateToWidth(`${cursor}    ${checkbox} ${name}`, width, "...");
+}
 
 class ConfigSelectorHeader implements Component {
 	invalidate(): void {}
@@ -270,6 +332,15 @@ class ResourceList implements Component, Focusable {
 		return fromIndex; // Stay at current if no item found
 	}
 
+	private moveSelectionByPage(direction: 1 | -1): void {
+		const lastIndex = this.filteredItems.length - 1;
+		let target = Math.max(0, Math.min(lastIndex, this.selectedIndex + direction * this.maxVisible));
+		while (target >= 0 && target <= lastIndex && this.filteredItems[target].type !== "item") {
+			target -= direction;
+		}
+		if (target >= 0 && target <= lastIndex) this.selectedIndex = target;
+	}
+
 	private filterItems(query: string): void {
 		if (!query.trim()) {
 			this.filteredItems = [...this.flatItems];
@@ -278,46 +349,9 @@ class ResourceList implements Component, Focusable {
 		}
 
 		const lowerQuery = query.toLowerCase();
-		const matchingItems = new Set<ResourceItem>();
-		const matchingSubgroups = new Set<ResourceSubgroup>();
-		const matchingGroups = new Set<ResourceGroup>();
-
-		for (const entry of this.flatItems) {
-			if (entry.type === "item") {
-				const item = entry.item;
-				if (
-					item.displayName.toLowerCase().includes(lowerQuery) ||
-					item.resourceType.toLowerCase().includes(lowerQuery) ||
-					item.path.toLowerCase().includes(lowerQuery)
-				) {
-					matchingItems.add(item);
-				}
-			}
-		}
-
-		// Find which subgroups and groups contain matching items
-		for (const group of this.groups) {
-			for (const subgroup of group.subgroups) {
-				for (const item of subgroup.items) {
-					if (matchingItems.has(item)) {
-						matchingSubgroups.add(subgroup);
-						matchingGroups.add(group);
-					}
-				}
-			}
-		}
-
-		this.filteredItems = [];
-		for (const entry of this.flatItems) {
-			if (entry.type === "group" && matchingGroups.has(entry.group)) {
-				this.filteredItems.push(entry);
-			} else if (entry.type === "subgroup" && matchingSubgroups.has(entry.subgroup)) {
-				this.filteredItems.push(entry);
-			} else if (entry.type === "item" && matchingItems.has(entry.item)) {
-				this.filteredItems.push(entry);
-			}
-		}
-
+		const matchingItems = collectMatchingResourceItems(this.flatItems, lowerQuery);
+		const matches = collectMatchingResourceHierarchy(this.groups, matchingItems);
+		this.filteredItems = filterResourceEntries(this.flatItems, matches);
 		this.selectFirstItem();
 	}
 
@@ -362,25 +396,7 @@ class ResourceList implements Component, Focusable {
 		const endIndex = Math.min(startIndex + this.maxVisible, this.filteredItems.length);
 
 		for (let i = startIndex; i < endIndex; i++) {
-			const entry = this.filteredItems[i];
-			const isSelected = i === this.selectedIndex;
-
-			if (entry.type === "group") {
-				// Main group header (no cursor)
-				const groupLine = theme.fg("accent", theme.bold(entry.group.label));
-				lines.push(truncateToWidth(`  ${groupLine}`, width, ""));
-			} else if (entry.type === "subgroup") {
-				// Subgroup header (indented, no cursor)
-				const subgroupLine = theme.fg("muted", entry.subgroup.label);
-				lines.push(truncateToWidth(`    ${subgroupLine}`, width, ""));
-			} else {
-				// Resource item (cursor only on items)
-				const item = entry.item;
-				const cursor = isSelected ? "> " : "  ";
-				const checkbox = item.enabled ? theme.fg("success", "[x]") : theme.fg("dim", "[ ]");
-				const name = isSelected ? theme.bold(item.displayName) : item.displayName;
-				lines.push(truncateToWidth(`${cursor}    ${checkbox} ${name}`, width, "..."));
-			}
+			lines.push(renderResourceEntry(this.filteredItems[i], i === this.selectedIndex, width));
 		}
 
 		// Scroll indicator
@@ -406,25 +422,11 @@ class ResourceList implements Component, Focusable {
 			return;
 		}
 		if (kb.matches(data, "tui.select.pageUp")) {
-			// Jump up by maxVisible, then find nearest item
-			let target = Math.max(0, this.selectedIndex - this.maxVisible);
-			while (target < this.filteredItems.length && this.filteredItems[target].type !== "item") {
-				target++;
-			}
-			if (target < this.filteredItems.length) {
-				this.selectedIndex = target;
-			}
+			this.moveSelectionByPage(-1);
 			return;
 		}
 		if (kb.matches(data, "tui.select.pageDown")) {
-			// Jump down by maxVisible, then find nearest item
-			let target = Math.min(this.filteredItems.length - 1, this.selectedIndex + this.maxVisible);
-			while (target >= 0 && this.filteredItems[target].type !== "item") {
-				target--;
-			}
-			if (target >= 0) {
-				this.selectedIndex = target;
-			}
+			this.moveSelectionByPage(1);
 			return;
 		}
 		if (kb.matches(data, "tui.select.cancel")) {
@@ -459,6 +461,45 @@ class ResourceList implements Component, Focusable {
 		}
 	}
 
+	private saveTopLevelResourcePaths(scope: InstalledSourceScope, resourceType: ResourceType, paths: string[]): void {
+		if (scope === "project") {
+			switch (resourceType) {
+				case "extensions":
+					this.settingsManager.setProjectExtensionPaths(paths);
+					return;
+				case "skills":
+					this.settingsManager.setProjectSkillPaths(paths);
+					return;
+				case "rules":
+					this.settingsManager.setProjectRulePaths(paths);
+					return;
+				case "prompts":
+					this.settingsManager.setProjectPromptTemplatePaths(paths);
+					return;
+				case "themes":
+					this.settingsManager.setProjectThemePaths(paths);
+					return;
+			}
+		}
+		switch (resourceType) {
+			case "extensions":
+				this.settingsManager.setExtensionPaths(paths);
+				return;
+			case "skills":
+				this.settingsManager.setSkillPaths(paths);
+				return;
+			case "rules":
+				this.settingsManager.setRulePaths(paths);
+				return;
+			case "prompts":
+				this.settingsManager.setPromptTemplatePaths(paths);
+				return;
+			case "themes":
+				this.settingsManager.setThemePaths(paths);
+				return;
+		}
+	}
+
 	private toggleTopLevelResource(item: ResourceItem, enabled: boolean): void {
 		const scope = item.metadata.scope as "user" | "project";
 		const settings =
@@ -484,31 +525,7 @@ class ResourceList implements Component, Focusable {
 			updated.push(disablePattern);
 		}
 
-		if (scope === "project") {
-			if (arrayKey === "extensions") {
-				this.settingsManager.setProjectExtensionPaths(updated);
-			} else if (arrayKey === "skills") {
-				this.settingsManager.setProjectSkillPaths(updated);
-			} else if (arrayKey === "rules") {
-				this.settingsManager.setProjectRulePaths(updated);
-			} else if (arrayKey === "prompts") {
-				this.settingsManager.setProjectPromptTemplatePaths(updated);
-			} else if (arrayKey === "themes") {
-				this.settingsManager.setProjectThemePaths(updated);
-			}
-		} else {
-			if (arrayKey === "extensions") {
-				this.settingsManager.setExtensionPaths(updated);
-			} else if (arrayKey === "skills") {
-				this.settingsManager.setSkillPaths(updated);
-			} else if (arrayKey === "rules") {
-				this.settingsManager.setRulePaths(updated);
-			} else if (arrayKey === "prompts") {
-				this.settingsManager.setPromptTemplatePaths(updated);
-			} else if (arrayKey === "themes") {
-				this.settingsManager.setThemePaths(updated);
-			}
-		}
+		this.saveTopLevelResourcePaths(scope, arrayKey, updated);
 	}
 
 	private togglePackageResource(item: ResourceItem, enabled: boolean): void {
@@ -570,7 +587,7 @@ class ResourceList implements Component, Focusable {
 		}
 	}
 
-	private getTopLevelBaseDir(scope: "user" | "project"): string {
+	private getTopLevelBaseDir(scope: InstalledSourceScope): string {
 		return scope === "project" ? join(this.cwd, CONFIG_DIR_NAME) : this.agentDir;
 	}
 

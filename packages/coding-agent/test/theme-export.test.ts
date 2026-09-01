@@ -4,15 +4,17 @@ import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { getThemeExportColors } from "../src/modes/interactive/theme/theme.ts";
 
+interface ThemeFileExportColors {
+	pageBg?: string | number;
+	cardBg?: string | number;
+	infoBg?: string | number;
+}
+
 type ThemeFile = {
 	name: string;
 	vars?: Record<string, string | number>;
 	colors: Record<string, string | number>;
-	export?: {
-		pageBg?: string | number;
-		cardBg?: string | number;
-		infoBg?: string | number;
-	};
+	export?: ThemeFileExportColors;
 };
 
 describe("getThemeExportColors", () => {

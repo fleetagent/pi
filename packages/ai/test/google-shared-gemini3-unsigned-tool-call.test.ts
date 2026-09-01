@@ -1,10 +1,11 @@
+import type { Content } from "@google/genai";
 import { describe, expect, it } from "vitest";
 import { convertMessages, requiresToolCallId } from "../src/providers/google-shared.ts";
-import type { Context, Model } from "../src/types.ts";
+import type { Context, Model, Provider } from "../src/types.ts";
 
 function makeGemini3Model<TApi extends "google-generative-ai" | "google-vertex">(
 	api: TApi,
-	provider: Model<TApi>["provider"],
+	provider: Provider,
 	id = "gemini-3-pro-preview",
 ): Model<TApi> {
 	return {
@@ -21,8 +22,14 @@ function makeGemini3Model<TApi extends "google-generative-ai" | "google-vertex">
 	};
 }
 
+interface HistoricalModelIdentity {
+	api: string;
+	provider: string;
+	id: string;
+}
+
 function makeContext(
-	model: { api: string; provider: string; id: string },
+	model: HistoricalModelIdentity,
 	thoughtSignature?: string,
 	toolCallIds: readonly [string, string] = ["call_1", "call_2"],
 ): Context {
@@ -81,7 +88,7 @@ function makeContext(
 	};
 }
 
-function getFunctionIds(contents: ReturnType<typeof convertMessages>) {
+function getFunctionIds(contents: Content[]) {
 	return {
 		callIds: contents
 			.flatMap((content) => content.parts ?? [])

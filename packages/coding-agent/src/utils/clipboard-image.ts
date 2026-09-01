@@ -12,6 +12,24 @@ export type ClipboardImage = {
 	mimeType: string;
 };
 
+interface ClipboardCommandOptions {
+	timeoutMs?: number;
+	maxBufferBytes?: number;
+	env?: NodeJS.ProcessEnv;
+}
+
+interface ClipboardCommandResult {
+	stdout: Buffer;
+	ok: boolean;
+}
+
+interface ClipboardImageReadOptions {
+	env?: NodeJS.ProcessEnv;
+	platform?: NodeJS.Platform;
+}
+
+type ClipboardImageReadAttempt = ClipboardImage | null | Promise<ClipboardImage | null>;
+
 const SUPPORTED_IMAGE_MIME_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"] as const;
 
 const DEFAULT_LIST_TIMEOUT_MS = 1000;
@@ -43,20 +61,21 @@ export function extensionForImageMimeType(mimeType: string): string | null {
 }
 
 function selectPreferredImageMimeType(mimeTypes: string[]): string | null {
-	const normalized = mimeTypes
-		.map((t) => t.trim())
-		.filter(Boolean)
-		.map((t) => ({ raw: t, base: baseMimeType(t) }));
-
-	for (const preferred of SUPPORTED_IMAGE_MIME_TYPES) {
-		const match = normalized.find((t) => t.base === preferred);
-		if (match) {
-			return match.raw;
-		}
+	const firstMimeTypeByBase = new Map<string, string>();
+	let firstImageMimeType: string | undefined;
+	for (const mimeType of mimeTypes) {
+		const raw = mimeType.trim();
+		if (!raw) continue;
+		const base = baseMimeType(raw);
+		if (!firstMimeTypeByBase.has(base)) firstMimeTypeByBase.set(base, raw);
+		if (firstImageMimeType === undefined && base.startsWith("image/")) firstImageMimeType = raw;
 	}
 
-	const anyImage = normalized.find((t) => t.base.startsWith("image/"));
-	return anyImage?.raw ?? null;
+	for (const preferred of SUPPORTED_IMAGE_MIME_TYPES) {
+		const match = firstMimeTypeByBase.get(preferred);
+		if (match) return match;
+	}
+	return firstImageMimeType ?? null;
 }
 
 function isSupportedImageMimeType(mimeType: string): boolean {
@@ -86,11 +105,7 @@ async function convertToPng(bytes: Uint8Array): Promise<Uint8Array | null> {
 	}
 }
 
-function runCommand(
-	command: string,
-	args: string[],
-	options?: { timeoutMs?: number; maxBufferBytes?: number; env?: NodeJS.ProcessEnv },
-): { stdout: Buffer; ok: boolean } {
+function runCommand(command: string, args: string[], options?: ClipboardCommandOptions): ClipboardCommandResult {
 	const timeoutMs = options?.timeoutMs ?? DEFAULT_READ_TIMEOUT_MS;
 	const maxBufferBytes = options?.maxBufferBytes ?? DEFAULT_MAX_BUFFER_BYTES;
 
@@ -251,10 +266,17 @@ async function readClipboardImageViaNativeClipboard(): Promise<ClipboardImage | 
 	return { bytes, mimeType: "image/png" };
 }
 
-export async function readClipboardImage(options?: {
-	env?: NodeJS.ProcessEnv;
-	platform?: NodeJS.Platform;
-}): Promise<ClipboardImage | null> {
+function readLinuxClipboardImage(env: NodeJS.ProcessEnv): ClipboardImageReadAttempt {
+	const wsl = isWSL(env);
+	const wayland = isWaylandSession(env);
+	let image: ClipboardImage | null = null;
+	if (wayland || wsl) image = readClipboardImageViaWlPaste() ?? readClipboardImageViaXclip();
+	if (!image && wsl) image = readClipboardImageViaPowerShell();
+	if (!image && !wayland) return readClipboardImageViaNativeClipboard();
+	return image;
+}
+
+export async function readClipboardImage(options?: ClipboardImageReadOptions): Promise<ClipboardImage | null> {
 	const env = options?.env ?? process.env;
 	const platform = options?.platform ?? process.platform;
 
@@ -262,26 +284,9 @@ export async function readClipboardImage(options?: {
 		return null;
 	}
 
-	let image: ClipboardImage | null = null;
-
-	if (platform === "linux") {
-		const wsl = isWSL(env);
-		const wayland = isWaylandSession(env);
-
-		if (wayland || wsl) {
-			image = readClipboardImageViaWlPaste() ?? readClipboardImageViaXclip();
-		}
-
-		if (!image && wsl) {
-			image = readClipboardImageViaPowerShell();
-		}
-
-		if (!image && !wayland) {
-			image = await readClipboardImageViaNativeClipboard();
-		}
-	} else {
-		image = await readClipboardImageViaNativeClipboard();
-	}
+	const imageReadAttempt =
+		platform === "linux" ? readLinuxClipboardImage(env) : readClipboardImageViaNativeClipboard();
+	const image = imageReadAttempt instanceof Promise ? await imageReadAttempt : imageReadAttempt;
 
 	if (!image) {
 		return null;

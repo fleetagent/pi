@@ -50,6 +50,35 @@ describe("PiAgent remote session durability barriers", () => {
 		let appendStarted = Promise.resolve();
 		let forkRequests = 0;
 		const requestOrder: string[] = [];
+		function createSourceSession(): Response {
+			return json({ reference: `remote:${sourceId}`, id: sourceId, entries: sourceEntries, etag: `v${etag}` });
+		}
+		async function appendSourceEntries(body: Record<string, unknown>): Promise<Response> {
+			requestOrder.push("append");
+			markAppendStarted();
+			if (gateAppends) await appendGate;
+			const entries = body.entries as FileEntry[];
+			sourceEntries = [...sourceEntries, ...entries];
+			etag++;
+			return json({ accepted: entries.length, etag: `v${etag}` });
+		}
+		function forkSourceSession(body: Record<string, unknown>): Response {
+			requestOrder.push("fork");
+			forkRequests++;
+			const leafId = body.leafId;
+			if (
+				typeof leafId !== "string" ||
+				!sourceEntries.some((entry) => entry.type !== "session" && entry.id === leafId)
+			) {
+				return new Response("unknown leaf", { status: 409 });
+			}
+			return json({
+				reference: `remote:${forkId}`,
+				id: forkId,
+				entries: [header(forkId, cwd, `remote:${sourceId}`), ...structuredClone(sourceEntries.slice(1))],
+				etag: "fork-v1",
+			});
+		}
 		const manager = new RemoteSessionManager({
 			baseUrl: "https://sessions.example.test",
 			token: "secret-token",
@@ -57,35 +86,9 @@ describe("PiAgent remote session durability barriers", () => {
 			fetch: async (input, init) => {
 				const url = String(input);
 				const body = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : {};
-				if (url.endsWith("/v1/sessions") && init?.method === "POST") {
-					return json({ reference: `remote:${sourceId}`, id: sourceId, entries: sourceEntries, etag: `v${etag}` });
-				}
-				if (url.endsWith(`/${sourceId}/entries`) && init?.method === "POST") {
-					requestOrder.push("append");
-					markAppendStarted();
-					if (gateAppends) await appendGate;
-					const entries = body.entries as FileEntry[];
-					sourceEntries = [...sourceEntries, ...entries];
-					etag++;
-					return json({ accepted: entries.length, etag: `v${etag}` });
-				}
-				if (url.endsWith(`/${sourceId}/fork`) && init?.method === "POST") {
-					requestOrder.push("fork");
-					forkRequests++;
-					const leafId = body.leafId;
-					if (
-						typeof leafId !== "string" ||
-						!sourceEntries.some((entry) => entry.type !== "session" && entry.id === leafId)
-					) {
-						return new Response("unknown leaf", { status: 409 });
-					}
-					return json({
-						reference: `remote:${forkId}`,
-						id: forkId,
-						entries: [header(forkId, cwd, `remote:${sourceId}`), ...structuredClone(sourceEntries.slice(1))],
-						etag: "fork-v1",
-					});
-				}
+				if (url.endsWith("/v1/sessions") && init?.method === "POST") return createSourceSession();
+				if (url.endsWith(`/${sourceId}/entries`) && init?.method === "POST") return appendSourceEntries(body);
+				if (url.endsWith(`/${sourceId}/fork`) && init?.method === "POST") return forkSourceSession(body);
 				throw new Error(`Unexpected remote session request: ${init?.method} ${url}`);
 			},
 		});

@@ -18,11 +18,42 @@ import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
+import type {
+	ExtensionAPI,
+	ExtensionEvent,
+	InputEventResult,
+	InputSource,
+	MessageEndEvent,
+	ToolCallEvent,
+} from "../src/core/extensions/types.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
 import { InMemorySessionManager } from "../src/core/session/in-memory-session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import type { BuildSystemPromptOptions } from "../src/core/system-prompt.ts";
 import { createTestExtensionsResult, createTestResourceLoader } from "./utilities.ts";
+
+interface ConcurrentTestGlobals {
+	testExtensionApi?: Pick<ExtensionAPI, "sendUserMessage">;
+}
+
+interface ConcurrentTestExtensionRunner {
+	hasHandlers(eventType: string): boolean;
+	emit(event: ExtensionEvent): Promise<void>;
+	emitMessageEnd(event: MessageEndEvent): Promise<undefined>;
+	emitToolCall?(event: ToolCallEvent): Promise<undefined>;
+	emitInput(text: string, images: ImageContent[] | undefined, source: InputSource): Promise<InputEventResult>;
+	emitBeforeAgentStart(
+		prompt: string,
+		images: ImageContent[] | undefined,
+		systemPrompt: string,
+		systemPromptOptions: BuildSystemPromptOptions,
+	): Promise<undefined>;
+	invalidate(message?: string): void;
+}
+
+interface AgentSessionWithConcurrentTestRunner {
+	_extensionRunner?: ConcurrentTestExtensionRunner;
+}
 
 // Mock stream that mimics AssistantMessageEventStream
 class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
@@ -268,13 +299,7 @@ describe("AgentSession concurrent prompt guard", () => {
 		await new Promise((resolve) => setTimeout(resolve, 10));
 		expect(session.isStreaming).toBe(true);
 
-		const pi = (
-			globalThis as typeof globalThis & {
-				testExtensionApi?: {
-					sendUserMessage: (content: string, options?: { deliverAs?: "steer" | "followUp" }) => void;
-				};
-			}
-		).testExtensionApi;
+		const pi = (globalThis as typeof globalThis & ConcurrentTestGlobals).testExtensionApi;
 		expect(pi).toBeDefined();
 
 		pi!.sendUserMessage("Steer from extension", { deliverAs: "steer" });
@@ -434,26 +459,7 @@ describe("AgentSession concurrent prompt guard", () => {
 		});
 
 		const snapshots: string[][] = [];
-		const sessionWithRunner = session as unknown as {
-			_extensionRunner?: {
-				hasHandlers: (eventType: string) => boolean;
-				emit: (event: { type: string; message?: { role?: string } }) => Promise<void>;
-				emitMessageEnd: (event: { type: string; message?: { role?: string } }) => Promise<undefined>;
-				emitToolCall: (event: { type: string; toolCallId: string }) => Promise<undefined>;
-				emitInput: (
-					text: string,
-					images: unknown,
-					source: "interactive" | "rpc" | "extension",
-				) => Promise<{ action: "continue" }>;
-				emitBeforeAgentStart: (
-					prompt: string,
-					images: unknown,
-					systemPrompt: string,
-					systemPromptOptions: BuildSystemPromptOptions,
-				) => Promise<undefined>;
-				invalidate: (message?: string) => void;
-			};
-		};
+		const sessionWithRunner = session as unknown as AgentSessionWithConcurrentTestRunner;
 		sessionWithRunner._extensionRunner = {
 			hasHandlers: (eventType) => eventType === "tool_call",
 			emit: async () => {},
@@ -579,25 +585,7 @@ describe("AgentSession concurrent prompt guard", () => {
 			baseToolsOverride: { dummy: tool },
 		});
 
-		const sessionWithRunner = session as unknown as {
-			_extensionRunner?: {
-				hasHandlers: (eventType: string) => boolean;
-				emit: (event: { type: string; message?: { role?: string } }) => Promise<void>;
-				emitMessageEnd: (event: { type: string; message?: { role?: string } }) => Promise<undefined>;
-				emitInput: (
-					text: string,
-					images: unknown,
-					source: "interactive" | "rpc" | "extension",
-				) => Promise<{ action: "continue" }>;
-				emitBeforeAgentStart: (
-					prompt: string,
-					images: unknown,
-					systemPrompt: string,
-					systemPromptOptions: BuildSystemPromptOptions,
-				) => Promise<undefined>;
-				invalidate: (message?: string) => void;
-			};
-		};
+		const sessionWithRunner = session as unknown as AgentSessionWithConcurrentTestRunner;
 		sessionWithRunner._extensionRunner = {
 			hasHandlers: () => false,
 			emit: async () => {},

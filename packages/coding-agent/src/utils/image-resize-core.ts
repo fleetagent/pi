@@ -1,5 +1,6 @@
+import type * as PhotonNode from "@silvia-odwyer/photon-node";
 import { applyExifOrientation } from "./exif-orientation.ts";
-import { loadPhoton } from "./photon.ts";
+import { loadPhoton, type PhotonImageType } from "./photon.ts";
 
 export interface ImageResizeOptions {
 	maxWidth?: number; // Default: 2000
@@ -33,6 +34,21 @@ interface EncodedCandidate {
 	encodedSize: number;
 	mimeType: string;
 }
+type PhotonModule = typeof PhotonNode;
+
+interface ImageDimensions {
+	width: number;
+	height: number;
+}
+
+interface SizedEncodedCandidate extends EncodedCandidate, ImageDimensions {}
+
+interface ImageEncodingContext {
+	photon: PhotonModule;
+	image: PhotonImageType;
+	jpegQualities: number[];
+	maxBytes: number;
+}
 
 function encodeCandidate(buffer: Uint8Array, mimeType: string): EncodedCandidate {
 	const data = Buffer.from(buffer).toString("base64");
@@ -41,6 +57,57 @@ function encodeCandidate(buffer: Uint8Array, mimeType: string): EncodedCandidate
 		encodedSize: Buffer.byteLength(data, "utf-8"),
 		mimeType,
 	};
+}
+
+function fitImageDimensions(dimensions: ImageDimensions, options: Required<ImageResizeOptions>): ImageDimensions {
+	let { width, height } = dimensions;
+	if (width > options.maxWidth) {
+		height = Math.round((height * options.maxWidth) / width);
+		width = options.maxWidth;
+	}
+	if (height > options.maxHeight) {
+		width = Math.round((width * options.maxHeight) / height);
+		height = options.maxHeight;
+	}
+	return { width, height };
+}
+function reduceImageDimensions(dimensions: ImageDimensions): ImageDimensions {
+	return {
+		width: dimensions.width === 1 ? 1 : Math.max(1, Math.floor(dimensions.width * 0.75)),
+		height: dimensions.height === 1 ? 1 : Math.max(1, Math.floor(dimensions.height * 0.75)),
+	};
+}
+
+function encodeResizedImage(context: ImageEncodingContext, dimensions: ImageDimensions): EncodedCandidate[] {
+	const { photon, image, jpegQualities } = context;
+	const resized = photon.resize(image, dimensions.width, dimensions.height, photon.SamplingFilter.Lanczos3);
+	try {
+		const candidates: EncodedCandidate[] = [encodeCandidate(resized.get_bytes(), "image/png")];
+		for (const quality of jpegQualities) {
+			candidates.push(encodeCandidate(resized.get_bytes_jpeg(quality), "image/jpeg"));
+		}
+		return candidates;
+	} finally {
+		resized.free();
+	}
+}
+
+function findSizedImageCandidate(
+	context: ImageEncodingContext,
+	initialDimensions: ImageDimensions,
+): SizedEncodedCandidate | null {
+	let current = initialDimensions;
+	while (true) {
+		const candidates = encodeResizedImage(context, current);
+		for (const candidate of candidates) {
+			if (candidate.encodedSize < context.maxBytes) return { ...candidate, ...current };
+		}
+		if (current.width === 1 && current.height === 1) break;
+		const next = reduceImageDimensions(current);
+		if (next.width === current.width && next.height === current.height) break;
+		current = next;
+	}
+	return null;
 }
 
 /**
@@ -92,68 +159,22 @@ export async function resizeImageInProcess(
 			};
 		}
 
-		// Calculate initial dimensions respecting max limits
-		let targetWidth = originalWidth;
-		let targetHeight = originalHeight;
-
-		if (targetWidth > opts.maxWidth) {
-			targetHeight = Math.round((targetHeight * opts.maxWidth) / targetWidth);
-			targetWidth = opts.maxWidth;
-		}
-		if (targetHeight > opts.maxHeight) {
-			targetWidth = Math.round((targetWidth * opts.maxHeight) / targetHeight);
-			targetHeight = opts.maxHeight;
-		}
-
-		function tryEncodings(width: number, height: number, jpegQualities: number[]): EncodedCandidate[] {
-			const resized = photon!.resize(image!, width, height, photon!.SamplingFilter.Lanczos3);
-
-			try {
-				const candidates: EncodedCandidate[] = [encodeCandidate(resized.get_bytes(), "image/png")];
-				for (const quality of jpegQualities) {
-					candidates.push(encodeCandidate(resized.get_bytes_jpeg(quality), "image/jpeg"));
-				}
-				return candidates;
-			} finally {
-				resized.free();
-			}
-		}
-
-		const qualitySteps = Array.from(new Set([opts.jpegQuality, 85, 70, 55, 40]));
-		let currentWidth = targetWidth;
-		let currentHeight = targetHeight;
-
-		while (true) {
-			const candidates = tryEncodings(currentWidth, currentHeight, qualitySteps);
-			for (const candidate of candidates) {
-				if (candidate.encodedSize < opts.maxBytes) {
-					return {
-						data: candidate.data,
-						mimeType: candidate.mimeType,
-						originalWidth,
-						originalHeight,
-						width: currentWidth,
-						height: currentHeight,
-						wasResized: true,
-					};
-				}
-			}
-
-			if (currentWidth === 1 && currentHeight === 1) {
-				break;
-			}
-
-			const nextWidth = currentWidth === 1 ? 1 : Math.max(1, Math.floor(currentWidth * 0.75));
-			const nextHeight = currentHeight === 1 ? 1 : Math.max(1, Math.floor(currentHeight * 0.75));
-			if (nextWidth === currentWidth && nextHeight === currentHeight) {
-				break;
-			}
-
-			currentWidth = nextWidth;
-			currentHeight = nextHeight;
-		}
-
-		return null;
+		const initialDimensions = fitImageDimensions({ width: originalWidth, height: originalHeight }, opts);
+		const jpegQualities = Array.from(new Set([opts.jpegQuality, 85, 70, 55, 40]));
+		const candidate = findSizedImageCandidate(
+			{ photon, image, jpegQualities, maxBytes: opts.maxBytes },
+			initialDimensions,
+		);
+		if (!candidate) return null;
+		return {
+			data: candidate.data,
+			mimeType: candidate.mimeType,
+			originalWidth,
+			originalHeight,
+			width: candidate.width,
+			height: candidate.height,
+			wasResized: true,
+		};
 	} catch {
 		return null;
 	} finally {

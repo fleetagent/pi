@@ -33,6 +33,13 @@ describe("parseArgs", () => {
 		});
 	});
 
+	describe("--trust-project-hooks flag", () => {
+		test("parses the opt-in trust grant and defaults to unset", () => {
+			expect(parseArgs([]).trustProjectHooks).toBeUndefined();
+			expect(parseArgs(["--trust-project-hooks"]).trustProjectHooks).toBe(true);
+		});
+	});
+
 	describe("--print flag", () => {
 		test("parses --print flag", () => {
 			const result = parseArgs(["--print"]);
@@ -299,11 +306,12 @@ describe("parseArgs", () => {
 			}
 		});
 
-		test("rejects removed ssh deferred flags", () => {
-			const result = parseArgs(["--ssh-deferred", "--ssh-cwd", "/workspace"]);
+		test("rejects removed SSH backend flags", () => {
+			const result = parseArgs(["--ssh", "user@host:/workspace", "--ssh-deferred", "--ssh-cwd", "/workspace"]);
 			expect(result.remoteDeferred).toBeUndefined();
 			expect(result.remoteCwd).toBeUndefined();
 			expect(result.diagnostics).toEqual([
+				{ type: "error", message: "--ssh was removed; use --remote <ws://url>" },
 				{ type: "error", message: "--ssh-deferred was removed; use --remote-deferred --remote-cwd <path>" },
 				{ type: "error", message: "--ssh-cwd was removed; use --remote-deferred --remote-cwd <path>" },
 			]);

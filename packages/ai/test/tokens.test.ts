@@ -149,9 +149,9 @@ describe("Token Statistics on Abort", () => {
 	});
 
 	describe.skipIf(!process.env.CEREBRAS_API_KEY)("Cerebras Provider", () => {
-		const preferredCerebrasModelIds: string[] = ["gpt-oss-120b", "zai-glm-4.7", "llama3.1-8b"];
+		const preferredCerebrasModelIds = new Set(["gpt-oss-120b", "zai-glm-4.7", "llama3.1-8b"]);
 		const cerebrasModels = getModels("cerebras");
-		const llm = cerebrasModels.find((model) => preferredCerebrasModelIds.includes(model.id)) ?? cerebrasModels[0];
+		const llm = cerebrasModels.find((model) => preferredCerebrasModelIds.has(model.id)) ?? cerebrasModels[0];
 
 		it("should include token stats when aborted mid-stream", { retry: 3, timeout: 30000 }, async () => {
 			if (!llm) {

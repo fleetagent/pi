@@ -20,67 +20,61 @@ export interface ProcessFileOptions {
 	autoResizeImages?: boolean;
 }
 
+interface ProcessedFileArgument {
+	text: string;
+	image?: ImageContent;
+}
+
+async function processImageFile(
+	absolutePath: string,
+	mimeType: string,
+	autoResizeImages: boolean,
+): Promise<ProcessedFileArgument> {
+	const content = await readFile(absolutePath);
+	const processed = await processImage(content, mimeType, { autoResizeImages });
+	if (!processed.ok) return { text: `<file name="${absolutePath}">${processed.message}</file>\n` };
+	const image: ImageContent = { type: "image", mimeType: processed.mimeType, data: processed.data };
+	const hints = processed.hints.length > 0 ? processed.hints.join("\n") : "";
+	return { text: `<file name="${absolutePath}">${hints}</file>\n`, image };
+}
+
+async function processTextFile(absolutePath: string): Promise<ProcessedFileArgument> {
+	try {
+		const content = await readFile(absolutePath, "utf-8");
+		return { text: `<file name="${absolutePath}">\n${content}\n</file>\n` };
+	} catch (error: unknown) {
+		const message = error instanceof Error ? error.message : String(error);
+		console.error(chalk.red(`Error: Could not read file ${absolutePath}: ${message}`));
+		process.exit(1);
+	}
+}
+
+async function processFileArgument(
+	fileArg: string,
+	autoResizeImages: boolean,
+): Promise<ProcessedFileArgument | undefined> {
+	const absolutePath = resolve(resolveReadPath(fileArg, process.cwd()));
+	try {
+		await access(absolutePath);
+	} catch {
+		console.error(chalk.red(`Error: File not found: ${absolutePath}`));
+		process.exit(1);
+	}
+	const stats = await stat(absolutePath);
+	if (stats.size === 0) return undefined;
+	const mimeType = await detectSupportedImageMimeTypeFromFile(absolutePath);
+	return mimeType ? processImageFile(absolutePath, mimeType, autoResizeImages) : processTextFile(absolutePath);
+}
 /** Process @file arguments into text content and image attachments */
 export async function processFileArguments(fileArgs: string[], options?: ProcessFileOptions): Promise<ProcessedFiles> {
 	const autoResizeImages = options?.autoResizeImages ?? true;
 	let text = "";
 	const images: ImageContent[] = [];
-
 	for (const fileArg of fileArgs) {
-		// Expand and resolve path (handles ~ expansion and macOS screenshot Unicode spaces)
-		const absolutePath = resolve(resolveReadPath(fileArg, process.cwd()));
-
-		// Check if file exists
-		try {
-			await access(absolutePath);
-		} catch {
-			console.error(chalk.red(`Error: File not found: ${absolutePath}`));
-			process.exit(1);
-		}
-
-		// Check if file is empty
-		const stats = await stat(absolutePath);
-		if (stats.size === 0) {
-			// Skip empty files
-			continue;
-		}
-
-		const mimeType = await detectSupportedImageMimeTypeFromFile(absolutePath);
-
-		if (mimeType) {
-			// Handle image file
-			const content = await readFile(absolutePath);
-			const processed = await processImage(content, mimeType, { autoResizeImages });
-
-			if (!processed.ok) {
-				text += `<file name="${absolutePath}">${processed.message}</file>\n`;
-				continue;
-			}
-
-			const attachment: ImageContent = {
-				type: "image",
-				mimeType: processed.mimeType,
-				data: processed.data,
-			};
-			images.push(attachment);
-
-			// Add text reference to image with optional processing hints
-			if (processed.hints.length > 0) {
-				text += `<file name="${absolutePath}">${processed.hints.join("\n")}</file>\n`;
-			} else {
-				text += `<file name="${absolutePath}"></file>\n`;
-			}
-		} else {
-			// Handle text file
-			try {
-				const content = await readFile(absolutePath, "utf-8");
-				text += `<file name="${absolutePath}">\n${content}\n</file>\n`;
-			} catch (error: unknown) {
-				const message = error instanceof Error ? error.message : String(error);
-				console.error(chalk.red(`Error: Could not read file ${absolutePath}: ${message}`));
-				process.exit(1);
-			}
-		}
+		const processed = await processFileArgument(fileArg, autoResizeImages);
+		if (!processed) continue;
+		if (processed.image) images.push(processed.image);
+		text += processed.text;
 	}
 
 	return { text, images };

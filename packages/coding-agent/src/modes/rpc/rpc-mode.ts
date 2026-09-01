@@ -15,6 +15,7 @@ import * as crypto from "node:crypto";
 import { stat } from "node:fs/promises";
 import type { AgentToolResult } from "@fleetagent/pi-agent-core";
 import type {
+	ExtensionNotificationType,
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
 	ExtensionWidgetOptions,
@@ -56,6 +57,8 @@ export type {
 	RpcToolCallRequest,
 	RpcToolDefinition,
 } from "./rpc-types.ts";
+
+type RpcInputParseResult = { ok: true; value: unknown } | { ok: false };
 
 const DEFAULT_RPC_SESSION_LIST_LIMIT = 100;
 const MAX_RPC_SESSION_LIST_LIMIT = 500;
@@ -190,7 +193,7 @@ export async function runRpcMode(runtimeHost: PiAgentRuntimeHost): Promise<never
 				"cancelled" in r && r.cancelled ? undefined : "value" in r ? r.value : undefined,
 			),
 
-		notify(message: string, type?: "info" | "warning" | "error"): void {
+		notify(message: string, type?: ExtensionNotificationType): void {
 			// Fire and forget - no response needed
 			output({
 				type: "extension_ui_request",
@@ -421,18 +424,64 @@ export async function runRpcMode(runtimeHost: PiAgentRuntimeHost): Promise<never
 	await rebindSession();
 	registerSignalHandlers();
 
-	// Handle a single command
-	const handleCommand = async (command: RpcCommand): Promise<RpcResponse | undefined> => {
+	const NOT_HANDLED = Symbol("not-handled");
+	type CommandResult = RpcResponse | undefined | typeof NOT_HANDLED;
+
+	const createRpcToolExecutor = (toolName: string) => {
+		return (toolCallId: string, params: unknown, signal: AbortSignal | undefined) => {
+			const requestId = crypto.randomUUID();
+			const request: RpcToolCallRequest = {
+				type: "rpc_tool_call",
+				requestId,
+				toolName,
+				toolCallId,
+				args: params,
+			};
+			return new Promise<AgentToolResult<unknown>>((resolve, reject) => {
+				let timeoutId: ReturnType<typeof setTimeout> | undefined;
+				const cleanup = () => {
+					if (timeoutId) clearTimeout(timeoutId);
+					signal?.removeEventListener("abort", onAbort);
+					pendingRpcToolRequests.delete(requestId);
+				};
+				const onAbort = () => {
+					cleanup();
+					reject(new Error(`RPC tool aborted: ${toolName}`));
+				};
+				if (signal?.aborted) {
+					onAbort();
+					return;
+				}
+				signal?.addEventListener("abort", onAbort, { once: true });
+				timeoutId = setTimeout(
+					() => {
+						cleanup();
+						reject(new Error(`Timed out waiting for RPC tool result: ${toolName}`));
+					},
+					5 * 60 * 1000,
+				);
+				pendingRpcToolRequests.set(requestId, {
+					resolve: (result) => {
+						cleanup();
+						resolve(result);
+					},
+					reject: (error) => {
+						cleanup();
+						reject(error);
+					},
+					abort: onAbort,
+				});
+				output(request);
+			});
+		};
+	};
+
+	const handlePromptCommands = async (command: RpcCommand): Promise<CommandResult> => {
 		const id = command.id;
-
 		switch (command.type) {
-			// =================================================================
-			// Prompting
-			// =================================================================
-
 			case "prompt": {
-				// Start prompt handling immediately, but emit the authoritative response only after
-				// prompt preflight succeeds. Queued and immediately handled prompts also count as success.
+				// Emit the authoritative response only after preflight succeeds. Queued and
+				// immediately handled prompts also count as success.
 				let preflightSucceeded = false;
 				const promptOperation = session.prompt(command.message, {
 					images: command.images,
@@ -462,7 +511,6 @@ export async function runRpcMode(runtimeHost: PiAgentRuntimeHost): Promise<never
 				);
 				return undefined;
 			}
-
 			case "get_structured_response": {
 				const result = await session.getStructuredResponse({
 					schema: command.schema,
@@ -473,59 +521,50 @@ export async function runRpcMode(runtimeHost: PiAgentRuntimeHost): Promise<never
 				});
 				return success(id, "get_structured_response", result);
 			}
-
-			case "steer": {
+			case "steer":
 				await session.steer(command.message, command.images);
 				return success(id, "steer");
-			}
-
-			case "follow_up": {
+			case "follow_up":
 				await session.followUp(command.message, command.images);
 				return success(id, "follow_up");
-			}
-
-			case "abort": {
+			case "abort":
 				await session.abort();
 				return success(id, "abort");
-			}
+			default:
+				return NOT_HANDLED;
+		}
+	};
 
-			case "new_session": {
-				const options =
-					command.sessionId || command.parentSession
-						? { id: command.sessionId, parentSession: command.parentSession }
-						: undefined;
-				const result = await runtimeHost.newSession(options);
-				if (!result.cancelled) {
-					await rebindSession();
-				}
-				return success(id, "new_session", result);
-			}
+	const handleNewSessionCommand = async (command: RpcCommand): Promise<CommandResult> => {
+		if (command.type !== "new_session") return NOT_HANDLED;
+		const options =
+			command.sessionId || command.parentSession
+				? { id: command.sessionId, parentSession: command.parentSession }
+				: undefined;
+		const result = await runtimeHost.newSession(options);
+		if (!result.cancelled) await rebindSession();
+		return success(command.id, "new_session", result);
+	};
 
-			case "list_sessions": {
-				const limit = parseSessionListLimit(command.limit);
-				if (typeof limit === "string") {
-					return error(id, "list_sessions", limit);
-				}
+	const handleListSessionsCommand = async (command: RpcCommand): Promise<CommandResult> => {
+		if (command.type !== "list_sessions") return NOT_HANDLED;
+		const limit = parseSessionListLimit(command.limit);
+		if (typeof limit === "string") return error(command.id, "list_sessions", limit);
+		const offset = parseSessionListCursor(command.cursor);
+		if (typeof offset === "string") return error(command.id, "list_sessions", offset);
+		const sessions = await runtimeHost.listSessions();
+		const page = sessions.slice(offset, offset + limit);
+		const nextOffset = offset + page.length;
+		const response: RpcListSessionsResponse = {
+			sessions: page,
+			...(nextOffset < sessions.length ? { nextCursor: String(nextOffset) } : {}),
+		};
+		return success(command.id, "list_sessions", response);
+	};
 
-				const offset = parseSessionListCursor(command.cursor);
-				if (typeof offset === "string") {
-					return error(id, "list_sessions", offset);
-				}
-
-				const sessions = await runtimeHost.listSessions();
-				const page = sessions.slice(offset, offset + limit);
-				const nextOffset = offset + page.length;
-				const response: RpcListSessionsResponse = {
-					sessions: page,
-					...(nextOffset < sessions.length ? { nextCursor: String(nextOffset) } : {}),
-				};
-				return success(id, "list_sessions", response);
-			}
-
-			// =================================================================
-			// State
-			// =================================================================
-
+	const handleConfigurationCommands = async (command: RpcCommand): Promise<CommandResult> => {
+		const id = command.id;
+		switch (command.type) {
 			case "get_state": {
 				const state: RpcSessionState = {
 					model: session.model,
@@ -545,97 +584,55 @@ export async function runRpcMode(runtimeHost: PiAgentRuntimeHost): Promise<never
 				};
 				return success(id, "get_state", state);
 			}
-
-			// =================================================================
-			// Model
-			// =================================================================
-
 			case "set_model": {
 				const models = await session.modelRegistry.getAvailable();
-				const model = models.find((m) => m.provider === command.provider && m.id === command.modelId);
-				if (!model) {
-					return error(id, "set_model", `Model not found: ${command.provider}/${command.modelId}`);
-				}
+				const model = models.find((model) => model.provider === command.provider && model.id === command.modelId);
+				if (!model) return error(id, "set_model", `Model not found: ${command.provider}/${command.modelId}`);
 				await session.setModel(model);
 				return success(id, "set_model", model);
 			}
-
 			case "cycle_model": {
 				const result = await session.cycleModel();
-				if (!result) {
-					return success(id, "cycle_model", null);
-				}
-				return success(id, "cycle_model", result);
+				return success(id, "cycle_model", result || null);
 			}
-
 			case "get_available_models": {
 				const models = await session.modelRegistry.getAvailable();
 				return success(id, "get_available_models", { models });
 			}
-
-			// =================================================================
-			// Thinking
-			// =================================================================
-
-			case "set_thinking_level": {
+			case "set_thinking_level":
 				session.setThinkingLevel(command.level);
 				return success(id, "set_thinking_level");
-			}
-
 			case "cycle_thinking_level": {
 				const level = session.cycleThinkingLevel();
-				if (!level) {
-					return success(id, "cycle_thinking_level", null);
-				}
-				return success(id, "cycle_thinking_level", { level });
+				return success(id, "cycle_thinking_level", level ? { level } : null);
 			}
-
-			// =================================================================
-			// Queue Modes
-			// =================================================================
-
-			case "set_steering_mode": {
+			case "set_steering_mode":
 				session.setSteeringMode(command.mode);
 				return success(id, "set_steering_mode");
-			}
-
-			case "set_follow_up_mode": {
+			case "set_follow_up_mode":
 				session.setFollowUpMode(command.mode);
 				return success(id, "set_follow_up_mode");
-			}
-
-			// =================================================================
-			// Compaction
-			// =================================================================
-
 			case "compact": {
 				const result = await session.compact(command.customInstructions);
 				return success(id, "compact", result);
 			}
-
-			case "set_auto_compaction": {
+			case "set_auto_compaction":
 				session.setAutoCompactionEnabled(command.enabled);
 				return success(id, "set_auto_compaction");
-			}
-
-			// =================================================================
-			// Retry
-			// =================================================================
-
-			case "set_auto_retry": {
+			case "set_auto_retry":
 				session.setAutoRetryEnabled(command.enabled);
 				return success(id, "set_auto_retry");
-			}
-
-			case "abort_retry": {
+			case "abort_retry":
 				session.abortRetry();
 				return success(id, "abort_retry");
-			}
+			default:
+				return NOT_HANDLED;
+		}
+	};
 
-			// =================================================================
-			// Bash
-			// =================================================================
-
+	const handleBackendCommands = async (command: RpcCommand): Promise<CommandResult> => {
+		const id = command.id;
+		switch (command.type) {
 			case "bash": {
 				const eventResult = await session.extensionRunner.emitUserBash({
 					type: "user_bash",
@@ -643,7 +640,6 @@ export async function runRpcMode(runtimeHost: PiAgentRuntimeHost): Promise<never
 					excludeFromContext: command.excludeFromContext ?? false,
 					cwd: session.session.getCwd(),
 				});
-
 				if (eventResult?.result) {
 					if (command.record !== false) {
 						session.recordBashResult(command.command, eventResult.result, {
@@ -652,7 +648,6 @@ export async function runRpcMode(runtimeHost: PiAgentRuntimeHost): Promise<never
 					}
 					return success(id, "bash", eventResult.result);
 				}
-
 				const result = await session.executeBash(command.command, undefined, {
 					operations: eventResult?.operations,
 					record: command.record,
@@ -661,170 +656,140 @@ export async function runRpcMode(runtimeHost: PiAgentRuntimeHost): Promise<never
 				});
 				return success(id, "bash", result);
 			}
-
-			case "abort_bash": {
+			case "abort_bash":
 				session.abortBash();
 				return success(id, "abort_bash");
-			}
-
 			case "set_remote_sandbox": {
-				const info = await session.configureRemoteSandbox(
-					command.backend === "ssh"
-						? { type: "ssh", remote: command.remote, cwd: command.cwd }
-						: { type: "daemon", url: command.url, token: command.token },
-				);
+				const info = await session.configureRemoteSandbox({
+					type: "daemon",
+					url: command.url,
+					token: command.token,
+				});
 				return success(id, "set_remote_sandbox", info);
 			}
-
-			case "clear_remote_sandbox": {
+			case "clear_remote_sandbox":
 				await session.clearRemoteSandbox();
 				return success(id, "clear_remote_sandbox", session.getToolBackendInfo());
-			}
-
 			case "upload_file": {
 				await session.uploadFile(command.sourcePath, command.destinationPath);
 				const result = await stat(command.sourcePath);
 				return success(id, "upload_file", { bytes: result.size });
 			}
-
 			case "download_file": {
 				await session.downloadFile(command.sourcePath, command.destinationPath);
 				const result = await stat(command.destinationPath);
 				return success(id, "download_file", { bytes: result.size });
 			}
+			default:
+				return NOT_HANDLED;
+		}
+	};
 
-			// =================================================================
-			// Session
-			// =================================================================
-
-			case "get_session_stats": {
-				const stats = session.getSessionStats();
-				return success(id, "get_session_stats", stats);
-			}
-
+	const handleSessionNavigationCommands = async (command: RpcCommand): Promise<CommandResult> => {
+		const id = command.id;
+		switch (command.type) {
+			case "get_session_stats":
+				return success(id, "get_session_stats", session.getSessionStats());
 			case "export_html": {
 				const path = await session.exportToHtml(command.outputPath);
 				return success(id, "export_html", { path });
 			}
-
 			case "switch_session": {
 				const result = await runtimeHost.switchSession(command.sessionPath);
-				if (!result.cancelled) {
-					await rebindSession();
-				}
+				if (!result.cancelled) await rebindSession();
 				return success(id, "switch_session", result);
 			}
-
 			case "fork": {
 				const result = await runtimeHost.fork(command.entryId);
-				if (!result.cancelled) {
-					await rebindSession();
-				}
+				if (!result.cancelled) await rebindSession();
 				return success(id, "fork", { text: result.selectedText, cancelled: result.cancelled });
 			}
-
 			case "clone": {
 				const leafId = session.session.getLeafId();
-				if (!leafId) {
-					return error(id, "clone", "Cannot clone session: no current entry selected");
-				}
+				if (!leafId) return error(id, "clone", "Cannot clone session: no current entry selected");
 				const result = await runtimeHost.fork(leafId, { position: "at" });
-				if (!result.cancelled) {
-					await rebindSession();
-				}
+				if (!result.cancelled) await rebindSession();
 				return success(id, "clone", { cancelled: result.cancelled });
 			}
+			default:
+				return NOT_HANDLED;
+		}
+	};
 
-			case "get_fork_messages": {
-				const messages = session.getUserMessagesForForking();
-				return success(id, "get_fork_messages", { messages });
-			}
-
+	const handleSessionQueryCommands = async (command: RpcCommand): Promise<CommandResult> => {
+		const id = command.id;
+		switch (command.type) {
+			case "get_fork_messages":
+				return success(id, "get_fork_messages", { messages: session.getUserMessagesForForking() });
 			case "get_entries": {
 				let entries = session.session.getEntries();
 				if (command.since !== undefined) {
 					const sinceIndex = entries.findIndex((entry) => entry.id === command.since);
-					if (sinceIndex === -1) {
-						return error(id, "get_entries", `Entry not found: ${command.since}`);
-					}
+					if (sinceIndex === -1) return error(id, "get_entries", `Entry not found: ${command.since}`);
 					entries = entries.slice(sinceIndex + 1);
 				}
 				return success(id, "get_entries", { entries, leafId: session.session.getLeafId() });
 			}
-
-			case "get_tree": {
+			case "get_tree":
 				return success(id, "get_tree", { tree: session.session.getTree(), leafId: session.session.getLeafId() });
-			}
-
-			case "get_last_assistant_text": {
-				const text = session.getLastAssistantText();
-				return success(id, "get_last_assistant_text", { text });
-			}
-
+			case "get_last_assistant_text":
+				return success(id, "get_last_assistant_text", { text: session.getLastAssistantText() });
 			case "set_session_name": {
 				const name = command.name.trim();
-				if (!name) {
-					return error(id, "set_session_name", "Session name cannot be empty");
-				}
+				if (!name) return error(id, "set_session_name", "Session name cannot be empty");
 				session.setSessionName(name);
 				return success(id, "set_session_name");
 			}
-
-			// =================================================================
-			// Messages
-			// =================================================================
-
-			case "get_messages": {
+			case "get_messages":
 				return success(id, "get_messages", { messages: session.messages });
-			}
+			default:
+				return NOT_HANDLED;
+		}
+	};
 
-			// =================================================================
-			// Commands (available for invocation via prompt)
-			// =================================================================
+	const collectCommands = (): RpcSlashCommand[] => {
+		const commands: RpcSlashCommand[] = [];
+		for (const registeredCommand of session.extensionRunner.getRegisteredCommands()) {
+			if (HIDDEN_BUILTIN_SLASH_COMMAND_NAMES.has(registeredCommand.name)) continue;
+			commands.push({
+				name: registeredCommand.invocationName,
+				description: registeredCommand.description,
+				source: "extension",
+				sourceInfo: registeredCommand.sourceInfo,
+			});
+		}
+		for (const template of session.promptTemplates) {
+			commands.push({
+				name: template.name,
+				description: template.description,
+				source: "prompt",
+				sourceInfo: template.sourceInfo,
+			});
+		}
+		for (const skill of session.getRegisteredSkills()) {
+			commands.push({
+				name: `skill:${skill.name}`,
+				description: skill.description,
+				source: "skill",
+				sourceInfo: skill.sourceInfo,
+			});
+		}
+		for (const rule of session.getRegisteredRules()) {
+			commands.push({
+				name: `rule:${rule.name}`,
+				description: rule.description,
+				source: "rule",
+				sourceInfo: rule.sourceInfo,
+			});
+		}
+		return commands;
+	};
 
-			case "get_commands": {
-				const commands: RpcSlashCommand[] = [];
-
-				for (const command of session.extensionRunner.getRegisteredCommands()) {
-					if (HIDDEN_BUILTIN_SLASH_COMMAND_NAMES.has(command.name)) continue;
-					commands.push({
-						name: command.invocationName,
-						description: command.description,
-						source: "extension",
-						sourceInfo: command.sourceInfo,
-					});
-				}
-
-				for (const template of session.promptTemplates) {
-					commands.push({
-						name: template.name,
-						description: template.description,
-						source: "prompt",
-						sourceInfo: template.sourceInfo,
-					});
-				}
-
-				for (const skill of session.getRegisteredSkills()) {
-					commands.push({
-						name: `skill:${skill.name}`,
-						description: skill.description,
-						source: "skill",
-						sourceInfo: skill.sourceInfo,
-					});
-				}
-
-				for (const rule of session.getRegisteredRules()) {
-					commands.push({
-						name: `rule:${rule.name}`,
-						description: rule.description,
-						source: "rule",
-						sourceInfo: rule.sourceInfo,
-					});
-				}
-
-				return success(id, "get_commands", { commands });
-			}
-
+	const handleSkillCommands = async (command: RpcCommand): Promise<CommandResult> => {
+		const id = command.id;
+		switch (command.type) {
+			case "get_commands":
+				return success(id, "get_commands", { commands: collectCommands() });
 			case "register_skill": {
 				if (!command.skill.filePath && command.skill.content === undefined) {
 					return error(
@@ -845,11 +810,16 @@ export async function runRpcMode(runtimeHost: PiAgentRuntimeHost): Promise<never
 				});
 				return success(id, "register_skill");
 			}
-
-			case "unregister_skill": {
+			case "unregister_skill":
 				return success(id, "unregister_skill", { unregistered: session.unregisterSessionSkill(command.name) });
-			}
+			default:
+				return NOT_HANDLED;
+		}
+	};
 
+	const handleRuleCommands = async (command: RpcCommand): Promise<CommandResult> => {
+		const id = command.id;
+		switch (command.type) {
 			case "register_rule": {
 				if (!command.rule.filePath && command.rule.content === undefined) {
 					return error(id, "register_rule", `registerRule("${command.rule.name}") requires filePath or content`);
@@ -866,12 +836,17 @@ export async function runRpcMode(runtimeHost: PiAgentRuntimeHost): Promise<never
 				});
 				return success(id, "register_rule");
 			}
-
-			case "unregister_rule": {
+			case "unregister_rule":
 				return success(id, "unregister_rule", { unregistered: session.unregisterSessionRule(command.name) });
-			}
+			default:
+				return NOT_HANDLED;
+		}
+	};
 
-			case "register_tool": {
+	const handleToolRegistrationCommands = async (command: RpcCommand): Promise<CommandResult> => {
+		const id = command.id;
+		switch (command.type) {
+			case "register_tool":
 				session.registerSessionTool(
 					{
 						name: command.tool.name,
@@ -881,74 +856,95 @@ export async function runRpcMode(runtimeHost: PiAgentRuntimeHost): Promise<never
 						promptGuidelines: command.tool.promptGuidelines,
 						parameters: command.tool.parameters,
 						executionMode: command.tool.executionMode,
-						execute: (toolCallId, params, signal) => {
-							const requestId = crypto.randomUUID();
-							const request: RpcToolCallRequest = {
-								type: "rpc_tool_call",
-								requestId,
-								toolName: command.tool.name,
-								toolCallId,
-								args: params,
-							};
-							return new Promise<AgentToolResult<unknown>>((resolve, reject) => {
-								let timeoutId: ReturnType<typeof setTimeout> | undefined;
-								const cleanup = () => {
-									if (timeoutId) clearTimeout(timeoutId);
-									signal?.removeEventListener("abort", onAbort);
-									pendingRpcToolRequests.delete(requestId);
-								};
-								const onAbort = () => {
-									cleanup();
-									reject(new Error(`RPC tool aborted: ${command.tool.name}`));
-								};
-								if (signal?.aborted) {
-									onAbort();
-									return;
-								}
-								signal?.addEventListener("abort", onAbort, { once: true });
-								timeoutId = setTimeout(
-									() => {
-										cleanup();
-										reject(new Error(`Timed out waiting for RPC tool result: ${command.tool.name}`));
-									},
-									5 * 60 * 1000,
-								);
-								pendingRpcToolRequests.set(requestId, {
-									resolve: (result) => {
-										cleanup();
-										resolve(result);
-									},
-									reject: (error) => {
-										cleanup();
-										reject(error);
-									},
-									abort: onAbort,
-								});
-								output(request);
-							});
-						},
+						execute: createRpcToolExecutor(command.tool.name),
 					},
 					{ lazy: command.tool.lazy },
 				);
 				return success(id, "register_tool");
-			}
-
-			case "unregister_tool": {
+			case "unregister_tool":
 				return success(id, "unregister_tool", { unregistered: session.unregisterSessionTool(command.name) });
-			}
-
-			case "get_available_tools": {
+			case "get_available_tools":
 				return success(id, "get_available_tools", { tools: session.getAvailableSessionTools() });
-			}
-
 			case "rpc_tool_result":
-			case "rpc_tool_error": {
+			case "rpc_tool_error":
 				return success(id, command.type);
-			}
+			default:
+				return NOT_HANDLED;
+		}
+	};
 
+	const requireHandledCommandResult = async (
+		command: RpcCommand,
+		resultPromise: Promise<CommandResult>,
+	): Promise<RpcResponse | undefined> => {
+		const result = await resultPromise;
+		if (result !== NOT_HANDLED) return result;
+		const unknownCommand = command as unknown as { type: string };
+		return error(command.id, unknownCommand.type, `Unknown command: ${unknownCommand.type}`);
+	};
+	// Route synchronously so commands begin handling in input order. Awaiting a chain of
+	// non-matching async handlers would let later input commands overtake earlier ones.
+	const handleCommand = async (command: RpcCommand): Promise<RpcResponse | undefined> => {
+		switch (command.type) {
+			case "prompt":
+			case "get_structured_response":
+			case "steer":
+			case "follow_up":
+			case "abort":
+				return requireHandledCommandResult(command, handlePromptCommands(command));
+			case "new_session":
+				return requireHandledCommandResult(command, handleNewSessionCommand(command));
+			case "list_sessions":
+				return requireHandledCommandResult(command, handleListSessionsCommand(command));
+			case "get_state":
+			case "set_model":
+			case "cycle_model":
+			case "get_available_models":
+			case "set_thinking_level":
+			case "cycle_thinking_level":
+			case "set_steering_mode":
+			case "set_follow_up_mode":
+			case "compact":
+			case "set_auto_compaction":
+			case "set_auto_retry":
+			case "abort_retry":
+				return requireHandledCommandResult(command, handleConfigurationCommands(command));
+			case "bash":
+			case "abort_bash":
+			case "set_remote_sandbox":
+			case "clear_remote_sandbox":
+			case "upload_file":
+			case "download_file":
+				return requireHandledCommandResult(command, handleBackendCommands(command));
+			case "get_session_stats":
+			case "export_html":
+			case "switch_session":
+			case "fork":
+			case "clone":
+				return requireHandledCommandResult(command, handleSessionNavigationCommands(command));
+			case "get_fork_messages":
+			case "get_entries":
+			case "get_tree":
+			case "get_last_assistant_text":
+			case "set_session_name":
+			case "get_messages":
+				return requireHandledCommandResult(command, handleSessionQueryCommands(command));
+			case "get_commands":
+			case "register_skill":
+			case "unregister_skill":
+				return requireHandledCommandResult(command, handleSkillCommands(command));
+			case "register_rule":
+			case "unregister_rule":
+				return requireHandledCommandResult(command, handleRuleCommands(command));
+			case "register_tool":
+			case "unregister_tool":
+			case "get_available_tools":
+			case "rpc_tool_result":
+			case "rpc_tool_error":
+				return requireHandledCommandResult(command, handleToolRegistrationCommands(command));
 			default: {
-				const unknownCommand = command as { type: string };
-				return error(id, unknownCommand.type, `Unknown command: ${unknownCommand.type}`);
+				const unknownCommand = command as unknown as { id?: string; type: string };
+				return error(unknownCommand.id, unknownCommand.type, `Unknown command: ${unknownCommand.type}`);
 			}
 		}
 	};
@@ -987,10 +983,9 @@ export async function runRpcMode(runtimeHost: PiAgentRuntimeHost): Promise<never
 		await shutdown();
 	}
 
-	const handleInputLine = async (line: string) => {
-		let parsed: unknown;
+	const parseInputLine = (line: string): RpcInputParseResult => {
 		try {
-			parsed = JSON.parse(line);
+			return { ok: true, value: JSON.parse(line) };
 		} catch (parseError: unknown) {
 			output(
 				error(
@@ -999,42 +994,40 @@ export async function runRpcMode(runtimeHost: PiAgentRuntimeHost): Promise<never
 					`Failed to parse command: ${parseError instanceof Error ? parseError.message : String(parseError)}`,
 				),
 			);
-			await waitForRawStdoutBackpressure();
-			return;
+			return { ok: false };
 		}
+	};
 
-		// Handle extension UI responses
-		if (typeof parsed === "object" && parsed !== null && "type" in parsed) {
-			if (parsed.type === "extension_ui_response") {
+	const handlePendingRpcResponse = (parsed: unknown): boolean => {
+		if (typeof parsed !== "object" || parsed === null || !("type" in parsed)) return false;
+		switch (parsed.type) {
+			case "extension_ui_response": {
 				const response = parsed as RpcExtensionUIResponse;
 				const pending = pendingExtensionRequests.get(response.id);
 				if (pending) {
 					pendingExtensionRequests.delete(response.id);
 					pending.resolve(response);
 				}
-				return;
+				return true;
 			}
-
-			if (parsed.type === "rpc_tool_result") {
+			case "rpc_tool_result": {
 				const response = parsed as Extract<RpcCommand, { type: "rpc_tool_result" }>;
 				const pending = pendingRpcToolRequests.get(response.requestId);
-				if (pending) {
-					pending.resolve(response.result);
-				}
-				return;
+				if (pending) pending.resolve(response.result);
+				return true;
 			}
-
-			if (parsed.type === "rpc_tool_error") {
+			case "rpc_tool_error": {
 				const response = parsed as Extract<RpcCommand, { type: "rpc_tool_error" }>;
 				const pending = pendingRpcToolRequests.get(response.requestId);
-				if (pending) {
-					pending.reject(new Error(response.error));
-				}
-				return;
+				if (pending) pending.reject(new Error(response.error));
+				return true;
 			}
+			default:
+				return false;
 		}
+	};
 
-		const command = parsed as RpcCommand;
+	const handleParsedCommand = async (command: RpcCommand): Promise<void> => {
 		try {
 			const response = await handleCommand(command);
 			if (response) {
@@ -1052,6 +1045,16 @@ export async function runRpcMode(runtimeHost: PiAgentRuntimeHost): Promise<never
 			);
 			await waitForRawStdoutBackpressure();
 		}
+	};
+
+	const handleInputLine = async (line: string) => {
+		const parseResult = parseInputLine(line);
+		if (!parseResult.ok) {
+			await waitForRawStdoutBackpressure();
+			return;
+		}
+		if (handlePendingRpcResponse(parseResult.value)) return;
+		await handleParsedCommand(parseResult.value as RpcCommand);
 	};
 
 	const onInputEnd = () => {

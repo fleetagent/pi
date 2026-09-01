@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { convertMessages } from "../src/providers/google-shared.ts";
-import type { AssistantMessage, Context, Model } from "../src/types.ts";
+import type { AssistantContent, AssistantMessage, Context, Model } from "../src/types.ts";
 
 // Gemini can attach `thoughtSignature` to a response part whose visible text is empty (e.g. a
 // thought burst preceding a function call) and requires the signature echoed back on the next
@@ -25,10 +25,7 @@ function makeModel(id = "gemini-3-pro-preview"): Model<"google-generative-ai"> {
 
 const VALID_SIG = "AAAAAAAAAAAAAAAAAAAAAA==";
 
-function makeContext(
-	model: { api: string; provider: string; id: string },
-	content: AssistantMessage["content"],
-): Context {
+function makeContext(model: Model<"google-generative-ai">, content: AssistantContent[]): Context {
 	const now = Date.now();
 	return {
 		messages: [

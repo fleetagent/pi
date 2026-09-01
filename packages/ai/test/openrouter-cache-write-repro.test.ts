@@ -11,6 +11,57 @@ function createLongSystemPrompt(): string {
 		.join("\n\n")}`;
 }
 
+interface OpenRouterCacheControl {
+	type: string;
+}
+
+interface OpenRouterCacheableContentPart {
+	type?: string;
+	text?: string;
+	cache_control?: OpenRouterCacheControl;
+}
+
+interface OpenRouterPromptMessage {
+	role?: string;
+	content?: string | OpenRouterCacheableContentPart[];
+}
+
+interface OpenRouterPromptPayload {
+	messages?: OpenRouterPromptMessage[];
+}
+
+function findLastCacheableUserMessage(messages: OpenRouterPromptMessage[]): OpenRouterPromptMessage | undefined {
+	for (let index = messages.length - 1; index >= 0; index--) {
+		const candidate = messages[index];
+		if (candidate.role !== "user") continue;
+		if (typeof candidate.content !== "string" && !Array.isArray(candidate.content)) continue;
+		return candidate;
+	}
+	return undefined;
+}
+
+function markLastTextPartForCaching(content: OpenRouterCacheableContentPart[]): void {
+	for (let index = content.length - 1; index >= 0; index--) {
+		const part = content[index];
+		if (part.type !== "text") continue;
+		part.cache_control = { type: "ephemeral" };
+		return;
+	}
+}
+
+function markLastUserMessageForCaching(payload: unknown): unknown {
+	const params = payload as OpenRouterPromptPayload;
+	if (!Array.isArray(params.messages)) return payload;
+	const message = findLastCacheableUserMessage(params.messages);
+	if (!message) return payload;
+	if (typeof message.content === "string") {
+		message.content = [{ type: "text", text: message.content, cache_control: { type: "ephemeral" } }];
+		return payload;
+	}
+	if (Array.isArray(message.content)) markLastTextPartForCaching(message.content);
+	return payload;
+}
+
 describe.skipIf(!process.env.OPENROUTER_API_KEY)("OpenRouter cache_write repro E2E", () => {
 	it("regression: preserves cache_write_tokens on openai-completions stream path", {
 		retry: 2,
@@ -32,35 +83,7 @@ describe.skipIf(!process.env.OPENROUTER_API_KEY)("OpenRouter cache_write repro E
 			apiKey: process.env.OPENROUTER_API_KEY!,
 			maxTokens: 32,
 			temperature: 0,
-			onPayload: (payload: unknown) => {
-				const params = payload as {
-					messages?: Array<{
-						role?: string;
-						content?: string | Array<{ type?: string; text?: string; cache_control?: { type: string } }>;
-					}>;
-				};
-				const messages = params.messages;
-				if (!Array.isArray(messages)) return payload;
-
-				for (let i = messages.length - 1; i >= 0; i--) {
-					const msg = messages[i];
-					if (msg.role !== "user") continue;
-					if (typeof msg.content === "string") {
-						msg.content = [{ type: "text", text: msg.content, cache_control: { type: "ephemeral" } }];
-						break;
-					}
-					if (!Array.isArray(msg.content)) continue;
-					for (let j = msg.content.length - 1; j >= 0; j--) {
-						const part = msg.content[j];
-						if (part.type === "text") {
-							part.cache_control = { type: "ephemeral" };
-							break;
-						}
-					}
-					break;
-				}
-				return payload;
-			},
+			onPayload: markLastUserMessageForCaching,
 		};
 
 		const first = await completeSimple(model, context, options);

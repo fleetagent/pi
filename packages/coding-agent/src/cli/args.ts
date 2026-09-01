@@ -18,6 +18,13 @@ import type { ExtensionFlag } from "../core/extensions/types.ts";
 
 export type Mode = "text" | "json" | "rpc";
 
+export type CliDiagnosticSeverity = "warning" | "error";
+
+export interface CliDiagnostic {
+	type: CliDiagnosticSeverity;
+	message: string;
+}
+
 export interface Args {
 	provider?: string;
 	model?: string;
@@ -43,6 +50,8 @@ export interface Args {
 	tools?: string[];
 	noTools?: boolean;
 	noBuiltinTools?: boolean;
+	/** Explicitly trust project/local Claude hooks as trusted host code. */
+	trustProjectHooks?: boolean;
 	extensions?: string[];
 	noExtensions?: boolean;
 	print?: boolean;
@@ -60,7 +69,6 @@ export interface Args {
 	offline?: boolean;
 	tuiMode?: TuiMode;
 	verbose?: boolean;
-	ssh?: string;
 	remote?: string;
 	remoteDeferred?: boolean;
 	remoteCwd?: string;
@@ -68,13 +76,243 @@ export interface Args {
 	fileArgs: string[];
 	/** Unknown flags (potentially extension flags) - map of flag name to value */
 	unknownFlags: Map<string, boolean | string>;
-	diagnostics: Array<{ type: "warning" | "error"; message: string }>;
+	diagnostics: CliDiagnostic[];
 }
 
 const VALID_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
 
 export function isValidThinkingLevel(level: string): level is ThinkingLevel {
 	return VALID_THINKING_LEVELS.includes(level as ThinkingLevel);
+}
+
+type CliBooleanFlagHandler = (result: Args) => void;
+type CliValueFlagHandler = (result: Args, value: string) => void;
+
+interface CliArgumentParseContext {
+	args: string[];
+	result: Args;
+	index: number;
+	arg: string;
+}
+
+type CliSpecialFlagHandler = (context: CliArgumentParseContext) => number;
+
+function appendArgumentValue(values: string[] | undefined, value: string): string[] {
+	const nextValues = values ?? [];
+	nextValues.push(value);
+	return nextValues;
+}
+
+const BOOLEAN_FLAG_HANDLERS = new Map<string, CliBooleanFlagHandler>([
+	["--help", (result) => (result.help = true)],
+	["-h", (result) => (result.help = true)],
+	["--version", (result) => (result.version = true)],
+	["-v", (result) => (result.version = true)],
+	["--continue", (result) => (result.continue = true)],
+	["-c", (result) => (result.continue = true)],
+	["--resume", (result) => (result.resume = true)],
+	["-r", (result) => (result.resume = true)],
+	["--no-session", (result) => (result.noSession = true)],
+	["--no-lsp", (result) => (result.noLsp = true)],
+	["--no-tools", (result) => (result.noTools = true)],
+	["-nt", (result) => (result.noTools = true)],
+	["--no-builtin-tools", (result) => (result.noBuiltinTools = true)],
+	["-nbt", (result) => (result.noBuiltinTools = true)],
+	["--trust-project-hooks", (result) => (result.trustProjectHooks = true)],
+	["--no-extensions", (result) => (result.noExtensions = true)],
+	["-ne", (result) => (result.noExtensions = true)],
+	["--no-skills", (result) => (result.noSkills = true)],
+	["-ns", (result) => (result.noSkills = true)],
+	["--no-rules", (result) => (result.noRules = true)],
+	["-nr", (result) => (result.noRules = true)],
+	["--no-prompt-templates", (result) => (result.noPromptTemplates = true)],
+	["-np", (result) => (result.noPromptTemplates = true)],
+	["--no-themes", (result) => (result.noThemes = true)],
+	["--no-context-files", (result) => (result.noContextFiles = true)],
+	["-nc", (result) => (result.noContextFiles = true)],
+	["--verbose", (result) => (result.verbose = true)],
+	["--offline", (result) => (result.offline = true)],
+	["--remote-deferred", (result) => (result.remoteDeferred = true)],
+]);
+
+const VALUE_FLAG_HANDLERS = new Map<string, CliValueFlagHandler>([
+	[
+		"--mode",
+		(result, value) => {
+			if (value === "text" || value === "json" || value === "rpc") result.mode = value;
+		},
+	],
+	["--provider", (result, value) => (result.provider = value)],
+	["--model", (result, value) => (result.model = value)],
+	["--api-key", (result, value) => (result.apiKey = value)],
+	["--system-prompt", (result, value) => (result.systemPrompt = value)],
+	[
+		"--append-system-prompt",
+		(result, value) => (result.appendSystemPrompt = appendArgumentValue(result.appendSystemPrompt, value)),
+	],
+	["--session", (result, value) => (result.session = value)],
+	["--fork", (result, value) => (result.fork = value)],
+	["--session-dir", (result, value) => (result.sessionDir = value)],
+	["--remote-session-base-url", (result, value) => (result.remoteSessionBaseUrl = value)],
+	["--remote-session-token", (result, value) => (result.remoteSessionToken = value)],
+	["--remote-project-id", (result, value) => (result.remoteProjectId = value)],
+	["--models", (result, value) => (result.models = value.split(",").map((item) => item.trim()))],
+	[
+		"--tools",
+		(result, value) =>
+			(result.tools = value
+				.split(",")
+				.map((item) => item.trim())
+				.filter((name) => name.length > 0)),
+	],
+	[
+		"-t",
+		(result, value) =>
+			(result.tools = value
+				.split(",")
+				.map((item) => item.trim())
+				.filter((name) => name.length > 0)),
+	],
+	[
+		"--thinking",
+		(result, value) => {
+			if (isValidThinkingLevel(value)) {
+				result.thinking = value;
+			} else {
+				result.diagnostics.push({
+					type: "warning",
+					message: `Invalid thinking level "${value}". Valid values: ${VALID_THINKING_LEVELS.join(", ")}`,
+				});
+			}
+		},
+	],
+	["--export", (result, value) => (result.export = value)],
+	["--extension", (result, value) => (result.extensions = appendArgumentValue(result.extensions, value))],
+	["-e", (result, value) => (result.extensions = appendArgumentValue(result.extensions, value))],
+	["--skill", (result, value) => (result.skills = appendArgumentValue(result.skills, value))],
+	["--rule", (result, value) => (result.rules = appendArgumentValue(result.rules, value))],
+	[
+		"--prompt-template",
+		(result, value) => (result.promptTemplates = appendArgumentValue(result.promptTemplates, value)),
+	],
+	["--theme", (result, value) => (result.themes = appendArgumentValue(result.themes, value))],
+	["--remote", (result, value) => (result.remote = value)],
+	["--remote-cwd", (result, value) => (result.remoteCwd = value)],
+]);
+
+function handleLspConfigFlag(context: CliArgumentParseContext): number {
+	const next = context.args[context.index + 1];
+	if (next === undefined || next.startsWith("-")) {
+		context.result.diagnostics.push({ type: "error", message: "--lsp-config requires a file path" });
+		return context.index;
+	}
+	context.result.lspConfig = next;
+	return context.index + 1;
+}
+
+function handlePrintFlag(context: CliArgumentParseContext): number {
+	context.result.print = true;
+	const next = context.args[context.index + 1];
+	if (next !== undefined && !next.startsWith("@") && (!next.startsWith("-") || next.startsWith("---"))) {
+		context.result.messages.push(next);
+		return context.index + 1;
+	}
+	return context.index;
+}
+
+function handleListModelsFlag(context: CliArgumentParseContext): number {
+	const next = context.args[context.index + 1];
+	if (next !== undefined && !next.startsWith("-") && !next.startsWith("@")) {
+		context.result.listModels = next;
+		return context.index + 1;
+	}
+	context.result.listModels = true;
+	return context.index;
+}
+
+function handleTuiModeFlag(context: CliArgumentParseContext): number {
+	const mode = context.args[context.index + 1];
+	if (mode === "regular" || mode === "fullscreen") {
+		context.result.tuiMode = mode;
+		return context.index + 1;
+	}
+	if (mode === undefined || mode.startsWith("-")) {
+		context.result.diagnostics.push({ type: "error", message: "--tui-mode requires regular or fullscreen" });
+		return context.index;
+	}
+	context.result.diagnostics.push({
+		type: "error",
+		message: `Invalid TUI mode "${mode}". Valid values: regular, fullscreen`,
+	});
+	return context.index + 1;
+}
+
+function handleRemovedSshFlag(context: CliArgumentParseContext): number {
+	context.result.diagnostics.push({
+		type: "error",
+		message:
+			context.arg === "--ssh"
+				? "--ssh was removed; use --remote <ws://url>"
+				: `${context.arg} was removed; use --remote-deferred --remote-cwd <path>`,
+	});
+	const value = context.args[context.index + 1];
+	if ((context.arg === "--ssh" || context.arg === "--ssh-cwd") && value !== undefined && !value.startsWith("-")) {
+		return context.index + 1;
+	}
+	return context.index;
+}
+
+const SPECIAL_FLAG_HANDLERS = new Map<string, CliSpecialFlagHandler>([
+	["--lsp-config", handleLspConfigFlag],
+	["--print", handlePrintFlag],
+	["-p", handlePrintFlag],
+	["--list-models", handleListModelsFlag],
+	["--tui-mode", handleTuiModeFlag],
+	["--ssh", handleRemovedSshFlag],
+	["--ssh-deferred", handleRemovedSshFlag],
+	["--ssh-cwd", handleRemovedSshFlag],
+]);
+
+function handleMappedCliFlag(context: CliArgumentParseContext): number | undefined {
+	const booleanHandler = BOOLEAN_FLAG_HANDLERS.get(context.arg);
+	if (booleanHandler) {
+		booleanHandler(context.result);
+		return context.index;
+	}
+	const valueHandler = VALUE_FLAG_HANDLERS.get(context.arg);
+	const value = context.args[context.index + 1];
+	if (!valueHandler || value === undefined) return undefined;
+	valueHandler(context.result, value);
+	return context.index + 1;
+}
+
+function handleFallbackCliArgument(context: CliArgumentParseContext): number {
+	const { arg, args, result, index } = context;
+	if (arg.startsWith("@")) {
+		result.fileArgs.push(arg.slice(1));
+		return index;
+	}
+	if (arg.startsWith("--")) {
+		const equalsIndex = arg.indexOf("=");
+		if (equalsIndex !== -1) {
+			result.unknownFlags.set(arg.slice(2, equalsIndex), arg.slice(equalsIndex + 1));
+			return index;
+		}
+		const flagName = arg.slice(2);
+		const next = args[index + 1];
+		if (next !== undefined && !next.startsWith("-") && !next.startsWith("@")) {
+			result.unknownFlags.set(flagName, next);
+			return index + 1;
+		}
+		result.unknownFlags.set(flagName, true);
+		return index;
+	}
+	if (arg.startsWith("-")) {
+		result.diagnostics.push({ type: "error", message: `Unknown option: ${arg}` });
+		return index;
+	}
+	result.messages.push(arg);
+	return index;
 }
 
 export function parseArgs(args: string[]): Args {
@@ -84,177 +322,20 @@ export function parseArgs(args: string[]): Args {
 		unknownFlags: new Map(),
 		diagnostics: [],
 	};
-
-	for (let i = 0; i < args.length; i++) {
-		const arg = args[i];
-
-		if (arg === "--help" || arg === "-h") {
-			result.help = true;
-		} else if (arg === "--version" || arg === "-v") {
-			result.version = true;
-		} else if (arg === "--mode" && i + 1 < args.length) {
-			const mode = args[++i];
-			if (mode === "text" || mode === "json" || mode === "rpc") {
-				result.mode = mode;
-			}
-		} else if (arg === "--continue" || arg === "-c") {
-			result.continue = true;
-		} else if (arg === "--resume" || arg === "-r") {
-			result.resume = true;
-		} else if (arg === "--provider" && i + 1 < args.length) {
-			result.provider = args[++i];
-		} else if (arg === "--model" && i + 1 < args.length) {
-			result.model = args[++i];
-		} else if (arg === "--api-key" && i + 1 < args.length) {
-			result.apiKey = args[++i];
-		} else if (arg === "--system-prompt" && i + 1 < args.length) {
-			result.systemPrompt = args[++i];
-		} else if (arg === "--append-system-prompt" && i + 1 < args.length) {
-			result.appendSystemPrompt = result.appendSystemPrompt ?? [];
-			result.appendSystemPrompt.push(args[++i]);
-		} else if (arg === "--no-session") {
-			result.noSession = true;
-		} else if (arg === "--session" && i + 1 < args.length) {
-			result.session = args[++i];
-		} else if (arg === "--fork" && i + 1 < args.length) {
-			result.fork = args[++i];
-		} else if (arg === "--session-dir" && i + 1 < args.length) {
-			result.sessionDir = args[++i];
-		} else if (arg === "--lsp-config") {
-			const next = args[i + 1];
-			if (next === undefined || next.startsWith("-")) {
-				result.diagnostics.push({ type: "error", message: "--lsp-config requires a file path" });
-			} else {
-				result.lspConfig = next;
-				i++;
-			}
-		} else if (arg === "--no-lsp") {
-			result.noLsp = true;
-		} else if (arg === "--remote-session-base-url" && i + 1 < args.length) {
-			result.remoteSessionBaseUrl = args[++i];
-		} else if (arg === "--remote-session-token" && i + 1 < args.length) {
-			result.remoteSessionToken = args[++i];
-		} else if (arg === "--remote-project-id" && i + 1 < args.length) {
-			result.remoteProjectId = args[++i];
-		} else if (arg === "--models" && i + 1 < args.length) {
-			result.models = args[++i].split(",").map((s) => s.trim());
-		} else if (arg === "--no-tools" || arg === "-nt") {
-			result.noTools = true;
-		} else if (arg === "--no-builtin-tools" || arg === "-nbt") {
-			result.noBuiltinTools = true;
-		} else if ((arg === "--tools" || arg === "-t") && i + 1 < args.length) {
-			result.tools = args[++i]
-				.split(",")
-				.map((s) => s.trim())
-				.filter((name) => name.length > 0);
-		} else if (arg === "--thinking" && i + 1 < args.length) {
-			const level = args[++i];
-			if (isValidThinkingLevel(level)) {
-				result.thinking = level;
-			} else {
-				result.diagnostics.push({
-					type: "warning",
-					message: `Invalid thinking level "${level}". Valid values: ${VALID_THINKING_LEVELS.join(", ")}`,
-				});
-			}
-		} else if (arg === "--print" || arg === "-p") {
-			result.print = true;
-			const next = args[i + 1];
-			if (next !== undefined && !next.startsWith("@") && (!next.startsWith("-") || next.startsWith("---"))) {
-				result.messages.push(next);
-				i++;
-			}
-		} else if (arg === "--export" && i + 1 < args.length) {
-			result.export = args[++i];
-		} else if ((arg === "--extension" || arg === "-e") && i + 1 < args.length) {
-			result.extensions = result.extensions ?? [];
-			result.extensions.push(args[++i]);
-		} else if (arg === "--no-extensions" || arg === "-ne") {
-			result.noExtensions = true;
-		} else if (arg === "--skill" && i + 1 < args.length) {
-			result.skills = result.skills ?? [];
-			result.skills.push(args[++i]);
-		} else if (arg === "--rule" && i + 1 < args.length) {
-			result.rules = result.rules ?? [];
-			result.rules.push(args[++i]);
-		} else if (arg === "--prompt-template" && i + 1 < args.length) {
-			result.promptTemplates = result.promptTemplates ?? [];
-			result.promptTemplates.push(args[++i]);
-		} else if (arg === "--theme" && i + 1 < args.length) {
-			result.themes = result.themes ?? [];
-			result.themes.push(args[++i]);
-		} else if (arg === "--no-skills" || arg === "-ns") {
-			result.noSkills = true;
-		} else if (arg === "--no-rules" || arg === "-nr") {
-			result.noRules = true;
-		} else if (arg === "--no-prompt-templates" || arg === "-np") {
-			result.noPromptTemplates = true;
-		} else if (arg === "--no-themes") {
-			result.noThemes = true;
-		} else if (arg === "--no-context-files" || arg === "-nc") {
-			result.noContextFiles = true;
-		} else if (arg === "--list-models") {
-			// Check if next arg is a search pattern (not a flag or file arg)
-			if (i + 1 < args.length && !args[i + 1].startsWith("-") && !args[i + 1].startsWith("@")) {
-				result.listModels = args[++i];
-			} else {
-				result.listModels = true;
-			}
-		} else if (arg === "--tui-mode") {
-			const mode = args[i + 1];
-			if (mode === "regular" || mode === "fullscreen") {
-				result.tuiMode = mode;
-				i++;
-			} else if (mode === undefined || mode.startsWith("-")) {
-				result.diagnostics.push({ type: "error", message: "--tui-mode requires regular or fullscreen" });
-			} else {
-				i++;
-				result.diagnostics.push({
-					type: "error",
-					message: `Invalid TUI mode "${mode}". Valid values: regular, fullscreen`,
-				});
-			}
-		} else if (arg === "--verbose") {
-			result.verbose = true;
-		} else if (arg === "--offline") {
-			result.offline = true;
-		} else if (arg === "--ssh" && i + 1 < args.length) {
-			result.ssh = args[++i];
-		} else if (arg === "--remote" && i + 1 < args.length) {
-			result.remote = args[++i];
-		} else if (arg === "--remote-deferred") {
-			result.remoteDeferred = true;
-		} else if (arg === "--remote-cwd" && i + 1 < args.length) {
-			result.remoteCwd = args[++i];
-		} else if (arg === "--ssh-deferred" || arg === "--ssh-cwd") {
-			result.diagnostics.push({
-				type: "error",
-				message: `${arg} was removed; use --remote-deferred --remote-cwd <path>`,
-			});
-			if (arg === "--ssh-cwd" && i + 1 < args.length) i++;
-		} else if (arg.startsWith("@")) {
-			result.fileArgs.push(arg.slice(1)); // Remove @ prefix
-		} else if (arg.startsWith("--")) {
-			const eqIndex = arg.indexOf("=");
-			if (eqIndex !== -1) {
-				result.unknownFlags.set(arg.slice(2, eqIndex), arg.slice(eqIndex + 1));
-			} else {
-				const flagName = arg.slice(2);
-				const next = args[i + 1];
-				if (next !== undefined && !next.startsWith("-") && !next.startsWith("@")) {
-					result.unknownFlags.set(flagName, next);
-					i++;
-				} else {
-					result.unknownFlags.set(flagName, true);
-				}
-			}
-		} else if (arg.startsWith("-") && !arg.startsWith("--")) {
-			result.diagnostics.push({ type: "error", message: `Unknown option: ${arg}` });
-		} else if (!arg.startsWith("-")) {
-			result.messages.push(arg);
+	for (let index = 0; index < args.length; index++) {
+		const context: CliArgumentParseContext = { args, result, index, arg: args[index] };
+		const mappedIndex = handleMappedCliFlag(context);
+		if (mappedIndex !== undefined) {
+			index = mappedIndex;
+			continue;
 		}
+		const specialHandler = SPECIAL_FLAG_HANDLERS.get(context.arg);
+		if (specialHandler) {
+			index = specialHandler(context);
+			continue;
+		}
+		index = handleFallbackCliArgument(context);
 	}
-
 	return result;
 }
 
@@ -311,6 +392,7 @@ ${chalk.bold("Options:")}
   --tools, -t <tools>            Comma-separated allowlist of tool names to enable
                                  Applies to built-in, extension, and custom tools
   --thinking <level>             Set thinking level: off, minimal, low, medium, high, xhigh
+  --trust-project-hooks          Trust and run project .pi/.claude hooks as host code (review them first)
   --extension, -e <path>         Load an extension file (can be used multiple times)
   --no-extensions, -ne           Disable extension discovery (explicit -e paths still work)
   --skill <path>                 Load a skill file or directory (can be used multiple times)
@@ -327,9 +409,8 @@ ${chalk.bold("Options:")}
   --tui-mode <mode>              TUI mode: regular (default) or fullscreen
   --verbose                      Force verbose startup (overrides quietStartup setting)
   --offline                      Disable startup network operations (same as PI_OFFLINE=1)
-  --ssh <target>                 Run built-in tools over SSH (user@host or user@host:/path)
-  --remote <url>                 Run built-in tools through a remote commander (ws:// or wss://)
-  --remote-deferred              Start without a connected tool backend; configure later with /sandbox
+  --remote <url>                 Run built-in tools through a pi --daemon backend (ws:// or wss://)
+  --remote-deferred              Start without a connected daemon backend; configure later with /sandbox
   --remote-cwd <path>            Stable backend cwd for --remote-deferred
   --help, -h                     Show this help
   --version, -v                  Show version number
@@ -379,10 +460,10 @@ ${chalk.bold("Examples:")}
   # Read-only mode (no file modifications possible)
   ${APP_NAME} --tools read,grep,find,ls -p "Review the code in src/"
 
-  # Run built-in tools on a remote machine over SSH
-  ${APP_NAME} --ssh user@host:/home/user/project "Inspect this repo"
+  # Run built-in tools through a remote workspace daemon
+  ${APP_NAME} --remote ws://localhost:8787 "Inspect this repo"
 
-  # Start without a connected tool backend and configure SSH or daemon later with /sandbox
+  # Start without a connected daemon backend and attach later with /sandbox
   ${APP_NAME} --remote-deferred --remote-cwd /workspace
 
   # Export a session file to HTML

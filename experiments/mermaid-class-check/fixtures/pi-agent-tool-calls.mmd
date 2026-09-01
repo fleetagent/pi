@@ -1,0 +1,130 @@
+classDiagram
+    class Tool
+    <<interface>> Tool
+    <<import>> Tool
+    %% pi:import Tool from "@fleetagent/pi-ai"
+
+    class AssistantMessage
+    <<import>> AssistantMessage
+    %% pi:import AssistantMessage from "@fleetagent/pi-ai"
+
+    class ToolResultMessage
+    <<import>> ToolResultMessage
+    %% pi:import ToolResultMessage from "@fleetagent/pi-ai"
+
+    class AgentTool
+    <<interface>> AgentTool
+    <<export>> AgentTool
+
+    class AgentContext {
+        +string systemPrompt
+        +AgentMessage[] messages
+        +AgentTool~any~[] tools
+    }
+    <<interface>> AgentContext
+    <<export>> AgentContext
+
+    class Agent {
+        +ToolExecutionMode toolExecution
+    }
+    <<export>> Agent
+
+    class runAgentLoop {
+        +runAgentLoop(AgentMessage[] prompts, AgentContext context, AgentLoopConfig config, AgentEventSink emit, AbortSignal signal, StreamFn streamFn): Promise~AgentMessage[]~
+    }
+    <<function>> runAgentLoop
+    <<async>> runAgentLoop
+    <<export>> runAgentLoop
+
+    class runLoop {
+        +runLoop(AgentContext initialContext, AgentMessage[] newMessages, AgentLoopConfig initialConfig, AbortSignal | undefined signal, AgentEventSink emit, StreamFn streamFn): Promise~void~
+    }
+    <<function>> runLoop
+    <<async>> runLoop
+
+    class executeAssistantTurn {
+        +executeAssistantTurn(AgentContext currentContext, AgentMessage[] newMessages, AgentLoopConfig config, AbortSignal | undefined signal, AgentEventSink emit, StreamFn streamFn): Promise~AssistantTurnResult~
+    }
+    <<function>> executeAssistantTurn
+    <<async>> executeAssistantTurn
+
+    class streamAssistantResponse {
+        +streamAssistantResponse(AgentContext context, AgentLoopConfig config, AbortSignal | undefined signal, AgentEventSink emit, StreamFn streamFn): Promise~AssistantMessage~
+    }
+    <<function>> streamAssistantResponse
+    <<async>> streamAssistantResponse
+
+    class executeToolCalls {
+        +executeToolCalls(AgentContext currentContext, AssistantMessage assistantMessage, AgentLoopConfig config, AbortSignal | undefined signal, AgentEventSink emit): Promise~ExecutedToolCallBatch~
+    }
+    <<function>> executeToolCalls
+    <<async>> executeToolCalls
+
+    class executeToolCallsSequential {
+        +executeToolCallsSequential(AgentContext currentContext, AssistantMessage assistantMessage, AgentToolCall[] toolCalls, AgentLoopConfig config, AbortSignal | undefined signal, AgentEventSink emit): Promise~ExecutedToolCallBatch~
+    }
+    <<function>> executeToolCallsSequential
+    <<async>> executeToolCallsSequential
+
+    class executeToolCallsParallel {
+        +executeToolCallsParallel(AgentContext currentContext, AssistantMessage assistantMessage, AgentToolCall[] toolCalls, AgentLoopConfig config, AbortSignal | undefined signal, AgentEventSink emit): Promise~ExecutedToolCallBatch~
+    }
+    <<function>> executeToolCallsParallel
+    <<async>> executeToolCallsParallel
+
+    class prepareToolCall {
+        +prepareToolCall(AgentContext currentContext, AssistantMessage assistantMessage, AgentToolCall toolCall, AgentLoopConfig config, AbortSignal | undefined signal): Promise~PreparedToolCall | ImmediateToolCallOutcome~
+    }
+    <<function>> prepareToolCall
+    <<async>> prepareToolCall
+
+    class executePreparedToolCall {
+        +executePreparedToolCall(PreparedToolCall prepared, AbortSignal | undefined signal, AgentEventSink emit): Promise~ExecutedToolCallOutcome~
+    }
+    <<function>> executePreparedToolCall
+    <<async>> executePreparedToolCall
+
+    class finalizeExecutedToolCall {
+        +finalizeExecutedToolCall(AgentContext currentContext, AssistantMessage assistantMessage, PreparedToolCall prepared, ExecutedToolCallOutcome executed, AgentLoopConfig config, AbortSignal | undefined signal): Promise~FinalizedToolCallOutcome~
+    }
+    <<function>> finalizeExecutedToolCall
+    <<async>> finalizeExecutedToolCall
+
+    class shouldTerminateToolBatch {
+        +shouldTerminateToolBatch(FinalizedToolCallOutcome[] finalizedCalls): boolean
+    }
+    <<function>> shouldTerminateToolBatch
+
+    class createToolResultMessage {
+        +createToolResultMessage(FinalizedToolCallOutcome finalized): ToolResultMessage
+    }
+    <<function>> createToolResultMessage
+
+    class emitToolResultMessage {
+        +emitToolResultMessage(ToolResultMessage toolResultMessage, AgentEventSink emit): Promise~void~
+    }
+    <<function>> emitToolResultMessage
+    <<async>> emitToolResultMessage
+
+    Tool <|-- AgentTool : extends
+    AgentContext "1" --> "*" AgentTool : exposes active tools
+
+    runAgentLoop --> runLoop : starts lifecycle
+    runLoop --> executeAssistantTurn : repeats while work remains
+    executeAssistantTurn --> streamAssistantResponse : streams provider response
+    streamAssistantResponse --> AssistantMessage : emits toolCall blocks
+    executeAssistantTurn --> executeToolCalls : dispatches toolCall batch
+    executeToolCalls --> executeToolCallsSequential : global sequential or any sequential tool
+    executeToolCalls --> executeToolCallsParallel : default parallel mode
+    executeToolCallsSequential --> prepareToolCall : preflight each call in order
+    executeToolCallsParallel --> prepareToolCall : preflight in source order
+    prepareToolCall --> AgentTool : lookup, adapt, validate, beforeToolCall
+    executeToolCallsSequential --> executePreparedToolCall : await one at a time
+    executeToolCallsParallel --> executePreparedToolCall : execute allowed calls concurrently
+    executePreparedToolCall --> AgentTool : execute and progress updates
+    executePreparedToolCall --> finalizeExecutedToolCall : result or caught error
+    finalizeExecutedToolCall --> shouldTerminateToolBatch : stop only when every result terminates
+    finalizeExecutedToolCall --> createToolResultMessage : afterToolCall overrides
+    createToolResultMessage --> ToolResultMessage : preserves tool call id and order
+    createToolResultMessage --> emitToolResultMessage : message_start and message_end
+    emitToolResultMessage --> runLoop : append results and request next turn

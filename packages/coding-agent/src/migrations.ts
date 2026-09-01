@@ -16,6 +16,42 @@ const EXTENSIONS_DOC_URL = "https://github.com/fleetagent/pi/blob/main/packages/
 
 const AUTH_FILE_WRITE_OPTIONS = { encoding: "utf-8", mode: 0o600 } as const;
 
+interface LegacyAuthMigrationState {
+	credentials: Record<string, unknown>;
+	providers: string[];
+}
+
+function migrateLegacyOauthFile(oauthPath: string, state: LegacyAuthMigrationState): void {
+	if (!existsSync(oauthPath)) return;
+	try {
+		const oauth = JSON.parse(readFileSync(oauthPath, "utf-8"));
+		for (const [provider, credential] of Object.entries(oauth)) {
+			state.credentials[provider] = { type: "oauth", ...(credential as object) };
+			state.providers.push(provider);
+		}
+		renameSync(oauthPath, `${oauthPath}.migrated`);
+	} catch {
+		// Skip on error
+	}
+}
+
+function migrateLegacySettingsApiKeys(settingsPath: string, state: LegacyAuthMigrationState): void {
+	if (!existsSync(settingsPath)) return;
+	try {
+		const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
+		if (!settings.apiKeys || typeof settings.apiKeys !== "object") return;
+		for (const [provider, key] of Object.entries(settings.apiKeys)) {
+			if (state.credentials[provider] || typeof key !== "string") continue;
+			state.credentials[provider] = { type: "api_key", key };
+			state.providers.push(provider);
+		}
+		delete settings.apiKeys;
+		writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
+	} catch {
+		// Skip on error
+	}
+}
+
 /**
  * Migrate legacy oauth.json and settings.json apiKeys to auth.json.
  *
@@ -30,49 +66,16 @@ export function migrateAuthToAuthJson(): string[] {
 	// Skip if auth.json already exists
 	if (existsSync(authPath)) return [];
 
-	const migrated: Record<string, unknown> = {};
-	const providers: string[] = [];
+	const migration: LegacyAuthMigrationState = { credentials: {}, providers: [] };
+	migrateLegacyOauthFile(oauthPath, migration);
+	migrateLegacySettingsApiKeys(settingsPath, migration);
 
-	// Migrate oauth.json
-	if (existsSync(oauthPath)) {
-		try {
-			const oauth = JSON.parse(readFileSync(oauthPath, "utf-8"));
-			for (const [provider, cred] of Object.entries(oauth)) {
-				migrated[provider] = { type: "oauth", ...(cred as object) };
-				providers.push(provider);
-			}
-			renameSync(oauthPath, `${oauthPath}.migrated`);
-		} catch {
-			// Skip on error
-		}
-	}
-
-	// Migrate settings.json apiKeys
-	if (existsSync(settingsPath)) {
-		try {
-			const content = readFileSync(settingsPath, "utf-8");
-			const settings = JSON.parse(content);
-			if (settings.apiKeys && typeof settings.apiKeys === "object") {
-				for (const [provider, key] of Object.entries(settings.apiKeys)) {
-					if (!migrated[provider] && typeof key === "string") {
-						migrated[provider] = { type: "api_key", key };
-						providers.push(provider);
-					}
-				}
-				delete settings.apiKeys;
-				writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
-			}
-		} catch {
-			// Skip on error
-		}
-	}
-
-	if (Object.keys(migrated).length > 0) {
+	if (Object.keys(migration.credentials).length > 0) {
 		mkdirSync(dirname(authPath), { recursive: true });
-		writeFileSync(authPath, JSON.stringify(migrated, null, 2), AUTH_FILE_WRITE_OPTIONS);
+		writeFileSync(authPath, JSON.stringify(migration.credentials, null, 2), AUTH_FILE_WRITE_OPTIONS);
 	}
 
-	return providers;
+	return migration.providers;
 }
 
 interface ConfigValueMigration {
@@ -141,48 +144,72 @@ function migrateAuthJsonConfigValues(agentDir: string): ConfigValueMigration[] {
 	}
 }
 
+function asConfigRecord(value: unknown): Record<string, unknown> | undefined {
+	return typeof value === "object" && value !== null && !Array.isArray(value)
+		? (value as Record<string, unknown>)
+		: undefined;
+}
+
+function migrateProviderModelHeaders(
+	providerRecord: Record<string, unknown>,
+	providerLocation: string,
+	migrations: ConfigValueMigration[],
+): void {
+	if (!Array.isArray(providerRecord.models)) return;
+	for (let index = 0; index < providerRecord.models.length; index++) {
+		const modelRecord = asConfigRecord(providerRecord.models[index]);
+		if (!modelRecord) continue;
+		const modelKey = typeof modelRecord.id === "string" ? JSON.stringify(modelRecord.id) : String(index);
+		migrateHeadersConfig(modelRecord.headers, `${providerLocation}.models[${modelKey}].headers`, migrations);
+	}
+}
+
+function migrateProviderModelOverrideHeaders(
+	providerRecord: Record<string, unknown>,
+	providerLocation: string,
+	migrations: ConfigValueMigration[],
+): void {
+	const modelOverrides = asConfigRecord(providerRecord.modelOverrides);
+	if (!modelOverrides) return;
+	for (const [modelId, modelOverride] of Object.entries(modelOverrides)) {
+		const modelOverrideRecord = asConfigRecord(modelOverride);
+		if (!modelOverrideRecord) continue;
+		migrateHeadersConfig(
+			modelOverrideRecord.headers,
+			`${providerLocation}.modelOverrides[${JSON.stringify(modelId)}].headers`,
+			migrations,
+		);
+	}
+}
+
+function migrateProviderConfigValues(
+	provider: string,
+	providerConfig: unknown,
+	migrations: ConfigValueMigration[],
+): void {
+	const providerRecord = asConfigRecord(providerConfig);
+	if (!providerRecord) return;
+	const providerLocation = `models.json.providers[${JSON.stringify(provider)}]`;
+	migrateStringProperty(providerRecord, "apiKey", `${providerLocation}.apiKey`, migrations);
+	migrateHeadersConfig(providerRecord.headers, `${providerLocation}.headers`, migrations);
+	migrateProviderModelHeaders(providerRecord, providerLocation, migrations);
+	migrateProviderModelOverrideHeaders(providerRecord, providerLocation, migrations);
+}
+
 function migrateModelsJsonConfigValues(agentDir: string): ConfigValueMigration[] {
 	const modelsPath = join(agentDir, "models.json");
 	if (!existsSync(modelsPath)) return [];
 
 	const parsed = JSON.parse(stripJsonComments(readFileSync(modelsPath, "utf-8"))) as unknown;
-	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return [];
-	const modelsData = parsed as Record<string, unknown>;
-	const providers = modelsData.providers;
-	if (typeof providers !== "object" || providers === null || Array.isArray(providers)) return [];
+	const modelsData = asConfigRecord(parsed);
+	if (!modelsData) return [];
+	const providers = asConfigRecord(modelsData.providers);
+	if (!providers) return [];
 
 	const migrations: ConfigValueMigration[] = [];
 	for (const [provider, providerConfig] of Object.entries(providers)) {
-		if (typeof providerConfig !== "object" || providerConfig === null || Array.isArray(providerConfig)) continue;
-		const providerRecord = providerConfig as Record<string, unknown>;
-		const providerLocation = `models.json.providers[${JSON.stringify(provider)}]`;
-		migrateStringProperty(providerRecord, "apiKey", `${providerLocation}.apiKey`, migrations);
-		migrateHeadersConfig(providerRecord.headers, `${providerLocation}.headers`, migrations);
-
-		if (Array.isArray(providerRecord.models)) {
-			for (let index = 0; index < providerRecord.models.length; index++) {
-				const modelConfig = providerRecord.models[index];
-				if (typeof modelConfig !== "object" || modelConfig === null || Array.isArray(modelConfig)) continue;
-				const modelRecord = modelConfig as Record<string, unknown>;
-				const modelKey = typeof modelRecord.id === "string" ? JSON.stringify(modelRecord.id) : String(index);
-				migrateHeadersConfig(modelRecord.headers, `${providerLocation}.models[${modelKey}].headers`, migrations);
-			}
-		}
-
-		const modelOverrides = providerRecord.modelOverrides;
-		if (typeof modelOverrides === "object" && modelOverrides !== null && !Array.isArray(modelOverrides)) {
-			for (const [modelId, modelOverride] of Object.entries(modelOverrides)) {
-				if (typeof modelOverride !== "object" || modelOverride === null || Array.isArray(modelOverride)) continue;
-				const modelOverrideRecord = modelOverride as Record<string, unknown>;
-				migrateHeadersConfig(
-					modelOverrideRecord.headers,
-					`${providerLocation}.modelOverrides[${JSON.stringify(modelId)}].headers`,
-					migrations,
-				);
-			}
-		}
+		migrateProviderConfigValues(provider, providerConfig, migrations);
 	}
-
 	if (migrations.length === 0) return [];
 	writeFileSync(modelsPath, `${JSON.stringify(parsed, null, 2)}\n`, "utf-8");
 	return migrations;
@@ -315,31 +342,8 @@ function migrateToolsToBin(): void {
 
 	const binaries = ["fd", "rg", "fd.exe", "rg.exe"];
 	let movedAny = false;
-
-	for (const bin of binaries) {
-		const oldPath = join(toolsDir, bin);
-		const newPath = join(binDir, bin);
-
-		if (existsSync(oldPath)) {
-			if (!existsSync(binDir)) {
-				mkdirSync(binDir, { recursive: true });
-			}
-			if (!existsSync(newPath)) {
-				try {
-					renameSync(oldPath, newPath);
-					movedAny = true;
-				} catch {
-					// Ignore errors
-				}
-			} else {
-				// Target exists, just delete the old one
-				try {
-					rmSync?.(oldPath, { force: true });
-				} catch {
-					// Ignore
-				}
-			}
-		}
+	for (const binary of binaries) {
+		if (migrateManagedBinary(toolsDir, binDir, binary)) movedAny = true;
 	}
 
 	if (movedAny) {
@@ -347,18 +351,37 @@ function migrateToolsToBin(): void {
 	}
 }
 
+function migrateManagedBinary(toolsDir: string, binDir: string, binary: string): boolean {
+	const oldPath = join(toolsDir, binary);
+	if (!existsSync(oldPath)) return false;
+
+	if (!existsSync(binDir)) mkdirSync(binDir, { recursive: true });
+	const newPath = join(binDir, binary);
+	if (existsSync(newPath)) {
+		try {
+			rmSync?.(oldPath, { force: true });
+		} catch {
+			// Ignore cleanup errors
+		}
+		return false;
+	}
+
+	try {
+		renameSync(oldPath, newPath);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 /**
- * Check for deprecated hooks/ and tools/ directories.
- * Note: tools/ may contain fd/rg binaries extracted by pi, so only warn if it has other files.
+ * Check for the deprecated tools/ extension directory.
+ * The hooks/ name is active again for command-hook scripts and must not be treated as a legacy extension directory.
+ * tools/ may contain fd/rg binaries extracted by pi, so only warn if it has other files.
  */
 function checkDeprecatedExtensionDirs(baseDir: string, label: string): string[] {
-	const hooksDir = join(baseDir, "hooks");
 	const toolsDir = join(baseDir, "tools");
 	const warnings: string[] = [];
-
-	if (existsSync(hooksDir)) {
-		warnings.push(`${label} hooks/ directory found. Hooks have been renamed to extensions.`);
-	}
 
 	if (existsSync(toolsDir)) {
 		// Check if tools/ contains anything other than fd/rg (which are auto-extracted binaries)
@@ -428,16 +451,17 @@ export async function showDeprecationWarnings(warnings: string[]): Promise<void>
 	});
 	console.log();
 }
+interface MigrationRunResult {
+	migratedAuthProviders: string[];
+	deprecationWarnings: string[];
+}
 
 /**
  * Run all migrations. Called once on startup.
  *
  * @returns Object with migration results and deprecation warnings
  */
-export function runMigrations(cwd: string): {
-	migratedAuthProviders: string[];
-	deprecationWarnings: string[];
-} {
+export function runMigrations(cwd: string): MigrationRunResult {
 	const migratedAuthProviders = migrateAuthToAuthJson();
 	migrateExplicitEnvVarConfigValues();
 	migrateSessionsFromAgentRoot();

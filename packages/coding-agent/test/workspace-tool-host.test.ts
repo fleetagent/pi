@@ -13,6 +13,7 @@ import type { BashToolDetails } from "../src/core/tools/bash.ts";
 import {
 	LocalToolOperations,
 	type ToolExecOptions,
+	type ToolExecResult,
 	type ToolGlobOptions,
 	type ToolGrepOptions,
 	type ToolGrepResult,
@@ -56,7 +57,7 @@ function createSession(cwd: string, operations: LocalToolOperations): AgentSessi
 class BlockingOperations extends LocalToolOperations {
 	disposeCalls = 0;
 
-	async exec(_command: string, options: ToolExecOptions): Promise<{ exitCode: number | null }> {
+	async exec(_command: string, options: ToolExecOptions): Promise<ToolExecResult> {
 		options.onData(Buffer.from("started"));
 		return new Promise((resolve, reject) => {
 			const onAbort = () => reject(new Error("aborted"));
@@ -75,7 +76,7 @@ class BlockingOperations extends LocalToolOperations {
 }
 
 class DeterministicOperations extends LocalToolOperations {
-	async exec(_command: string, options: ToolExecOptions): Promise<{ exitCode: number | null }> {
+	async exec(_command: string, options: ToolExecOptions): Promise<ToolExecResult> {
 		options.onData(Buffer.from("canonical output"));
 		return { exitCode: 0 };
 	}
@@ -93,7 +94,7 @@ class DeterministicOperations extends LocalToolOperations {
 }
 
 class LargeOutputOperations extends DeterministicOperations {
-	async exec(_command: string, options: ToolExecOptions): Promise<{ exitCode: number | null }> {
+	async exec(_command: string, options: ToolExecOptions): Promise<ToolExecResult> {
 		options.onData(Buffer.alloc(DEFAULT_MAX_BYTES + 100, "x"));
 		return { exitCode: 0 };
 	}
@@ -116,7 +117,7 @@ class OrderedWriteOperations extends DeterministicOperations {
 }
 
 class UncooperativeOperations extends BlockingOperations {
-	async exec(): Promise<{ exitCode: number | null }> {
+	async exec(): Promise<ToolExecResult> {
 		return new Promise(() => undefined);
 	}
 }

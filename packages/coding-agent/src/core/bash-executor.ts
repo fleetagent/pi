@@ -10,6 +10,7 @@ import { randomBytes } from "node:crypto";
 import { createWriteStream, type WriteStream } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { ShellCaptureResult } from "@fleetagent/pi-agent-core";
 import { stripAnsi } from "../utils/ansi.ts";
 import { sanitizeBinaryOutput } from "../utils/shell.ts";
 import type { ToolOperations } from "./tools/operations.ts";
@@ -30,26 +31,78 @@ export interface BashExecutorOptions {
 	truncate?: boolean;
 }
 
-export interface BashResult {
-	/** Combined stdout + stderr output (sanitized, possibly truncated) */
-	output: string;
-	/** Process exit code (undefined if killed/cancelled) */
-	exitCode: number | undefined;
-	/** Whether the command was cancelled via signal */
-	cancelled: boolean;
-	/** Whether the output was truncated */
-	truncated: boolean;
-	/** Path to temp file containing full output (if output exceeded truncation threshold) */
-	fullOutputPath?: string;
-}
+export type BashResult = ShellCaptureResult;
 
 // ============================================================================
 // Implementation
 // ============================================================================
 
+class BashOutputCapture {
+	private outputChunks: string[] = [];
+	private outputBytes = 0;
+	private readonly maxOutputBytes = DEFAULT_MAX_BYTES * 2;
+	private readonly truncateOutput: boolean;
+	private tempFilePath: string | undefined;
+	private tempFileStream: WriteStream | undefined;
+	private totalBytes = 0;
+	private readonly decoder = new TextDecoder();
+	private readonly options: BashExecutorOptions;
+
+	constructor(options: BashExecutorOptions = {}) {
+		this.options = options;
+		this.truncateOutput = options.truncate !== false;
+	}
+
+	private ensureTempFile(): void {
+		if (this.tempFilePath) return;
+		const id = randomBytes(8).toString("hex");
+		this.tempFilePath = join(tmpdir(), `pi-bash-${id}.log`);
+		this.tempFileStream = createWriteStream(this.tempFilePath);
+		for (const chunk of this.outputChunks) {
+			this.tempFileStream.write(chunk);
+		}
+	}
+
+	onData = (data: Buffer): void => {
+		this.totalBytes += data.length;
+		const text = sanitizeBinaryOutput(stripAnsi(this.decoder.decode(data, { stream: true }))).replace(/\r/g, "");
+
+		if (this.totalBytes > DEFAULT_MAX_BYTES) this.ensureTempFile();
+		this.tempFileStream?.write(text);
+
+		this.outputChunks.push(text);
+		this.outputBytes += text.length;
+		while (this.truncateOutput && this.outputBytes > this.maxOutputBytes && this.outputChunks.length > 1) {
+			const removed = this.outputChunks.shift()!;
+			this.outputBytes -= removed.length;
+		}
+
+		this.options.onChunk?.(text);
+	};
+
+	finish(exitCode: number | null | undefined, cancelled: boolean): BashResult {
+		const fullOutput = this.outputChunks.join("");
+		const truncationResult = this.truncateOutput
+			? truncateTail(fullOutput)
+			: { content: fullOutput, truncated: false };
+		if (truncationResult.truncated) this.ensureTempFile();
+		this.close();
+		return {
+			output: truncationResult.content,
+			exitCode: cancelled ? undefined : (exitCode ?? undefined),
+			cancelled,
+			truncated: truncationResult.truncated,
+			fullOutputPath: this.tempFilePath,
+		};
+	}
+
+	close(): void {
+		this.tempFileStream?.end();
+	}
+}
 /**
  * Execute a bash command using custom ToolOperations.
- * Used for remote execution (SSH, containers, etc.).
+ * Used for remote daemon, container, and host-provided execution backends.
  */
 export async function executeBashWithOperations(
 	command: string,
@@ -57,107 +110,20 @@ export async function executeBashWithOperations(
 	operations: ToolOperations,
 	options?: BashExecutorOptions,
 ): Promise<BashResult> {
-	const outputChunks: string[] = [];
-	let outputBytes = 0;
-	const maxOutputBytes = DEFAULT_MAX_BYTES * 2;
-	const truncateOutput = options?.truncate !== false;
-
-	let tempFilePath: string | undefined;
-	let tempFileStream: WriteStream | undefined;
-	let totalBytes = 0;
-
-	const ensureTempFile = () => {
-		if (tempFilePath) {
-			return;
-		}
-		const id = randomBytes(8).toString("hex");
-		tempFilePath = join(tmpdir(), `pi-bash-${id}.log`);
-		tempFileStream = createWriteStream(tempFilePath);
-		for (const chunk of outputChunks) {
-			tempFileStream.write(chunk);
-		}
-	};
-
-	const decoder = new TextDecoder();
-
-	const onData = (data: Buffer) => {
-		totalBytes += data.length;
-
-		// Sanitize: strip ANSI, replace binary garbage, normalize newlines
-		const text = sanitizeBinaryOutput(stripAnsi(decoder.decode(data, { stream: true }))).replace(/\r/g, "");
-
-		// Start writing to temp file if exceeds threshold
-		if (totalBytes > DEFAULT_MAX_BYTES) {
-			ensureTempFile();
-		}
-
-		if (tempFileStream) {
-			tempFileStream.write(text);
-		}
-
-		// Keep rolling buffer unless the caller explicitly needs complete output.
-		outputChunks.push(text);
-		outputBytes += text.length;
-		while (truncateOutput && outputBytes > maxOutputBytes && outputChunks.length > 1) {
-			const removed = outputChunks.shift()!;
-			outputBytes -= removed.length;
-		}
-
-		// Stream to callback
-		if (options?.onChunk) {
-			options.onChunk(text);
-		}
-	};
+	const outputCapture = new BashOutputCapture(options);
 
 	try {
 		const result = await operations.exec(command, {
 			cwd,
-			onData,
+			onData: outputCapture.onData,
 			signal: options?.signal,
 			timeout: options?.timeout,
 		});
-
-		const fullOutput = outputChunks.join("");
-		const truncationResult = truncateOutput ? truncateTail(fullOutput) : { content: fullOutput, truncated: false };
-		if (truncationResult.truncated) {
-			ensureTempFile();
-		}
-		if (tempFileStream) {
-			tempFileStream.end();
-		}
 		const cancelled = options?.signal?.aborted ?? false;
-
-		return {
-			output: truncationResult.content,
-			exitCode: cancelled ? undefined : (result.exitCode ?? undefined),
-			cancelled,
-			truncated: truncationResult.truncated,
-			fullOutputPath: tempFilePath,
-		};
-	} catch (err) {
-		// Check if it was an abort
-		if (options?.signal?.aborted) {
-			const fullOutput = outputChunks.join("");
-			const truncationResult = truncateOutput ? truncateTail(fullOutput) : { content: fullOutput, truncated: false };
-			if (truncationResult.truncated) {
-				ensureTempFile();
-			}
-			if (tempFileStream) {
-				tempFileStream.end();
-			}
-			return {
-				output: truncationResult.content,
-				exitCode: undefined,
-				cancelled: true,
-				truncated: truncationResult.truncated,
-				fullOutputPath: tempFilePath,
-			};
-		}
-
-		if (tempFileStream) {
-			tempFileStream.end();
-		}
-
-		throw err;
+		return outputCapture.finish(result.exitCode, cancelled);
+	} catch (error) {
+		if (options?.signal?.aborted) return outputCapture.finish(undefined, true);
+		outputCapture.close();
+		throw error;
 	}
 }

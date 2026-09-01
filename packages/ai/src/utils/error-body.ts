@@ -9,13 +9,22 @@ export interface NormalizedProviderError {
 	messageCarriesBody: boolean;
 }
 
+interface SdkErrorMetadata {
+	httpStatusCode?: unknown;
+}
+
+interface SdkErrorResponse {
+	statusCode?: unknown;
+	body?: unknown;
+}
+
 type SdkErrorShape = Error & {
 	statusCode?: unknown;
 	status?: unknown;
 	body?: unknown;
 	error?: unknown;
-	$metadata?: { httpStatusCode?: unknown };
-	$response?: { statusCode?: unknown; body?: unknown };
+	$metadata?: SdkErrorMetadata;
+	$response?: SdkErrorResponse;
 };
 
 export function normalizeProviderError(error: unknown): NormalizedProviderError {

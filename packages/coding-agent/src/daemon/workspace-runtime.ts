@@ -17,6 +17,8 @@ import {
 import {
 	RemoteWorkspaceRequestError,
 	type RemoteWorkspaceServerHandler,
+	type RemoteWorkspaceServerRequestContext,
+	type RemoteWorkspaceTypedRequest,
 } from "../core/remote-workspace-protocol/session.ts";
 import { withFileMutationQueue } from "../core/tools/file-mutation-queue.ts";
 import {
@@ -24,12 +26,15 @@ import {
 	type ToolAccessMode,
 	type ToolBackendInfo,
 	type ToolExecOptions,
+	type ToolExecResult,
 	type ToolFileStat,
 	type ToolGlobOptions,
 	type ToolGrepMatch,
 	type ToolGrepOptions,
 	type ToolGrepResult,
+	type ToolMkdirOptions,
 	type ToolOperations,
+	type WorkspaceToolExecutionOptions,
 } from "../core/tools/operations.ts";
 import { WorkspaceToolHost, type WorkspaceToolName } from "../core/tools/workspace-tool-host.ts";
 import type { DaemonConfiguration } from "./config.ts";
@@ -169,6 +174,33 @@ function runCommand(
 	});
 }
 
+function isUnknownRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null;
+}
+
+function nestedText(record: Record<string, unknown> | undefined, key: string): string | undefined {
+	const nested = record?.[key];
+	return isUnknownRecord(nested) && typeof nested.text === "string" ? nested.text : undefined;
+}
+
+function parseDaemonGrepMatch(line: string): ToolGrepMatch | undefined {
+	if (!line) return undefined;
+	let event: unknown;
+	try {
+		event = JSON.parse(line) as unknown;
+	} catch {
+		return undefined;
+	}
+	const eventRecord = isUnknownRecord(event) ? event : undefined;
+	if (eventRecord?.type !== "match") return undefined;
+	const data = isUnknownRecord(eventRecord.data) ? eventRecord.data : undefined;
+	const filePath = nestedText(data, "path");
+	const lineNumber = data?.line_number;
+	if (!filePath || typeof lineNumber !== "number") return undefined;
+	const lineText = nestedText(data, "lines");
+	return { filePath, lineNumber, ...(lineText === undefined ? {} : { lineText }) };
+}
+
 export class ConfinedDaemonToolOperations implements ToolOperations {
 	readonly cwd: string;
 	private readonly local: LocalToolOperations;
@@ -226,8 +258,7 @@ export class ConfinedDaemonToolOperations implements ToolOperations {
 		return this.lexicalPath(canonical);
 	}
 
-	private async writablePath(path: string): Promise<string> {
-		const candidate = this.lexicalPath(path);
+	private async existingWritablePath(candidate: string, path: string): Promise<string | undefined> {
 		try {
 			const stat = await lstat(candidate);
 			if (stat.isSymbolicLink()) {
@@ -243,8 +274,12 @@ export class ConfinedDaemonToolOperations implements ToolOperations {
 			this.lexicalPath(canonical);
 			return this.lexicalPath(canonical);
 		} catch (error) {
-			if (!isMissingPath(error)) throw error;
+			if (isMissingPath(error)) return undefined;
+			throw error;
 		}
+	}
+
+	private async ensureConfinedWritableParent(candidate: string, path: string): Promise<void> {
 		let parent = resolve(candidate, "..");
 		while (true) {
 			try {
@@ -255,7 +290,7 @@ export class ConfinedDaemonToolOperations implements ToolOperations {
 				}
 				const canonicalParent = await realpath(parent);
 				this.lexicalPath(canonicalParent);
-				return candidate;
+				return;
 			} catch (error) {
 				if (!isMissingPath(error)) throw error;
 				const next = resolve(parent, "..");
@@ -263,6 +298,14 @@ export class ConfinedDaemonToolOperations implements ToolOperations {
 				parent = next;
 			}
 		}
+	}
+
+	private async writablePath(path: string): Promise<string> {
+		const candidate = this.lexicalPath(path);
+		const existing = await this.existingWritablePath(candidate, path);
+		if (existing) return existing;
+		await this.ensureConfinedWritableParent(candidate, path);
+		return candidate;
 	}
 
 	private async atomicWriteFile(path: string, content: string | Buffer): Promise<void> {
@@ -293,7 +336,7 @@ export class ConfinedDaemonToolOperations implements ToolOperations {
 		}
 	}
 
-	async exec(command: string, options: ToolExecOptions): Promise<{ exitCode: number | null }> {
+	async exec(command: string, options: ToolExecOptions): Promise<ToolExecResult> {
 		if (!this.allowProcessExec) throw new Error("Process execution is disabled by daemon policy");
 		const cwd = await this.existingPath(options.cwd ?? this.cwd);
 		return this.local.exec(command, { ...options, cwd, env: { ...this.environment } });
@@ -311,7 +354,7 @@ export class ConfinedDaemonToolOperations implements ToolOperations {
 		await this.atomicWriteFile(path, content);
 	}
 
-	async mkdir(path: string, options?: { recursive?: boolean }): Promise<void> {
+	async mkdir(path: string, options?: ToolMkdirOptions): Promise<void> {
 		await fsMkdir(await this.writablePath(path), options);
 	}
 
@@ -358,35 +401,15 @@ export class ConfinedDaemonToolOperations implements ToolOperations {
 		const output = await runCommand("rg", args, this.environment, this.maxBufferedOutputBytes);
 		const matches: ToolGrepMatch[] = [];
 		for (const line of output.toString("utf8").split("\n")) {
-			if (!line || matches.length >= options.limit) continue;
-			let event: unknown;
+			if (matches.length >= options.limit) continue;
+			const match = parseDaemonGrepMatch(line);
+			if (!match) continue;
 			try {
-				event = JSON.parse(line) as unknown;
+				await this.existingPath(match.filePath);
 			} catch {
 				continue;
 			}
-			if (!event || typeof event !== "object" || !("type" in event) || event.type !== "match") continue;
-			const data = "data" in event && event.data && typeof event.data === "object" ? event.data : undefined;
-			const pathData = data && "path" in data && data.path && typeof data.path === "object" ? data.path : undefined;
-			const linesData =
-				data && "lines" in data && data.lines && typeof data.lines === "object" ? data.lines : undefined;
-			const filePath =
-				pathData && "text" in pathData && typeof pathData.text === "string" ? pathData.text : undefined;
-			const lineNumber =
-				data && "line_number" in data && typeof data.line_number === "number" ? data.line_number : undefined;
-			if (!filePath || lineNumber === undefined) continue;
-			try {
-				await this.existingPath(filePath);
-			} catch {
-				continue;
-			}
-			matches.push({
-				filePath,
-				lineNumber,
-				...(linesData && "text" in linesData && typeof linesData.text === "string"
-					? { lineText: linesData.text }
-					: {}),
-			});
+			matches.push(match);
 		}
 		return { isDirectory, matches };
 	}
@@ -411,12 +434,236 @@ export interface DaemonWorkspaceRuntime {
 	dispose(): Promise<void>;
 }
 
-function requestError(
-	code: "cancelled" | "deadline_exceeded",
-	message: string,
-	state: "not_started" | "indeterminate",
-) {
+type DaemonRequestInterruptionCode = "cancelled" | "deadline_exceeded";
+type DaemonInterruptedExecutionState = "not_started" | "indeterminate";
+
+function requestError(code: DaemonRequestInterruptionCode, message: string, state: DaemonInterruptedExecutionState) {
 	return new RemoteWorkspaceRequestError({ code, message, executionState: state, retryable: false });
+}
+interface DaemonRequestRuntime {
+	configuration: DaemonConfiguration;
+	operations: ConfinedDaemonToolOperations;
+	host: WorkspaceToolHost;
+	lspRuntime: LspRuntimeState | undefined;
+	workspace: RemoteWorkspaceIdentity;
+}
+
+function withDaemonWorkspace<T extends Record<string, unknown>>(result: T, workspace: RemoteWorkspaceIdentity) {
+	return { ...result, workspace };
+}
+
+async function synchronizeDaemonToolFile(
+	toolName: string,
+	invocationArguments: unknown,
+	runtime: DaemonRequestRuntime,
+): Promise<void> {
+	if (!runtime.lspRuntime) return;
+	const args = invocationArguments as { path?: unknown };
+	if (typeof args.path !== "string") return;
+	try {
+		if (toolName === "read") {
+			await runtime.lspRuntime.fileSync.handleFileRead(args.path, runtime.operations);
+		} else if (toolName === "write" || toolName === "edit") {
+			await runtime.lspRuntime.fileSync.handleFileWrite(args.path, runtime.operations);
+		}
+	} catch {
+		// Synchronization remains best-effort, matching local AgentSession behavior.
+	}
+}
+
+async function invokeDaemonTool(
+	request: RemoteWorkspaceTypedRequest,
+	params: Record<string, unknown>,
+	context: RemoteWorkspaceServerRequestContext,
+	runtime: DaemonRequestRuntime,
+): Promise<AgentToolResult<unknown>> {
+	const toolName = params.toolName as string;
+	const kind = operationKind(toolName);
+	if (kind !== "read") context.markSideEffectStarted();
+	let updateQueue = Promise.resolve();
+	try {
+		const result = await runtime.host.executePrepared(toolName, {
+			toolCallId: request.id,
+			arguments: params.arguments,
+			signal: context.signal,
+			executionOptions: params.executionOptions as WorkspaceToolExecutionOptions,
+			onUpdate: (update) => {
+				updateQueue = updateQueue.then(() => context.sendUpdate(portableToolResult(update)));
+			},
+		});
+		await updateQueue;
+		await synchronizeDaemonToolFile(toolName, params.arguments, runtime);
+		if (kind !== "read") context.markCommitted();
+		return portableToolResult(result);
+	} catch (error) {
+		await updateQueue.catch(() => undefined);
+		if (context.signal.aborted) {
+			throw requestError(
+				"cancelled",
+				"Remote workspace tool invocation was cancelled",
+				kind === "read" ? "not_started" : "indeterminate",
+			);
+		}
+		throw new RemoteWorkspaceRequestError({
+			code: "internal_error",
+			message: error instanceof Error ? error.message.slice(0, 4096) : "Workspace tool failed",
+			executionState: kind === "read" ? "not_started" : "indeterminate",
+			retryable: false,
+		});
+	}
+}
+
+async function executeDaemonWorkspaceProcess(
+	params: Record<string, unknown>,
+	context: RemoteWorkspaceServerRequestContext,
+	runtime: DaemonRequestRuntime,
+): Promise<ToolExecResult> {
+	context.markSideEffectStarted();
+	let updateQueue = Promise.resolve();
+	let pendingOutputBytes = 0;
+	let outputLimitExceeded = false;
+	const outputController = new AbortController();
+	const signal = AbortSignal.any([context.signal, outputController.signal]);
+	let result: ToolExecResult;
+	try {
+		result = await runtime.operations.exec(params.command as string, {
+			cwd: params.cwd as string,
+			signal,
+			onData: (data) => {
+				if (outputLimitExceeded) return;
+				const chunk = Buffer.from(data);
+				pendingOutputBytes += chunk.byteLength;
+				if (pendingOutputBytes > runtime.configuration.maxBufferedOutputBytes) {
+					outputLimitExceeded = true;
+					outputController.abort();
+					return;
+				}
+				updateQueue = updateQueue
+					.then(() => context.sendUpdate({ dataBase64: chunk.toString("base64") }))
+					.finally(() => {
+						pendingOutputBytes -= chunk.byteLength;
+					});
+			},
+		});
+	} catch (error) {
+		if (outputLimitExceeded) throw new Error("Process output exceeded the daemon buffered-output limit");
+		throw error;
+	}
+	await updateQueue;
+	context.markCommitted();
+	return result;
+}
+
+async function readDaemonResource(
+	params: Record<string, unknown>,
+	runtime: DaemonRequestRuntime,
+): Promise<Record<string, unknown>> {
+	const path = params.path as string;
+	if (path !== "SANDBOX.md" || !runtime.configuration.sandboxInstructionsPath) {
+		throw new RemoteWorkspaceRequestError({
+			code: "not_available",
+			message: "Requested daemon resource is not available",
+			executionState: "not_started",
+			retryable: false,
+		});
+	}
+	return withDaemonWorkspace(
+		{ contentBase64: (await readFile(runtime.configuration.sandboxInstructionsPath)).toString("base64") },
+		runtime.workspace,
+	);
+}
+
+function getDaemonLspStatus(runtime: DaemonRequestRuntime): Record<string, unknown> {
+	if (!runtime.lspRuntime) {
+		throw new RemoteWorkspaceRequestError({
+			code: "not_available",
+			message: "Daemon LSP is not configured",
+			executionState: "not_started",
+			retryable: false,
+		});
+	}
+	return {
+		enabled: true,
+		servers: runtime.lspRuntime.manager.getStatus().map((status) => sanitizeLspStatus(status, runtime.configuration)),
+	};
+}
+
+async function dispatchDaemonWorkspaceRequest(
+	request: RemoteWorkspaceTypedRequest,
+	context: RemoteWorkspaceServerRequestContext,
+	runtime: DaemonRequestRuntime,
+): Promise<unknown> {
+	const params = request.params as Record<string, unknown>;
+	switch (request.method) {
+		case "tool.invoke":
+			return invokeDaemonTool(request, params, context, runtime);
+		case "workspace.access":
+			await runtime.operations.access(params.path as string, params.mode as ToolAccessMode | undefined);
+			return {};
+		case "workspace.read":
+			return withDaemonWorkspace(
+				{ contentBase64: (await runtime.operations.readFile(params.path as string)).toString("base64") },
+				runtime.workspace,
+			);
+		case "workspace.write":
+			context.markSideEffectStarted();
+			await withFileMutationQueue(resolve(runtime.configuration.workspaceRoot, params.path as string), () =>
+				runtime.operations.writeFile(params.path as string, Buffer.from(params.contentBase64 as string, "base64")),
+			);
+			context.markCommitted();
+			return {};
+		case "workspace.mkdir":
+			context.markSideEffectStarted();
+			await withFileMutationQueue(resolve(runtime.configuration.workspaceRoot, params.path as string), () =>
+				runtime.operations.mkdir(params.path as string, { recursive: params.recursive === true }),
+			);
+			context.markCommitted();
+			return {};
+		case "workspace.stat": {
+			const value = await runtime.operations.stat(params.path as string);
+			return withDaemonWorkspace(
+				{ kind: value.isDirectory() ? "directory" : value.isFile() ? "file" : "other" },
+				runtime.workspace,
+			);
+		}
+		case "workspace.readdir":
+			return withDaemonWorkspace(
+				{ entries: await runtime.operations.readdir(params.path as string) },
+				runtime.workspace,
+			);
+		case "workspace.glob":
+			return withDaemonWorkspace(
+				{
+					matches: await runtime.operations.glob(params.pattern as string, params.cwd as string, {
+						ignore: params.ignore as string[],
+						limit: params.limit as number,
+					}),
+				},
+				runtime.workspace,
+			);
+		case "workspace.grep": {
+			const result = await runtime.operations.grep(params as unknown as ToolGrepOptions);
+			return withDaemonWorkspace(result as unknown as Record<string, unknown>, runtime.workspace);
+		}
+		case "workspace.detect_image_mime":
+			return withDaemonWorkspace(
+				{ mimeType: (await runtime.operations.detectImageMimeType(params.path as string)) ?? null },
+				runtime.workspace,
+			);
+		case "workspace.exec":
+			return executeDaemonWorkspaceProcess(params, context, runtime);
+		case "resource.read":
+			return readDaemonResource(params, runtime);
+		case "lsp.status":
+			return getDaemonLspStatus(runtime);
+		default:
+			throw new RemoteWorkspaceRequestError({
+				code: "method_not_supported",
+				message: `Workspace operation is not implemented: ${request.method}`,
+				executionState: "not_started",
+				retryable: false,
+			});
+	}
 }
 
 export function createDaemonWorkspaceRuntime(configuration: DaemonConfiguration): DaemonWorkspaceRuntime {
@@ -481,7 +728,7 @@ export function createDaemonWorkspaceRuntime(configuration: DaemonConfiguration)
 		catalog,
 		capabilities,
 		createHandler(workspace) {
-			const withWorkspace = <T extends Record<string, unknown>>(result: T) => ({ ...result, workspace });
+			const requestRuntime: DaemonRequestRuntime = { configuration, operations, host, lspRuntime, workspace };
 			return {
 				validateToolArguments: (toolName, value) => host.validatePreparedArguments(toolName, value),
 				async handleRequest(request, context) {
@@ -495,180 +742,7 @@ export function createDaemonWorkspaceRuntime(configuration: DaemonConfiguration)
 					}
 					activeRequests++;
 					try {
-						const params = request.params as Record<string, unknown>;
-						switch (request.method) {
-							case "tool.invoke": {
-								const toolName = params.toolName as string;
-								const kind = operationKind(toolName);
-								if (kind !== "read") context.markSideEffectStarted();
-								let updateQueue = Promise.resolve();
-								try {
-									const result = await host.executePrepared(toolName, {
-										toolCallId: request.id,
-										arguments: params.arguments,
-										signal: context.signal,
-										executionOptions: params.executionOptions as {
-											imageAutoResize?: boolean;
-											shellCommandPrefix?: string;
-										},
-										onUpdate: (update) => {
-											updateQueue = updateQueue.then(() => context.sendUpdate(portableToolResult(update)));
-										},
-									});
-									await updateQueue;
-									const invocationArguments = params.arguments as { path?: unknown };
-									if (lspRuntime && typeof invocationArguments.path === "string") {
-										try {
-											if (toolName === "read") {
-												await lspRuntime.fileSync.handleFileRead(invocationArguments.path, operations);
-											} else if (toolName === "write" || toolName === "edit") {
-												await lspRuntime.fileSync.handleFileWrite(invocationArguments.path, operations);
-											}
-										} catch {
-											// Synchronization remains best-effort, matching local AgentSession behavior.
-										}
-									}
-									if (kind !== "read") context.markCommitted();
-									return portableToolResult(result);
-								} catch (error) {
-									await updateQueue.catch(() => undefined);
-									if (context.signal.aborted) {
-										throw requestError(
-											"cancelled",
-											"Remote workspace tool invocation was cancelled",
-											kind === "read" ? "not_started" : "indeterminate",
-										);
-									}
-									throw new RemoteWorkspaceRequestError({
-										code: "internal_error",
-										message: error instanceof Error ? error.message.slice(0, 4096) : "Workspace tool failed",
-										executionState: kind === "read" ? "not_started" : "indeterminate",
-										retryable: false,
-									});
-								}
-							}
-							case "workspace.access":
-								await operations.access(params.path as string, params.mode as ToolAccessMode | undefined);
-								return {};
-							case "workspace.read":
-								return withWorkspace({
-									contentBase64: (await operations.readFile(params.path as string)).toString("base64"),
-								});
-							case "workspace.write":
-								context.markSideEffectStarted();
-								await withFileMutationQueue(resolve(configuration.workspaceRoot, params.path as string), () =>
-									operations.writeFile(
-										params.path as string,
-										Buffer.from(params.contentBase64 as string, "base64"),
-									),
-								);
-								context.markCommitted();
-								return {};
-							case "workspace.mkdir":
-								context.markSideEffectStarted();
-								await withFileMutationQueue(resolve(configuration.workspaceRoot, params.path as string), () =>
-									operations.mkdir(params.path as string, { recursive: params.recursive === true }),
-								);
-								context.markCommitted();
-								return {};
-							case "workspace.stat": {
-								const value = await operations.stat(params.path as string);
-								return withWorkspace({
-									kind: value.isDirectory() ? "directory" : value.isFile() ? "file" : "other",
-								});
-							}
-							case "workspace.readdir":
-								return withWorkspace({ entries: await operations.readdir(params.path as string) });
-							case "workspace.glob":
-								return withWorkspace({
-									matches: await operations.glob(params.pattern as string, params.cwd as string, {
-										ignore: params.ignore as string[],
-										limit: params.limit as number,
-									}),
-								});
-							case "workspace.grep": {
-								const result = await operations.grep(params as unknown as ToolGrepOptions);
-								return withWorkspace(result as unknown as Record<string, unknown>);
-							}
-							case "workspace.detect_image_mime":
-								return withWorkspace({
-									mimeType: (await operations.detectImageMimeType(params.path as string)) ?? null,
-								});
-							case "workspace.exec": {
-								context.markSideEffectStarted();
-								let updateQueue = Promise.resolve();
-								let pendingOutputBytes = 0;
-								let outputLimitExceeded = false;
-								const outputController = new AbortController();
-								const signal = AbortSignal.any([context.signal, outputController.signal]);
-								let result: { exitCode: number | null };
-								try {
-									result = await operations.exec(params.command as string, {
-										cwd: params.cwd as string,
-										signal,
-										onData: (data) => {
-											if (outputLimitExceeded) return;
-											const chunk = Buffer.from(data);
-											pendingOutputBytes += chunk.byteLength;
-											if (pendingOutputBytes > configuration.maxBufferedOutputBytes) {
-												outputLimitExceeded = true;
-												outputController.abort();
-												return;
-											}
-											updateQueue = updateQueue
-												.then(() => context.sendUpdate({ dataBase64: chunk.toString("base64") }))
-												.finally(() => {
-													pendingOutputBytes -= chunk.byteLength;
-												});
-										},
-									});
-								} catch (error) {
-									if (outputLimitExceeded)
-										throw new Error("Process output exceeded the daemon buffered-output limit");
-									throw error;
-								}
-								await updateQueue;
-								context.markCommitted();
-								return result;
-							}
-							case "resource.read": {
-								const path = params.path as string;
-								if (path !== "SANDBOX.md" || !configuration.sandboxInstructionsPath) {
-									throw new RemoteWorkspaceRequestError({
-										code: "not_available",
-										message: "Requested daemon resource is not available",
-										executionState: "not_started",
-										retryable: false,
-									});
-								}
-								return withWorkspace({
-									contentBase64: (await readFile(configuration.sandboxInstructionsPath)).toString("base64"),
-								});
-							}
-							case "lsp.status": {
-								if (!lspRuntime) {
-									throw new RemoteWorkspaceRequestError({
-										code: "not_available",
-										message: "Daemon LSP is not configured",
-										executionState: "not_started",
-										retryable: false,
-									});
-								}
-								return {
-									enabled: true,
-									servers: lspRuntime.manager
-										.getStatus()
-										.map((status) => sanitizeLspStatus(status, configuration)),
-								};
-							}
-							default:
-								throw new RemoteWorkspaceRequestError({
-									code: "method_not_supported",
-									message: `Workspace operation is not implemented: ${request.method}`,
-									executionState: "not_started",
-									retryable: false,
-								});
-						}
+						return await dispatchDaemonWorkspaceRequest(request, context, requestRuntime);
 					} finally {
 						activeRequests--;
 					}

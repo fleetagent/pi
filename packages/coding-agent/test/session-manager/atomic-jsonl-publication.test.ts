@@ -26,6 +26,8 @@ import {
 } from "../../src/core/session/stores/jsonl-session-store.ts";
 import type { SessionEntry, SessionHeader, SessionMessageEntry } from "../../src/core/session/types.ts";
 
+type SessionPublicationAttemptKind = "create" | "fork";
+
 const tempDirs: string[] = [];
 
 function createTempDir(): string {
@@ -509,7 +511,7 @@ describe("atomic JSONL publication", () => {
 		const source = manager.create({ id: "source-session" });
 		source.appendMessage({ role: "user", content: "one", timestamp: 1 });
 		const assistantId = source.appendMessage(createAssistantMessage("source-assistant"));
-		const createTarget = (kind: "create" | "fork") => {
+		const createTarget = (kind: SessionPublicationAttemptKind) => {
 			const target = manager.create({ id: "claimed-session", parentSession: source.getSessionReference() });
 			if (kind === "fork") target.copyBranchFrom(source, assistantId, source.getSessionReference());
 			else {

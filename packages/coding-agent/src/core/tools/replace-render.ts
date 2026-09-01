@@ -86,10 +86,24 @@ export function fmtCall(args: ReqParams | undefined, state: RRState, expanded: b
 	}
 	return text;
 }
+// pi-ignore noNearIdenticalDataStructures: Replace rendering accepts minimal adapter input, while the test fixture captures streamed tool-update callback content.
+interface ReplaceResultContentEntry {
+	type: string;
+	text?: string;
+}
 
-export function getResultText(result: { content?: Array<{ type: string; text?: string }> }): string | undefined {
+interface ReplaceResultTextEntry extends ReplaceResultContentEntry {
+	type: "text";
+	text: string;
+}
+
+interface ReplaceResultTextSource {
+	content?: ReplaceResultContentEntry[];
+}
+
+export function getResultText(result: ReplaceResultTextSource): string | undefined {
 	const textContent = result.content?.find(
-		(entry): entry is { type: "text"; text: string } => entry.type === "text" && typeof entry.text === "string",
+		(entry): entry is ReplaceResultTextEntry => entry.type === "text" && typeof entry.text === "string",
 	);
 	return textContent?.text;
 }

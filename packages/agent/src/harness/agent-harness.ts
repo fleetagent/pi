@@ -3,6 +3,7 @@ import {
 	type ImageContent,
 	type Model,
 	streamSimple,
+	type TextContent,
 	type UserMessage,
 } from "@fleetagent/pi-ai";
 import { runAgentLoop } from "../agent-loop.ts";
@@ -23,19 +24,25 @@ import { formatPromptTemplateInvocation } from "./prompt-templates.ts";
 import { formatSkillInvocation } from "./skills.ts";
 import type {
 	AbortResult,
+	AgentHarnessErrorCode,
 	AgentHarnessEvent,
 	AgentHarnessEventResultMap,
 	AgentHarnessOptions,
 	AgentHarnessOwnEvent,
 	AgentHarnessPhase,
+	AgentHarnessPromptOptions,
 	AgentHarnessResources,
 	AgentHarnessStreamOptions,
 	AgentHarnessStreamOptionsPatch,
+	CompactResult,
 	ExecutionEnv,
+	NavigateTreeOptions,
 	NavigateTreeResult,
 	PendingSessionWrite,
 	PromptTemplate,
 	Session,
+	SessionBeforeTreeResult,
+	SessionTreeEntry,
 	Skill,
 } from "./types.ts";
 import { AgentHarnessError, BranchSummaryError, CompactionError, SessionError, toError } from "./types.ts";
@@ -44,6 +51,35 @@ function createUserMessage(text: string, images?: ImageContent[]): UserMessage {
 	const content: Array<{ type: "text"; text: string } | ImageContent> = [{ type: "text", text }];
 	if (images) content.push(...images);
 	return { role: "user", content, timestamp: Date.now() };
+}
+
+interface ResolvedTreeSummary {
+	text: string | undefined;
+	details: unknown;
+}
+
+interface TreeNavigationDestination {
+	leafId: string | null;
+	editorText: string | undefined;
+}
+
+function extractEditorText(content: string | (TextContent | ImageContent)[]): string {
+	if (typeof content === "string") return content;
+	let text = "";
+	for (const item of content) {
+		if (item.type === "text") text += item.text;
+	}
+	return text;
+}
+
+function resolveTreeNavigationDestination(targetEntry: SessionTreeEntry, targetId: string): TreeNavigationDestination {
+	if (targetEntry.type === "message" && targetEntry.message.role === "user") {
+		return { leafId: targetEntry.parentId, editorText: extractEditorText(targetEntry.message.content) };
+	}
+	if (targetEntry.type === "custom_message") {
+		return { leafId: targetEntry.parentId, editorText: extractEditorText(targetEntry.content) };
+	}
+	return { leafId: targetId, editorText: undefined };
 }
 
 function createFailureMessage(model: Model<any>, error: unknown, aborted: boolean): AssistantMessage {
@@ -86,6 +122,19 @@ function mergeHeaders(...headers: Array<Record<string, string> | undefined>): Re
 	return hasHeaders ? merged : undefined;
 }
 
+function applyOptionalRecordPatch<TValue>(
+	base: Record<string, TValue> | undefined,
+	patch: Record<string, TValue | undefined> | undefined,
+): Record<string, TValue> | undefined {
+	if (patch === undefined) return undefined;
+	const result = { ...(base ?? {}) };
+	for (const [key, value] of Object.entries(patch)) {
+		if (value === undefined) delete result[key];
+		else result[key] = value;
+	}
+	return Object.keys(result).length > 0 ? result : undefined;
+}
+
 function applyStreamOptionsPatch(
 	base: AgentHarnessStreamOptions,
 	patch?: AgentHarnessStreamOptionsPatch,
@@ -98,41 +147,24 @@ function applyStreamOptionsPatch(
 	if (Object.hasOwn(patch, "maxRetries")) result.maxRetries = patch.maxRetries;
 	if (Object.hasOwn(patch, "maxRetryDelayMs")) result.maxRetryDelayMs = patch.maxRetryDelayMs;
 	if (Object.hasOwn(patch, "cacheRetention")) result.cacheRetention = patch.cacheRetention;
-
 	if (Object.hasOwn(patch, "headers")) {
-		if (patch.headers === undefined) {
-			result.headers = undefined;
-		} else {
-			const headers = { ...(result.headers ?? {}) };
-			for (const [key, value] of Object.entries(patch.headers)) {
-				if (value === undefined) delete headers[key];
-				else headers[key] = value;
-			}
-			result.headers = Object.keys(headers).length > 0 ? headers : undefined;
-		}
+		result.headers = applyOptionalRecordPatch(result.headers, patch.headers);
 	}
-
 	if (Object.hasOwn(patch, "metadata")) {
-		if (patch.metadata === undefined) {
-			result.metadata = undefined;
-		} else {
-			const metadata = { ...(result.metadata ?? {}) };
-			for (const [key, value] of Object.entries(patch.metadata)) {
-				if (value === undefined) delete metadata[key];
-				else metadata[key] = value;
-			}
-			result.metadata = Object.keys(metadata).length > 0 ? metadata : undefined;
-		}
+		result.metadata = applyOptionalRecordPatch(result.metadata, patch.metadata);
 	}
-
 	return result;
 }
 
 const SUBSCRIBER_EVENT_TYPE = "*";
 
 type AgentHarnessHandler = (event: any, signal?: AbortSignal) => Promise<any> | any;
+type AgentHarnessOwnEventOfType<TType extends keyof AgentHarnessEventResultMap> = Extract<
+	AgentHarnessOwnEvent,
+	{ type: TType }
+>;
 
-function normalizeHarnessError(error: unknown, fallbackCode: AgentHarnessError["code"]): AgentHarnessError {
+function normalizeHarnessError(error: unknown, fallbackCode: AgentHarnessErrorCode): AgentHarnessError {
 	if (error instanceof AgentHarnessError) return error;
 	const cause = toError(error);
 	if (cause instanceof SessionError) return new AgentHarnessError("session", cause.message, cause);
@@ -229,7 +261,7 @@ export class AgentHarness<
 	}
 
 	private async emitHook<TType extends keyof AgentHarnessEventResultMap>(
-		event: Extract<AgentHarnessOwnEvent, { type: TType }>,
+		event: AgentHarnessOwnEventOfType<TType>,
 	): Promise<AgentHarnessEventResultMap[TType] | undefined> {
 		const handlers = this.getHandlers(event.type as TType);
 		if (!handlers || handlers.size === 0) return undefined;
@@ -456,26 +488,38 @@ export class AgentHarness<
 		if (missing.length > 0) throw new AgentHarnessError("invalid_argument", `Unknown tool(s): ${missing.join(", ")}`);
 	}
 
+	private async appendPendingSessionWrite(write: PendingSessionWrite): Promise<void> {
+		switch (write.type) {
+			case "message":
+				await this.session.appendMessage(write.message);
+				break;
+			case "model_change":
+				await this.session.appendModelChange(write.provider, write.modelId);
+				break;
+			case "thinking_level_change":
+				await this.session.appendThinkingLevelChange(write.thinkingLevel);
+				break;
+			case "custom":
+				await this.session.appendCustomEntry(write.customType, write.data);
+				break;
+			case "custom_message":
+				await this.session.appendCustomMessageEntry(write.customType, write.content, write.display, write.details);
+				break;
+			case "label":
+				await this.session.appendLabel(write.targetId, write.label);
+				break;
+			case "session_info":
+				await this.session.appendSessionName(write.name ?? "");
+				break;
+			case "leaf":
+				await this.session.getStorage().setLeafId(write.targetId);
+				break;
+		}
+	}
+
 	private async flushPendingSessionWrites(): Promise<void> {
 		while (this.pendingSessionWrites.length > 0) {
-			const write = this.pendingSessionWrites[0]!;
-			if (write.type === "message") {
-				await this.session.appendMessage(write.message);
-			} else if (write.type === "model_change") {
-				await this.session.appendModelChange(write.provider, write.modelId);
-			} else if (write.type === "thinking_level_change") {
-				await this.session.appendThinkingLevelChange(write.thinkingLevel);
-			} else if (write.type === "custom") {
-				await this.session.appendCustomEntry(write.customType, write.data);
-			} else if (write.type === "custom_message") {
-				await this.session.appendCustomMessageEntry(write.customType, write.content, write.display, write.details);
-			} else if (write.type === "label") {
-				await this.session.appendLabel(write.targetId, write.label);
-			} else if (write.type === "session_info") {
-				await this.session.appendSessionName(write.name ?? "");
-			} else if (write.type === "leaf") {
-				await this.session.getStorage().setLeafId(write.targetId);
-			}
+			await this.appendPendingSessionWrite(this.pendingSessionWrites[0]!);
 			this.pendingSessionWrites.shift();
 		}
 	}
@@ -526,7 +570,7 @@ export class AgentHarness<
 	private async executeTurn(
 		turnState: AgentHarnessTurnState<TSkill, TPromptTemplate, TTool>,
 		text: string,
-		options?: { images?: ImageContent[] },
+		options?: AgentHarnessPromptOptions,
 	): Promise<AssistantMessage> {
 		let activeTurnState = turnState;
 		let messages: AgentMessage[] = [createUserMessage(text, options?.images)];
@@ -600,7 +644,7 @@ export class AgentHarness<
 		}
 	}
 
-	async prompt(text: string, options?: { images?: ImageContent[] }): Promise<AssistantMessage> {
+	async prompt(text: string, options?: AgentHarnessPromptOptions): Promise<AssistantMessage> {
 		if (this.phase !== "idle") throw new AgentHarnessError("busy", "AgentHarness is busy");
 		this.phase = "turn";
 		const finishRunPromise = this.startRunPromise();
@@ -649,19 +693,19 @@ export class AgentHarness<
 		}
 	}
 
-	async steer(text: string, options?: { images?: ImageContent[] }): Promise<void> {
+	async steer(text: string, options?: AgentHarnessPromptOptions): Promise<void> {
 		if (this.phase === "idle") throw new AgentHarnessError("invalid_state", "Cannot steer while idle");
 		this.steerQueue.push(createUserMessage(text, options?.images));
 		await this.emitQueueUpdate();
 	}
 
-	async followUp(text: string, options?: { images?: ImageContent[] }): Promise<void> {
+	async followUp(text: string, options?: AgentHarnessPromptOptions): Promise<void> {
 		if (this.phase === "idle") throw new AgentHarnessError("invalid_state", "Cannot follow up while idle");
 		this.followUpQueue.push(createUserMessage(text, options?.images));
 		await this.emitQueueUpdate();
 	}
 
-	async nextTurn(text: string, options?: { images?: ImageContent[] }): Promise<void> {
+	async nextTurn(text: string, options?: AgentHarnessPromptOptions): Promise<void> {
 		this.nextTurnQueue.push(createUserMessage(text, options?.images));
 		await this.emitQueueUpdate();
 	}
@@ -678,9 +722,7 @@ export class AgentHarness<
 		}
 	}
 
-	async compact(
-		customInstructions?: string,
-	): Promise<{ summary: string; firstKeptEntryId: string; tokensBefore: number; details?: unknown }> {
+	async compact(customInstructions?: string): Promise<CompactResult> {
 		if (this.phase !== "idle") throw new AgentHarnessError("busy", "compact() requires idle harness");
 		this.phase = "compaction";
 		try {
@@ -734,10 +776,42 @@ export class AgentHarness<
 		}
 	}
 
-	async navigateTree(
-		targetId: string,
-		options?: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string },
-	): Promise<NavigateTreeResult> {
+	private async resolveTreeSummary(
+		entries: SessionTreeEntry[],
+		hookResult: SessionBeforeTreeResult | undefined,
+		options: NavigateTreeOptions | undefined,
+	): Promise<ResolvedTreeSummary | null> {
+		const providedText = hookResult?.summary?.summary;
+		const providedDetails = hookResult?.summary?.details;
+		if (providedText || !options?.summarize || entries.length === 0) {
+			return { text: providedText, details: providedDetails };
+		}
+		const model = this.model;
+		if (!model) throw new AgentHarnessError("invalid_state", "No model set for branch summary");
+		const auth = await this.getApiKeyAndHeaders?.(model);
+		if (!auth) throw new AgentHarnessError("auth", "No auth available for branch summary");
+		const branchSummary = await generateBranchSummary(entries, {
+			model,
+			apiKey: auth.apiKey,
+			headers: auth.headers,
+			signal: new AbortController().signal,
+			customInstructions: hookResult?.customInstructions ?? options.customInstructions,
+			replaceInstructions: hookResult?.replaceInstructions ?? options.replaceInstructions,
+		});
+		if (!branchSummary.ok) {
+			if (branchSummary.error.code === "aborted") return null;
+			throw new AgentHarnessError("branch_summary", branchSummary.error.message, branchSummary.error);
+		}
+		return {
+			text: branchSummary.value.summary,
+			details: {
+				readFiles: branchSummary.value.readFiles,
+				modifiedFiles: branchSummary.value.modifiedFiles,
+			},
+		};
+	}
+
+	async navigateTree(targetId: string, options?: NavigateTreeOptions): Promise<NavigateTreeResult> {
 		if (this.phase !== "idle") throw new AgentHarnessError("busy", "navigateTree() requires idle harness");
 		this.phase = "branch_summary";
 		try {
@@ -759,60 +833,14 @@ export class AgentHarness<
 			const signal = new AbortController().signal;
 			const hookResult = await this.emitHook({ type: "session_before_tree", preparation, signal });
 			if (hookResult?.cancel) return { cancelled: true };
+			const summary = await this.resolveTreeSummary(entries, hookResult, options);
+			if (summary === null) return { cancelled: true };
 			let summaryEntry: NavigateTreeResult["summaryEntry"];
-			let summaryText: string | undefined = hookResult?.summary?.summary;
-			let summaryDetails: unknown = hookResult?.summary?.details;
-			if (!summaryText && options?.summarize && entries.length > 0) {
-				const model = this.model;
-				if (!model) throw new AgentHarnessError("invalid_state", "No model set for branch summary");
-				const auth = await this.getApiKeyAndHeaders?.(model);
-				if (!auth) throw new AgentHarnessError("auth", "No auth available for branch summary");
-				const branchSummary = await generateBranchSummary(entries, {
-					model,
-					apiKey: auth.apiKey,
-					headers: auth.headers,
-					signal: new AbortController().signal,
-					customInstructions: hookResult?.customInstructions ?? options?.customInstructions,
-					replaceInstructions: hookResult?.replaceInstructions ?? options?.replaceInstructions,
-				});
-				if (!branchSummary.ok) {
-					if (branchSummary.error.code === "aborted") return { cancelled: true };
-					throw new AgentHarnessError("branch_summary", branchSummary.error.message, branchSummary.error);
-				}
-				summaryText = branchSummary.value.summary;
-				summaryDetails = {
-					readFiles: branchSummary.value.readFiles,
-					modifiedFiles: branchSummary.value.modifiedFiles,
-				};
-			}
-			let editorText: string | undefined;
-			let newLeafId: string | null;
-			if (targetEntry.type === "message" && targetEntry.message.role === "user") {
-				newLeafId = targetEntry.parentId;
-				const content = targetEntry.message.content;
-				editorText =
-					typeof content === "string"
-						? content
-						: content
-								.filter((c): c is { readonly type: "text"; readonly text: string } => c.type === "text")
-								.map((c) => c.text)
-								.join("");
-			} else if (targetEntry.type === "custom_message") {
-				newLeafId = targetEntry.parentId;
-				editorText =
-					typeof targetEntry.content === "string"
-						? targetEntry.content
-						: targetEntry.content
-								.filter((c): c is { readonly type: "text"; readonly text: string } => c.type === "text")
-								.map((c) => c.text)
-								.join("");
-			} else {
-				newLeafId = targetId;
-			}
+			const { leafId: newLeafId, editorText } = resolveTreeNavigationDestination(targetEntry, targetId);
 			const summaryId = await this.session.moveTo(
 				newLeafId,
-				summaryText
-					? { summary: summaryText, details: summaryDetails, fromHook: hookResult?.summary !== undefined }
+				summary.text
+					? { summary: summary.text, details: summary.details, fromHook: hookResult?.summary !== undefined }
 					: undefined,
 			);
 			if (summaryId) {
@@ -981,7 +1009,7 @@ export class AgentHarness<
 	on<TType extends keyof AgentHarnessEventResultMap>(
 		type: TType,
 		handler: (
-			event: Extract<AgentHarnessOwnEvent, { type: TType }>,
+			event: AgentHarnessOwnEventOfType<TType>,
 		) => Promise<AgentHarnessEventResultMap[TType]> | AgentHarnessEventResultMap[TType],
 	): () => void {
 		let handlers = this.handlers.get(type);

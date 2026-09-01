@@ -10,6 +10,7 @@ import { isKeyRelease, type TUI } from "@fleetagent/pi-tui";
 import type { DoomEngine } from "./doom-engine.ts";
 import { DoomKeys, mapKeyToDoom } from "./doom-keys.ts";
 
+// pi-ignore noExcessiveCollectionIterations: Rendering requires exactly one sample for every targetRows × targetCols output cell in row-major order.
 function renderHalfBlock(
 	rgba: Uint8Array,
 	width: number,

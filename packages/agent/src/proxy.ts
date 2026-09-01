@@ -14,6 +14,7 @@ import {
 	type SimpleStreamOptions,
 	type StopReason,
 	type ToolCall,
+	type Usage,
 } from "@fleetagent/pi-ai";
 
 // Create stream class matching ProxyMessageEventStream
@@ -47,13 +48,13 @@ export type ProxyAssistantMessageEvent =
 	| {
 			type: "done";
 			reason: Extract<StopReason, "stop" | "length" | "toolUse">;
-			usage: AssistantMessage["usage"];
+			usage: Usage;
 	  }
 	| {
 			type: "error";
 			reason: Extract<StopReason, "aborted" | "error">;
 			errorMessage?: string;
-			usage: AssistantMessage["usage"];
+			usage: Usage;
 	  };
 
 type ProxySerializableStreamOptions = Pick<
@@ -113,122 +114,119 @@ function buildProxyRequestOptions(options: ProxyStreamOptions): ProxySerializabl
 	};
 }
 
+interface ProxyStreamRuntime {
+	model: Model<any>;
+	context: Context;
+	options: ProxyStreamOptions;
+	stream: ProxyMessageEventStream;
+	partial: AssistantMessage;
+	reader?: ReadableStreamDefaultReader<Uint8Array>;
+}
+
+function createProxyPartialMessage(model: Model<any>): AssistantMessage {
+	return {
+		role: "assistant",
+		stopReason: "stop",
+		content: [],
+		api: model.api,
+		provider: model.provider,
+		model: model.id,
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		timestamp: Date.now(),
+	};
+}
+
+async function requireSuccessfulProxyResponse(response: Response): Promise<void> {
+	if (response.ok) return;
+	let errorMessage = `Proxy error: ${response.status} ${response.statusText}`;
+	try {
+		const errorData = (await response.json()) as { error?: string };
+		if (errorData.error) errorMessage = `Proxy error: ${errorData.error}`;
+	} catch {
+		// Couldn't parse error response
+	}
+	throw new Error(errorMessage);
+}
+
+function pushProxySseLine(line: string, runtime: ProxyStreamRuntime): void {
+	if (!line.startsWith("data: ")) return;
+	const data = line.slice(6).trim();
+	if (!data) return;
+	const proxyEvent = JSON.parse(data) as ProxyAssistantMessageEvent;
+	const event = processProxyEvent(proxyEvent, runtime.partial);
+	if (event) runtime.stream.push(event);
+}
+
+function throwIfProxyRequestAborted(signal: AbortSignal | undefined): void {
+	if (signal?.aborted) throw new Error("Request aborted by user");
+}
+
+async function consumeProxyResponse(response: Response, runtime: ProxyStreamRuntime): Promise<void> {
+	runtime.reader = response.body!.getReader();
+	const decoder = new TextDecoder();
+	let buffer = "";
+	while (true) {
+		const { done, value } = await runtime.reader.read();
+		if (done) break;
+		throwIfProxyRequestAborted(runtime.options.signal);
+		buffer += decoder.decode(value, { stream: true });
+		const lines = buffer.split("\n");
+		buffer = lines.pop() || "";
+		for (const line of lines) pushProxySseLine(line, runtime);
+	}
+	throwIfProxyRequestAborted(runtime.options.signal);
+}
+
+async function runProxyStream(runtime: ProxyStreamRuntime): Promise<void> {
+	const abortHandler = () => {
+		if (runtime.reader) runtime.reader.cancel("Request aborted by user").catch(() => {});
+	};
+	if (runtime.options.signal) runtime.options.signal.addEventListener("abort", abortHandler);
+	try {
+		const response = await fetch(`${runtime.options.proxyUrl}/api/stream`, {
+			method: "POST",
+			headers: {
+				Authorization: `Bearer ${runtime.options.authToken}`,
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify({
+				model: runtime.model,
+				context: runtime.context,
+				options: buildProxyRequestOptions(runtime.options),
+			}),
+			signal: runtime.options.signal,
+		});
+		await requireSuccessfulProxyResponse(response);
+		await consumeProxyResponse(response, runtime);
+		runtime.stream.end();
+	} catch (error) {
+		const errorMessage = error instanceof Error ? error.message : String(error);
+		const reason = runtime.options.signal?.aborted ? "aborted" : "error";
+		runtime.partial.stopReason = reason;
+		runtime.partial.errorMessage = errorMessage;
+		runtime.stream.push({ type: "error", reason, error: runtime.partial });
+		runtime.stream.end();
+	} finally {
+		if (runtime.options.signal) runtime.options.signal.removeEventListener("abort", abortHandler);
+	}
+}
+
 export function streamProxy(model: Model<any>, context: Context, options: ProxyStreamOptions): ProxyMessageEventStream {
 	const stream = new ProxyMessageEventStream();
-
-	(async () => {
-		// Initialize the partial message that we'll build up from events
-		const partial: AssistantMessage = {
-			role: "assistant",
-			stopReason: "stop",
-			content: [],
-			api: model.api,
-			provider: model.provider,
-			model: model.id,
-			usage: {
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			timestamp: Date.now(),
-		};
-
-		let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
-
-		const abortHandler = () => {
-			if (reader) {
-				reader.cancel("Request aborted by user").catch(() => {});
-			}
-		};
-
-		if (options.signal) {
-			options.signal.addEventListener("abort", abortHandler);
-		}
-
-		try {
-			const response = await fetch(`${options.proxyUrl}/api/stream`, {
-				method: "POST",
-				headers: {
-					Authorization: `Bearer ${options.authToken}`,
-					"Content-Type": "application/json",
-				},
-				body: JSON.stringify({
-					model,
-					context,
-					options: buildProxyRequestOptions(options),
-				}),
-				signal: options.signal,
-			});
-
-			if (!response.ok) {
-				let errorMessage = `Proxy error: ${response.status} ${response.statusText}`;
-				try {
-					const errorData = (await response.json()) as { error?: string };
-					if (errorData.error) {
-						errorMessage = `Proxy error: ${errorData.error}`;
-					}
-				} catch {
-					// Couldn't parse error response
-				}
-				throw new Error(errorMessage);
-			}
-
-			reader = response.body!.getReader();
-			const decoder = new TextDecoder();
-			let buffer = "";
-
-			while (true) {
-				const { done, value } = await reader.read();
-				if (done) break;
-
-				if (options.signal?.aborted) {
-					throw new Error("Request aborted by user");
-				}
-
-				buffer += decoder.decode(value, { stream: true });
-				const lines = buffer.split("\n");
-				buffer = lines.pop() || "";
-
-				for (const line of lines) {
-					if (line.startsWith("data: ")) {
-						const data = line.slice(6).trim();
-						if (data) {
-							const proxyEvent = JSON.parse(data) as ProxyAssistantMessageEvent;
-							const event = processProxyEvent(proxyEvent, partial);
-							if (event) {
-								stream.push(event);
-							}
-						}
-					}
-				}
-			}
-
-			if (options.signal?.aborted) {
-				throw new Error("Request aborted by user");
-			}
-
-			stream.end();
-		} catch (error) {
-			const errorMessage = error instanceof Error ? error.message : String(error);
-			const reason = options.signal?.aborted ? "aborted" : "error";
-			partial.stopReason = reason;
-			partial.errorMessage = errorMessage;
-			stream.push({
-				type: "error",
-				reason,
-				error: partial,
-			});
-			stream.end();
-		} finally {
-			if (options.signal) {
-				options.signal.removeEventListener("abort", abortHandler);
-			}
-		}
-	})();
-
+	void runProxyStream({
+		model,
+		context,
+		options,
+		stream,
+		partial: createProxyPartialMessage(model),
+	});
 	return stream;
 }
 

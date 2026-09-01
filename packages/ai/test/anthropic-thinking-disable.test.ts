@@ -2,10 +2,15 @@ import { describe, expect, it } from "vitest";
 import { getModel } from "../src/models.ts";
 import { streamSimple } from "../src/stream.ts";
 import type { Context, Model, SimpleStreamOptions } from "../src/types.ts";
+import type { AnthropicThinkingConfig } from "./anthropic-utils.ts";
+
+interface AnthropicOutputConfig {
+	effort?: string;
+}
 
 interface AnthropicThinkingPayload {
-	thinking?: { type: string; budget_tokens?: number; display?: string };
-	output_config?: { effort?: string };
+	thinking?: AnthropicThinkingConfig;
+	output_config?: AnthropicOutputConfig;
 }
 
 class PayloadCaptured extends Error {

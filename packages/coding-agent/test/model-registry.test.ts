@@ -9,6 +9,10 @@ import { AuthStorage } from "../src/core/auth-storage.ts";
 import { clearApiKeyCache, ModelRegistry, type ProviderConfigInput } from "../src/core/model-registry.ts";
 import { clearDeprecationWarningsForTests } from "../src/utils/deprecation.ts";
 
+interface TestProviderModelDescriptor {
+	id: string;
+	name?: string;
+}
 describe("ModelRegistry", () => {
 	let tempDir: string;
 	let modelsJsonPath: string;
@@ -34,7 +38,7 @@ describe("ModelRegistry", () => {
 	/** Create minimal provider config  */
 	function providerConfig(
 		baseUrl: string,
-		models: Array<{ id: string; name?: string }>,
+		models: TestProviderModelDescriptor[],
 		api: string = "anthropic-messages",
 	): ProviderConfigInput {
 		return {
@@ -53,7 +57,7 @@ describe("ModelRegistry", () => {
 		};
 	}
 
-	function writeModelsJson(providers: Record<string, ReturnType<typeof providerConfig>>) {
+	function writeModelsJson(providers: Record<string, ProviderConfigInput>) {
 		writeFileSync(modelsJsonPath, JSON.stringify({ providers }));
 	}
 

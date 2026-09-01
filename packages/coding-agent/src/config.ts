@@ -1,6 +1,6 @@
 import { accessSync, constants, existsSync, readFileSync, realpathSync } from "fs";
 import { homedir } from "os";
-import { basename, dirname, join, resolve, sep, win32 } from "path";
+import { basename, dirname, join, resolve, win32 } from "path";
 import { fileURLToPath } from "url";
 import { spawnProcessSync } from "./utils/child-process.ts";
 import { normalizePath } from "./utils/paths.ts";
@@ -81,7 +81,12 @@ export function detectInstallMethod(): InstallMethod {
 	return "unknown";
 }
 
-function getInferredNpmInstall(): { root: string; prefix: string } | undefined {
+interface InferredNpmInstall {
+	root: string;
+	prefix: string;
+}
+
+function getInferredNpmInstall(): InferredNpmInstall | undefined {
 	const packageDir = getPackageDir();
 	const path = process.platform === "win32" || packageDir.includes("\\") ? win32 : { basename, dirname };
 	const parent = path.dirname(packageDir);
@@ -165,10 +170,14 @@ function getSelfUpdateCommandForMethod(
 	}
 }
 
+interface ReadCommandOutputOptions {
+	requireSuccess?: boolean;
+}
+
 function readCommandOutput(
 	command: string,
 	args: string[],
-	options: { requireSuccess?: boolean } = {},
+	options: ReadCommandOutputOptions = {},
 ): string | undefined {
 	const result = spawnProcessSync(command, args, {
 		encoding: "utf-8",
@@ -182,27 +191,30 @@ function readCommandOutput(
 	return undefined;
 }
 
+function getNpmGlobalPackageRoots(npmCommand?: string[]): string[] {
+	const configured = !!npmCommand?.length;
+	const [command = "npm", ...npmArgs] = npmCommand ?? [];
+	if (configured && command === "bun") {
+		const bunBin = readCommandOutput(command, [...npmArgs, "pm", "bin", "-g"], {
+			requireSuccess: true,
+		});
+		const roots = [join(homedir(), ".bun", "install", "global", "node_modules")];
+		if (bunBin) {
+			roots.push(join(dirname(bunBin), "install", "global", "node_modules"));
+		}
+		return roots;
+	}
+	const root = readCommandOutput(command, [...npmArgs, "root", "-g"], {
+		requireSuccess: configured,
+	});
+	const inferred = configured ? undefined : getInferredNpmInstall();
+	return [root, inferred?.root].filter((candidate): candidate is string => !!candidate);
+}
+
 function getGlobalPackageRoots(method: InstallMethod, _packageName: string, npmCommand?: string[]): string[] {
 	switch (method) {
-		case "npm": {
-			const configured = !!npmCommand?.length;
-			const [command = "npm", ...npmArgs] = npmCommand ?? [];
-			if (configured && command === "bun") {
-				const bunBin = readCommandOutput(command, [...npmArgs, "pm", "bin", "-g"], {
-					requireSuccess: true,
-				});
-				const roots = [join(homedir(), ".bun", "install", "global", "node_modules")];
-				if (bunBin) {
-					roots.push(join(dirname(bunBin), "install", "global", "node_modules"));
-				}
-				return roots;
-			}
-			const root = readCommandOutput(command, [...npmArgs, "root", "-g"], {
-				requireSuccess: configured,
-			});
-			const inferred = configured ? undefined : getInferredNpmInstall();
-			return [root, inferred?.root].filter((x): x is string => !!x);
-		}
+		case "npm":
+			return getNpmGlobalPackageRoots(npmCommand);
 		case "pnpm": {
 			const root = readCommandOutput("pnpm", ["root", "-g"]);
 			return root ? [root, dirname(root)] : [];
@@ -278,15 +290,26 @@ function isSelfUpdatePathWritable(): boolean {
 	}
 }
 
+function getAncestorPathSet(paths: string[]): Set<string> {
+	const ancestors = new Set<string>();
+	for (const path of paths) {
+		let ancestor = dirname(path);
+		while (true) {
+			ancestors.add(ancestor);
+			const parent = dirname(ancestor);
+			if (parent === ancestor) break;
+			ancestor = parent;
+		}
+	}
+	return ancestors;
+}
 function isManagedByGlobalPackageManager(method: InstallMethod, packageName: string, npmCommand?: string[]): boolean {
 	const packageDirs = [getPackageDir(), getEntrypointPackageDir()].filter((dir): dir is string => !!dir);
 	const packageDirCandidates = packageDirs.flatMap((dir) => getPathComparisonCandidates(dir));
-	return getGlobalPackageRoots(method, packageName, npmCommand).some((root) => {
-		return getPathComparisonCandidates(root).some((normalizedRoot) => {
-			const rootPrefix = normalizedRoot.endsWith(sep) ? normalizedRoot : `${normalizedRoot}${sep}`;
-			return packageDirCandidates.some((packageDir) => packageDir.startsWith(rootPrefix));
-		});
-	});
+	const packageDirAncestors = getAncestorPathSet(packageDirCandidates);
+	return getGlobalPackageRoots(method, packageName, npmCommand).some((root) =>
+		getPathComparisonCandidates(root).some((normalizedRoot) => packageDirAncestors.has(normalizedRoot)),
+	);
 }
 
 export function getSelfUpdateCommand(
@@ -423,13 +446,15 @@ export function getChangelogPath(): string {
 // App Config (from package.json piConfig)
 // =============================================================================
 
+interface PackagePiConfig {
+	name?: string;
+	configDir?: string;
+}
+
 interface PackageJson {
 	name?: string;
 	version?: string;
-	piConfig?: {
-		name?: string;
-		configDir?: string;
-	};
+	piConfig?: PackagePiConfig;
 }
 
 const pkg = JSON.parse(readFileSync(getPackageJsonPath(), "utf-8")) as PackageJson;

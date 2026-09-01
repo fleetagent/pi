@@ -116,19 +116,26 @@ interface ProtocolPair {
 	serverCloses: RemoteWorkspaceProtocolCloseReason[];
 }
 
-function createProtocolPair(
-	handler: RemoteWorkspaceServerHandler,
-	options: {
-		catalog?: RemoteWorkspaceCatalog;
-		clientVersions?: RemoteWorkspaceHandshake["versions"];
-		serverVersions?: RemoteWorkspaceHandshake["versions"];
-		clientRequiredCapabilities?: ("primitive_operations" | "file_transfer")[];
-		serverCapabilities?: string[];
-		limits?: RemoteWorkspaceProtocolLimits;
-		onCatalogChanged?: (generation: number) => void;
-		onCatalogRefreshed?: (catalog: RemoteWorkspaceCatalog) => void | Promise<void>;
-	} = {},
-): ProtocolPair {
+type ProtocolPairRequiredCapability = "primitive_operations" | "file_transfer";
+
+interface ProtocolPairOptions {
+	catalog?: RemoteWorkspaceCatalog;
+	clientVersions?: RemoteWorkspaceHandshake["versions"];
+	serverVersions?: RemoteWorkspaceHandshake["versions"];
+	clientRequiredCapabilities?: ProtocolPairRequiredCapability[];
+	serverCapabilities?: string[];
+	limits?: RemoteWorkspaceProtocolLimits;
+	onCatalogChanged?: (generation: number) => void;
+	onCatalogRefreshed?: (catalog: RemoteWorkspaceCatalog) => void | Promise<void>;
+}
+
+interface ServerHarnessOptions {
+	catalog?: RemoteWorkspaceCatalog;
+	capabilities?: string[];
+	limits?: RemoteWorkspaceProtocolLimits;
+}
+
+function createProtocolPair(handler: RemoteWorkspaceServerHandler, options: ProtocolPairOptions = {}): ProtocolPair {
 	const catalog = options.catalog ?? validCatalog();
 	const localToolSchemas = new Map(catalog.tools.map((tool) => [tool.name, tool.schemaHash]));
 	const clientMessages: RemoteWorkspaceClientMessage[] = [];
@@ -183,7 +190,7 @@ function createProtocolPair(
 
 function createServerHarness(
 	handler: RemoteWorkspaceServerHandler = defaultHandler(),
-	options: { catalog?: RemoteWorkspaceCatalog; capabilities?: string[]; limits?: RemoteWorkspaceProtocolLimits } = {},
+	options: ServerHarnessOptions = {},
 ) {
 	const messages: RemoteWorkspaceServerMessage[] = [];
 	const closes: RemoteWorkspaceProtocolCloseReason[] = [];

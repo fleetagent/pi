@@ -1,13 +1,10 @@
+import type { CacheControlEphemeral as CacheControl } from "@anthropic-ai/sdk/resources/messages.js";
 import { Type } from "typebox";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getModel } from "../src/models.ts";
 import { streamOpenAICompletions } from "../src/providers/openai-completions.ts";
-import type { Model } from "../src/types.ts";
-
-interface CacheControl {
-	type: "ephemeral";
-	ttl?: string;
-}
+import type { CacheRetention, Model } from "../src/types.ts";
+import type { MockCompletionPromise } from "./openai-mock-types.ts";
 
 interface TextPart {
 	type: "text";
@@ -20,12 +17,18 @@ interface ToolWithCacheControl {
 	cache_control?: CacheControl;
 }
 
+interface CapturedCompletionMessage {
+	role: string;
+	content: string | TextPart[] | null;
+}
+
 interface CapturedParams {
-	messages: Array<{
-		role: string;
-		content: string | TextPart[] | null;
-	}>;
+	messages: CapturedCompletionMessage[];
 	tools?: ToolWithCacheControl[];
+}
+
+interface CacheControlPayloadOptions {
+	cacheRetention?: CacheRetention;
 }
 
 const mockState = vi.hoisted(() => ({
@@ -52,12 +55,7 @@ vi.mock("openai", () => {
 							};
 						},
 					};
-					const promise = Promise.resolve(stream) as Promise<typeof stream> & {
-						withResponse: () => Promise<{
-							data: typeof stream;
-							response: { status: number; headers: Headers };
-						}>;
-					};
+					const promise = Promise.resolve(stream) as MockCompletionPromise<typeof stream>;
 					promise.withResponse = async () => ({
 						data: stream,
 						response: { status: 200, headers: new Headers() },
@@ -73,7 +71,7 @@ vi.mock("openai", () => {
 
 async function capturePayload(
 	model: Model<"openai-completions">,
-	options?: { cacheRetention?: "none" | "short" | "long" },
+	options?: CacheControlPayloadOptions,
 ): Promise<CapturedParams> {
 	const timestamp = Date.now();
 

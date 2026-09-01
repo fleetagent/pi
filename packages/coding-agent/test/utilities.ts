@@ -293,12 +293,19 @@ export function createTestSession(options: TestSessionOptions = {}): TestSession
  * u4 -> a4              (another root)
  * ```
  */
-export function buildTestTree(
-	session: Session,
-	structure: {
-		messages: Array<{ role: "user" | "assistant"; text: string; branchFrom?: string }>;
-	},
-): Map<string, string> {
+type TestSessionTreeMessageRole = "user" | "assistant";
+
+interface TestSessionTreeMessage {
+	role: TestSessionTreeMessageRole;
+	text: string;
+	branchFrom?: string;
+}
+
+interface TestSessionTreeStructure {
+	messages: TestSessionTreeMessage[];
+}
+
+export function buildTestTree(session: Session, structure: TestSessionTreeStructure): Map<string, string> {
 	const ids = new Map<string, string>();
 
 	for (const msg of structure.messages) {

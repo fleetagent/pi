@@ -54,8 +54,8 @@ export default function toolsExtension(pi: ExtensionAPI) {
 
 		if (savedTools) {
 			// Restore saved tool selection (filter to only tools that still exist)
-			const allToolNames = allTools.map((t) => t.name);
-			enabledTools = new Set(savedTools.filter((t: string) => allToolNames.includes(t)));
+			const allToolNames = new Set(allTools.map((tool) => tool.name));
+			enabledTools = new Set(savedTools.filter((toolName) => allToolNames.has(toolName)));
 			applyTools();
 		} else {
 			// No saved state - sync with currently active tools

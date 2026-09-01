@@ -17,6 +17,7 @@ export type AuthSelectorProvider = {
 	authType: "oauth" | "api_key";
 };
 
+type OAuthSelectorMode = "login" | "logout";
 /**
  * Component that renders an auth provider selector
  */
@@ -37,14 +38,14 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 	private allProviders: AuthSelectorProvider[];
 	private filteredProviders: AuthSelectorProvider[];
 	private selectedIndex: number = 0;
-	private mode: "login" | "logout";
+	private mode: OAuthSelectorMode;
 	private authStorage: AuthStorage;
 	private getAuthStatus: (providerId: string) => AuthStatus;
 	private onSelectCallback: (providerId: string) => void;
 	private onCancelCallback: () => void;
 
 	constructor(
-		mode: "login" | "logout",
+		mode: OAuthSelectorMode,
 		authStorage: AuthStorage,
 		providers: AuthSelectorProvider[],
 		onSelect: (providerId: string) => void,

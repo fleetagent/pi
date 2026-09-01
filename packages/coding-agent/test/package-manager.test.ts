@@ -6,7 +6,10 @@ import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DefaultPackageManager, type ProgressEvent, type ResolvedResource } from "../src/core/package-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
+import type { SourceScope } from "../src/core/source-info.ts";
+import type { GitSource } from "../src/utils/git.ts";
 
+type ResourcePathMatchMode = "endsWith" | "includes";
 function normalizeForMatch(value: string): string {
 	return value.replace(/\\/g, "/");
 }
@@ -25,24 +28,35 @@ class MockSpawnedProcess extends EventEmitter {
 	}
 }
 
+interface PackageManagerCommandOptions {
+	cwd?: string;
+}
+
+interface PackageManagerCommandEnvironmentOptions extends PackageManagerCommandOptions {
+	env?: Record<string, string>;
+}
+
+interface PackageManagerCommandCaptureOptions extends PackageManagerCommandEnvironmentOptions {
+	timeoutMs?: number;
+}
+
+interface PackageManagerGitCheckoutTarget {
+	ref: string;
+	head: string;
+	fetchArgs: string[];
+}
+
 interface PackageManagerInternals {
-	runCommand(command: string, args: string[], options?: { cwd?: string }): Promise<void>;
-	runCommandCapture(
-		command: string,
-		args: string[],
-		options?: { cwd?: string; timeoutMs?: number; env?: Record<string, string> },
-	): Promise<string>;
-	getLocalGitUpdateTarget(installedPath: string): Promise<{ ref: string; head: string; fetchArgs: string[] }>;
-	getGitInstallPath(
-		source: { type: "git"; repo: string; host: string; path: string; pinned: boolean; ref?: string },
-		scope: "user" | "project" | "temporary",
-	): string;
+	runCommand(command: string, args: string[], options?: PackageManagerCommandOptions): Promise<void>;
+	runCommandCapture(command: string, args: string[], options?: PackageManagerCommandCaptureOptions): Promise<string>;
+	getLocalGitUpdateTarget(installedPath: string): Promise<PackageManagerGitCheckoutTarget>;
+	getGitInstallPath(source: GitSource, scope: SourceScope): string;
 	getTemporaryDir(prefix: string, suffix?: string): string;
 	parseSource(source: string): unknown;
 }
 
 // Helper to check if a resource is enabled
-const isEnabled = (r: ResolvedResource, pathMatch: string, matchFn: "endsWith" | "includes" = "endsWith") => {
+const isEnabled = (r: ResolvedResource, pathMatch: string, matchFn: ResourcePathMatchMode = "endsWith") => {
 	const normalizedPath = normalizeForMatch(r.path);
 	const normalizedMatch = normalizeForMatch(pathMatch);
 	return matchFn === "endsWith"
@@ -50,7 +64,7 @@ const isEnabled = (r: ResolvedResource, pathMatch: string, matchFn: "endsWith" |
 		: normalizedPath.includes(normalizedMatch) && r.enabled;
 };
 
-const isDisabled = (r: ResolvedResource, pathMatch: string, matchFn: "endsWith" | "includes" = "endsWith") => {
+const isDisabled = (r: ResolvedResource, pathMatch: string, matchFn: ResourcePathMatchMode = "endsWith") => {
 	const normalizedPath = normalizeForMatch(r.path);
 	const normalizedMatch = normalizeForMatch(pathMatch);
 	return matchFn === "endsWith"
@@ -707,10 +721,12 @@ Content`,
 				gitSource("evil.example", "user%2Frepo/name"),
 			];
 
-			for (const source of unsafeSources) {
-				for (const scope of ["user", "project", "temporary"] as const) {
-					expect(() => internals.getGitInstallPath(source, scope)).toThrow(/Refusing/);
-				}
+			const scopes = ["user", "project", "temporary"] as const;
+			const caseCount = unsafeSources.length * scopes.length;
+			for (let index = 0; index < caseCount; index += 1) {
+				const source = unsafeSources[Math.floor(index / scopes.length)];
+				const scope = scopes[index % scopes.length];
+				expect(() => internals.getGitInstallPath(source, scope)).toThrow(/Refusing/);
 			}
 		});
 
@@ -1114,18 +1130,19 @@ Content`,
 			writeFileSync(join(targetDir, "package.json"), JSON.stringify({ name: "repo", version: "1.0.0" }));
 			settingsManager.setProjectPackages([source]);
 
+			const gitCaptureResults = new Map([
+				["--abbrev-ref @{upstream}", "origin/main"],
+				["@{upstream}", "remote-head"],
+				["@{upstream}^{commit}", "remote-head"],
+				["HEAD", "local-head"],
+			]);
 			vi.spyOn(packageManager as any, "runCommandCapture").mockImplementation(async (...callArgs: unknown[]) => {
 				const [_command, args] = callArgs as [string, string[]];
-				if (args[0] === "rev-parse" && args[1] === "--abbrev-ref" && args[2] === "@{upstream}") {
-					return "origin/main";
-				}
-				if (args[0] === "rev-parse" && (args[1] === "@{upstream}" || args[1] === "@{upstream}^{commit}")) {
-					return "remote-head";
-				}
-				if (args[0] === "rev-parse" && args[1] === "HEAD") {
-					return "local-head";
-				}
-				throw new Error(`Unexpected runCommandCapture args: ${args.join(" ")}`);
+				if (args[0] !== "rev-parse") throw new Error(`Unexpected runCommandCapture args: ${args.join(" ")}`);
+				const lookupKey = args[1] === "--abbrev-ref" ? `${args[1]} ${args[2]}` : args[1];
+				const result = gitCaptureResults.get(lookupKey);
+				if (!result) throw new Error(`Unexpected runCommandCapture args: ${args.join(" ")}`);
+				return result;
 			});
 			const runCommandSpy = vi.spyOn(packageManager as any, "runCommand").mockResolvedValue(undefined);
 
@@ -1150,18 +1167,19 @@ Content`,
 			writeFileSync(join(targetDir, "package.json"), JSON.stringify({ name: "repo", version: "1.0.0" }));
 			settingsManager.setProjectPackages([source]);
 
+			const gitCaptureResults = new Map([
+				["--abbrev-ref @{upstream}", "origin/main"],
+				["@{upstream}", "remote-head"],
+				["@{upstream}^{commit}", "remote-head"],
+				["HEAD", "local-head"],
+			]);
 			vi.spyOn(packageManager as any, "runCommandCapture").mockImplementation(async (...callArgs: unknown[]) => {
 				const [_command, args] = callArgs as [string, string[]];
-				if (args[0] === "rev-parse" && args[1] === "--abbrev-ref" && args[2] === "@{upstream}") {
-					return "origin/main";
-				}
-				if (args[0] === "rev-parse" && (args[1] === "@{upstream}" || args[1] === "@{upstream}^{commit}")) {
-					return "remote-head";
-				}
-				if (args[0] === "rev-parse" && args[1] === "HEAD") {
-					return "local-head";
-				}
-				throw new Error(`Unexpected runCommandCapture args: ${args.join(" ")}`);
+				if (args[0] !== "rev-parse") throw new Error(`Unexpected runCommandCapture args: ${args.join(" ")}`);
+				const lookupKey = args[1] === "--abbrev-ref" ? `${args[1]} ${args[2]}` : args[1];
+				const result = gitCaptureResults.get(lookupKey);
+				if (!result) throw new Error(`Unexpected runCommandCapture args: ${args.join(" ")}`);
+				return result;
 			});
 			const runCommandSpy = vi.spyOn(packageManager as any, "runCommand").mockResolvedValue(undefined);
 
@@ -2631,12 +2649,12 @@ export default function(api) { api.registerTool({ name: "test", description: "te
 				spawnCaptureCommand(
 					command: string,
 					args: string[],
-					options?: { cwd?: string; env?: Record<string, string> },
+					options?: PackageManagerCommandEnvironmentOptions,
 				): MockSpawnedProcess;
 				runCommandCapture(
 					command: string,
 					args: string[],
-					options?: { cwd?: string; timeoutMs?: number; env?: Record<string, string> },
+					options?: PackageManagerCommandCaptureOptions,
 				): Promise<string>;
 			};
 			const child = new MockSpawnedProcess();

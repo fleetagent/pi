@@ -6,6 +6,7 @@ import type {
 	Context,
 	Model,
 	OpenAICompletionsCompat,
+	ToolResultContent,
 	ToolResultMessage,
 	Usage,
 } from "../src/types.ts";
@@ -42,7 +43,7 @@ const compat: Required<OpenAICompletionsCompat> = {
 function buildToolResult(
 	toolCallId: string,
 	timestamp: number,
-	content: ToolResultMessage["content"] = [
+	content: ToolResultContent[] = [
 		{ type: "text", text: "Read image file [image/png]" },
 		{ type: "image", data: "ZmFrZQ==", mimeType: "image/png" },
 	],
@@ -122,7 +123,7 @@ describe("openai-completions convertMessages", () => {
 			stopReason: "toolUse",
 			timestamp: now,
 		};
-		const emptyContents: ToolResultMessage["content"][] = [[], [{ type: "text", text: "" }]];
+		const emptyContents: ToolResultContent[][] = [[], [{ type: "text", text: "" }]];
 
 		for (const content of emptyContents) {
 			const context: Context = {

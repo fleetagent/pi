@@ -1,9 +1,10 @@
+import type { TuiStopOptions } from "@fleetagent/pi-tui";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 
 type FakeUi = {
 	start: () => void;
-	stop: (options?: { preserveScreen?: boolean }) => void;
+	stop: (options?: TuiStopOptions) => void;
 	requestRender: (force?: boolean) => void;
 };
 

@@ -24,6 +24,24 @@ function escapeControlCharacter(char: string): string {
 	}
 }
 
+interface JsonEscapeRepair {
+	text: string;
+	endIndex: number;
+}
+
+function repairJsonEscape(json: string, index: number): JsonEscapeRepair {
+	const nextChar = json[index + 1];
+	if (nextChar === undefined) return { text: "\\\\", endIndex: index };
+	if (nextChar === "u") {
+		const unicodeDigits = json.slice(index + 2, index + 6);
+		if (/^[0-9a-fA-F]{4}$/.test(unicodeDigits)) {
+			return { text: `\\u${unicodeDigits}`, endIndex: index + 5 };
+		}
+	}
+	if (VALID_JSON_ESCAPES.has(nextChar)) return { text: `\\${nextChar}`, endIndex: index + 1 };
+	return { text: "\\\\", endIndex: index };
+}
+
 /**
  * Repairs malformed JSON string literals by:
  * - escaping raw control characters inside strings
@@ -51,28 +69,9 @@ export function repairJson(json: string): string {
 		}
 
 		if (char === "\\") {
-			const nextChar = json[index + 1];
-			if (nextChar === undefined) {
-				repaired += "\\\\";
-				continue;
-			}
-
-			if (nextChar === "u") {
-				const unicodeDigits = json.slice(index + 2, index + 6);
-				if (/^[0-9a-fA-F]{4}$/.test(unicodeDigits)) {
-					repaired += `\\u${unicodeDigits}`;
-					index += 5;
-					continue;
-				}
-			}
-
-			if (VALID_JSON_ESCAPES.has(nextChar)) {
-				repaired += `\\${nextChar}`;
-				index += 1;
-				continue;
-			}
-
-			repaired += "\\\\";
+			const escapeRepair = repairJsonEscape(json, index);
+			repaired += escapeRepair.text;
+			index = escapeRepair.endIndex;
 			continue;
 		}
 

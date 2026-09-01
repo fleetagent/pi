@@ -17,6 +17,7 @@ function referenceStripAnsi(value: string): string {
 	return value.replace(referenceRegex, "");
 }
 
+// pi-ignore noExcessiveCollectionIterations: Compatibility coverage intentionally generates 176 pairs from a fixed 22-character ANSI alphabet.
 function getCompatibilityInputs(): string[] {
 	const inputs = [
 		"plain",

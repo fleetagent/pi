@@ -5,9 +5,12 @@
  * It is only intended for CLI use, not browser environments.
  */
 
-// NEVER convert to top-level imports - breaks browser/Vite builds
-let _randomBytes: typeof import("node:crypto").randomBytes | null = null;
-let _http: typeof import("node:http") | null = null;
+import type * as NodeCrypto from "node:crypto";
+import type * as NodeHttp from "node:http";
+
+// NEVER convert these to top-level runtime imports - that breaks browser/Vite builds.
+let _randomBytes: typeof NodeCrypto.randomBytes | null = null;
+let _http: typeof NodeHttp | null = null;
 if (typeof process !== "undefined" && (process.versions?.node || process.versions?.bun)) {
 	import("node:crypto").then((m) => {
 		_randomBytes = m.randomBytes;
@@ -19,7 +22,13 @@ if (typeof process !== "undefined" && (process.versions?.node || process.version
 
 import { oauthErrorHtml, oauthSuccessHtml } from "./oauth-page.ts";
 import { generatePKCE } from "./pkce.ts";
-import type { OAuthCredentials, OAuthLoginCallbacks, OAuthPrompt, OAuthProviderInterface } from "./types.ts";
+import type {
+	OAuthCredentials,
+	OAuthLoginCallbacks,
+	OAuthManualCodeInput,
+	OAuthProviderInterface,
+	ParsedOAuthAuthorizationInput,
+} from "./types.ts";
 
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const AUTHORIZE_URL = "https://auth.openai.com/oauth/authorize";
@@ -36,10 +45,26 @@ type TokenSuccess = { type: "success"; access: string; refresh: string; expires:
 type TokenFailure = { type: "failed"; message: string; status?: number };
 type TokenResult = TokenSuccess | TokenFailure;
 
+interface OpenAICodexAuthorizationFlow {
+	verifier: string;
+	state: string;
+	url: string;
+}
+
+interface OpenAICodexAuthorizationCode {
+	code: string;
+}
+
+type OpenAICodexLoginOptions = Pick<OAuthLoginCallbacks, "onAuth" | "onPrompt" | "onProgress" | "onManualCodeInput"> & {
+	originator?: string;
+};
+
+interface OpenAICodexJwtAuthClaims {
+	chatgpt_account_id?: string;
+}
+
 type JwtPayload = {
-	[JWT_CLAIM_PATH]?: {
-		chatgpt_account_id?: string;
-	};
+	[JWT_CLAIM_PATH]?: OpenAICodexJwtAuthClaims;
 	[key: string]: unknown;
 };
 
@@ -50,7 +75,7 @@ function createState(): string {
 	return _randomBytes(16).toString("hex");
 }
 
-function parseAuthorizationInput(input: string): { code?: string; state?: string } {
+function parseAuthorizationInput(input: string): ParsedOAuthAuthorizationInput {
 	const value = input.trim();
 	if (!value) return {};
 
@@ -188,9 +213,7 @@ async function refreshAccessToken(refreshToken: string, signal?: AbortSignal): P
 	}
 }
 
-async function createAuthorizationFlow(
-	originator: string = "pi",
-): Promise<{ verifier: string; state: string; url: string }> {
+async function createAuthorizationFlow(originator: string = "pi"): Promise<OpenAICodexAuthorizationFlow> {
 	const { verifier, challenge } = await generatePKCE();
 	const state = createState();
 
@@ -212,7 +235,7 @@ async function createAuthorizationFlow(
 type OAuthServerInfo = {
 	close: () => void;
 	cancelWait: () => void;
-	waitForCode: () => Promise<{ code: string } | null>;
+	waitForCode: () => Promise<OpenAICodexAuthorizationCode | null>;
 };
 
 function startLocalOAuthServer(state: string): Promise<OAuthServerInfo> {
@@ -220,8 +243,8 @@ function startLocalOAuthServer(state: string): Promise<OAuthServerInfo> {
 		throw new Error("OpenAI Codex OAuth is only available in Node.js environments");
 	}
 
-	let settleWait: ((value: { code: string } | null) => void) | undefined;
-	const waitForCodePromise = new Promise<{ code: string } | null>((resolve) => {
+	let settleWait: ((value: OpenAICodexAuthorizationCode | null) => void) | undefined;
+	const waitForCodePromise = new Promise<OpenAICodexAuthorizationCode | null>((resolve) => {
 		let settled = false;
 		settleWait = (value) => {
 			if (settled) return;
@@ -298,6 +321,73 @@ function getAccountId(accessToken: string): string | null {
 	return typeof accountId === "string" && accountId.length > 0 ? accountId : null;
 }
 
+function parseVerifiedOpenAICodexAuthorizationCode(input: string, expectedState: string): string | undefined {
+	const parsed = parseAuthorizationInput(input);
+	if (parsed.state && parsed.state !== expectedState) throw new Error("State mismatch");
+	return parsed.code;
+}
+
+async function waitForOpenAICodexCallbackOrManualCode(
+	server: OAuthServerInfo,
+	onManualCodeInput: OAuthManualCodeInput,
+	expectedState: string,
+): Promise<string | undefined> {
+	let manualCode: string | undefined;
+	let manualError: Error | undefined;
+	const manualPromise = onManualCodeInput()
+		.then((input) => {
+			manualCode = input;
+			server.cancelWait();
+		})
+		.catch((error) => {
+			manualError = error instanceof Error ? error : new Error(String(error));
+			server.cancelWait();
+		});
+
+	const callbackResult = await server.waitForCode();
+	if (manualError) throw manualError;
+	if (callbackResult?.code) return callbackResult.code;
+	if (manualCode) return parseVerifiedOpenAICodexAuthorizationCode(manualCode, expectedState);
+
+	await manualPromise;
+	if (manualError) throw manualError;
+	return manualCode ? parseVerifiedOpenAICodexAuthorizationCode(manualCode, expectedState) : undefined;
+}
+
+async function waitForOpenAICodexAuthorizationCode(
+	server: OAuthServerInfo,
+	options: OpenAICodexLoginOptions,
+	expectedState: string,
+): Promise<string | undefined> {
+	if (options.onManualCodeInput) {
+		return waitForOpenAICodexCallbackOrManualCode(server, options.onManualCodeInput, expectedState);
+	}
+	const callbackResult = await server.waitForCode();
+	return callbackResult?.code;
+}
+
+async function promptForOpenAICodexAuthorizationCode(
+	options: OpenAICodexLoginOptions,
+	expectedState: string,
+): Promise<string | undefined> {
+	const input = await options.onPrompt({
+		message: "Paste the authorization code (or full redirect URL):",
+	});
+	return parseVerifiedOpenAICodexAuthorizationCode(input, expectedState);
+}
+
+function createOpenAICodexCredentials(tokenResult: TokenResult): OAuthCredentials {
+	if (tokenResult.type !== "success") throw new Error(tokenResult.message);
+	const accountId = getAccountId(tokenResult.access);
+	if (!accountId) throw new Error("Failed to extract accountId from token");
+	return {
+		access: tokenResult.access,
+		refresh: tokenResult.refresh,
+		expires: tokenResult.expires,
+		accountId,
+	};
+}
+
 /**
  * Login with OpenAI Codex OAuth
  *
@@ -309,108 +399,17 @@ function getAccountId(accessToken: string): string | null {
  *                                    Useful for showing paste input immediately alongside browser flow.
  * @param options.originator - OAuth originator parameter (defaults to "pi")
  */
-export async function loginOpenAICodex(options: {
-	onAuth: (info: { url: string; instructions?: string }) => void;
-	onPrompt: (prompt: OAuthPrompt) => Promise<string>;
-	onProgress?: (message: string) => void;
-	onManualCodeInput?: () => Promise<string>;
-	originator?: string;
-}): Promise<OAuthCredentials> {
+export async function loginOpenAICodex(options: OpenAICodexLoginOptions): Promise<OAuthCredentials> {
 	const { verifier, state, url } = await createAuthorizationFlow(options.originator);
 	const server = await startLocalOAuthServer(state);
 
 	options.onAuth({ url, instructions: "A browser window should open. Complete login to finish." });
 
-	let code: string | undefined;
 	try {
-		if (options.onManualCodeInput) {
-			// Race between browser callback and manual input
-			let manualCode: string | undefined;
-			let manualError: Error | undefined;
-			const manualPromise = options
-				.onManualCodeInput()
-				.then((input) => {
-					manualCode = input;
-					server.cancelWait();
-				})
-				.catch((err) => {
-					manualError = err instanceof Error ? err : new Error(String(err));
-					server.cancelWait();
-				});
-
-			const result = await server.waitForCode();
-
-			// If manual input was cancelled, throw that error
-			if (manualError) {
-				throw manualError;
-			}
-
-			if (result?.code) {
-				// Browser callback won
-				code = result.code;
-			} else if (manualCode) {
-				// Manual input won (or callback timed out and user had entered code)
-				const parsed = parseAuthorizationInput(manualCode);
-				if (parsed.state && parsed.state !== state) {
-					throw new Error("State mismatch");
-				}
-				code = parsed.code;
-			}
-
-			// If still no code, wait for manual promise to complete and try that
-			if (!code) {
-				await manualPromise;
-				if (manualError) {
-					throw manualError;
-				}
-				if (manualCode) {
-					const parsed = parseAuthorizationInput(manualCode);
-					if (parsed.state && parsed.state !== state) {
-						throw new Error("State mismatch");
-					}
-					code = parsed.code;
-				}
-			}
-		} else {
-			// Original flow: wait for callback, then prompt if needed
-			const result = await server.waitForCode();
-			if (result?.code) {
-				code = result.code;
-			}
-		}
-
-		// Fallback to onPrompt if still no code
-		if (!code) {
-			const input = await options.onPrompt({
-				message: "Paste the authorization code (or full redirect URL):",
-			});
-			const parsed = parseAuthorizationInput(input);
-			if (parsed.state && parsed.state !== state) {
-				throw new Error("State mismatch");
-			}
-			code = parsed.code;
-		}
-
-		if (!code) {
-			throw new Error("Missing authorization code");
-		}
-
-		const tokenResult = await exchangeAuthorizationCode(code, verifier);
-		if (tokenResult.type !== "success") {
-			throw new Error(tokenResult.message);
-		}
-
-		const accountId = getAccountId(tokenResult.access);
-		if (!accountId) {
-			throw new Error("Failed to extract accountId from token");
-		}
-
-		return {
-			access: tokenResult.access,
-			refresh: tokenResult.refresh,
-			expires: tokenResult.expires,
-			accountId,
-		};
+		let code = await waitForOpenAICodexAuthorizationCode(server, options, state);
+		if (!code) code = await promptForOpenAICodexAuthorizationCode(options, state);
+		if (!code) throw new Error("Missing authorization code");
+		return createOpenAICodexCredentials(await exchangeAuthorizationCode(code, verifier));
 	} finally {
 		server.close();
 	}

@@ -35,7 +35,8 @@ describe("Input component", () => {
 	});
 
 	describe("render", () => {
-		it("does not overflow with wide CJK and fullwidth text", () => {
+		// pi-ignore noExcessiveCollectionIterations: The four fixed text fixtures must each be rendered at all three fixed cursor positions, for exactly 12 combinations.
+		function assertWideTextRenderingsFitViewport(): void {
 			const width = 93;
 			const cases = [
 				"가나다라마바사아자차카타파하 한글 텍스트가 터미널 너비를 초과하면 크래시가 발생합니다 이것은 재현용 테스트입니다",
@@ -66,7 +67,8 @@ describe("Input component", () => {
 					assert.ok(visibleWidth(line) <= width, `rendered line overflowed for ${text} at ${label}`);
 				}
 			}
-		});
+		}
+		it("does not overflow with wide CJK and fullwidth text", assertWideTextRenderingsFitViewport);
 
 		it("keeps the cursor visible when horizontally scrolling wide text", () => {
 			const input = new Input();

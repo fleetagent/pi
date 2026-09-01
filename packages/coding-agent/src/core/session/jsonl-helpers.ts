@@ -17,11 +17,15 @@ export function getDefaultSessionDir(cwd: string, agentDir?: string): string {
 	return getDefaultJsonlSessionDir(cwd, agentDir);
 }
 
+type JsonlSessionEntryLoadPhase = "fork" | "open" | "import" | "migrate";
+
+interface LoadSessionEntriesOptions {
+	repair?: boolean;
+	phase?: JsonlSessionEntryLoadPhase;
+}
+
 /** Exported for testing. */
-export function loadEntriesFromFile(
-	filePath: string,
-	options: { repair?: boolean; phase?: "fork" | "open" | "import" | "migrate" } = {},
-): FileEntry[] {
+export function loadEntriesFromFile(filePath: string, options: LoadSessionEntriesOptions = {}): FileEntry[] {
 	return load(filePath, {}, options.repair ?? true, options.phase ?? "open");
 }
 

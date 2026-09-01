@@ -3,7 +3,7 @@
  */
 
 import type { ExtensionAPI } from "@fleetagent/pi-coding-agent";
-import { matchesKey, visibleWidth } from "@fleetagent/pi-tui";
+import { matchesKey, type TUI, visibleWidth } from "@fleetagent/pi-tui";
 
 const GAME_WIDTH = 40;
 const GAME_HEIGHT = 15;
@@ -11,6 +11,13 @@ const TICK_MS = 100;
 
 type Direction = "up" | "down" | "left" | "right";
 type Point = { x: number; y: number };
+
+const OPPOSITE_DIRECTIONS: Record<Direction, Direction> = {
+	up: "down",
+	down: "up",
+	left: "right",
+	right: "left",
+};
 
 interface GameState {
 	snake: Point[];
@@ -40,14 +47,37 @@ function createInitialState(): GameState {
 	};
 }
 
+type CellStyler = (text: string) => string;
+
+interface SnakeCellRenderState {
+	headPosition: number;
+	bodyPositions: ReadonlySet<number>;
+	foodPosition: number;
+	green: CellStyler;
+	red: CellStyler;
+}
+
+function pointKey(x: number, y: number): number {
+	return y * GAME_WIDTH + x;
+}
+
+function renderSnakeCell(position: number, state: SnakeCellRenderState): string {
+	if (position === state.headPosition) return state.green("██");
+	if (state.bodyPositions.has(position)) return state.green("▓▓");
+	if (position === state.foodPosition) return state.red("◆ ");
+	return "  ";
+}
+
 function spawnFood(snake: Point[]): Point {
+	const occupiedPositions = new Set<number>();
+	for (const point of snake) occupiedPositions.add(pointKey(point.x, point.y));
 	let food: Point;
 	do {
 		food = {
 			x: Math.floor(Math.random() * GAME_WIDTH),
 			y: Math.floor(Math.random() * GAME_HEIGHT),
 		};
-	} while (snake.some((s) => s.x === food.x && s.y === food.y));
+	} while (occupiedPositions.has(pointKey(food.x, food.y)));
 	return food;
 }
 
@@ -56,19 +86,14 @@ class SnakeComponent {
 	private interval: ReturnType<typeof setInterval> | null = null;
 	private onClose: () => void;
 	private onSave: (state: GameState | null) => void;
-	private tui: { requestRender: () => void };
+	private tui: TUI;
 	private cachedLines: string[] = [];
 	private cachedWidth = 0;
 	private version = 0;
 	private cachedVersion = -1;
 	private paused: boolean;
 
-	constructor(
-		tui: { requestRender: () => void },
-		onClose: () => void,
-		onSave: (state: GameState | null) => void,
-		savedState?: GameState,
-	) {
+	constructor(tui: TUI, onClose: () => void, onSave: (state: GameState | null) => void, savedState?: GameState) {
 		this.tui = tui;
 		if (savedState && !savedState.gameOver) {
 			// Resume from saved state, start paused
@@ -147,57 +172,65 @@ class SnakeComponent {
 		}
 	}
 
-	handleInput(data: string): void {
-		// If paused (resuming), wait for any key
-		if (this.paused) {
-			if (matchesKey(data, "escape") || data === "q" || data === "Q") {
-				// Quit without clearing save
-				this.dispose();
-				this.onClose();
-				return;
-			}
-			// Any other key resumes
+	private isQuitInput(data: string): boolean {
+		return data === "q" || data === "Q";
+	}
+
+	private handlePausedInput(data: string): boolean {
+		if (!this.paused) return false;
+		if (matchesKey(data, "escape") || this.isQuitInput(data)) {
+			this.dispose();
+			this.onClose();
+		} else {
 			this.paused = false;
 			this.startGame();
-			return;
 		}
+		return true;
+	}
 
-		// ESC to pause and save
+	private handleActiveExit(data: string): boolean {
 		if (matchesKey(data, "escape")) {
 			this.dispose();
 			this.onSave(this.state);
 			this.onClose();
-			return;
+			return true;
 		}
+		if (!this.isQuitInput(data)) return false;
+		this.dispose();
+		this.onSave(null);
+		this.onClose();
+		return true;
+	}
 
-		// Q to quit without saving (clears saved state)
-		if (data === "q" || data === "Q") {
-			this.dispose();
-			this.onSave(null); // Clear saved state
-			this.onClose();
-			return;
-		}
+	private requestedDirection(data: string): Direction | undefined {
+		if (matchesKey(data, "up") || data === "w" || data === "W") return "up";
+		if (matchesKey(data, "down") || data === "s" || data === "S") return "down";
+		if (matchesKey(data, "right") || data === "d" || data === "D") return "right";
+		if (matchesKey(data, "left") || data === "a" || data === "A") return "left";
+		return undefined;
+	}
 
-		// Arrow keys or WASD
-		if (matchesKey(data, "up") || data === "w" || data === "W") {
-			if (this.state.direction !== "down") this.state.nextDirection = "up";
-		} else if (matchesKey(data, "down") || data === "s" || data === "S") {
-			if (this.state.direction !== "up") this.state.nextDirection = "down";
-		} else if (matchesKey(data, "right") || data === "d" || data === "D") {
-			if (this.state.direction !== "left") this.state.nextDirection = "right";
-		} else if (matchesKey(data, "left") || data === "a" || data === "A") {
-			if (this.state.direction !== "right") this.state.nextDirection = "left";
+	private queueDirection(data: string): void {
+		const direction = this.requestedDirection(data);
+		if (direction && this.state.direction !== OPPOSITE_DIRECTIONS[direction]) {
+			this.state.nextDirection = direction;
 		}
+	}
 
-		// Restart on game over
-		if (this.state.gameOver && (data === "r" || data === "R" || data === " ")) {
-			const highScore = this.state.highScore;
-			this.state = createInitialState();
-			this.state.highScore = highScore;
-			this.onSave(null); // Clear saved state on restart
-			this.version++;
-			this.tui.requestRender();
-		}
+	private restartGame(data: string): void {
+		if (!this.state.gameOver || (data !== "r" && data !== "R" && data !== " ")) return;
+		const highScore = this.state.highScore;
+		this.state = createInitialState();
+		this.state.highScore = highScore;
+		this.onSave(null);
+		this.version++;
+		this.tui.requestRender();
+	}
+
+	handleInput(data: string): void {
+		if (this.handlePausedInput(data) || this.handleActiveExit(data)) return;
+		this.queueDirection(data);
+		this.restartGame(data);
 	}
 
 	invalidate(): void {
@@ -245,24 +278,29 @@ class SnakeComponent {
 		lines.push(this.padLine(dim(` ├${"─".repeat(boxWidth)}┤`), width));
 
 		// Game grid
-		for (let y = 0; y < effectiveHeight; y++) {
-			let row = "";
-			for (let x = 0; x < effectiveWidth; x++) {
-				const isHead = this.state.snake[0].x === x && this.state.snake[0].y === y;
-				const isBody = this.state.snake.slice(1).some((s) => s.x === x && s.y === y);
-				const isFood = this.state.food.x === x && this.state.food.y === y;
-
-				if (isHead) {
-					row += green("██"); // Snake head (2 chars)
-				} else if (isBody) {
-					row += green("▓▓"); // Snake body (2 chars)
-				} else if (isFood) {
-					row += red("◆ "); // Food (2 chars)
-				} else {
-					row += "  "; // Empty cell (2 spaces)
-				}
-			}
+		const headPosition = pointKey(this.state.snake[0].x, this.state.snake[0].y);
+		const bodyPositions = new Set<number>();
+		for (let index = 1; index < this.state.snake.length; index += 1) {
+			const point = this.state.snake[index];
+			bodyPositions.add(pointKey(point.x, point.y));
+		}
+		const cellRenderState: SnakeCellRenderState = {
+			headPosition,
+			bodyPositions,
+			foodPosition: pointKey(this.state.food.x, this.state.food.y),
+			green,
+			red,
+		};
+		const gridStride = Math.max(1, effectiveWidth);
+		const gridCellCount = gridStride * effectiveHeight;
+		let row = "";
+		for (let cellIndex = 0; cellIndex < gridCellCount; cellIndex += 1) {
+			const x = cellIndex % gridStride;
+			const position = pointKey(x, Math.floor(cellIndex / gridStride));
+			if (effectiveWidth > 0) row += renderSnakeCell(position, cellRenderState);
+			if (x !== gridStride - 1) continue;
 			lines.push(this.padLine(dim(" │") + row + dim("│"), width));
+			row = "";
 		}
 
 		// Separator

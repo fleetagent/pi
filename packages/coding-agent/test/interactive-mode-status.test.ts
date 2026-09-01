@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { type AutocompleteProvider, CombinedAutocompleteProvider, Container } from "@fleetagent/pi-tui";
 import { beforeAll, describe, expect, test, vi } from "vitest";
 import type { AutocompleteProviderFactory } from "../src/core/extensions/types.ts";
-import type { SourceInfo } from "../src/core/source-info.ts";
+import type { SourceInfo, SourceOrigin, SourceScope } from "../src/core/source-info.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 
@@ -31,6 +31,41 @@ type ExtensionFixture = {
 	path: string;
 	sourceInfo?: SourceInfo;
 };
+
+interface ContextFileFixture {
+	path: string;
+	content?: string;
+}
+
+interface SkillFixture {
+	filePath: string;
+	name: string;
+}
+
+type LoadedResourceDiagnosticType = "warning" | "error" | "collision";
+
+interface LoadedResourceDiagnosticFixture {
+	type: LoadedResourceDiagnosticType;
+	message: string;
+}
+
+interface ShowLoadedResourcesFixtureOptions {
+	quietStartup: boolean;
+	verbose?: boolean;
+	toolOutputExpanded?: boolean;
+	cwd?: string;
+	contextFiles?: ContextFileFixture[];
+	extensions?: ExtensionFixture[];
+	skills?: SkillFixture[];
+	skillDiagnostics?: LoadedResourceDiagnosticFixture[];
+	useRealScopeGroups?: boolean;
+}
+interface SourceInfoFixtureOptions {
+	source: string;
+	scope: SourceScope;
+	origin: SourceOrigin;
+	baseDir?: string;
+}
 
 describe("InteractiveMode.showStatus", () => {
 	beforeAll(() => {
@@ -267,17 +302,7 @@ describe("InteractiveMode.showLoadedResources", () => {
 		initTheme("dark");
 	});
 
-	function createShowLoadedResourcesThis(options: {
-		quietStartup: boolean;
-		verbose?: boolean;
-		toolOutputExpanded?: boolean;
-		cwd?: string;
-		contextFiles?: Array<{ path: string; content?: string }>;
-		extensions?: ExtensionFixture[];
-		skills?: Array<{ filePath: string; name: string }>;
-		skillDiagnostics?: Array<{ type: "warning" | "error" | "collision"; message: string }>;
-		useRealScopeGroups?: boolean;
-	}) {
+	function createShowLoadedResourcesThis(options: ShowLoadedResourcesFixtureOptions) {
 		const fakeThis: any = {
 			options: { verbose: options.verbose ?? false },
 			toolOutputExpanded: options.toolOutputExpanded ?? false,
@@ -326,22 +351,34 @@ describe("InteractiveMode.showLoadedResources", () => {
 				(InteractiveMode as any).prototype.getCompactExtensionLabel.call(fakeThis, p, sourceInfo),
 			getCompactDisplayPathSegments: (p: string) =>
 				(InteractiveMode as any).prototype.getCompactDisplayPathSegments.call(fakeThis, p),
-			getCompactNonPackageExtensionLabel: (
-				p: string,
-				index: number,
-				allPaths: Array<{ path: string; segments: string[] }>,
-			) => (InteractiveMode as any).prototype.getCompactNonPackageExtensionLabel.call(fakeThis, p, index, allPaths),
+			getCompactNonPackageExtensionLabel: (InteractiveMode as any).prototype.getCompactNonPackageExtensionLabel,
 			getCompactExtensionLabels: (extensions: ExtensionFixture[]) =>
 				(InteractiveMode as any).prototype.getCompactExtensionLabels.call(fakeThis, extensions),
 			formatDiagnostics: () => "diagnostics",
 			getBuiltInCommandConflictDiagnostics: () => [],
 		};
+		const loadedResourceMethodNames = [
+			"getLoadedResourceSnapshot",
+			"renderLoadedResourceListing",
+			"renderContextFilesSection",
+			"renderNamedInstructionSection",
+			"renderPromptTemplateSection",
+			"renderExtensionSection",
+			"renderThemeSection",
+			"formatCompactResourceList",
+			"addLoadedResourceSection",
+			"renderLoadedResourceDiagnostics",
+			"addResourceDiagnosticSection",
+			"getExtensionResourceDiagnostics",
+		] as const;
+		for (const methodName of loadedResourceMethodNames) {
+			fakeThis[methodName] = (InteractiveMode as any).prototype[methodName];
+		}
 
 		if (options.useRealScopeGroups) {
 			fakeThis.getScopeGroup = (sourceInfo?: SourceInfo) =>
 				(InteractiveMode as any).prototype.getScopeGroup.call(fakeThis, sourceInfo);
-			fakeThis.buildScopeGroups = (items: Array<{ path: string; sourceInfo?: SourceInfo }>) =>
-				(InteractiveMode as any).prototype.buildScopeGroups.call(fakeThis, items);
+			fakeThis.buildScopeGroups = (InteractiveMode as any).prototype.buildScopeGroups;
 			fakeThis.formatScopeGroups = (groups: unknown, formatOptions: unknown) =>
 				(InteractiveMode as any).prototype.formatScopeGroups.call(fakeThis, groups, formatOptions);
 		}
@@ -349,15 +386,7 @@ describe("InteractiveMode.showLoadedResources", () => {
 		return fakeThis;
 	}
 
-	function createSourceInfo(
-		filePath: string,
-		options: {
-			source: string;
-			scope: "user" | "project" | "temporary";
-			origin: "package" | "top-level";
-			baseDir?: string;
-		},
-	): SourceInfo {
+	function createSourceInfo(filePath: string, options: SourceInfoFixtureOptions): SourceInfo {
 		return {
 			path: filePath,
 			source: options.source,

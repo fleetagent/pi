@@ -1,5 +1,5 @@
 import type { AgentTool, ThinkingLevel } from "@fleetagent/pi-agent-core";
-import { fauxAssistantMessage, fauxToolCall, type Model } from "@fleetagent/pi-ai";
+import { fauxAssistantMessage, fauxToolCall, type Model, type TextContent } from "@fleetagent/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ExtensionAPI } from "../../src/index.ts";
@@ -119,7 +119,7 @@ describe("AgentSession model and extension characterization", () => {
 				const errorText =
 					toolResult?.role === "toolResult"
 						? toolResult.content
-								.filter((part): part is { type: "text"; text: string } => part.type === "text")
+								.filter((part): part is TextContent => part.type === "text")
 								.map((part) => part.text)
 								.join("\n")
 						: "";
@@ -165,7 +165,7 @@ describe("AgentSession model and extension characterization", () => {
 				const text =
 					toolResult?.role === "toolResult"
 						? toolResult.content
-								.filter((part): part is { type: "text"; text: string } => part.type === "text")
+								.filter((part): part is TextContent => part.type === "text")
 								.map((part) => part.text)
 								.join("\n")
 						: "";
@@ -203,7 +203,7 @@ describe("AgentSession model and extension characterization", () => {
 				providerUserText =
 					user && typeof user.content !== "string"
 						? user.content
-								.filter((part): part is { type: "text"; text: string } => part.type === "text")
+								.filter((part): part is TextContent => part.type === "text")
 								.map((part) => part.text)
 								.join("\n")
 						: "";
@@ -244,7 +244,7 @@ describe("AgentSession model and extension characterization", () => {
 				providerUserText =
 					user && typeof user.content !== "string"
 						? user.content
-								.filter((part): part is { type: "text"; text: string } => part.type === "text")
+								.filter((part): part is TextContent => part.type === "text")
 								.map((part) => part.text)
 								.join("\n")
 						: "";

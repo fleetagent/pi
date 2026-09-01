@@ -2,14 +2,21 @@ import { describe, expect, it } from "vitest";
 import { getModel } from "../src/models.ts";
 import { type BedrockOptions, streamBedrock } from "../src/providers/amazon-bedrock.ts";
 import type { Context, Model } from "../src/types.ts";
+import type { AnthropicThinkingConfig } from "./anthropic-utils.ts";
 import { hasBedrockCredentials } from "./bedrock-utils.ts";
 
+interface BedrockOutputConfig {
+	effort?: string;
+}
+
+interface BedrockAdditionalModelRequestFields {
+	thinking?: AnthropicThinkingConfig;
+	output_config?: BedrockOutputConfig;
+	anthropic_beta?: string[];
+}
+
 interface BedrockThinkingPayload {
-	additionalModelRequestFields?: {
-		thinking?: { type: string; budget_tokens?: number; display?: string };
-		output_config?: { effort?: string };
-		anthropic_beta?: string[];
-	};
+	additionalModelRequestFields?: BedrockAdditionalModelRequestFields;
 }
 
 class PayloadCaptured extends Error {

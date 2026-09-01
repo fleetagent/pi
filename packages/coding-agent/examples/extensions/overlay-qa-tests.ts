@@ -27,6 +27,21 @@ import { spawn } from "child_process";
 // Global handle for toggle demo (in real code, use a more elegant pattern)
 let globalToggleHandle: OverlayHandle | null = null;
 
+type AnchorTestResult = "next" | "confirm" | "cancel";
+type OverlayCycleResult = "next" | "close";
+type OverlayPanelColor = "error" | "success" | "accent";
+
+interface MarginTestConfig {
+	name: string;
+	options: OverlayOptions;
+}
+
+interface PercentTestConfig {
+	name: string;
+	row: number;
+	col: number;
+}
+
 export default function (pi: ExtensionAPI) {
 	// Animation demo - proves overlays can handle real-time updates (like pi-doom would need)
 	pi.registerCommand("overlay-animation", {
@@ -57,7 +72,7 @@ export default function (pi: ExtensionAPI) {
 
 			let index = 0;
 			while (true) {
-				const result = await ctx.ui.custom<"next" | "confirm" | "cancel">(
+				const result = await ctx.ui.custom<AnchorTestResult>(
 					(_tui, theme, _kb, done) => new AnchorTestComponent(theme, anchors[index]!, done),
 					{
 						overlay: true,
@@ -81,7 +96,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("overlay-margins", {
 		description: "Test margin and offset options",
 		handler: async (_args: string, ctx: ExtensionCommandContext) => {
-			const configs: { name: string; options: OverlayOptions }[] = [
+			const configs: MarginTestConfig[] = [
 				{ name: "No margin (top-left)", options: { anchor: "top-left", width: 35 } },
 				{ name: "Margin: 3 all sides", options: { anchor: "top-left", width: 35, margin: 3 } },
 				{
@@ -94,7 +109,7 @@ export default function (pi: ExtensionAPI) {
 
 			let index = 0;
 			while (true) {
-				const result = await ctx.ui.custom<"next" | "close">(
+				const result = await ctx.ui.custom<OverlayCycleResult>(
 					(_tui, theme, _kb, done) => new MarginTestComponent(theme, configs[index]!, done),
 					{
 						overlay: true,
@@ -181,7 +196,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("overlay-percent", {
 		description: "Test percentage-based positioning",
 		handler: async (_args: string, ctx: ExtensionCommandContext) => {
-			const configs = [
+			const configs: PercentTestConfig[] = [
 				{ name: "rowPercent: 0 (top)", row: 0, col: 50 },
 				{ name: "rowPercent: 50 (middle)", row: 50, col: 50 },
 				{ name: "rowPercent: 100 (bottom)", row: 100, col: 50 },
@@ -192,7 +207,7 @@ export default function (pi: ExtensionAPI) {
 			let index = 0;
 			while (true) {
 				const config = configs[index]!;
-				const result = await ctx.ui.custom<"next" | "close">(
+				const result = await ctx.ui.custom<OverlayCycleResult>(
 					(_tui, theme, _kb, done) => new PercentTestComponent(theme, config, done),
 					{
 						overlay: true,
@@ -335,9 +350,9 @@ abstract class BaseOverlay {
 // Anchor position test
 class AnchorTestComponent extends BaseOverlay {
 	private anchor: OverlayAnchor;
-	private done: (result: "next" | "confirm" | "cancel") => void;
+	private done: (result: AnchorTestResult) => void;
 
-	constructor(theme: Theme, anchor: OverlayAnchor, done: (result: "next" | "confirm" | "cancel") => void) {
+	constructor(theme: Theme, anchor: OverlayAnchor, done: (result: AnchorTestResult) => void) {
 		super(theme);
 		this.anchor = anchor;
 		this.done = done;
@@ -373,14 +388,10 @@ class AnchorTestComponent extends BaseOverlay {
 
 // Margin/offset test
 class MarginTestComponent extends BaseOverlay {
-	private config: { name: string; options: OverlayOptions };
-	private done: (result: "next" | "close") => void;
+	private config: MarginTestConfig;
+	private done: (result: OverlayCycleResult) => void;
 
-	constructor(
-		theme: Theme,
-		config: { name: string; options: OverlayOptions },
-		done: (result: "next" | "close") => void,
-	) {
+	constructor(theme: Theme, config: MarginTestConfig, done: (result: OverlayCycleResult) => void) {
 		super(theme);
 		this.config = config;
 		this.done = done;
@@ -626,14 +637,10 @@ class EdgeTestComponent extends BaseOverlay {
 
 // Percentage positioning test
 class PercentTestComponent extends BaseOverlay {
-	private config: { name: string; row: number; col: number };
-	private done: (result: "next" | "close") => void;
+	private config: PercentTestConfig;
+	private done: (result: OverlayCycleResult) => void;
 
-	constructor(
-		theme: Theme,
-		config: { name: string; row: number; col: number },
-		done: (result: "next" | "close") => void,
-	) {
+	constructor(theme: Theme, config: PercentTestConfig, done: (result: OverlayCycleResult) => void) {
 		super(theme);
 		this.config = config;
 		this.done = done;
@@ -1124,17 +1131,11 @@ class FocusDemoController extends BaseOverlay {
 class FocusPanel extends BaseOverlay {
 	handle: OverlayHandle | null = null;
 	readonly label: string;
-	private color: "error" | "success" | "accent";
+	private color: OverlayPanelColor;
 	private onTab: () => void;
 	private onClose: () => void;
 
-	constructor(
-		theme: Theme,
-		label: string,
-		color: "error" | "success" | "accent",
-		onTab: () => void,
-		onClose: () => void,
-	) {
+	constructor(theme: Theme, label: string, color: OverlayPanelColor, onTab: () => void, onClose: () => void) {
 		super(theme);
 		this.label = label;
 		this.color = color;
@@ -1313,17 +1314,11 @@ class StreamingInputPanel implements Component {
 	private theme: Theme;
 	private typed = "";
 	readonly label: string;
-	private color: "error" | "success" | "accent";
+	private color: OverlayPanelColor;
 	private onTab: () => void;
 	private onClose: () => void;
 
-	constructor(
-		theme: Theme,
-		label: string,
-		color: "error" | "success" | "accent",
-		onTab: () => void,
-		onClose: () => void,
-	) {
+	constructor(theme: Theme, label: string, color: OverlayPanelColor, onTab: () => void, onClose: () => void) {
 		this.theme = theme;
 		this.label = label;
 		this.color = color;

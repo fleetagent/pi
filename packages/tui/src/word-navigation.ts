@@ -13,6 +13,47 @@ export interface WordNavigationOptions {
 	isAtomicSegment?: (segment: string) => boolean;
 }
 
+function skipTrailingWhitespaceBackward(
+	segments: Intl.SegmentData[],
+	cursor: number,
+	options?: WordNavigationOptions,
+): number {
+	let newCursor = cursor;
+	while (segments.length > 0) {
+		const last = segments[segments.length - 1]!;
+		if (options?.isAtomicSegment?.(last.segment) || !isWhitespaceChar(last.segment)) break;
+		newCursor -= segments.pop()!.segment.length;
+	}
+	return newCursor;
+}
+
+function moveBackwardAcrossNavigationUnit(
+	segments: Intl.SegmentData[],
+	cursor: number,
+	options?: WordNavigationOptions,
+): number {
+	const last = segments[segments.length - 1];
+	if (!last) return cursor;
+	if (options?.isAtomicSegment?.(last.segment)) return cursor - last.segment.length;
+	if (last.isWordLike) {
+		const punctuationMatches = [...last.segment.matchAll(new RegExp(PUNCTUATION_REGEX, "g"))];
+		const lastMatch = punctuationMatches[punctuationMatches.length - 1];
+		return lastMatch
+			? cursor - (last.segment.length - (lastMatch.index + lastMatch[0].length))
+			: cursor - last.segment.length;
+	}
+
+	let newCursor = cursor;
+	while (segments.length > 0) {
+		const trailing = segments[segments.length - 1]!;
+		if (options?.isAtomicSegment?.(trailing.segment) || trailing.isWordLike || isWhitespaceChar(trailing.segment)) {
+			break;
+		}
+		newCursor -= segments.pop()!.segment.length;
+	}
+	return newCursor;
+}
+
 /**
  * Find the cursor position after moving one word backward from `cursor` in `text`.
  * Skips trailing whitespace, then stops at the next word/punctuation boundary.
@@ -21,52 +62,11 @@ export interface WordNavigationOptions {
  */
 export function findWordBackward(text: string, cursor: number, options?: WordNavigationOptions): number {
 	if (cursor <= 0) return 0;
-
 	const textBeforeCursor = text.slice(0, cursor);
-	const segmentFn = options?.segment;
-	const isAtomic = options?.isAtomicSegment;
-	const segments = segmentFn ? [...segmentFn(textBeforeCursor)] : [...wordSegmenter.segment(textBeforeCursor)];
-	let newCursor = cursor;
-
-	// Skip trailing whitespace
-	while (
-		segments.length > 0 &&
-		!isAtomic?.(segments[segments.length - 1]?.segment || "") &&
-		isWhitespaceChar(segments[segments.length - 1]?.segment || "")
-	) {
-		newCursor -= segments.pop()?.segment.length || 0;
-	}
-
-	if (segments.length === 0) return newCursor;
-
-	const last = segments[segments.length - 1]!;
-
-	if (isAtomic?.(last.segment)) {
-		// Skip one atomic segment.
-		newCursor -= last.segment.length;
-	} else if (last.isWordLike) {
-		// Skip inside one word-like segment, preserving ASCII punctuation boundaries.
-		const segment = last.segment;
-		const matches = [...segment.matchAll(new RegExp(PUNCTUATION_REGEX, "g"))];
-		if (matches.length <= 0) {
-			newCursor -= segment.length;
-		} else {
-			const lastMatch = matches[matches.length - 1]!;
-			newCursor -= segment.length - (lastMatch.index + lastMatch[0].length);
-		}
-	} else {
-		// Skip non-word non-whitespace run (punctuation)
-		while (
-			segments.length > 0 &&
-			!isAtomic?.(segments[segments.length - 1]?.segment || "") &&
-			!segments[segments.length - 1]?.isWordLike &&
-			!isWhitespaceChar(segments[segments.length - 1]?.segment || "")
-		) {
-			newCursor -= segments.pop()?.segment.length || 0;
-		}
-	}
-
-	return newCursor;
+	const segment = options?.segment;
+	const segments = segment ? [...segment(textBeforeCursor)] : [...wordSegmenter.segment(textBeforeCursor)];
+	const cursorAfterWhitespace = skipTrailingWhitespaceBackward(segments, cursor, options);
+	return moveBackwardAcrossNavigationUnit(segments, cursorAfterWhitespace, options);
 }
 
 /**

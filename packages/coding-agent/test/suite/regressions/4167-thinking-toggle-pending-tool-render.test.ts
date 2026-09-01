@@ -5,7 +5,11 @@ import { beforeAll, describe, expect, test, vi } from "vitest";
 import type { AgentSessionEvent } from "../../../src/core/agent-session.ts";
 import type { SessionContext } from "../../../src/core/session/types.ts";
 import type { ToolExecutionComponent } from "../../../src/modes/interactive/components/tool-execution.ts";
-import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
+import {
+	type AddMessageToChatOptions,
+	InteractiveMode,
+	type RenderSessionContextOptions,
+} from "../../../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../../../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../../../src/utils/ansi.ts";
 
@@ -27,28 +31,42 @@ const EMPTY_USAGE: Usage = {
 	},
 };
 
-type RenderSessionContextThis = {
+interface RenderSessionFooter {
+	invalidate(): void;
+}
+
+interface RenderSessionSettings {
+	getShowImages(): boolean;
+	getImageWidthCells(): number;
+}
+
+interface RenderSessionActiveSession {
+	getCwd(): string;
+}
+
+interface RenderSessionRuntimeState {
+	retryAttempt: number;
+}
+
+interface RenderSessionContextThis {
 	pendingTools: Map<string, ToolExecutionComponent>;
 	chatContainer: Container;
-	footer: { invalidate(): void };
+	footer: RenderSessionFooter;
 	ui: TUI;
-	settingsManager: {
-		getShowImages(): boolean;
-		getImageWidthCells(): number;
-	};
-	activeSession: { getCwd(): string };
-	session: { retryAttempt: number };
+	settingsManager: RenderSessionSettings;
+	activeSession: RenderSessionActiveSession;
+	session: RenderSessionRuntimeState;
 	toolOutputExpanded: boolean;
 	isInitialized: boolean;
 	updateEditorBorderColor(): void;
 	getRegisteredToolDefinition(toolName: string): undefined;
-	addMessageToChat(message: AgentMessage, options?: { populateHistory?: boolean }): void;
-};
+	addMessageToChat(message: AgentMessage, options?: AddMessageToChatOptions): void;
+}
 
 type RenderSessionContext = (
 	this: RenderSessionContextThis,
 	sessionContext: SessionContext,
-	options?: { updateFooter?: boolean; populateHistory?: boolean },
+	options?: RenderSessionContextOptions,
 ) => void;
 
 type HandleEvent = (this: RenderSessionContextThis, event: AgentSessionEvent) => Promise<void>;

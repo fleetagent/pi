@@ -4,8 +4,13 @@
  */
 
 const ENABLED = process.env.PI_TIMING === "1";
+interface TimingMeasurement {
+	label: string;
+	ms: number;
+}
+
 interface TimingNamespace {
-	timings: Array<{ label: string; ms: number }>;
+	timings: TimingMeasurement[];
 	lastTime: number;
 }
 
@@ -31,7 +36,7 @@ export function time(label: string, namespace: TimingLabel = "main"): void {
 	timingNamespace.lastTime = now;
 }
 
-function printTimingGroup(title: string, timings: TimingNamespace["timings"]): void {
+function printTimingGroup(title: string, timings: TimingMeasurement[]): void {
 	const printableTimings = timings.filter((timing) => timing.ms >= 0);
 	if (printableTimings.length === 0) return;
 	console.error(`\n--- ${title} ---`);

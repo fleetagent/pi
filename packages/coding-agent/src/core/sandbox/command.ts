@@ -4,7 +4,6 @@ export type SandboxUserCommand =
 	| { subcommand: "status" }
 	| { subcommand: "clear" }
 	| { subcommand: "attach"; url: string }
-	| { subcommand: "ssh"; target: string; cwd?: string }
 	| { subcommand: "start"; image?: string }
 	| { subcommand: "list" }
 	| { subcommand: "stop"; target?: string };
@@ -19,57 +18,48 @@ function splitCommandLine(input: string): string[] {
 	});
 }
 
+function parseSandboxStartCommand(tokens: string[]): SandboxUserCommand {
+	let image: string | undefined;
+	for (let index = 2; index < tokens.length; index++) {
+		const token = tokens[index];
+		if (token !== "--image") throw new Error(`Unsupported /sandbox start argument: ${token}`);
+
+		const value = tokens[++index];
+		if (!value) throw new Error("Usage: /sandbox start --image <image>");
+		image = value;
+	}
+	return image ? { subcommand: "start", image } : { subcommand: "start" };
+}
+
 export function parseSandboxUserCommand(input: string): SandboxUserCommand {
 	const tokens = splitCommandLine(input.trim());
-	if (tokens[0] !== "/sandbox") {
-		throw new Error("Sandbox command must start with /sandbox");
-	}
+	if (tokens[0] !== "/sandbox") throw new Error("Sandbox command must start with /sandbox");
+
 	const subcommand = tokens[1];
-	if (!subcommand || subcommand === "status") {
-		if (tokens.length > 2) throw new Error("Usage: /sandbox status");
-		return { subcommand: "status" };
+	switch (subcommand) {
+		case undefined:
+		case "status":
+			if (tokens.length > 2) throw new Error("Usage: /sandbox status");
+			return { subcommand: "status" };
+		case "clear":
+			if (tokens.length > 2) throw new Error("Usage: /sandbox clear");
+			return { subcommand: "clear" };
+		case "--attach":
+			if (tokens.length !== 3) throw new Error("Usage: /sandbox --attach <ws://url>");
+			return { subcommand: "attach", url: tokens[2]! };
+		case "start":
+			return parseSandboxStartCommand(tokens);
+		case "list":
+			if (tokens.length > 2) throw new Error("Usage: /sandbox list");
+			return { subcommand: "list" };
+		case "stop":
+			if (tokens.length > 3) throw new Error("Usage: /sandbox stop [container]");
+			return tokens[2] ? { subcommand: "stop", target: tokens[2] } : { subcommand: "stop" };
+		default:
+			throw new Error(
+				`Unsupported /sandbox subcommand: ${subcommand}. Use status, clear, --attach, start, list, or stop.`,
+			);
 	}
-	if (subcommand === "clear") {
-		if (tokens.length > 2) throw new Error("Usage: /sandbox clear");
-		return { subcommand: "clear" };
-	}
-	if (subcommand === "--attach") {
-		if (tokens.length !== 3) throw new Error("Usage: /sandbox --attach <ws://url>");
-		return { subcommand: "attach", url: tokens[2]! };
-	}
-	if (subcommand === "ssh") {
-		if (tokens.length < 3 || tokens.length > 4) {
-			throw new Error("Usage: /sandbox ssh <user@host[:/path]> [path]");
-		}
-		return tokens[3]
-			? { subcommand: "ssh", target: tokens[2]!, cwd: tokens[3] }
-			: { subcommand: "ssh", target: tokens[2]! };
-	}
-	if (subcommand === "start") {
-		let image: string | undefined;
-		for (let index = 2; index < tokens.length; index++) {
-			const token = tokens[index];
-			if (token === "--image") {
-				const value = tokens[++index];
-				if (!value) throw new Error("Usage: /sandbox start --image <image>");
-				image = value;
-				continue;
-			}
-			throw new Error(`Unsupported /sandbox start argument: ${token}`);
-		}
-		return image ? { subcommand: "start", image } : { subcommand: "start" };
-	}
-	if (subcommand === "list") {
-		if (tokens.length > 2) throw new Error("Usage: /sandbox list");
-		return { subcommand: "list" };
-	}
-	if (subcommand === "stop") {
-		if (tokens.length > 3) throw new Error("Usage: /sandbox stop [container]");
-		return tokens[2] ? { subcommand: "stop", target: tokens[2] } : { subcommand: "stop" };
-	}
-	throw new Error(
-		`Unsupported /sandbox subcommand: ${subcommand}. Use status, clear, ssh, --attach, start, list, or stop.`,
-	);
 }
 
 export function formatSandboxStartResult(result: SandboxStartResult): string {

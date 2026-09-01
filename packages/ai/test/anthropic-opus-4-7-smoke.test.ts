@@ -3,9 +3,17 @@ import { getModel } from "../src/models.ts";
 import { streamSimple } from "../src/stream.ts";
 import type { Context } from "../src/types.ts";
 
+interface AnthropicAdaptiveThinkingConfig {
+	type: string;
+}
+
+interface AnthropicOutputConfig {
+	effort?: string;
+}
+
 interface AnthropicThinkingPayload {
-	thinking?: { type: string };
-	output_config?: { effort?: string };
+	thinking?: AnthropicAdaptiveThinkingConfig;
+	output_config?: AnthropicOutputConfig;
 }
 
 function makeContext(): Context {

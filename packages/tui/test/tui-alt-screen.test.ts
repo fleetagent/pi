@@ -20,8 +20,11 @@ import { VirtualTerminal } from "./virtual-terminal.ts";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
 
+type RecordedTerminalEvent = { type: "write"; data: string } | { type: "start" } | { type: "stop" };
+type RecordedTerminalWriteEvent = Extract<RecordedTerminalEvent, { type: "write" }>;
+
 class RecordingTerminal extends VirtualTerminal {
-	readonly events: Array<{ type: "write"; data: string } | { type: "start" } | { type: "stop" }> = [];
+	readonly events: RecordedTerminalEvent[] = [];
 
 	override start(onInput: (data: string) => void, onResize: () => void): void {
 		this.events.push({ type: "start" });
@@ -37,6 +40,50 @@ class RecordingTerminal extends VirtualTerminal {
 		this.events.push({ type: "stop" });
 		super.stop();
 	}
+}
+
+const MOUSE_MODES = [1000, 1002, 1003, 1004, 1006] as const;
+const ALL_MOUSE_MODES = new Set<number>(MOUSE_MODES);
+const MULTIPLEXER_MOUSE_MODES = new Set<number>([1000, 1002, 1004, 1006]);
+const NO_MOUSE_MODES = new Set<number>();
+type TerminalModeChange = "h" | "l";
+
+function collectRecordedWrites(terminal: RecordingTerminal): string {
+	return terminal.events
+		.filter((event) => event.type === "write")
+		.map((event) => event.data)
+		.join("");
+}
+
+function collectChangedTerminalModes(writes: string, change: TerminalModeChange): Set<number> {
+	const modes = new Set<number>();
+	for (const match of writes.matchAll(/\x1b\[\?(\d+)([hl])/g)) {
+		if (match[2] === change) modes.add(Number(match[1]));
+	}
+	return modes;
+}
+
+function assertMouseModeWrites(
+	writes: string,
+	change: TerminalModeChange,
+	expectedModes: ReadonlySet<number>,
+	context = "terminal",
+): void {
+	const changedModes = collectChangedTerminalModes(writes, change);
+	for (const mode of MOUSE_MODES) {
+		assert.strictEqual(
+			changedModes.has(mode),
+			expectedModes.has(mode),
+			`${context} should ${expectedModes.has(mode) ? "change" : "not change"} mode ${mode}${change}`,
+		);
+	}
+}
+
+function clearMultiplexerEnvironment(): void {
+	delete process.env.TMUX;
+	delete process.env.ZELLIJ;
+	delete process.env.STY;
+	delete process.env.TERM;
 }
 
 describe("TuiAltScreen", () => {
@@ -770,7 +817,7 @@ describe("TuiAltScreen", () => {
 			await terminal.waitForRender();
 			const redrawWrites = terminal.events
 				.slice(eventCount)
-				.filter((event): event is { type: "write"; data: string } => event.type === "write")
+				.filter((event): event is RecordedTerminalWriteEvent => event.type === "write")
 				.map((event) => event.data)
 				.join("");
 			const placementIndex = redrawWrites.indexOf("\x1b_Ga=p,q=2");
@@ -813,7 +860,7 @@ describe("TuiAltScreen", () => {
 			await terminal.waitForRender();
 			const reentryWrites = terminal.events
 				.slice(eventCount)
-				.filter((event): event is { type: "write"; data: string } => event.type === "write")
+				.filter((event): event is RecordedTerminalWriteEvent => event.type === "write")
 				.map((event) => event.data)
 				.join("");
 			assert.ok(reentryWrites.includes("\x1b_Ga=p,q=2"));
@@ -844,7 +891,7 @@ describe("TuiAltScreen", () => {
 			await terminal.waitForRender();
 			const updateWrites = terminal.events
 				.slice(eventCount)
-				.filter((event): event is { type: "write"; data: string } => event.type === "write")
+				.filter((event): event is RecordedTerminalWriteEvent => event.type === "write")
 				.map((event) => event.data)
 				.join("");
 			assert.ok(updateWrites.includes("\x1b_Ga=T"));
@@ -872,7 +919,7 @@ describe("TuiAltScreen", () => {
 			await terminal.waitForRender();
 			const resizeWrites = terminal.events
 				.slice(resizeEventCount)
-				.filter((event): event is { type: "write"; data: string } => event.type === "write")
+				.filter((event): event is RecordedTerminalWriteEvent => event.type === "write")
 				.map((event) => event.data)
 				.join("");
 			assert.ok(resizeWrites.includes("\x1b_Ga=d,d=a,q=2\x1b\\"));
@@ -885,7 +932,7 @@ describe("TuiAltScreen", () => {
 			await terminal.waitForRender();
 			const restartWrites = terminal.events
 				.slice(restartEventCount)
-				.filter((event): event is { type: "write"; data: string } => event.type === "write")
+				.filter((event): event is RecordedTerminalWriteEvent => event.type === "write")
 				.map((event) => event.data)
 				.join("");
 			assert.ok(restartWrites.includes("\x1b_Ga=T"));
@@ -921,7 +968,7 @@ describe("TuiAltScreen", () => {
 			await terminal.waitForRender();
 			const evictionWrites = terminal.events
 				.slice(evictionEventCount)
-				.filter((event): event is { type: "write"; data: string } => event.type === "write")
+				.filter((event): event is RecordedTerminalWriteEvent => event.type === "write")
 				.map((event) => event.data)
 				.join("");
 			assert.ok(evictionWrites.includes(`\x1b_Ga=d,d=I,i=${firstImageId + 1},q=2\x1b\\`));
@@ -932,7 +979,7 @@ describe("TuiAltScreen", () => {
 			await terminal.waitForRender();
 			const reentryWrites = terminal.events
 				.slice(reentryEventCount)
-				.filter((event): event is { type: "write"; data: string } => event.type === "write")
+				.filter((event): event is RecordedTerminalWriteEvent => event.type === "write")
 				.map((event) => event.data)
 				.join("");
 			assert.ok(reentryWrites.includes("\x1b_Ga=T"));
@@ -1440,13 +1487,8 @@ describe("TuiAltScreen", () => {
 		tui.start();
 		try {
 			await terminal.waitForRender();
-			const writes = terminal.events
-				.filter((event) => event.type === "write")
-				.map((event) => event.data)
-				.join("");
-			for (const mode of [1000, 1002, 1003, 1004, 1006]) {
-				assert.ok(!writes.includes(`\x1b[?${mode}h`));
-			}
+			const writes = collectRecordedWrites(terminal);
+			assertMouseModeWrites(writes, "h", NO_MOUSE_MODES);
 			terminal.sendInput("\x1b[5~");
 			await terminal.waitForRender();
 			assert.strictEqual(tui.viewportTop, 5);
@@ -1457,13 +1499,8 @@ describe("TuiAltScreen", () => {
 		} finally {
 			tui.stop({ preserveScreen: true });
 		}
-		const shutdownWrites = terminal.events
-			.filter((event) => event.type === "write")
-			.map((event) => event.data)
-			.join("");
-		for (const mode of [1000, 1002, 1003, 1004, 1006]) {
-			assert.ok(!shutdownWrites.includes(`\x1b[?${mode}l`));
-		}
+		const shutdownWrites = collectRecordedWrites(terminal);
+		assertMouseModeWrites(shutdownWrites, "l", NO_MOUSE_MODES);
 	});
 
 	it("ignores horizontal trackpad wheel events", async () => {
@@ -1488,27 +1525,17 @@ describe("TuiAltScreen", () => {
 	it("uses button-motion tracking and preserves mouse interactions in multiplexer environments", async () => {
 		const keys = ["TMUX", "ZELLIJ", "STY", "TERM"] as const;
 		const previous = new Map(keys.map((key) => [key, process.env[key]]));
-		const getWrites = (terminal: RecordingTerminal) =>
-			terminal.events
-				.filter((event) => event.type === "write")
-				.map((event) => event.data)
-				.join("");
-		const mouseModes = [1000, 1002, 1003, 1004, 1006] as const;
 		try {
-			for (const key of keys) delete process.env[key];
+			clearMultiplexerEnvironment();
 			process.env.TERM = "xterm-256color";
 			const direct = new RecordingTerminal();
 			const directTui = new TuiAltScreen(direct);
 			directTui.start();
-			const directStartupWrites = getWrites(direct);
-			for (const mode of mouseModes) {
-				assert.ok(directStartupWrites.includes(`\x1b[?${mode}h`), `direct terminal should enable mode ${mode}`);
-			}
+			const directStartupWrites = collectRecordedWrites(direct);
+			assertMouseModeWrites(directStartupWrites, "h", ALL_MOUSE_MODES, "direct terminal");
 			directTui.stop();
-			const directShutdownWrites = getWrites(direct);
-			for (const mode of mouseModes) {
-				assert.ok(directShutdownWrites.includes(`\x1b[?${mode}l`), `direct terminal should disable mode ${mode}`);
-			}
+			const directShutdownWrites = collectRecordedWrites(direct);
+			assertMouseModeWrites(directShutdownWrites, "l", ALL_MOUSE_MODES, "direct terminal");
 
 			const multiplexers = [
 				{ name: "tmux environment", environment: { TMUX: "/tmp/tmux/default,1,0" } },
@@ -1518,7 +1545,7 @@ describe("TuiAltScreen", () => {
 				{ name: "Screen TERM", environment: { TERM: "screen-256color" } },
 			];
 			for (const { name, environment } of multiplexers) {
-				for (const key of keys) delete process.env[key];
+				clearMultiplexerEnvironment();
 				Object.assign(process.env, environment);
 				const terminal = new RecordingTerminal(10, 5);
 				const scrollView = new ScrollView(
@@ -1530,12 +1557,8 @@ describe("TuiAltScreen", () => {
 				tui.start();
 				try {
 					await terminal.waitForRender();
-					const startupWrites = getWrites(terminal);
-					for (const mode of [1000, 1002, 1004, 1006] as const) {
-						assert.ok(startupWrites.includes(`\x1b[?${mode}h`), `${name} should enable mode ${mode}`);
-					}
-					assert.ok(!startupWrites.includes("\x1b[?1003h"), `${name} should not enable all-motion tracking`);
-
+					const startupWrites = collectRecordedWrites(terminal);
+					assertMouseModeWrites(startupWrites, "h", MULTIPLEXER_MOUSE_MODES, name);
 					terminal.sendInput("\x1b[<65;1;1M");
 					await terminal.waitForRender();
 					assert.strictEqual(scrollView.scrollTop, 1, `${name} should preserve wheel scrolling`);
@@ -1545,7 +1568,8 @@ describe("TuiAltScreen", () => {
 					terminal.sendInput("\x1b[<32;4;1M");
 					terminal.sendInput("\x1b[<0;4;1m");
 					await terminal.waitForRender();
-					assert.ok(getWrites(terminal).includes(copiedText), `${name} should preserve text selection`);
+					const selectionWrites: string = collectRecordedWrites(terminal);
+					assert.ok(selectionWrites.includes(copiedText), `${name} should preserve text selection`);
 
 					terminal.sendInput("\x1b[<0;10;1M");
 					terminal.sendInput("\x1b[<32;10;5M");
@@ -1555,10 +1579,8 @@ describe("TuiAltScreen", () => {
 				} finally {
 					tui.stop();
 				}
-				const shutdownWrites = getWrites(terminal);
-				for (const mode of mouseModes) {
-					assert.ok(shutdownWrites.includes(`\x1b[?${mode}l`), `${name} should disable mode ${mode}`);
-				}
+				const shutdownWrites = collectRecordedWrites(terminal);
+				assertMouseModeWrites(shutdownWrites, "l", ALL_MOUSE_MODES, name);
 			}
 		} finally {
 			for (const key of keys) {

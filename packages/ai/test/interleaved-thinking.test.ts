@@ -3,7 +3,16 @@ import { describe, expect, it } from "vitest";
 import { getEnvApiKey } from "../src/env-api-keys.ts";
 import { getModel } from "../src/models.ts";
 import { completeSimple } from "../src/stream.ts";
-import type { Api, Context, Model, StopReason, Tool, ToolCall, ToolResultMessage } from "../src/types.ts";
+import type {
+	Api,
+	Context,
+	Model,
+	StopReason,
+	Tool,
+	ToolCall,
+	ToolCallArguments,
+	ToolResultMessage,
+} from "../src/types.ts";
 import { StringEnum } from "../src/utils/typebox-helpers.ts";
 import { hasBedrockCredentials } from "./bedrock-utils.ts";
 
@@ -22,6 +31,7 @@ const calculatorTool: Tool<typeof calculatorSchema> = {
 };
 
 type CalculatorOperation = "add" | "subtract" | "multiply" | "divide";
+type InterleavedThinkingReasoningLevel = "high" | "xhigh";
 
 type CalculatorArguments = {
 	a: number;
@@ -29,7 +39,7 @@ type CalculatorArguments = {
 	operation: CalculatorOperation;
 };
 
-function asCalculatorArguments(args: ToolCall["arguments"]): CalculatorArguments {
+function asCalculatorArguments(args: ToolCallArguments): CalculatorArguments {
 	if (typeof args !== "object" || args === null) {
 		throw new Error("Tool arguments must be an object");
 	}
@@ -63,7 +73,7 @@ function evaluateCalculatorCall(toolCall: ToolCall): number {
 
 async function assertSecondToolCallWithInterleavedThinking<TApi extends Api>(
 	llm: Model<TApi>,
-	reasoning: "high" | "xhigh",
+	reasoning: InterleavedThinkingReasoningLevel,
 ) {
 	const context: Context = {
 		systemPrompt: [

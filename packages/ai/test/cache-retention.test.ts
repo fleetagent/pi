@@ -4,7 +4,7 @@ import { streamAnthropic } from "../src/providers/anthropic.ts";
 import { streamOpenAICompletions } from "../src/providers/openai-completions.ts";
 import { streamOpenAIResponses } from "../src/providers/openai-responses.ts";
 import { stream } from "../src/stream.ts";
-import type { Context, Model } from "../src/types.ts";
+import type { Context, Model, OpenAICompletionsCompat } from "../src/types.ts";
 
 class PayloadCaptured extends Error {
 	constructor() {
@@ -390,7 +390,7 @@ describe("Cache Retention (PI_CACHE_RETENTION)", () => {
 	});
 
 	describe("OpenAI Completions Provider", () => {
-		function createCompletionsModel(compat?: Model<"openai-completions">["compat"]): Model<"openai-completions"> {
+		function createCompletionsModel(compat?: OpenAICompletionsCompat): Model<"openai-completions"> {
 			return {
 				id: "test-model",
 				name: "Test Model",

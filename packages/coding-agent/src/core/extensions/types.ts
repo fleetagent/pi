@@ -12,6 +12,7 @@ import type {
 	AgentMessage,
 	AgentToolResult,
 	AgentToolUpdateCallback,
+	BeforeToolCallResult,
 	ThinkingLevel,
 	ToolExecutionMode,
 } from "@fleetagent/pi-agent-core";
@@ -36,12 +37,13 @@ import type {
 	EditorComponent,
 	EditorTheme,
 	KeyId,
+	LoaderIndicatorOptions,
 	OverlayHandle,
 	OverlayOptions,
 	TUI,
 } from "@fleetagent/pi-tui";
 import type { Static, TSchema } from "typebox";
-import type { Theme } from "../../modes/interactive/theme/theme.ts";
+import type { Theme, ThemeActivationResult, ThemeInfo } from "../../modes/interactive/theme/theme.ts";
 import type { BashExecutorOptions, BashResult } from "../bash-executor.ts";
 import type { CompactionPreparation, CompactionResult } from "../compaction/compaction.ts";
 import type { EventBus } from "../event-bus.ts";
@@ -98,20 +100,57 @@ export interface ExtensionWidgetOptions {
 	placement?: WidgetPlacement;
 }
 
-/** Raw terminal input listener for extensions. */
-export type TerminalInputHandler = (data: string) => { consume?: boolean; data?: string } | undefined;
-
-/** Working indicator configuration for the interactive streaming loader. */
-export interface WorkingIndicatorOptions {
-	/** Animation frames. Use an empty array to hide the indicator entirely. Custom frames are rendered verbatim. */
-	frames?: string[];
-	/** Frame interval in milliseconds for animated indicators. */
-	intervalMs?: number;
+/** Result from a raw terminal input listener. */
+export interface TerminalInputResult {
+	consume?: boolean;
+	data?: string;
 }
+
+/** Raw terminal input listener for extensions. */
+export type TerminalInputHandler = (data: string) => TerminalInputResult | undefined;
+
+/** Component that may release resources when removed from the UI. */
+export type DisposableComponent = Component & { dispose?(): void };
+
+/** Factory for an extension widget component. */
+export type ExtensionWidgetFactory = (tui: TUI, theme: Theme) => DisposableComponent;
+
+/** Factory for an extension footer component. */
+export type ExtensionFooterFactory = (
+	tui: TUI,
+	theme: Theme,
+	footerData: ReadonlyFooterDataProvider,
+) => DisposableComponent;
+
+/** Factory for an extension header component. */
+export type ExtensionHeaderFactory = (tui: TUI, theme: Theme) => DisposableComponent;
+
+/** Factory for a focused custom extension component. */
+export type ExtensionCustomFactory<T> = (
+	tui: TUI,
+	theme: Theme,
+	keybindings: KeybindingsManager,
+	done: (result: T) => void,
+) => DisposableComponent | Promise<DisposableComponent>;
+
+/** Display options for a focused custom extension component. */
+export interface ExtensionCustomOptions {
+	overlay?: boolean;
+	/** Overlay positioning/sizing options. Can be static or a function for dynamic updates. */
+	overlayOptions?: OverlayOptions | (() => OverlayOptions);
+	/** Called with the overlay handle after the overlay is shown. Use to control visibility. */
+	onHandle?: (handle: OverlayHandle) => void;
+}
+
+/** Theme available to extension UI consumers. */
+export type AvailableTheme = ThemeInfo;
+/** Working indicator configuration for the interactive streaming loader. */
+export type WorkingIndicatorOptions = LoaderIndicatorOptions;
 
 /** Wrap the current autocomplete provider with additional behavior. */
 export type AutocompleteProviderFactory = (current: AutocompleteProvider) => AutocompleteProvider;
 export type EditorFactory = (tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) => EditorComponent;
+export type ExtensionNotificationType = "info" | "warning" | "error";
 
 /**
  * UI context for extensions to request interactive UI.
@@ -128,7 +167,7 @@ export interface ExtensionUIContext {
 	input(title: string, placeholder?: string, opts?: ExtensionUIDialogOptions): Promise<string | undefined>;
 
 	/** Show a notification to the user. */
-	notify(message: string, type?: "info" | "warning" | "error"): void;
+	notify(message: string, type?: ExtensionNotificationType): void;
 
 	/** Listen to raw terminal input (interactive mode only). Returns an unsubscribe function. */
 	onTerminalInput(handler: TerminalInputHandler): () => void;
@@ -157,11 +196,7 @@ export interface ExtensionUIContext {
 
 	/** Set a widget to display above or below the editor. Accepts string array or component factory. */
 	setWidget(key: string, content: string[] | undefined, options?: ExtensionWidgetOptions): void;
-	setWidget(
-		key: string,
-		content: ((tui: TUI, theme: Theme) => Component & { dispose?(): void }) | undefined,
-		options?: ExtensionWidgetOptions,
-	): void;
+	setWidget(key: string, content: ExtensionWidgetFactory | undefined, options?: ExtensionWidgetOptions): void;
 
 	/** Set a custom footer component, or undefined to restore the built-in footer.
 	 *
@@ -169,34 +204,16 @@ export interface ExtensionUIContext {
 	 * git branch and extension statuses from setStatus(). Token stats, model info,
 	 * etc. are available via ctx.session and ctx.model.
 	 */
-	setFooter(
-		factory:
-			| ((tui: TUI, theme: Theme, footerData: ReadonlyFooterDataProvider) => Component & { dispose?(): void })
-			| undefined,
-	): void;
+	setFooter(factory: ExtensionFooterFactory | undefined): void;
 
 	/** Set a custom header component (shown at startup, above chat), or undefined to restore the built-in header. */
-	setHeader(factory: ((tui: TUI, theme: Theme) => Component & { dispose?(): void }) | undefined): void;
+	setHeader(factory: ExtensionHeaderFactory | undefined): void;
 
 	/** Set the terminal window/tab title. */
 	setTitle(title: string): void;
 
 	/** Show a custom component with keyboard focus. */
-	custom<T>(
-		factory: (
-			tui: TUI,
-			theme: Theme,
-			keybindings: KeybindingsManager,
-			done: (result: T) => void,
-		) => (Component & { dispose?(): void }) | Promise<Component & { dispose?(): void }>,
-		options?: {
-			overlay?: boolean;
-			/** Overlay positioning/sizing options. Can be static or a function for dynamic updates. */
-			overlayOptions?: OverlayOptions | (() => OverlayOptions);
-			/** Called with the overlay handle after the overlay is shown. Use to control visibility. */
-			onHandle?: (handle: OverlayHandle) => void;
-		},
-	): Promise<T>;
+	custom<T>(factory: ExtensionCustomFactory<T>, options?: ExtensionCustomOptions): Promise<T>;
 
 	/** Paste text into the editor, triggering paste handling (collapse for large content). */
 	pasteToEditor(text: string): void;
@@ -255,13 +272,13 @@ export interface ExtensionUIContext {
 	readonly theme: Theme;
 
 	/** Get all available themes with their names and file paths. */
-	getAllThemes(): { name: string; path: string | undefined }[];
+	getAllThemes(): AvailableTheme[];
 
 	/** Load a theme by name without switching to it. Returns undefined if not found. */
 	getTheme(name: string): Theme | undefined;
 
 	/** Set the current theme by name or Theme object. */
-	setTheme(theme: string | Theme): { success: boolean; error?: string };
+	setTheme(theme: string | Theme): ThemeActivationResult;
 
 	/** Get current tool output expansion state. */
 	getToolsExpanded(): boolean;
@@ -305,7 +322,7 @@ export interface ExtensionContext {
 	hasUI: boolean;
 	/** Current working directory */
 	cwd: string;
-	/** Active file/tool backend used by built-in tools (local or SSH). */
+	/** Active file/tool backend used by built-in tools (local or remote daemon). */
 	toolOperations: BorrowedToolOperations;
 	/** Get active file/tool backend metadata. */
 	getToolBackendInfo(): ToolBackendInfo;
@@ -339,6 +356,49 @@ export interface ExtensionContext {
 	getSystemPrompt(): string;
 }
 
+export interface ExtensionNewSessionOptions {
+	id?: string;
+	parentSession?: string;
+	setup?: (session: Session) => Promise<void>;
+	withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
+}
+
+export type SessionForkPosition = "before" | "at";
+
+export interface ExtensionForkOptions {
+	position?: SessionForkPosition;
+	withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
+}
+
+export interface ExtensionNavigateTreeOptions {
+	summarize?: boolean;
+	customInstructions?: string;
+	replaceInstructions?: boolean;
+	label?: string;
+}
+export interface ExtensionSwitchSessionOptions {
+	withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
+}
+
+export interface ExtensionSessionActionResult {
+	cancelled: boolean;
+}
+
+/** Queue destination for a message submitted while the agent is streaming. */
+export type StreamingBehavior = "steer" | "followUp";
+
+/** Delivery destination for a custom message. */
+export type ExtensionMessageDelivery = StreamingBehavior | "nextTurn";
+
+export interface ExtensionSendMessageOptions {
+	triggerTurn?: boolean;
+	deliverAs?: ExtensionMessageDelivery;
+}
+
+export interface ExtensionSendUserMessageOptions {
+	deliverAs?: StreamingBehavior;
+}
+
 /**
  * Extended context for command handlers.
  * Includes session control methods only safe in user-initiated commands.
@@ -348,30 +408,16 @@ export interface ExtensionCommandContext extends ExtensionContext {
 	waitForIdle(): Promise<void>;
 
 	/** Start a new session, optionally with initialization. */
-	newSession(options?: {
-		id?: string;
-		parentSession?: string;
-		setup?: (session: Session) => Promise<void>;
-		withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
-	}): Promise<{ cancelled: boolean }>;
+	newSession(options?: ExtensionNewSessionOptions): Promise<ExtensionSessionActionResult>;
 
 	/** Fork from a specific entry, creating a new session file. */
-	fork(
-		entryId: string,
-		options?: { position?: "before" | "at"; withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
-	): Promise<{ cancelled: boolean }>;
+	fork(entryId: string, options?: ExtensionForkOptions): Promise<ExtensionSessionActionResult>;
 
 	/** Navigate to a different point in the session tree. */
-	navigateTree(
-		targetId: string,
-		options?: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string },
-	): Promise<{ cancelled: boolean }>;
+	navigateTree(targetId: string, options?: ExtensionNavigateTreeOptions): Promise<ExtensionSessionActionResult>;
 
 	/** Switch to a different session file. */
-	switchSession(
-		sessionPath: string,
-		options?: { withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
-	): Promise<{ cancelled: boolean }>;
+	switchSession(sessionPath: string, options?: ExtensionSwitchSessionOptions): Promise<ExtensionSessionActionResult>;
 
 	/** Reload extensions, skills, rules, prompts, and themes. */
 	reload(): Promise<void>;
@@ -385,18 +431,19 @@ export interface ExtensionCommandContext extends ExtensionContext {
 export interface ReplacedSessionContext extends ExtensionCommandContext {
 	sendMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
-		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+		options?: ExtensionSendMessageOptions,
 	): Promise<void>;
 
 	sendUserMessage(
 		content: string | (TextContent | ImageContent)[],
-		options?: { deliverAs?: "steer" | "followUp" },
+		options?: ExtensionSendUserMessageOptions,
 	): Promise<void>;
 }
 
 // ============================================================================
 // Tool Types
 // ============================================================================
+export type ToolRenderShell = "default" | "self";
 
 /** Rendering options for tool results */
 export interface ToolRenderResultOptions {
@@ -434,6 +481,19 @@ export interface ToolRenderContext<TState = any, TArgs = any> {
 	isError: boolean;
 }
 
+export type ToolCallRenderer<TParams extends TSchema = TSchema, TState = any> = (
+	args: Static<TParams>,
+	theme: Theme,
+	context: ToolRenderContext<TState, Static<TParams>>,
+) => Component;
+
+export type ToolResultRenderer<TParams extends TSchema = TSchema, TDetails = unknown, TState = any> = (
+	result: AgentToolResult<TDetails>,
+	options: ToolRenderResultOptions,
+	theme: Theme,
+	context: ToolRenderContext<TState, Static<TParams>>,
+) => Component;
+
 /**
  * Tool definition for registerTool().
  */
@@ -451,7 +511,7 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	/** Parameter schema (TypeBox) */
 	parameters: TParams;
 	/** Controls whether ToolExecutionComponent renders the standard colored shell or the tool renders its own framing. */
-	renderShell?: "default" | "self";
+	renderShell?: ToolRenderShell;
 
 	/** Optional compatibility shim to prepare raw tool call arguments before schema validation. Must return an object conforming to TParams. */
 	prepareArguments?: (args: unknown) => Static<TParams>;
@@ -475,15 +535,10 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	): Promise<AgentToolResult<TDetails>>;
 
 	/** Custom rendering for tool call display */
-	renderCall?: (args: Static<TParams>, theme: Theme, context: ToolRenderContext<TState, Static<TParams>>) => Component;
+	renderCall?: ToolCallRenderer<TParams, TState>;
 
 	/** Custom rendering for tool result display */
-	renderResult?: (
-		result: AgentToolResult<TDetails>,
-		options: ToolRenderResultOptions,
-		theme: Theme,
-		context: ToolRenderContext<TState, Static<TParams>>,
-	) => Component;
+	renderResult?: ToolResultRenderer<TParams, TDetails, TState>;
 }
 
 type AnyToolDefinition = ToolDefinition<any, any, any>;
@@ -505,11 +560,13 @@ export function defineTool<TParams extends TSchema, TDetails = unknown, TState =
 // Resource Events
 // ============================================================================
 
+export type ResourcesDiscoverReason = "startup" | "reload";
+
 /** Fired after session_start to allow extensions to provide additional resource paths. */
 export interface ResourcesDiscoverEvent {
 	type: "resources_discover";
 	cwd: string;
-	reason: "startup" | "reload";
+	reason: ResourcesDiscoverReason;
 }
 
 /** Result from resources_discover event handler */
@@ -524,11 +581,14 @@ export interface ResourcesDiscoverResult {
 // Session Events
 // ============================================================================
 
+export type SessionStartReason = "startup" | "reload" | "new" | "resume" | "fork";
+export type SessionSwitchReason = "new" | "resume";
+
 /** Fired when a session is started, loaded, or reloaded */
 export interface SessionStartEvent {
 	type: "session_start";
 	/** Why this session start happened. */
-	reason: "startup" | "reload" | "new" | "resume" | "fork";
+	reason: SessionStartReason;
 	/** Previously active session reference. Present for "new", "resume", and "fork". */
 	previousSessionReference?: string;
 	/** @deprecated Use previousSessionReference. For local JSONL sessions this is the same file path. */
@@ -545,7 +605,7 @@ export interface SessionInfoChangedEvent {
 /** Fired before switching to another session (can be cancelled) */
 export interface SessionBeforeSwitchEvent {
 	type: "session_before_switch";
-	reason: "new" | "resume";
+	reason: SessionSwitchReason;
 	/** Target session reference when switching to an existing session. */
 	targetSessionReference?: string;
 	/** @deprecated Use targetSessionReference. For local JSONL sessions this is the same file path. */
@@ -556,7 +616,7 @@ export interface SessionBeforeSwitchEvent {
 export interface SessionBeforeForkEvent {
 	type: "session_before_fork";
 	entryId: string;
-	position: "before" | "at";
+	position: SessionForkPosition;
 }
 
 /** Fired before context compaction (can be cancelled or customized) */
@@ -575,10 +635,12 @@ export interface SessionCompactEvent {
 	fromExtension: boolean;
 }
 
+export type SessionShutdownReason = "quit" | "reload" | "new" | "resume" | "fork";
+
 /** Fired before an extension runtime is torn down due to quit, reload, or session replacement. */
 export interface SessionShutdownEvent {
 	type: "session_shutdown";
-	reason: "quit" | "reload" | "new" | "resume" | "fork";
+	reason: SessionShutdownReason;
 	/** Destination session reference when shutting down due to session replacement. */
 	targetSessionReference?: string;
 	/** @deprecated Use targetSessionReference. For local JSONL sessions this is the same file path. */
@@ -802,7 +864,7 @@ export interface InputEvent {
 	/** Where the input came from */
 	source: InputSource;
 	/** Queue behavior requested while the agent is already streaming. */
-	streamingBehavior?: "steer" | "followUp";
+	streamingBehavior?: StreamingBehavior;
 }
 
 /** Result from input event handler */
@@ -1009,6 +1071,11 @@ export function isWebsearchToolResult(e: ToolResultEvent): e is WebsearchToolRes
  * Note: Direct narrowing via `event.toolName === "bash"` doesn't work because
  * CustomToolCallEvent.toolName is `string` which overlaps with all literals.
  */
+export type NamedToolCallEvent<TName extends string, TInput extends Record<string, unknown>> = ToolCallEvent & {
+	toolName: TName;
+	input: TInput;
+};
+
 export function isToolCallEventType(toolName: "bash", event: ToolCallEvent): event is BashToolCallEvent;
 export function isToolCallEventType(toolName: "read", event: ToolCallEvent): event is ReadToolCallEvent;
 export function isToolCallEventType(toolName: "edit", event: ToolCallEvent): event is EditToolCallEvent;
@@ -1021,7 +1088,7 @@ export function isToolCallEventType(toolName: "websearch", event: ToolCallEvent)
 export function isToolCallEventType<TName extends string, TInput extends Record<string, unknown>>(
 	toolName: TName,
 	event: ToolCallEvent,
-): event is ToolCallEvent & { toolName: TName; input: TInput };
+): event is NamedToolCallEvent<TName, TInput>;
 export function isToolCallEventType(toolName: string, event: ToolCallEvent): boolean {
 	return event.toolName === toolName;
 }
@@ -1063,16 +1130,7 @@ export interface ContextEventResult {
 
 export type BeforeProviderRequestEventResult = unknown;
 
-export interface ToolCallEventResult {
-	/** Block tool execution. To modify arguments, mutate `event.input` in place instead. */
-	block?: boolean;
-	reason?: string;
-	/**
-	 * Hint that the agent should stop after the current tool batch when this call is blocked.
-	 * Early termination only happens when every finalized tool result in the batch sets this to true.
-	 */
-	terminate?: boolean;
-}
+export type ToolCallEventResult = BeforeToolCallResult;
 
 /** Result from user_bash event handler */
 export interface UserBashEventResult {
@@ -1113,12 +1171,14 @@ export interface SessionBeforeCompactResult {
 	compaction?: CompactionResult;
 }
 
+export interface SessionBeforeTreeSummary {
+	summary: string;
+	details?: unknown;
+}
+
 export interface SessionBeforeTreeResult {
 	cancel?: boolean;
-	summary?: {
-		summary: string;
-		details?: unknown;
-	};
+	summary?: SessionBeforeTreeSummary;
 	/** Override custom instructions for summarization */
 	customInstructions?: string;
 	/** Override whether customInstructions replaces the default prompt */
@@ -1131,8 +1191,10 @@ export interface SessionBeforeTreeResult {
 // Message Rendering
 // ============================================================================
 
+export type MarkdownMessageType = "user" | "assistant" | "assistant-thinking";
+
 export interface MarkdownTransformContext {
-	messageType: "user" | "assistant" | "assistant-thinking";
+	messageType: MarkdownMessageType;
 	isStreaming: boolean;
 	availableWidth: number;
 }
@@ -1152,6 +1214,19 @@ export type MessageRenderer<T = unknown> = (
 // ============================================================================
 // Command Registration
 // ============================================================================
+
+export interface RegisterShortcutOptions {
+	description?: string;
+	handler: (ctx: ExtensionContext) => Promise<void> | void;
+}
+
+export type ExtensionFlagValueType = "boolean" | "string";
+
+export interface RegisterFlagOptions {
+	description?: string;
+	type: ExtensionFlagValueType;
+	default?: boolean | string;
+}
 
 export interface RegisteredCommand {
 	name: string;
@@ -1279,36 +1354,23 @@ export interface ExtensionAPI {
 	/** Register a custom command. */
 	registerCommand(name: string, options: Omit<RegisteredCommand, "name" | "sourceInfo">): void;
 
-	/** Register a local skill from an extension. Extension skills stay local even when tools use SSH. */
+	/** Register a local skill from an extension. Extension skills stay local when tools use a remote daemon. */
 	registerSkill(skill: ExtensionInstructionRegistration): void;
 
-	/** Register a local rule from an extension. Extension rules stay local even when tools use SSH. */
+	/** Register a local rule from an extension. Extension rules stay local when tools use a remote daemon. */
 	registerRule(rule: ExtensionInstructionRegistration): void;
 
-	/** Register a local prompt template from an extension. Extension prompts stay local even when tools use SSH. */
+	/** Register a local prompt template from an extension. Extension prompts stay local when tools use a remote daemon. */
 	registerPrompt(prompt: ExtensionPromptRegistration): void;
 
 	/** Register multiple local prompt templates from an extension. */
 	registerPrompts(prompts: ExtensionPromptRegistration[]): void;
 
 	/** Register a keyboard shortcut. */
-	registerShortcut(
-		shortcut: KeyId,
-		options: {
-			description?: string;
-			handler: (ctx: ExtensionContext) => Promise<void> | void;
-		},
-	): void;
+	registerShortcut(shortcut: KeyId, options: RegisterShortcutOptions): void;
 
 	/** Register a CLI flag. */
-	registerFlag(
-		name: string,
-		options: {
-			description?: string;
-			type: "boolean" | "string";
-			default?: boolean | string;
-		},
-	): void;
+	registerFlag(name: string, options: RegisterFlagOptions): void;
 
 	/** Get the value of a registered CLI flag. */
 	getFlag(name: string): boolean | string | undefined;
@@ -1330,17 +1392,14 @@ export interface ExtensionAPI {
 	/** Send a custom message to the session. */
 	sendMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
-		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+		options?: ExtensionSendMessageOptions,
 	): void;
 
 	/**
 	 * Send a user message to the agent. Always triggers a turn.
 	 * When the agent is streaming, use deliverAs to specify how to queue the message.
 	 */
-	sendUserMessage(
-		content: string | (TextContent | ImageContent)[],
-		options?: { deliverAs?: "steer" | "followUp" },
-	): void;
+	sendUserMessage(content: string | (TextContent | ImageContent)[], options?: ExtensionSendUserMessageOptions): void;
 
 	/** Append a custom entry to the session for state persistence (not sent to LLM). */
 	appendEntry<T = unknown>(customType: string, data?: T): void;
@@ -1467,6 +1526,30 @@ export interface ExtensionAPI {
 // Provider Registration Types
 // ============================================================================
 
+export interface ProviderOAuthConfig {
+	/** Display name for the provider in login UI. */
+	name: string;
+	/** Run the login flow, return credentials to persist. */
+	login(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials>;
+	/** Refresh expired credentials, return updated credentials to persist. */
+	refreshToken(credentials: OAuthCredentials): Promise<OAuthCredentials>;
+	/** Convert credentials to API key string for the provider. */
+	getApiKey(credentials: OAuthCredentials): string;
+	/** Optional: modify models for this provider (e.g., update baseUrl based on credentials). */
+	modifyModels?(models: Model<Api>[], credentials: OAuthCredentials): Model<Api>[];
+}
+
+export interface PendingProviderRegistration {
+	name: string;
+	config: ProviderConfig;
+	extensionPath: string;
+}
+
+export interface LoadExtensionError {
+	path: string;
+	error: string;
+}
+
 /** Configuration for registering a provider via pi.registerProvider(). */
 export interface ProviderConfig {
 	/** Display name for the provider in UI. */
@@ -1486,19 +1569,10 @@ export interface ProviderConfig {
 	/** Models to register. If provided, replaces all existing models for this provider. */
 	models?: ProviderModelConfig[];
 	/** OAuth provider for /login support. The `id` is set automatically from the provider name. */
-	oauth?: {
-		/** Display name for the provider in login UI. */
-		name: string;
-		/** Run the login flow, return credentials to persist. */
-		login(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials>;
-		/** Refresh expired credentials, return updated credentials to persist. */
-		refreshToken(credentials: OAuthCredentials): Promise<OAuthCredentials>;
-		/** Convert credentials to API key string for the provider. */
-		getApiKey(credentials: OAuthCredentials): string;
-		/** Optional: modify models for this provider (e.g., update baseUrl based on credentials). */
-		modifyModels?(models: Model<Api>[], credentials: OAuthCredentials): Model<Api>[];
-	};
+	oauth?: ProviderOAuthConfig;
 }
+
+export type ProviderModelInputType = "text" | "image";
 
 /** Configuration for a model within a provider. */
 export interface ProviderModelConfig {
@@ -1515,9 +1589,9 @@ export interface ProviderModelConfig {
 	/** Maps pi thinking levels to provider/model-specific values; null marks a level unsupported. */
 	thinkingLevelMap?: Model<Api>["thinkingLevelMap"];
 	/** Supported input types. */
-	input: ("text" | "image")[];
+	input: ProviderModelInputType[];
 	/** Cost per token (for tracking, can be 0). */
-	cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
+	cost: Model<Api>["cost"];
 	/** Maximum context window size in tokens. */
 	contextWindow: number;
 	/** Maximum output tokens. */
@@ -1549,7 +1623,7 @@ export interface RegisteredTool {
 export interface ExtensionFlag {
 	name: string;
 	description?: string;
-	type: "boolean" | "string";
+	type: ExtensionFlagValueType;
 	default?: boolean | string;
 	extensionPath: string;
 }
@@ -1561,16 +1635,17 @@ export interface ExtensionShortcut {
 	extensionPath: string;
 }
 
-type HandlerFn = (...args: unknown[]) => Promise<unknown>;
+export type ExtensionEventHandler = (...args: unknown[]) => Promise<unknown>;
+export type ExtensionHandlers = Map<string, ExtensionEventHandler[]>;
 
 export type SendMessageHandler = <T = unknown>(
 	message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
-	options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+	options?: ExtensionSendMessageOptions,
 ) => void;
 
 export type SendUserMessageHandler = (
 	content: string | (TextContent | ImageContent)[],
-	options?: { deliverAs?: "steer" | "followUp" },
+	options?: ExtensionSendUserMessageOptions,
 ) => void;
 
 export type AppendEntryHandler = <T = unknown>(customType: string, data?: T) => void;
@@ -1615,7 +1690,7 @@ export type SetLabelHandler = (entryId: string, label: string | undefined) => vo
 export interface ExtensionRuntimeState {
 	flagValues: Map<string, boolean | string>;
 	/** Provider registrations queued during extension loading, processed when runner binds */
-	pendingProviderRegistrations: Array<{ name: string; config: ProviderConfig; extensionPath: string }>;
+	pendingProviderRegistrations: PendingProviderRegistration[];
 	/** Throws when this extension instance is stale after runtime replacement. */
 	assertActive: () => void;
 	/** Marks this extension instance as stale after runtime replacement or reload. */
@@ -1684,24 +1759,13 @@ export interface ExtensionContextActions {
  */
 export interface ExtensionCommandContextActions {
 	waitForIdle: () => Promise<void>;
-	newSession: (options?: {
-		id?: string;
-		parentSession?: string;
-		setup?: (session: Session) => Promise<void>;
-		withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
-	}) => Promise<{ cancelled: boolean }>;
-	fork: (
-		entryId: string,
-		options?: { position?: "before" | "at"; withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
-	) => Promise<{ cancelled: boolean }>;
-	navigateTree: (
-		targetId: string,
-		options?: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string },
-	) => Promise<{ cancelled: boolean }>;
+	newSession: (options?: ExtensionNewSessionOptions) => Promise<ExtensionSessionActionResult>;
+	fork: (entryId: string, options?: ExtensionForkOptions) => Promise<ExtensionSessionActionResult>;
+	navigateTree: (targetId: string, options?: ExtensionNavigateTreeOptions) => Promise<ExtensionSessionActionResult>;
 	switchSession: (
 		sessionPath: string,
-		options?: { withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
-	) => Promise<{ cancelled: boolean }>;
+		options?: ExtensionSwitchSessionOptions,
+	) => Promise<ExtensionSessionActionResult>;
 	reload: () => Promise<void>;
 }
 
@@ -1716,7 +1780,7 @@ export interface Extension {
 	path: string;
 	resolvedPath: string;
 	sourceInfo: SourceInfo;
-	handlers: Map<string, HandlerFn[]>;
+	handlers: ExtensionHandlers;
 	tools: Map<string, RegisteredTool>;
 	messageRenderers: Map<string, MessageRenderer>;
 	markdownTransformer?: MarkdownTransformer;
@@ -1731,7 +1795,7 @@ export interface Extension {
 /** Result of loading extensions. */
 export interface LoadExtensionsResult {
 	extensions: Extension[];
-	errors: Array<{ path: string; error: string }>;
+	errors: LoadExtensionError[];
 	/** Shared runtime - actions are throwing stubs until runner.initialize() */
 	runtime: ExtensionRuntime;
 }

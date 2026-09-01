@@ -46,8 +46,14 @@
 * Require direct `LspClient` users to provide a server ID and `LspConnectionFactory` instead of process command options.
 * Replace the separate `@fleetagent/pi-daemon` package and `pi-daemon` binary with the integrated `pi --daemon` command; the old unversioned daemon protocol, query-token authentication, and `HOST`/`PORT` aliases are not supported.
 * Upgrade bundled TypeBox aliases to 1.3.7, removing deprecated APIs including `Type.Base`, `Type.Awaited`, `Type.Promise`, `Type.AsyncIterator`, `Type.Iterator`, `Type.Options`, and `Value.Mutate`, while fixing compiled validation of nullable array tool arguments. Extensions using removed APIs must migrate to supported TypeBox APIs. See [Package Dependencies](docs/packages.md#dependencies) ([upstream `f9476a61e`](https://github.com/fleetagent/pi/commit/f9476a61e557bfdce2fbf3ffeaad0988fe47c184)).
+* Remove built-in SSH workspace tool and sandbox support, including `--ssh`, `/sandbox ssh`, SSH RPC configuration, `SshToolOperations`, and related SDK exports. Use `pi --daemon` with `--remote`, `--remote-deferred`, `/sandbox --attach`, or daemon RPC configuration instead.
 
 ### Added
+
+* Add Phase 0 Claude-compatible host-local hooks across prompt, tool, stop, compaction, and PiAgent session lifecycle boundaries, with preferred native Pi settings, additive Claude settings compatibility, immutable per-session snapshots, interactive per-repository trust choices, persistent Trust always approvals, sandbox-transition support, diagnostics, SDK controls, bounded continuations, argument revalidation, and security documentation.
+* Allow converging Stop-hook workflows to continue beyond the default eight-turn cap by reporting a decreasing `continuationProgress` remaining-work metric, with bounded tolerance for temporary regressions.
+* Add bounded TUI-only hook execution cards showing matching handler calls and explicit returned model-visible prompts with distinct styling across transcript rebuilds, without persisting activity or exposing non-actionable hook output.
+* Add a hidden user-only `/hooks enable|disable` command for session-local control of subsequent hook dispatch.
 
 * Add shared instruction resource loaders for skills and rules.
 * Add validated global, project, CLI, and SDK/host LSP configuration loading with source-relative paths and host-controlled project transport trust.
@@ -68,8 +74,8 @@
 * Add host-owned `session_search` and `session_entry_get` tools for bounded regex searching of finalized active-session history across compaction boundaries and fetching exact model-visible entries by ID without routing session data through workspace backends.
 * Allow extension `tool_call` policies to mark blocked calls as terminating, skipping the follow-up model call when every finalized batch result terminates ([upstream `1eb988cfe`](https://github.com/fleetagent/pi/commit/1eb988cfe88fb0ff740ff62583d2f16359f7b6b0)).
 * Add an authoritative AgentSession `waitForIdle()` boundary and additive extension/RPC `agent_settled` event after retries, compaction, queued continuations, runtime synchronization, remote operations, and child subagent calls settle ([upstream `e9fa5a68a`](https://github.com/fleetagent/pi/commit/e9fa5a68a1967f42a90a1c07f512bc8af63517a9)).
-* Add per-directory `AGENTS.override.md` context files that replace `AGENTS.md` or `CLAUDE.md` only in the same directory across local, SSH, and daemon instruction discovery, while preserving ancestor layering ([upstream `8ecf8a988`](https://github.com/fleetagent/pi/commit/8ecf8a9883d1cb7c78d07c0fd64d32d6a1fd2c4c)).
-* Add a mutable `before_provider_headers` extension hook after model-provider auth/header assembly, with null deletion markers and isolation from SSH/daemon transport credentials ([upstream `244f1deaf`](https://github.com/fleetagent/pi/commit/244f1deaf1ae0fc1a242d9df5cddf457cf3d36a7), follow-up [`a24fb9e96`](https://github.com/fleetagent/pi/commit/a24fb9e96a3fbc7be2a87e81aa1aa5c0ddf95d35)).
+* Add per-directory `AGENTS.override.md` context files that replace `AGENTS.md` or `CLAUDE.md` only in the same directory across local and daemon instruction discovery, while preserving ancestor layering ([upstream `8ecf8a988`](https://github.com/fleetagent/pi/commit/8ecf8a9883d1cb7c78d07c0fd64d32d6a1fd2c4c)).
+* Add a mutable `before_provider_headers` extension hook after model-provider auth/header assembly, with null deletion markers and isolation from daemon transport credentials ([upstream `244f1deaf`](https://github.com/fleetagent/pi/commit/244f1deaf1ae0fc1a242d9df5cddf457cf3d36a7), follow-up [`a24fb9e96`](https://github.com/fleetagent/pi/commit/a24fb9e96a3fbc7be2a87e81aa1aa5c0ddf95d35)).
 * Export typed local JSONL decode and storage errors with exact references, physical lines, byte offsets, operation phases, decode kinds, original causes, and write outcomes while retaining best-effort listing quarantine and strict explicit-open diagnostics ([upstream `7aca0d7b3`](https://github.com/fleetagent/pi/commit/7aca0d7b3e041a9e2b635e8370b2549f032932d6)).
 * Add opt-in `Ctrl+P`/`Ctrl+N` prompt history navigation, with explicit history bindings taking precedence over application shortcuts while the editor is focused ([upstream `16ad96ae8`](https://github.com/fleetagent/pi/commit/16ad96ae89c028f9058c8de2fad0ab45c20ce233)).
 * Add configurable `Ctrl+X` copying for the last assistant message or the selected `/tree` entry, including full untruncated text and clipboard error reporting ([upstream `3b686ac22`](https://github.com/fleetagent/pi/commit/3b686ac224db0eb24cadb6fd0149db94c6aa1854)).
@@ -94,8 +100,12 @@
 * Retire daemon file-transfer and resource-limit work from the separate package into the integrated, bounded `pi --daemon` protocol.
 ### Fixed
 
-* Keep registered host-local skills, rules, prompts, and their referenced assets readable after SSH, remote, or sandbox workspace tools switch to canonical remote execution.
+* Keep registered host-local skills, rules, prompts, and their referenced assets readable after remote or sandbox workspace tools switch to canonical remote execution.
 * Keep sandbox backends session-local, allocate non-conflicting daemon ports for concurrent session containers, restore sandboxes when returning to their sessions, stop all process-owned sandbox containers during graceful Pi shutdown, and confine subagents to the parent's active workspace backend.
+* Generate a unique Docker container name for every sandbox start so stale containers from the same session cannot block restart with a name conflict.
+* Stop reporting active `.pi/hooks/` and global hook-script directories as deprecated legacy extension directories.
+* Route approved project/local command hooks through the active sandbox or remote workspace backend instead of the host, and block project HTTP hooks there rather than escaping through host networking.
+* Isolate Docker sandboxes with bridge networking and publish only the authenticated daemon port instead of exposing host-loopback services through host networking.
 * Preserve extension and custom TUI method wrappers without recursive self-calls while routing captured methods to the active renderer after runtime mode switches ([upstream `666d8972f`](https://github.com/fleetagent/pi/commit/666d8972ff0b6da5067e05973249760964194769), [#7731](https://github.com/fleetagent/pi/issues/7731)).
 * Paste Windows clipboard text into the currently focused fullscreen component on unmodified right-click, using bracketed-paste input and dropping asynchronous results after focus changes ([upstream `c96bfaccd`](https://github.com/fleetagent/pi/commit/c96bfaccd)).
 * Show configurable copy-shortcut confirmation as a transient fullscreen flash without adding a transcript status entry, while explicit `/copy` and regular mode retain status output ([upstream `ebf33c0c2`](https://github.com/fleetagent/pi/commit/ebf33c0c2282fb8c027174d3d2b53519d8f564e3)).
@@ -116,8 +126,7 @@
 * Reject delayed create/create, create/fork, and fork/fork publication collisions for one canonical cwd and session ID without overwriting the existing JSONL session, while retaining cross-cwd IDs and detecting already-published IDs across managers/processes ([upstream `9d090bc5d`](https://github.com/fleetagent/pi/commit/9d090bc5dcecf8f35354e09fe57413e57dea8e5b)).
 * Strictly decode local JSONL bytes before open, migration, import, compaction, and fork; atomically repair only unterminated final JSON/UTF-8 fragments or missing final newlines, and reject interior, schema, graph, and state corruption without rewriting the source ([upstream `4a0e2f115`](https://github.com/fleetagent/pi/commit/4a0e2f115ad46d34c19d200c6a71fa79d264092d), follow-up [`7aca0d7b3`](https://github.com/fleetagent/pi/commit/7aca0d7b3e041a9e2b635e8370b2549f032932d6)).
 * Runtime-validate remote session snapshots, listings, and mutation acknowledgements before state changes; fence malformed, conflicting, or outcome-ambiguous synchronization while retaining dirty entries; and flush active remote history before fork handoff, without requiring ETags or changing the existing wire protocol.
-* Dispose CLI-owned SSH, daemon, and deferred workspace tool backends when print, JSON, RPC, or interactive runtime shutdown completes, preventing remote connections from keeping the process alive.
-* Terminate remote SSH command process groups on cancellation and timeout, preventing interrupted commands from continuing to mutate the workspace after the local SSH client exits.
+* Dispose CLI-owned daemon and deferred workspace tool backends when print, JSON, RPC, or interactive runtime shutdown completes, preventing remote connections from keeping the process alive.
 * Upgrade Undici to 8.10.0 to address published response-desynchronization, cache-directive disclosure/crash, CRLF-injection, and cookie-attribute injection advisories found by the isolated release audit.
 * Load and package the shipped browser Markdown, syntax-highlighting, stylesheet, and renderer assets for Node and Bun HTML exports, preserving source LaTeX and Mermaid syntax outside the terminal renderer.
 
@@ -164,6 +173,7 @@
 ### Removed
 
 * Remove built-in easter-egg components and their hidden triggers.
+* Remove built-in SSH workspace tool and sandbox support; daemon WebSocket backends remain supported through direct, deferred, RPC, and `/sandbox` connections.
 * Remove the retired `@fleetagent/pi-daemon` workspace, package, release component, local-release shim, and standalone `pi-daemon` executable.
 
 ## [0.1.7](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.1.6...@fleetagent/pi-coding-agent-v0.1.7) (2026-07-13)

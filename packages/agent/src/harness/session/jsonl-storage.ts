@@ -6,6 +6,7 @@ import {
 	SessionError,
 	type SessionStorage,
 	type SessionTreeEntry,
+	type SessionTreeEntryOfType,
 	toError,
 } from "../types.ts";
 import {
@@ -23,6 +24,9 @@ type JsonlSessionStorageFileSystem = Pick<
 >;
 type JsonlSessionMetadataFileSystem = Pick<FileSystem, "readBinaryFile" | "readTextLines">;
 
+export type JsonlSessionCreationPhase = "create" | "fork";
+export type JsonlSessionLoadPhase = "open" | "fork";
+
 interface SessionHeader {
 	type: "session";
 	version: 3;
@@ -30,6 +34,15 @@ interface SessionHeader {
 	timestamp: string;
 	cwd: string;
 	parentSession?: string;
+}
+
+/** Options for creating a JSONL session storage file. */
+export interface JsonlSessionStorageCreateOptions {
+	cwd: string;
+	sessionId: string;
+	parentSessionPath?: string;
+	entries?: SessionTreeEntry[];
+	phase?: JsonlSessionCreationPhase;
 }
 
 function updateLabelCache(labelsById: Map<string, string>, entry: SessionTreeEntry): void {
@@ -50,7 +63,11 @@ function buildLabelsById(entries: SessionTreeEntry[]): Map<string, string> {
 	return labelsById;
 }
 
-function generateEntryId(byId: { has(id: string): boolean }): string {
+interface SessionEntryIdLookup {
+	has(id: string): boolean;
+}
+
+function generateEntryId(byId: SessionEntryIdLookup): string {
 	for (let i = 0; i < 100; i++) {
 		// The uuidv7 prefix is timestamp-derived and nearly constant between calls,
 		// so short ids must come from the random tail.
@@ -66,15 +83,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-interface PhysicalRecord {
+/** Raw JSONL line boundaries shared by session storage implementations. */
+export interface JsonlPhysicalRecord {
 	bytes: Uint8Array;
 	line: number;
 	start: number;
 	terminated: boolean;
 }
 
-function splitPhysicalRecords(bytes: Uint8Array): PhysicalRecord[] {
-	const records: PhysicalRecord[] = [];
+function splitPhysicalRecords(bytes: Uint8Array): JsonlPhysicalRecord[] {
+	const records: JsonlPhysicalRecord[] = [];
 	let start = 0;
 	let line = 1;
 	for (let index = 0; index < bytes.length; index++) {
@@ -87,7 +105,7 @@ function splitPhysicalRecords(bytes: Uint8Array): PhysicalRecord[] {
 	return records;
 }
 
-function decodeRecord(record: PhysicalRecord): string {
+function decodeRecord(record: JsonlPhysicalRecord): string {
 	let bytes = record.bytes;
 	if (bytes.at(-1) === 0x0d) bytes = bytes.subarray(0, bytes.length - 1);
 	try {
@@ -97,7 +115,7 @@ function decodeRecord(record: PhysicalRecord): string {
 	}
 }
 
-function parseJsonObject(record: PhysicalRecord): Record<string, unknown> {
+function parseJsonObject(record: JsonlPhysicalRecord): Record<string, unknown> {
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(decodeRecord(record));
@@ -181,7 +199,7 @@ function jsonlStorageError(
 	});
 }
 
-function parseHeaderRecord(record: PhysicalRecord, filePath: string): SessionHeader {
+function parseHeaderRecord(record: JsonlPhysicalRecord, filePath: string): SessionHeader {
 	let parsed: Record<string, unknown>;
 	try {
 		parsed = parseJsonObject(record);
@@ -253,6 +271,48 @@ const MESSAGE_ROLES = new Set([
 	"hookMessage",
 ]);
 
+function validateToolResultMessage(value: Record<string, unknown>): void {
+	requireString(value.toolCallId, "toolCallId");
+	requireString(value.toolName, "toolName");
+	if (typeof value.isError !== "boolean") throw new JsonlDecodeFailure("schema", "has invalid isError");
+}
+
+function validateCustomMessage(value: Record<string, unknown>): void {
+	requireString(value.customType, "customType");
+	if (typeof value.display !== "boolean") throw new JsonlDecodeFailure("schema", "has invalid display");
+}
+
+function validateBashExecutionMessage(value: Record<string, unknown>): void {
+	requireString(value.command, "command");
+	if (typeof value.output !== "string") throw new JsonlDecodeFailure("schema", "has invalid output");
+	if (typeof value.cancelled !== "boolean" || typeof value.truncated !== "boolean") {
+		throw new JsonlDecodeFailure("schema", "has invalid bash state");
+	}
+}
+
+function validateSummaryMessage(value: Record<string, unknown>): void {
+	requireString(value.summary, "summary");
+}
+
+function validateMessageRolePayload(role: string, value: Record<string, unknown>): void {
+	switch (role) {
+		case "toolResult":
+			validateToolResultMessage(value);
+			break;
+		case "custom":
+		case "hookMessage":
+			validateCustomMessage(value);
+			break;
+		case "bashExecution":
+			validateBashExecutionMessage(value);
+			break;
+		case "branchSummary":
+		case "compactionSummary":
+			validateSummaryMessage(value);
+			break;
+	}
+}
+
 function validatePersistedMessage(value: unknown): void {
 	if (!isRecord(value)) throw new JsonlDecodeFailure("schema", "has invalid message");
 	const role = requireString(value.role, "message role");
@@ -263,35 +323,38 @@ function validatePersistedMessage(value: unknown): void {
 	if (value.content != null && typeof value.content !== "string" && !Array.isArray(value.content)) {
 		throw new JsonlDecodeFailure("schema", "has invalid message content");
 	}
-	if (role === "toolResult") {
-		requireString(value.toolCallId, "toolCallId");
-		requireString(value.toolName, "toolName");
-		if (typeof value.isError !== "boolean") throw new JsonlDecodeFailure("schema", "has invalid isError");
-	} else if (role === "custom" || role === "hookMessage") {
-		requireString(value.customType, "customType");
-		if (typeof value.display !== "boolean") throw new JsonlDecodeFailure("schema", "has invalid display");
-	} else if (role === "bashExecution") {
-		requireString(value.command, "command");
-		if (typeof value.output !== "string") throw new JsonlDecodeFailure("schema", "has invalid output");
-		if (typeof value.cancelled !== "boolean" || typeof value.truncated !== "boolean") {
-			throw new JsonlDecodeFailure("schema", "has invalid bash state");
-		}
-	} else if (role === "branchSummary" || role === "compactionSummary") {
-		requireString(value.summary, "summary");
+	validateMessageRolePayload(role, value);
+}
+
+function validateCompactionEntry(value: Record<string, unknown>): void {
+	requireString(value.summary, "summary");
+	requireId(value.firstKeptEntryId, "firstKeptEntryId");
+	if (typeof value.tokensBefore !== "number" || !Number.isFinite(value.tokensBefore)) {
+		throw new JsonlDecodeFailure("schema", "has invalid tokensBefore");
 	}
 }
 
-function parseEntryRecord(record: PhysicalRecord): SessionTreeEntry {
-	const parsed = parseJsonObject(record);
-	const type = requireString(parsed.type, "entry type");
-	if (!ENTRY_TYPES.has(type as SessionTreeEntry["type"])) {
-		throw new JsonlDecodeFailure("schema", `has unknown entry type ${type}`);
+function validateCustomMessageEntry(value: Record<string, unknown>): void {
+	requireString(value.customType, "customType");
+	if (value.content != null && typeof value.content !== "string" && !Array.isArray(value.content)) {
+		throw new JsonlDecodeFailure("schema", "has invalid content");
 	}
-	requireId(parsed.id, "entry id");
-	if (parsed.parentId !== null && (typeof parsed.parentId !== "string" || !SAFE_ID_PATTERN.test(parsed.parentId))) {
-		throw new JsonlDecodeFailure("schema", "has invalid parentId");
+	if (typeof value.display !== "boolean") throw new JsonlDecodeFailure("schema", "has invalid display");
+}
+
+function validateOptionalString(value: unknown, field: string): void {
+	if (value !== undefined && typeof value !== "string") {
+		throw new JsonlDecodeFailure("schema", `has invalid ${field}`);
 	}
-	requireTimestamp(parsed.timestamp);
+}
+
+function validateNullableId(value: unknown, field: string): void {
+	if (value !== null && (typeof value !== "string" || !SAFE_ID_PATTERN.test(value))) {
+		throw new JsonlDecodeFailure("schema", `has invalid ${field}`);
+	}
+}
+
+function validateEntryPayload(type: string, parsed: Record<string, unknown>): void {
 	switch (type) {
 		case "message":
 			validatePersistedMessage(parsed.message);
@@ -304,11 +367,7 @@ function parseEntryRecord(record: PhysicalRecord): SessionTreeEntry {
 			requireString(parsed.modelId, "modelId");
 			break;
 		case "compaction":
-			requireString(parsed.summary, "summary");
-			requireId(parsed.firstKeptEntryId, "firstKeptEntryId");
-			if (typeof parsed.tokensBefore !== "number" || !Number.isFinite(parsed.tokensBefore)) {
-				throw new JsonlDecodeFailure("schema", "has invalid tokensBefore");
-			}
+			validateCompactionEntry(parsed);
 			break;
 		case "branch_summary":
 			requireId(parsed.fromId, "fromId");
@@ -318,32 +377,33 @@ function parseEntryRecord(record: PhysicalRecord): SessionTreeEntry {
 			requireString(parsed.customType, "customType");
 			break;
 		case "custom_message":
-			requireString(parsed.customType, "customType");
-			if (parsed.content != null && typeof parsed.content !== "string" && !Array.isArray(parsed.content)) {
-				throw new JsonlDecodeFailure("schema", "has invalid content");
-			}
-			if (typeof parsed.display !== "boolean") throw new JsonlDecodeFailure("schema", "has invalid display");
+			validateCustomMessageEntry(parsed);
 			break;
 		case "label":
 			requireId(parsed.targetId, "targetId");
-			if (parsed.label !== undefined && typeof parsed.label !== "string") {
-				throw new JsonlDecodeFailure("schema", "has invalid label");
-			}
+			validateOptionalString(parsed.label, "label");
 			break;
 		case "session_info":
-			if (parsed.name !== undefined && typeof parsed.name !== "string") {
-				throw new JsonlDecodeFailure("schema", "has invalid name");
-			}
+			validateOptionalString(parsed.name, "name");
 			break;
 		case "leaf":
-			if (
-				parsed.targetId !== null &&
-				(typeof parsed.targetId !== "string" || !SAFE_ID_PATTERN.test(parsed.targetId))
-			) {
-				throw new JsonlDecodeFailure("schema", "has invalid targetId");
-			}
+			validateNullableId(parsed.targetId, "targetId");
 			break;
 	}
+}
+
+function parseEntryRecord(record: JsonlPhysicalRecord): SessionTreeEntry {
+	const parsed = parseJsonObject(record);
+	const type = requireString(parsed.type, "entry type");
+	if (!ENTRY_TYPES.has(type as SessionTreeEntry["type"])) {
+		throw new JsonlDecodeFailure("schema", `has unknown entry type ${type}`);
+	}
+	requireId(parsed.id, "entry id");
+	if (parsed.parentId !== null && (typeof parsed.parentId !== "string" || !SAFE_ID_PATTERN.test(parsed.parentId))) {
+		throw new JsonlDecodeFailure("schema", "has invalid parentId");
+	}
+	requireTimestamp(parsed.timestamp);
+	validateEntryPayload(type, parsed);
 	return parsed as unknown as SessionTreeEntry;
 }
 
@@ -533,7 +593,23 @@ function validateEntryState(
 	}
 	entriesById.set(entry.id, entry);
 }
-function getNextAppendPosition(bytes: Uint8Array): { nextLine: number; nextOffset: number } {
+
+interface JsonlAppendPosition {
+	nextLine: number;
+	nextOffset: number;
+}
+
+interface JsonlEntryRecordResolution {
+	entry?: SessionTreeEntry;
+	repairTruncatedTail: boolean;
+}
+
+interface JsonlStorageLoadResult extends JsonlAppendPosition {
+	header: SessionHeader;
+	entries: SessionTreeEntry[];
+	leafId: string | null;
+}
+function getNextAppendPosition(bytes: Uint8Array): JsonlAppendPosition {
 	let nextLine = 1;
 	for (const byte of bytes) {
 		if (byte === 0x0a) nextLine++;
@@ -541,17 +617,38 @@ function getNextAppendPosition(bytes: Uint8Array): { nextLine: number; nextOffse
 	return { nextLine, nextOffset: bytes.length };
 }
 
+function resolveJsonlEntryRecord(
+	record: JsonlPhysicalRecord,
+	isLastRecord: boolean,
+	filePath: string,
+	phase: JsonlErrorPhase,
+): JsonlEntryRecordResolution {
+	let line: string;
+	try {
+		line = decodeRecord(record);
+	} catch (error) {
+		const failure = toError(error);
+		const isRepairableTail = !record.terminated && isLastRecord && failure instanceof JsonlDecodeFailure;
+		if (isRepairableTail) return { repairTruncatedTail: true };
+		throw invalidEntry(filePath, record.line, failure.message, failure, record.start, phase);
+	}
+	if (!line.trim()) return { repairTruncatedTail: false };
+	try {
+		return { entry: parseEntryRecord(record), repairTruncatedTail: false };
+	} catch (error) {
+		const failure = toError(error);
+		const isRepairableTail =
+			!record.terminated && isLastRecord && failure instanceof JsonlDecodeFailure && failure.kind === "syntax";
+		if (isRepairableTail) return { repairTruncatedTail: true };
+		throw invalidEntry(filePath, record.line, failure.message, failure, record.start, phase);
+	}
+}
+
 async function loadJsonlStorage(
 	fs: JsonlSessionStorageFileSystem,
 	filePath: string,
-	phase: "open" | "fork" = "open",
-): Promise<{
-	header: SessionHeader;
-	entries: SessionTreeEntry[];
-	leafId: string | null;
-	nextLine: number;
-	nextOffset: number;
-}> {
+	phase: JsonlSessionLoadPhase = "open",
+): Promise<JsonlStorageLoadResult> {
 	let bytes: Uint8Array;
 	try {
 		bytes = getFileSystemResultOrThrow(await fs.readBinaryFile(filePath), `Failed to read session ${filePath}`);
@@ -573,37 +670,16 @@ async function loadJsonlStorage(
 
 	for (let index = 1; index < records.length; index++) {
 		const record = records[index]!;
-		let line: string;
-		try {
-			line = decodeRecord(record);
-		} catch (error) {
-			const failure = toError(error);
-			if (!record.terminated && index === records.length - 1 && failure instanceof JsonlDecodeFailure) {
-				await publishJsonlContentAtomically(fs, filePath, bytes.subarray(0, record.start), true, "repair");
-				return { header, entries, leafId, ...getNextAppendPosition(bytes.subarray(0, record.start)) };
-			}
-			throw invalidEntry(filePath, record.line, failure.message, failure, record.start, phase);
+		const resolution = resolveJsonlEntryRecord(record, index === records.length - 1, filePath, phase);
+		if (resolution.repairTruncatedTail) {
+			const repairedBytes = bytes.subarray(0, record.start);
+			await publishJsonlContentAtomically(fs, filePath, repairedBytes, true, "repair");
+			return { header, entries, leafId, ...getNextAppendPosition(repairedBytes) };
 		}
-		if (!line.trim()) continue;
-		let entry: SessionTreeEntry;
-		try {
-			entry = parseEntryRecord(record);
-		} catch (error) {
-			const failure = toError(error);
-			if (
-				!record.terminated &&
-				index === records.length - 1 &&
-				failure instanceof JsonlDecodeFailure &&
-				failure.kind === "syntax"
-			) {
-				await publishJsonlContentAtomically(fs, filePath, bytes.subarray(0, record.start), true, "repair");
-				return { header, entries, leafId, ...getNextAppendPosition(bytes.subarray(0, record.start)) };
-			}
-			throw invalidEntry(filePath, record.line, failure.message, failure, record.start, phase);
-		}
-		validateEntryState(entry, entriesById, filePath, record.line, record.start, phase);
-		entries.push(entry);
-		leafId = leafIdAfterEntry(entry);
+		if (!resolution.entry) continue;
+		validateEntryState(resolution.entry, entriesById, filePath, record.line, record.start, phase);
+		entries.push(resolution.entry);
+		leafId = leafIdAfterEntry(resolution.entry);
 	}
 
 	if (records.at(-1)?.terminated === false) {
@@ -656,7 +732,7 @@ export class JsonlSessionStorage implements SessionStorage<JsonlSessionMetadata>
 	static async open(
 		fs: JsonlSessionStorageFileSystem,
 		filePath: string,
-		phase: "open" | "fork" = "open",
+		phase: JsonlSessionLoadPhase = "open",
 	): Promise<JsonlSessionStorage> {
 		const loaded = await loadJsonlStorage(fs, filePath, phase);
 		return new JsonlSessionStorage(
@@ -673,13 +749,7 @@ export class JsonlSessionStorage implements SessionStorage<JsonlSessionMetadata>
 	static async create(
 		fs: JsonlSessionStorageFileSystem,
 		filePath: string,
-		options: {
-			cwd: string;
-			sessionId: string;
-			parentSessionPath?: string;
-			entries?: SessionTreeEntry[];
-			phase?: "create" | "fork";
-		},
+		options: JsonlSessionStorageCreateOptions,
 	): Promise<JsonlSessionStorage> {
 		const header: SessionHeader = {
 			type: "session",
@@ -792,8 +862,8 @@ export class JsonlSessionStorage implements SessionStorage<JsonlSessionMetadata>
 
 	async findEntries<TType extends SessionTreeEntry["type"]>(
 		type: TType,
-	): Promise<Array<Extract<SessionTreeEntry, { type: TType }>>> {
-		return this.entries.filter((entry): entry is Extract<SessionTreeEntry, { type: TType }> => entry.type === type);
+	): Promise<Array<SessionTreeEntryOfType<TType>>> {
+		return this.entries.filter((entry): entry is SessionTreeEntryOfType<TType> => entry.type === type);
 	}
 
 	async getLabel(id: string): Promise<string | undefined> {

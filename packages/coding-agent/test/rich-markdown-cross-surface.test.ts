@@ -8,6 +8,15 @@ import { LocalSessionManager } from "../src/core/session/local-session-manager.t
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { toJsonEvent } from "../src/modes/json-event.ts";
 
+interface ExportedSessionEntry {
+	type: string;
+	message?: AssistantMessage;
+}
+
+interface BinaryAssetPackageScripts {
+	"copy-binary-assets"?: string;
+}
+
 const tempDirs: string[] = [];
 const richSource = "$\\frac{1}{2}$\n\n```mermaid\nflowchart LR\nA --> B\n```";
 
@@ -64,7 +73,7 @@ describe("rich Markdown non-interactive boundaries", () => {
 		const encoded = /<script id="session-data" type="application\/json">([^<]+)<\/script>/.exec(html)?.[1];
 		expect(encoded).toBeDefined();
 		const exported = JSON.parse(Buffer.from(encoded!, "base64").toString("utf8")) as {
-			entries: Array<{ type: string; message?: AssistantMessage }>;
+			entries: ExportedSessionEntry[];
 		};
 		const exportedAssistant = exported.entries.find((entry) => entry.message?.role === "assistant")?.message;
 		expect(exportedAssistant?.content[0]).toEqual({ type: "text", text: richSource });
@@ -73,7 +82,7 @@ describe("rich Markdown non-interactive boundaries", () => {
 
 	it("copies every browser export asset into Bun binary packages", () => {
 		const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
-			scripts?: { "copy-binary-assets"?: string };
+			scripts?: BinaryAssetPackageScripts;
 		};
 		const copyCommand = packageJson.scripts?.["copy-binary-assets"];
 		expect(copyCommand).toBeDefined();

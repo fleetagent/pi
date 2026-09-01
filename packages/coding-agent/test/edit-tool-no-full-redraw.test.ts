@@ -4,8 +4,9 @@ import { join } from "node:path";
 import { Container, type Terminal, Text, TuiMainScreen } from "@fleetagent/pi-tui";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { ExtensionContext } from "../src/core/extensions/types.ts";
-import { createEditToolDefinition, type EditToolInput } from "../src/core/tools/edit.ts";
+import { createEditToolDefinition } from "../src/core/tools/edit.ts";
 import { initHasher, lineHashes } from "../src/core/tools/hashline/hash.ts";
+import type { HTEdit } from "../src/core/tools/hashline/resolve.ts";
 import { LocalToolOperations } from "../src/core/tools/operations.ts";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
@@ -40,6 +41,7 @@ async function waitForRender(): Promise<void> {
 	await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+// pi-ignore noExcessiveCollectionIterations: Each bounded poll returns a new render snapshot that must be searched.
 async function waitForRenderedText(
 	getRender: () => string,
 	expectedText: string,
@@ -63,7 +65,7 @@ async function createLargeChanges(
 	content: string,
 	filePath: string,
 	targets = [50, 150, 250, 350, 450, 550, 650, 750, 850, 950],
-): Promise<EditToolInput["changes"]> {
+): Promise<HTEdit[]> {
 	await initHasher();
 	const lines = content.trimEnd().split("\n");
 	const hashes = await lineHashes(content, filePath);

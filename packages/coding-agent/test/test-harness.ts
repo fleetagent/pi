@@ -10,7 +10,7 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentTool } from "@fleetagent/pi-agent-core";
+import type { AgentTool, StreamFn } from "@fleetagent/pi-agent-core";
 import { Agent } from "@fleetagent/pi-agent-core";
 import type {
 	AssistantMessage,
@@ -65,11 +65,22 @@ export const fauxModel: Model<typeof FAUX_API> = {
 // Response description
 // ============================================================================
 
+export interface FauxToolCall {
+	id?: string;
+	name: string;
+	args: Record<string, unknown>;
+}
+
+export interface FauxResponseModelOverride {
+	provider?: string;
+	id?: string;
+}
+
 export interface FauxResponse {
 	/** Text content blocks. String shorthand becomes a single text block. */
 	text?: string;
 	/** Tool calls to include in the response. */
-	toolCalls?: Array<{ id?: string; name: string; args: Record<string, unknown> }>;
+	toolCalls?: FauxToolCall[];
 	/** Thinking content. */
 	thinking?: string;
 	/** Stop reason. Defaults to "stop", or "toolUse" if toolCalls are present, or "error" if error is set. */
@@ -81,7 +92,7 @@ export interface FauxResponse {
 	/** Delay in ms before the response starts. */
 	delayMs?: number;
 	/** Model overrides (provider, model id) for responses that should look like they came from a different model. */
-	model?: { provider?: string; id?: string };
+	model?: FauxResponseModelOverride;
 }
 
 /** Shorthand: a string becomes a simple text response. */
@@ -90,6 +101,8 @@ export type FauxResponseInput = FauxResponse | string;
 // ============================================================================
 // Faux stream function
 // ============================================================================
+
+type FauxAssistantDeltaEventType = "text_delta" | "thinking_delta" | "toolcall_delta";
 
 function normalizeResponse(input: FauxResponseInput): FauxResponse {
 	if (typeof input === "string") {
@@ -184,75 +197,108 @@ function chunkString(text: string): string[] {
  * Stream a complete AssistantMessage through an EventStream with realistic
  * intermediate delta events for each content block.
  */
+function streamThinkingBlock(
+	stream: AssistantMessageEventStream,
+	partial: AssistantMessage,
+	block: ThinkingContent,
+	contentIndex: number,
+): void {
+	partial.content = [...partial.content, { type: "thinking", thinking: "" }];
+	stream.push({ type: "thinking_start", contentIndex, partial: { ...partial } });
+
+	for (const chunk of chunkString(block.thinking)) {
+		(partial.content[contentIndex] as ThinkingContent).thinking += chunk;
+		stream.push(makeEvent("thinking_delta", contentIndex, chunk, partial));
+	}
+
+	stream.push({
+		type: "thinking_end",
+		contentIndex,
+		content: block.thinking,
+		partial: { ...partial },
+	});
+}
+
+function streamTextBlock(
+	stream: AssistantMessageEventStream,
+	partial: AssistantMessage,
+	block: TextContent,
+	contentIndex: number,
+): void {
+	partial.content = [...partial.content, { type: "text", text: "" }];
+	stream.push({ type: "text_start", contentIndex, partial: { ...partial } });
+
+	for (const chunk of chunkString(block.text)) {
+		(partial.content[contentIndex] as TextContent).text += chunk;
+		stream.push(makeEvent("text_delta", contentIndex, chunk, partial));
+	}
+
+	stream.push({
+		type: "text_end",
+		contentIndex,
+		content: block.text,
+		partial: { ...partial },
+	});
+}
+
+function streamToolCallBlock(
+	stream: AssistantMessageEventStream,
+	partial: AssistantMessage,
+	block: ToolCall,
+	contentIndex: number,
+): void {
+	const argsJson = JSON.stringify(block.arguments);
+	partial.content = [...partial.content, { type: "toolCall", id: block.id, name: block.name, arguments: {} }];
+	stream.push({ type: "toolcall_start", contentIndex, partial: { ...partial } });
+
+	for (const chunk of chunkString(argsJson)) {
+		stream.push(makeEvent("toolcall_delta", contentIndex, chunk, partial));
+	}
+
+	(partial.content[contentIndex] as ToolCall).arguments = block.arguments;
+	stream.push({
+		type: "toolcall_end",
+		contentIndex,
+		toolCall: block,
+		partial: { ...partial },
+	});
+}
+
+function streamContentBlock(
+	stream: AssistantMessageEventStream,
+	partial: AssistantMessage,
+	block: TextContent | ThinkingContent | ToolCall,
+	contentIndex: number,
+): void {
+	if (block.type === "thinking") {
+		streamThinkingBlock(stream, partial, block, contentIndex);
+		return;
+	}
+	if (block.type === "text") {
+		streamTextBlock(stream, partial, block, contentIndex);
+		return;
+	}
+	streamToolCallBlock(stream, partial, block, contentIndex);
+}
+
 function streamWithDeltas(stream: AssistantMessageEventStream, message: AssistantMessage): void {
 	const isError = message.stopReason === "error" || message.stopReason === "aborted";
-
-	// Build partial progressively as we stream content blocks
 	const partial: AssistantMessage = { ...message, content: [] };
 	stream.push({ type: "start", partial: { ...partial } });
 
-	for (let i = 0; i < message.content.length; i++) {
-		const block = message.content[i];
-
-		if (block.type === "thinking") {
-			partial.content = [...partial.content, { type: "thinking", thinking: "" }];
-			stream.push({ type: "thinking_start", contentIndex: i, partial: { ...partial } });
-
-			for (const chunk of chunkString(block.thinking)) {
-				(partial.content[i] as ThinkingContent).thinking += chunk;
-				stream.push(makeEvent("thinking_delta", i, chunk, partial));
-			}
-
-			stream.push({
-				type: "thinking_end",
-				contentIndex: i,
-				content: block.thinking,
-				partial: { ...partial },
-			});
-		} else if (block.type === "text") {
-			partial.content = [...partial.content, { type: "text", text: "" }];
-			stream.push({ type: "text_start", contentIndex: i, partial: { ...partial } });
-
-			for (const chunk of chunkString(block.text)) {
-				(partial.content[i] as TextContent).text += chunk;
-				stream.push(makeEvent("text_delta", i, chunk, partial));
-			}
-
-			stream.push({
-				type: "text_end",
-				contentIndex: i,
-				content: block.text,
-				partial: { ...partial },
-			});
-		} else if (block.type === "toolCall") {
-			const argsJson = JSON.stringify(block.arguments);
-			partial.content = [...partial.content, { type: "toolCall", id: block.id, name: block.name, arguments: {} }];
-			stream.push({ type: "toolcall_start", contentIndex: i, partial: { ...partial } });
-
-			for (const chunk of chunkString(argsJson)) {
-				stream.push(makeEvent("toolcall_delta", i, chunk, partial));
-			}
-
-			// Final toolcall has the real parsed arguments
-			(partial.content[i] as ToolCall).arguments = block.arguments;
-			stream.push({
-				type: "toolcall_end",
-				contentIndex: i,
-				toolCall: block,
-				partial: { ...partial },
-			});
-		}
+	for (let contentIndex = 0; contentIndex < message.content.length; contentIndex++) {
+		streamContentBlock(stream, partial, message.content[contentIndex], contentIndex);
 	}
 
 	if (isError) {
 		stream.push({ type: "error", reason: message.stopReason as "error" | "aborted", error: message });
-	} else {
-		stream.push({ type: "done", reason: message.stopReason as "stop" | "length" | "toolUse", message });
+		return;
 	}
+	stream.push({ type: "done", reason: message.stopReason as "stop" | "length" | "toolUse", message });
 }
 
 function makeEvent(
-	type: "text_delta" | "thinking_delta" | "toolcall_delta",
+	type: FauxAssistantDeltaEventType,
 	contentIndex: number,
 	delta: string,
 	partial: AssistantMessage,
@@ -271,6 +317,11 @@ export interface FauxStreamFnState {
 	contexts: Context[];
 }
 
+interface FauxStreamFnResult {
+	streamFn: StreamFn;
+	state: FauxStreamFnState;
+}
+
 /**
  * Create a faux stream function from a sequence of response descriptions.
  *
@@ -279,10 +330,7 @@ export interface FauxStreamFnState {
  *
  * Returns the stream function and a state object for inspection.
  */
-export function createFauxStreamFn(responses: FauxResponseInput[]): {
-	streamFn: (model: Model<any>, context: Context, options?: SimpleStreamOptions) => AssistantMessageEventStream;
-	state: FauxStreamFnState;
-} {
+export function createFauxStreamFn(responses: FauxResponseInput[]): FauxStreamFnResult {
 	if (responses.length === 0) {
 		throw new Error("createFauxStreamFn requires at least one response");
 	}
@@ -339,6 +387,8 @@ export interface HarnessOptions {
 	extensionFactories?: Array<ExtensionFactory | CreateTestExtensionsResultInput>;
 }
 
+type CapturedAgentSessionEvent<T extends AgentSessionEvent["type"]> = Extract<AgentSessionEvent, { type: T }>;
+
 export interface Harness {
 	session: AgentSession;
 	agent: Agent;
@@ -349,7 +399,7 @@ export interface Harness {
 	/** All events emitted by the session, in order. */
 	events: AgentSessionEvent[];
 	/** Filter captured events by type. */
-	eventsOfType<T extends AgentSessionEvent["type"]>(type: T): Extract<AgentSessionEvent, { type: T }>[];
+	eventsOfType<T extends AgentSessionEvent["type"]>(type: T): CapturedAgentSessionEvent<T>[];
 	/** Temp directory (cleaned up by cleanup()). */
 	tempDir: string;
 	/** Dispose session and remove temp directory. */
@@ -423,7 +473,7 @@ function createHarnessWithResourceLoader(
 		faux: fauxState,
 		events,
 		eventsOfType<T extends AgentSessionEvent["type"]>(type: T) {
-			return events.filter((e): e is Extract<AgentSessionEvent, { type: T }> => e.type === type);
+			return events.filter((e): e is CapturedAgentSessionEvent<T> => e.type === type);
 		},
 		tempDir,
 		cleanup,

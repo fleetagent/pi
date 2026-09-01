@@ -2,29 +2,14 @@
  * Test that BashExecutionComponent's collapsed output respects the render-time width,
  * not a stale captured width. Regression test for #2569.
  */
-import { visibleWidth } from "@fleetagent/pi-tui";
+import { type TUI, TuiMainScreen, visibleWidth } from "@fleetagent/pi-tui";
 import { beforeAll, describe, expect, it } from "vitest";
+import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import { BashExecutionComponent } from "../src/modes/interactive/components/bash-execution.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 
-/** Minimal TUI stub that only exposes terminal.columns */
-function createTuiStub(columns: number): { columns: number; stub: any } {
-	const state = { columns };
-	const stub = {
-		terminal: {
-			get columns() {
-				return state.columns;
-			},
-			get rows() {
-				return 24;
-			},
-		},
-		// Loader calls ui.addInterval / ui.removeInterval
-		addInterval: (_cb: () => void, _ms: number) => ({ dispose: () => {} }),
-		removeInterval: () => {},
-		requestRender: () => {},
-	};
-	return { columns: state.columns, stub };
+function createTestTui(columns: number): TUI {
+	return new TuiMainScreen(new VirtualTerminal(columns));
 }
 
 describe("BashExecutionComponent width handling (#2569)", () => {
@@ -36,8 +21,7 @@ describe("BashExecutionComponent width handling (#2569)", () => {
 		const wideWidth = 200;
 		const narrowWidth = 80;
 
-		const { stub } = createTuiStub(wideWidth);
-		const component = new BashExecutionComponent("pwd", stub);
+		const component = new BashExecutionComponent("pwd", createTestTui(wideWidth));
 
 		// Add output with long lines that will wrap differently at different widths
 		const longLine = "x".repeat(150);
@@ -57,8 +41,7 @@ describe("BashExecutionComponent width handling (#2569)", () => {
 	});
 
 	it("re-computes lines when width changes between renders", () => {
-		const { stub } = createTuiStub(200);
-		const component = new BashExecutionComponent("echo hello", stub);
+		const component = new BashExecutionComponent("echo hello", createTestTui(200));
 
 		const longLine = "abcdefghij".repeat(20); // 200 chars
 		component.appendOutput(`${longLine}\n`);

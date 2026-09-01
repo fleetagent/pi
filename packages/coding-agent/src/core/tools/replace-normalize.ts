@@ -15,17 +15,16 @@ function tryParseJSON<T>(value: unknown, guard: (v: unknown) => v is T): T | und
  * and `edits` normalization branches.
  */
 function coerceEditArray(items: unknown[]): unknown[] {
-	return items
-		.map((item: unknown) => tryParseJSON(item, isRec) ?? item)
-		.map((change: unknown) => {
-			if (!isRec(change)) return change;
-			if (typeof change.content_lines !== "string") return change;
-			const parsed = tryParseJSON(
-				change.content_lines,
-				(v): v is string[] => Array.isArray(v) && v.every((i) => typeof i === "string"),
-			);
-			return parsed ? { ...change, content_lines: parsed } : change;
-		});
+	return items.map((item: unknown) => {
+		const change = tryParseJSON(item, isRec) ?? item;
+		if (!isRec(change)) return change;
+		if (typeof change.content_lines !== "string") return change;
+		const parsed = tryParseJSON(
+			change.content_lines,
+			(v): v is string[] => Array.isArray(v) && v.every((i) => typeof i === "string"),
+		);
+		return parsed ? { ...change, content_lines: parsed } : change;
+	});
 }
 
 /**

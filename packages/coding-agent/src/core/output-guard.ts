@@ -1,6 +1,9 @@
+type RawOutputWriteCallback = (error?: Error | null) => void;
+type RawOutputWrite = (chunk: string, callback?: RawOutputWriteCallback) => boolean;
+
 interface StdoutTakeoverState {
-	rawStdoutWrite: (chunk: string, callback?: (error?: Error | null) => void) => boolean;
-	rawStderrWrite: (chunk: string, callback?: (error?: Error | null) => void) => boolean;
+	rawStdoutWrite: RawOutputWrite;
+	rawStderrWrite: RawOutputWrite;
 	originalStdoutWrite: typeof process.stdout.write;
 }
 
@@ -10,11 +13,11 @@ const RAW_STDOUT_RETRY_DELAY_MS = 10;
 
 let rawStdoutWriteTail: Promise<void> = Promise.resolve();
 
-function getRawStdoutWrite(): StdoutTakeoverState["rawStdoutWrite"] {
+function getRawStdoutWrite(): RawOutputWrite {
 	if (stdoutTakeoverState) {
 		return stdoutTakeoverState.rawStdoutWrite;
 	}
-	return process.stdout.write.bind(process.stdout) as StdoutTakeoverState["rawStdoutWrite"];
+	return process.stdout.write.bind(process.stdout) as RawOutputWrite;
 }
 
 async function writeRawStdoutChunk(text: string): Promise<void> {
@@ -47,8 +50,8 @@ export function takeOverStdout(): void {
 		return;
 	}
 
-	const rawStdoutWrite = process.stdout.write.bind(process.stdout) as StdoutTakeoverState["rawStdoutWrite"];
-	const rawStderrWrite = process.stderr.write.bind(process.stderr) as StdoutTakeoverState["rawStderrWrite"];
+	const rawStdoutWrite = process.stdout.write.bind(process.stdout) as RawOutputWrite;
+	const rawStderrWrite = process.stderr.write.bind(process.stderr) as RawOutputWrite;
 	const originalStdoutWrite = process.stdout.write;
 
 	process.stdout.write = ((

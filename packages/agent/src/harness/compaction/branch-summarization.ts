@@ -1,4 +1,4 @@
-import type { Model } from "@fleetagent/pi-ai";
+import type { Model, TextContent } from "@fleetagent/pi-ai";
 import { completeSimple } from "@fleetagent/pi-ai";
 import type { AgentMessage } from "../../types.ts";
 import {
@@ -14,18 +14,14 @@ import {
 	computeFileLists,
 	createFileOps,
 	extractFileOpsFromMessage,
+	type FileOperationLists,
 	type FileOperations,
 	formatFileOperations,
 	serializeConversation,
 } from "./utils.ts";
 
-/** File-operation details stored on generated branch summary entries. */
-export interface BranchSummaryDetails {
-	/** Files read while exploring the summarized branch. */
-	readFiles: string[];
-	/** Files modified while exploring the summarized branch. */
-	modifiedFiles: string[];
-}
+/** File-operation lists stored on generated branch summary entries. */
+export type BranchSummaryDetails = FileOperationLists;
 
 export type { FileOperations } from "./utils.ts";
 
@@ -120,46 +116,59 @@ function getMessageFromEntry(entry: SessionTreeEntry): AgentMessage | undefined 
 	}
 }
 
-/** Prepare branch entries for summarization within an optional token budget. */
-export function prepareBranchEntries(entries: SessionTreeEntry[], tokenBudget: number = 0): BranchPreparation {
-	const messages: AgentMessage[] = [];
-	const fileOps = createFileOps();
-	let totalTokens = 0;
-	for (const entry of entries) {
-		if (entry.type === "branch_summary" && !entry.fromHook && entry.details) {
-			const details = entry.details as BranchSummaryDetails;
-			if (Array.isArray(details.readFiles)) {
-				for (const f of details.readFiles) fileOps.read.add(f);
-			}
-			if (Array.isArray(details.modifiedFiles)) {
-				for (const f of details.modifiedFiles) {
-					fileOps.edited.add(f);
-				}
-			}
-		}
+function mergeStoredBranchFileOperations(details: BranchSummaryDetails, fileOps: FileOperations): void {
+	if (Array.isArray(details.readFiles)) {
+		for (const file of details.readFiles) fileOps.read.add(file);
 	}
-	for (let i = entries.length - 1; i >= 0; i--) {
-		const entry = entries[i];
+	if (Array.isArray(details.modifiedFiles)) {
+		for (const file of details.modifiedFiles) fileOps.edited.add(file);
+	}
+}
+
+function collectStoredBranchFileOperations(entries: SessionTreeEntry[], fileOps: FileOperations): void {
+	for (const entry of entries) {
+		if (entry.type !== "branch_summary" || entry.fromHook || !entry.details) continue;
+		mergeStoredBranchFileOperations(entry.details as BranchSummaryDetails, fileOps);
+	}
+}
+
+function prependBranchMessage(preparation: BranchPreparation, message: AgentMessage, tokens: number): void {
+	preparation.messages.unshift(message);
+	preparation.totalTokens += tokens;
+}
+
+function exceedsBranchTokenBudget(totalTokens: number, messageTokens: number, tokenBudget: number): boolean {
+	return tokenBudget > 0 && totalTokens + messageTokens > tokenBudget;
+}
+
+function canRetainOverBudgetSummary(entry: SessionTreeEntry, totalTokens: number, tokenBudget: number): boolean {
+	return (entry.type === "compaction" || entry.type === "branch_summary") && totalTokens < tokenBudget * 0.9;
+}
+
+function selectBranchMessages(entries: SessionTreeEntry[], tokenBudget: number, preparation: BranchPreparation): void {
+	for (let index = entries.length - 1; index >= 0; index--) {
+		const entry = entries[index];
 		const message = getMessageFromEntry(entry);
 		if (!message) continue;
-		extractFileOpsFromMessage(message, fileOps);
-
+		extractFileOpsFromMessage(message, preparation.fileOps);
 		const tokens = estimateTokens(message);
-		if (tokenBudget > 0 && totalTokens + tokens > tokenBudget) {
-			if (entry.type === "compaction" || entry.type === "branch_summary") {
-				if (totalTokens < tokenBudget * 0.9) {
-					messages.unshift(message);
-					totalTokens += tokens;
-				}
-			}
-			break;
+		if (!exceedsBranchTokenBudget(preparation.totalTokens, tokens, tokenBudget)) {
+			prependBranchMessage(preparation, message, tokens);
+			continue;
 		}
-
-		messages.unshift(message);
-		totalTokens += tokens;
+		if (canRetainOverBudgetSummary(entry, preparation.totalTokens, tokenBudget)) {
+			prependBranchMessage(preparation, message, tokens);
+		}
+		break;
 	}
+}
 
-	return { messages, fileOps, totalTokens };
+/** Prepare branch entries for summarization within an optional token budget. */
+export function prepareBranchEntries(entries: SessionTreeEntry[], tokenBudget: number = 0): BranchPreparation {
+	const preparation: BranchPreparation = { messages: [], fileOps: createFileOps(), totalTokens: 0 };
+	collectStoredBranchFileOperations(entries, preparation.fileOps);
+	selectBranchMessages(entries, tokenBudget, preparation);
+	return preparation;
 }
 
 const BRANCH_SUMMARY_PREAMBLE = `The user explored a different conversation branch before returning here.
@@ -247,7 +256,7 @@ export async function generateBranchSummary(
 	}
 
 	let summary = response.content
-		.filter((c): c is { type: "text"; text: string } => c.type === "text")
+		.filter((c): c is TextContent => c.type === "text")
 		.map((c) => c.text)
 		.join("\n");
 	summary = BRANCH_SUMMARY_PREAMBLE + summary;

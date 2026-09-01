@@ -36,10 +36,13 @@ function createAssistantMessage(text: string): AssistantMessage {
 	};
 }
 
-function createDeferred(): {
+// pi-ignore noNearIdenticalDataStructures: Agent lifecycle barriers and coding-agent file-mutation barriers belong to separate package test harnesses.
+interface DeferredSignal {
 	promise: Promise<void>;
 	resolve: () => void;
-} {
+}
+
+function createDeferred(): DeferredSignal {
 	let resolve = () => {};
 	const promise = new Promise<void>((resolvePromise) => {
 		resolve = resolvePromise;

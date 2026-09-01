@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getModel } from "../src/models.ts";
 import { streamOpenAICompletions } from "../src/providers/openai-completions.ts";
-import type { Model } from "../src/types.ts";
+import type { CacheRetention, Model } from "../src/types.ts";
+import type { MockCompletionPromise } from "./openai-mock-types.ts";
 
+type PromptCacheRetentionValue = "24h" | "in-memory";
 interface FakeOpenAIClientOptions {
 	apiKey: string;
 	baseURL: string;
@@ -12,7 +14,13 @@ interface FakeOpenAIClientOptions {
 
 interface CapturedCompletionsPayload {
 	prompt_cache_key?: string;
-	prompt_cache_retention?: "24h" | "in-memory" | null;
+	prompt_cache_retention?: PromptCacheRetentionValue | null;
+}
+
+interface PromptCacheRequestOptions {
+	cacheRetention?: CacheRetention;
+	sessionId?: string;
+	headers?: Record<string, string>;
 }
 
 const mockState = vi.hoisted(() => ({
@@ -39,12 +47,7 @@ vi.mock("openai", () => {
 							};
 						},
 					};
-					const promise = Promise.resolve(stream) as Promise<typeof stream> & {
-						withResponse: () => Promise<{
-							data: typeof stream;
-							response: { status: number; headers: Headers };
-						}>;
-					};
+					const promise = Promise.resolve(stream) as MockCompletionPromise<typeof stream>;
 					promise.withResponse = async () => ({
 						data: stream,
 						response: { status: 200, headers: new Headers() },
@@ -89,11 +92,7 @@ describe("openai-completions prompt caching", () => {
 	}
 
 	async function captureRequest(
-		options?: {
-			cacheRetention?: "none" | "short" | "long";
-			sessionId?: string;
-			headers?: Record<string, string>;
-		},
+		options?: PromptCacheRequestOptions,
 		model: Model<"openai-completions"> = createModel(),
 	) {
 		await streamOpenAICompletions(

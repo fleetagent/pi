@@ -1,16 +1,15 @@
-import { Type } from "typebox";
+import { type TSchema, Type } from "typebox";
 import { Compile } from "typebox/compile";
 import { describe, expect, it } from "vitest";
 import type { Tool, ToolCall } from "../src/types.ts";
 import { validateToolArguments } from "../src/utils/validation.ts";
 
-function createToolCallWithPlainSchema(
-	schema: Tool["parameters"],
-	value: unknown,
-): {
+interface PlainSchemaToolFixture {
 	tool: Tool;
 	toolCall: ToolCall;
-} {
+}
+
+function createToolCallWithPlainSchema(schema: TSchema, value: unknown): PlainSchemaToolFixture {
 	const tool: Tool = {
 		name: "echo",
 		description: "Echo tool",

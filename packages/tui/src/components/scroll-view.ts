@@ -1,13 +1,15 @@
-import { LAYOUT_NODE, type ScrollLayoutNode } from "../layout-node.ts";
+import { LAYOUT_NODE, type ScrollLayoutNode, type ScrollViewOverscrollBehavior } from "../layout-node.ts";
 import { type Component, Container } from "../tui.ts";
 
+export type ScrollViewFollowMode = "none" | "end";
+export type { ScrollViewOverscrollBehavior } from "../layout-node.ts";
 export type ScrollViewScrollbar = "hidden" | "auto" | "always";
 
 export interface ScrollViewOptions {
 	axis?: "vertical";
-	follow?: "none" | "end";
+	follow?: ScrollViewFollowMode;
 	primary?: boolean;
-	overscroll?: "chain" | "contain";
+	overscroll?: ScrollViewOverscrollBehavior;
 	scrollbar?: ScrollViewScrollbar;
 	scrollbarStyle?: (text: string) => string;
 	scrollbarHideDelayMs?: number;
@@ -17,7 +19,7 @@ export class ScrollView extends Container {
 	private readonly child: Component;
 	private readonly followEnd: boolean;
 	readonly primary: boolean;
-	readonly overscroll: "chain" | "contain";
+	readonly overscroll: ScrollViewOverscrollBehavior;
 	readonly scrollbarStyle: (text: string) => string;
 	private currentScrollbar: ScrollViewScrollbar;
 	private readonly scrollbarHideDelayMs: number;

@@ -268,6 +268,10 @@ const KEYBINDING_NAME_MIGRATIONS = {
 	deleteSessionNoninvasive: "app.session.deleteNoninvasive",
 } as const satisfies Record<string, Keybinding>;
 
+interface KeybindingsMigrationResult {
+	config: Record<string, unknown>;
+	migrated: boolean;
+}
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -292,10 +296,7 @@ function toKeybindingsConfig(value: unknown): KeybindingsConfig {
 	return config;
 }
 
-export function migrateKeybindingsConfig(rawConfig: Record<string, unknown>): {
-	config: Record<string, unknown>;
-	migrated: boolean;
-} {
+export function migrateKeybindingsConfig(rawConfig: Record<string, unknown>): KeybindingsMigrationResult {
 	const config: Record<string, unknown> = {};
 	let migrated = false;
 

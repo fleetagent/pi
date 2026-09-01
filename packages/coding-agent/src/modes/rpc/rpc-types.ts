@@ -5,15 +5,20 @@
  * Responses and events are emitted as JSON lines on stdout.
  */
 
-import type { AgentMessage, AgentToolResult, ThinkingLevel } from "@fleetagent/pi-agent-core";
+import type { AgentMessage, AgentToolResult, QueueMode, ThinkingLevel } from "@fleetagent/pi-agent-core";
 import type { ImageContent, Model } from "@fleetagent/pi-ai";
 import type { TSchema } from "typebox";
-import type { SessionStats, StructuredResponse } from "../../core/agent-session.ts";
+import type {
+	ForkableUserMessage,
+	ModelCycleResult,
+	SessionStats,
+	StructuredResponse,
+} from "../../core/agent-session.ts";
 import type { BashResult } from "../../core/bash-executor.ts";
 import type { CompactionResult } from "../../core/compaction/compaction.ts";
 import type { ExtensionInstructionRegistration, ToolDefinition, ToolInfo } from "../../core/extensions/types.ts";
 import type { SessionEntry, SessionInfo, SessionTreeNode } from "../../core/session/types.ts";
-import type { SourceInfo } from "../../core/source-info.ts";
+import type { SlashCommandInfo } from "../../core/slash-commands.ts";
 import type { ToolBackendInfo } from "../../core/tools/operations.ts";
 
 // ============================================================================
@@ -33,6 +38,54 @@ export interface RpcInstructionDefinition
 		ExtensionInstructionRegistration,
 		"name" | "description" | "filePath" | "content" | "baseDir" | "disableModelInvocation" | "tools"
 	> {}
+
+export type RpcCommandType =
+	| "prompt"
+	| "get_structured_response"
+	| "steer"
+	| "follow_up"
+	| "abort"
+	| "new_session"
+	| "list_sessions"
+	| "get_state"
+	| "set_model"
+	| "cycle_model"
+	| "get_available_models"
+	| "set_thinking_level"
+	| "cycle_thinking_level"
+	| "set_steering_mode"
+	| "set_follow_up_mode"
+	| "compact"
+	| "set_auto_compaction"
+	| "set_auto_retry"
+	| "abort_retry"
+	| "bash"
+	| "abort_bash"
+	| "set_remote_sandbox"
+	| "clear_remote_sandbox"
+	| "upload_file"
+	| "download_file"
+	| "get_session_stats"
+	| "export_html"
+	| "switch_session"
+	| "fork"
+	| "clone"
+	| "get_fork_messages"
+	| "get_entries"
+	| "get_tree"
+	| "get_last_assistant_text"
+	| "set_session_name"
+	| "get_messages"
+	| "get_commands"
+	| "register_skill"
+	| "unregister_skill"
+	| "register_rule"
+	| "unregister_rule"
+	| "register_tool"
+	| "unregister_tool"
+	| "get_available_tools"
+	| "rpc_tool_result"
+	| "rpc_tool_error";
 
 export type RpcCommand =
 	// Prompting
@@ -88,7 +141,6 @@ export type RpcCommand =
 	| { id?: string; type: "abort_bash" }
 
 	// Remote sandbox
-	| { id?: string; type: "set_remote_sandbox"; backend: "ssh"; remote: string; cwd?: string }
 	| { id?: string; type: "set_remote_sandbox"; backend: "daemon"; url: string; token?: string }
 	| { id?: string; type: "clear_remote_sandbox" }
 	| { id?: string; type: "upload_file"; sourcePath: string; destinationPath: string }
@@ -151,16 +203,7 @@ export type RpcClientListSessionsResponse = {
 // ============================================================================
 
 /** A command available for invocation via prompt */
-export interface RpcSlashCommand {
-	/** Command name (without leading slash) */
-	name: string;
-	/** Human-readable description */
-	description?: string;
-	/** What kind of command this is */
-	source: "extension" | "prompt" | "skill" | "rule";
-	/** Source metadata for the owning resource */
-	sourceInfo: SourceInfo;
-}
+export type RpcSlashCommand = SlashCommandInfo;
 
 // ============================================================================
 // RPC State
@@ -172,8 +215,8 @@ export interface RpcSessionState {
 	isStreaming: boolean;
 	isIdle: boolean;
 	isCompacting: boolean;
-	steeringMode: "all" | "one-at-a-time";
-	followUpMode: "all" | "one-at-a-time";
+	steeringMode: QueueMode;
+	followUpMode: QueueMode;
 	sessionFile?: string;
 	sessionId: string;
 	sessionName?: string;
@@ -186,6 +229,89 @@ export interface RpcSessionState {
 // ============================================================================
 // RPC Responses (stdout)
 // ============================================================================
+
+interface RpcNewSessionResponseData {
+	cancelled: boolean;
+}
+
+type RpcCycleModelResponseData = ModelCycleResult;
+
+interface RpcAvailableModelsResponseData {
+	models: Model<any>[];
+}
+
+interface RpcCycleThinkingLevelResponseData {
+	level: ThinkingLevel;
+}
+
+interface RpcUploadFileResponseData {
+	bytes: number;
+}
+
+interface RpcDownloadFileResponseData {
+	bytes: number;
+}
+
+interface RpcExportHtmlResponseData {
+	path: string;
+}
+
+interface RpcSwitchSessionResponseData {
+	cancelled: boolean;
+}
+
+interface RpcForkResponseData {
+	text: string;
+	cancelled: boolean;
+}
+
+interface RpcCloneResponseData {
+	cancelled: boolean;
+}
+
+type RpcForkMessage = ForkableUserMessage;
+
+export interface RpcForkMessagesResponseData {
+	messages: RpcForkMessage[];
+}
+
+export interface RpcEntriesResponseData {
+	entries: SessionEntry[];
+	leafId: string | null;
+}
+
+export interface RpcTreeResponseData {
+	tree: SessionTreeNode[];
+	leafId: string | null;
+}
+
+interface RpcLastAssistantTextResponseData {
+	text: string | null;
+}
+
+interface RpcMessagesResponseData {
+	messages: AgentMessage[];
+}
+
+interface RpcCommandsResponseData {
+	commands: RpcSlashCommand[];
+}
+
+interface RpcUnregisterSkillResponseData {
+	unregistered: boolean;
+}
+
+interface RpcUnregisterRuleResponseData {
+	unregistered: boolean;
+}
+
+interface RpcUnregisterToolResponseData {
+	unregistered: boolean;
+}
+
+interface RpcAvailableToolsResponseData {
+	tools: ToolInfo[];
+}
 
 // Success responses with data
 export type RpcResponse =
@@ -201,7 +327,7 @@ export type RpcResponse =
 	| { id?: string; type: "response"; command: "steer"; success: true }
 	| { id?: string; type: "response"; command: "follow_up"; success: true }
 	| { id?: string; type: "response"; command: "abort"; success: true }
-	| { id?: string; type: "response"; command: "new_session"; success: true; data: { cancelled: boolean } }
+	| { id?: string; type: "response"; command: "new_session"; success: true; data: RpcNewSessionResponseData }
 	| { id?: string; type: "response"; command: "list_sessions"; success: true; data: RpcListSessionsResponse }
 
 	// State
@@ -220,14 +346,14 @@ export type RpcResponse =
 			type: "response";
 			command: "cycle_model";
 			success: true;
-			data: { model: Model<any>; thinkingLevel: ThinkingLevel; isScoped: boolean } | null;
+			data: RpcCycleModelResponseData | null;
 	  }
 	| {
 			id?: string;
 			type: "response";
 			command: "get_available_models";
 			success: true;
-			data: { models: Model<any>[] };
+			data: RpcAvailableModelsResponseData;
 	  }
 
 	// Thinking
@@ -237,7 +363,7 @@ export type RpcResponse =
 			type: "response";
 			command: "cycle_thinking_level";
 			success: true;
-			data: { level: ThinkingLevel } | null;
+			data: RpcCycleThinkingLevelResponseData | null;
 	  }
 
 	// Queue modes
@@ -259,47 +385,47 @@ export type RpcResponse =
 	// Remote sandbox
 	| { id?: string; type: "response"; command: "set_remote_sandbox"; success: true; data: ToolBackendInfo }
 	| { id?: string; type: "response"; command: "clear_remote_sandbox"; success: true; data: ToolBackendInfo }
-	| { id?: string; type: "response"; command: "upload_file"; success: true; data: { bytes: number } }
-	| { id?: string; type: "response"; command: "download_file"; success: true; data: { bytes: number } }
+	| { id?: string; type: "response"; command: "upload_file"; success: true; data: RpcUploadFileResponseData }
+	| { id?: string; type: "response"; command: "download_file"; success: true; data: RpcDownloadFileResponseData }
 
 	// Session
 	| { id?: string; type: "response"; command: "get_session_stats"; success: true; data: SessionStats }
-	| { id?: string; type: "response"; command: "export_html"; success: true; data: { path: string } }
-	| { id?: string; type: "response"; command: "switch_session"; success: true; data: { cancelled: boolean } }
-	| { id?: string; type: "response"; command: "fork"; success: true; data: { text: string; cancelled: boolean } }
-	| { id?: string; type: "response"; command: "clone"; success: true; data: { cancelled: boolean } }
+	| { id?: string; type: "response"; command: "export_html"; success: true; data: RpcExportHtmlResponseData }
+	| { id?: string; type: "response"; command: "switch_session"; success: true; data: RpcSwitchSessionResponseData }
+	| { id?: string; type: "response"; command: "fork"; success: true; data: RpcForkResponseData }
+	| { id?: string; type: "response"; command: "clone"; success: true; data: RpcCloneResponseData }
 	| {
 			id?: string;
 			type: "response";
 			command: "get_fork_messages";
 			success: true;
-			data: { messages: Array<{ entryId: string; text: string }> };
+			data: RpcForkMessagesResponseData;
 	  }
 	| {
 			id?: string;
 			type: "response";
 			command: "get_entries";
 			success: true;
-			data: { entries: SessionEntry[]; leafId: string | null };
+			data: RpcEntriesResponseData;
 	  }
 	| {
 			id?: string;
 			type: "response";
 			command: "get_tree";
 			success: true;
-			data: { tree: SessionTreeNode[]; leafId: string | null };
+			data: RpcTreeResponseData;
 	  }
 	| {
 			id?: string;
 			type: "response";
 			command: "get_last_assistant_text";
 			success: true;
-			data: { text: string | null };
+			data: RpcLastAssistantTextResponseData;
 	  }
 	| { id?: string; type: "response"; command: "set_session_name"; success: true }
 
 	// Messages
-	| { id?: string; type: "response"; command: "get_messages"; success: true; data: { messages: AgentMessage[] } }
+	| { id?: string; type: "response"; command: "get_messages"; success: true; data: RpcMessagesResponseData }
 
 	// Commands
 	| {
@@ -307,19 +433,43 @@ export type RpcResponse =
 			type: "response";
 			command: "get_commands";
 			success: true;
-			data: { commands: RpcSlashCommand[] };
+			data: RpcCommandsResponseData;
 	  }
 
 	// Session-scoped RPC instructions
 	| { id?: string; type: "response"; command: "register_skill"; success: true }
-	| { id?: string; type: "response"; command: "unregister_skill"; success: true; data: { unregistered: boolean } }
+	| {
+			id?: string;
+			type: "response";
+			command: "unregister_skill";
+			success: true;
+			data: RpcUnregisterSkillResponseData;
+	  }
 	| { id?: string; type: "response"; command: "register_rule"; success: true }
-	| { id?: string; type: "response"; command: "unregister_rule"; success: true; data: { unregistered: boolean } }
+	| {
+			id?: string;
+			type: "response";
+			command: "unregister_rule";
+			success: true;
+			data: RpcUnregisterRuleResponseData;
+	  }
 
 	// Session-scoped RPC tools
 	| { id?: string; type: "response"; command: "register_tool"; success: true }
-	| { id?: string; type: "response"; command: "unregister_tool"; success: true; data: { unregistered: boolean } }
-	| { id?: string; type: "response"; command: "get_available_tools"; success: true; data: { tools: ToolInfo[] } }
+	| {
+			id?: string;
+			type: "response";
+			command: "unregister_tool";
+			success: true;
+			data: RpcUnregisterToolResponseData;
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "get_available_tools";
+			success: true;
+			data: RpcAvailableToolsResponseData;
+	  }
 	| { id?: string; type: "response"; command: "rpc_tool_result"; success: true }
 	| { id?: string; type: "response"; command: "rpc_tool_error"; success: true }
 
@@ -389,9 +539,3 @@ export type RpcExtensionUIResponse =
 	| { type: "extension_ui_response"; id: string; value: string }
 	| { type: "extension_ui_response"; id: string; confirmed: boolean }
 	| { type: "extension_ui_response"; id: string; cancelled: true };
-
-// ============================================================================
-// Helper type for extracting command types
-// ============================================================================
-
-export type RpcCommandType = RpcCommand["type"];

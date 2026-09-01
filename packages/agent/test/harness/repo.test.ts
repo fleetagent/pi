@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import { NodeExecutionEnv } from "../../src/harness/env/nodejs.ts";
 import { JsonlSessionRepo } from "../../src/harness/session/jsonl-repo.ts";
+import type { JsonlSessionCreationPhase } from "../../src/harness/session/jsonl-storage.ts";
 import { InMemorySessionRepo } from "../../src/harness/session/memory-repo.ts";
 import { err, FileError, type FileSystem } from "../../src/harness/types.ts";
 import { createAssistantMessage, createTempDir, createUserMessage } from "./session-test-utils.ts";
@@ -110,7 +111,7 @@ describe("JsonlSessionRepo", () => {
 		const cwd = join(root, "workspace");
 		const source = await repo.create({ cwd, id: "source-session" });
 		const sourceMetadata = await source.getMetadata();
-		const run = (kind: "create" | "fork", claimedCwd: string) =>
+		const run = (kind: JsonlSessionCreationPhase, claimedCwd: string) =>
 			kind === "create"
 				? repo.create({ cwd: claimedCwd, id: "claimed-session" })
 				: repo.fork(sourceMetadata, { cwd: claimedCwd, id: "claimed-session" });

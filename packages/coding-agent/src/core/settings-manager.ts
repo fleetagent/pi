@@ -1,4 +1,9 @@
-import type { Transport } from "@fleetagent/pi-ai";
+import type {
+	QueueMode,
+	CompactionSettings as ResolvedCompactionSettings,
+	ThinkingLevel,
+} from "@fleetagent/pi-agent-core";
+import type { RetryPolicy, ThinkingBudgets, Transport } from "@fleetagent/pi-ai";
 import type { ScrollViewScrollbar, TuiMode } from "@fleetagent/pi-tui";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
@@ -7,7 +12,9 @@ import { CONFIG_DIR_NAME, getAgentDir } from "../config.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
 import { DEFAULT_HTTP_IDLE_TIMEOUT_MS, parseHttpIdleTimeoutMs } from "./http-dispatcher.ts";
 import type { LspConfigurationLayer } from "./lsp/config.ts";
+import type { SandboxCleanupBehavior } from "./sandbox/docker.ts";
 
+// pi-ignore noNearIdenticalDataStructures: Persisted overrides permit omitted fields so settings layering can apply defaults independently of the fully resolved harness runtime contract.
 export interface CompactionSettings {
 	enabled?: boolean; // default: true
 	reserveTokens?: number; // default: 16384
@@ -46,14 +53,11 @@ export interface ImageSettings {
 	blockImages?: boolean; // default: false - when true, prevents all images from being sent to LLM providers
 }
 
-export interface ThinkingBudgetsSettings {
-	minimal?: number;
-	low?: number;
-	medium?: number;
-	high?: number;
-}
+export type ThinkingBudgetsSettings = ThinkingBudgets;
 
 export type MermaidRenderingMode = "off" | "final" | "streaming";
+export type DoubleEscapeAction = "fork" | "tree" | "none";
+export type TreeFilterMode = "default" | "no-tools" | "user-only" | "labeled-only" | "all";
 
 export interface MarkdownSettings {
 	codeBlockIndent?: string; // default: "  "
@@ -73,7 +77,7 @@ export interface SandboxSettings {
 	containerNamePrefix?: string; // default: pi-sandbox
 	daemonPort?: number; // container daemon port, default: 8787
 	daemonHostBind?: string; // host bind address for published daemon port, default: 127.0.0.1
-	cleanup?: "stop" | "remove"; // default: stop
+	cleanup?: SandboxCleanupBehavior; // default: stop
 }
 
 export type TransportSetting = Transport;
@@ -98,10 +102,10 @@ export interface Settings {
 	lastChangelogVersion?: string;
 	defaultProvider?: string;
 	defaultModel?: string;
-	defaultThinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+	defaultThinkingLevel?: ThinkingLevel;
 	transport?: TransportSetting; // default: "auto"
-	steeringMode?: "all" | "one-at-a-time";
-	followUpMode?: "all" | "one-at-a-time";
+	steeringMode?: QueueMode;
+	followUpMode?: QueueMode;
 	theme?: string;
 	compaction?: CompactionSettings;
 	branchSummary?: BranchSummarySettings;
@@ -124,8 +128,8 @@ export interface Settings {
 	terminal?: TerminalSettings;
 	images?: ImageSettings;
 	enabledModels?: string[]; // Model patterns for cycling (same format as --models CLI flag)
-	doubleEscapeAction?: "fork" | "tree" | "none"; // Action for double-escape with empty editor (default: "tree")
-	treeFilterMode?: "default" | "no-tools" | "user-only" | "labeled-only" | "all"; // Default filter when opening /tree
+	doubleEscapeAction?: DoubleEscapeAction; // Action for double-escape with empty editor (default: "tree")
+	treeFilterMode?: TreeFilterMode; // Default filter when opening /tree
 	thinkingBudgets?: ThinkingBudgetsSettings; // Custom token budgets for thinking levels
 	editorPaddingX?: number; // Horizontal padding for input editor (default: 0)
 	outputPad?: 0 | 1; // Horizontal padding for user, assistant, and thinking output (default: 1)
@@ -182,48 +186,55 @@ function deepMergeObjects(base: Record<string, unknown>, overrides: Record<strin
 	return result;
 }
 
+function mergeToolSettings(baseValue: ToolSettings | undefined, overrideValue: ToolSettings): ToolSettings {
+	const mergedTools: ToolSettings = isMergeableObject(baseValue) ? { ...baseValue } : {};
+	for (const [toolName, toolOverride] of Object.entries(overrideValue)) {
+		const baseTool = mergedTools[toolName];
+		setOwnValue(
+			mergedTools,
+			toolName,
+			isMergeableObject(baseTool) && isMergeableObject(toolOverride)
+				? { ...baseTool, ...toolOverride }
+				: toolOverride,
+		);
+	}
+	return mergedTools;
+}
+
+function applySettingsOverride(
+	result: Settings,
+	base: Settings,
+	key: keyof Settings,
+	overrideValue: Settings[keyof Settings],
+): void {
+	const resultRecord = result as Record<string, unknown>;
+	// LSP layers are resolved independently with scope-specific trust policy.
+	if (key === "lsp") {
+		setOwnValue(resultRecord, key, overrideValue);
+		return;
+	}
+	// Tool names merge, but each tool's configuration remains a shallow layer.
+	if (key === "tools" && isMergeableObject(overrideValue)) {
+		result.tools = mergeToolSettings(base.tools, overrideValue as ToolSettings);
+		return;
+	}
+	if (overrideValue === undefined) return;
+	const baseValue = base[key];
+	setOwnValue(
+		resultRecord,
+		key,
+		RECURSIVELY_MERGED_SETTINGS.has(key) && isMergeableObject(baseValue) && isMergeableObject(overrideValue)
+			? deepMergeObjects(baseValue, overrideValue)
+			: overrideValue,
+	);
+}
+
 /** Merge settings according to each field's layering policy. */
 function deepMergeSettings(base: Settings, overrides: Settings): Settings {
 	const result: Settings = { ...base };
-	const resultRecord = result as Record<string, unknown>;
-
 	for (const key of Object.keys(overrides) as (keyof Settings)[]) {
-		const overrideValue = overrides[key];
-		const baseValue = base[key];
-
-		// LSP layers are resolved independently with scope-specific trust policy.
-		if (key === "lsp") {
-			setOwnValue(resultRecord, key, overrideValue);
-			continue;
-		}
-
-		// Tool names merge, but each tool's configuration remains a shallow layer.
-		if (key === "tools" && isMergeableObject(overrideValue)) {
-			const mergedTools: ToolSettings = isMergeableObject(baseValue) ? { ...baseValue } : {};
-			for (const [toolName, toolOverride] of Object.entries(overrideValue as ToolSettings)) {
-				const baseTool = mergedTools[toolName];
-				setOwnValue(
-					mergedTools,
-					toolName,
-					isMergeableObject(baseTool) && isMergeableObject(toolOverride)
-						? { ...baseTool, ...toolOverride }
-						: toolOverride,
-				);
-			}
-			result.tools = mergedTools;
-			continue;
-		}
-
-		if (overrideValue === undefined) continue;
-		setOwnValue(
-			resultRecord,
-			key,
-			RECURSIVELY_MERGED_SETTINGS.has(key) && isMergeableObject(baseValue) && isMergeableObject(overrideValue)
-				? deepMergeObjects(baseValue, overrideValue)
-				: overrideValue,
-		);
+		applySettingsOverride(result, base, key, overrides[key]);
 	}
-
 	return result;
 }
 
@@ -248,6 +259,16 @@ export interface SettingsError {
 	scope: SettingsScope;
 	error: Error;
 }
+
+interface SettingsLoadResult {
+	settings: Settings;
+	error: Error | null;
+}
+
+type ResolvedBranchSummarySettings = Required<BranchSummarySettings>;
+
+type ResolvedProviderRetrySettings = Omit<ProviderRetrySettings, "maxRetryDelayMs"> &
+	Required<Pick<ProviderRetrySettings, "maxRetryDelayMs">>;
 
 export class FileSettingsStorage implements SettingsStorage {
 	private globalSettingsPath: string;
@@ -334,6 +355,54 @@ export class InMemorySettingsStorage implements SettingsStorage {
 		}
 	}
 }
+interface LegacySkillsSettings {
+	enableSkillCommands?: boolean;
+	customDirectories?: unknown;
+}
+
+function migrateLegacyQueueMode(settings: Record<string, unknown>): void {
+	if (!("queueMode" in settings) || "steeringMode" in settings) return;
+	settings.steeringMode = settings.queueMode;
+	delete settings.queueMode;
+}
+
+function migrateLegacyWebsocketSetting(settings: Record<string, unknown>): void {
+	if ("transport" in settings || typeof settings.websockets !== "boolean") return;
+	settings.transport = settings.websockets ? "websocket" : "sse";
+	delete settings.websockets;
+}
+
+function migrateLegacySkillsSetting(settings: Record<string, unknown>): void {
+	if (!("skills" in settings) || !isMergeableObject(settings.skills)) return;
+	const skillsSettings = settings.skills as LegacySkillsSettings;
+	if (skillsSettings.enableSkillCommands !== undefined && settings.enableSkillCommands === undefined) {
+		settings.enableSkillCommands = skillsSettings.enableSkillCommands;
+	}
+	if (Array.isArray(skillsSettings.customDirectories) && skillsSettings.customDirectories.length > 0) {
+		settings.skills = skillsSettings.customDirectories;
+	} else {
+		delete settings.skills;
+	}
+}
+
+function migrateLegacyRetryDelaySetting(settings: Record<string, unknown>): void {
+	if (!("retry" in settings) || !isMergeableObject(settings.retry)) return;
+	const retrySettings = settings.retry;
+	const providerSettings =
+		typeof retrySettings.provider === "object" && retrySettings.provider !== null
+			? (retrySettings.provider as Record<string, unknown>)
+			: undefined;
+	if (
+		typeof retrySettings.maxDelayMs === "number" &&
+		(providerSettings?.maxRetryDelayMs === undefined || providerSettings?.maxRetryDelayMs === null)
+	) {
+		retrySettings.provider = {
+			...(providerSettings ?? {}),
+			maxRetryDelayMs: retrySettings.maxDelayMs,
+		};
+	}
+	delete retrySettings.maxDelayMs;
+}
 
 export class SettingsManager {
 	private storage: SettingsStorage;
@@ -417,10 +486,7 @@ export class SettingsManager {
 		return SettingsManager.migrateSettings(settings);
 	}
 
-	private static tryLoadFromStorage(
-		storage: SettingsStorage,
-		scope: SettingsScope,
-	): { settings: Settings; error: Error | null } {
+	private static tryLoadFromStorage(storage: SettingsStorage, scope: SettingsScope): SettingsLoadResult {
 		try {
 			return { settings: SettingsManager.loadFromStorage(storage, scope), error: null };
 		} catch (error) {
@@ -430,63 +496,10 @@ export class SettingsManager {
 
 	/** Migrate old settings format to new format */
 	private static migrateSettings(settings: Record<string, unknown>): Settings {
-		// Migrate queueMode -> steeringMode
-		if ("queueMode" in settings && !("steeringMode" in settings)) {
-			settings.steeringMode = settings.queueMode;
-			delete settings.queueMode;
-		}
-
-		// Migrate legacy websockets boolean -> transport enum
-		if (!("transport" in settings) && typeof settings.websockets === "boolean") {
-			settings.transport = settings.websockets ? "websocket" : "sse";
-			delete settings.websockets;
-		}
-
-		// Migrate old skills object format to new array format
-		if (
-			"skills" in settings &&
-			typeof settings.skills === "object" &&
-			settings.skills !== null &&
-			!Array.isArray(settings.skills)
-		) {
-			const skillsSettings = settings.skills as {
-				enableSkillCommands?: boolean;
-				customDirectories?: unknown;
-			};
-			if (skillsSettings.enableSkillCommands !== undefined && settings.enableSkillCommands === undefined) {
-				settings.enableSkillCommands = skillsSettings.enableSkillCommands;
-			}
-			if (Array.isArray(skillsSettings.customDirectories) && skillsSettings.customDirectories.length > 0) {
-				settings.skills = skillsSettings.customDirectories;
-			} else {
-				delete settings.skills;
-			}
-		}
-
-		// Migrate retry.maxDelayMs -> retry.provider.maxRetryDelayMs
-		if (
-			"retry" in settings &&
-			typeof settings.retry === "object" &&
-			settings.retry !== null &&
-			!Array.isArray(settings.retry)
-		) {
-			const retrySettings = settings.retry as Record<string, unknown>;
-			const providerSettings =
-				typeof retrySettings.provider === "object" && retrySettings.provider !== null
-					? (retrySettings.provider as Record<string, unknown>)
-					: undefined;
-			if (
-				typeof retrySettings.maxDelayMs === "number" &&
-				(providerSettings?.maxRetryDelayMs === undefined || providerSettings?.maxRetryDelayMs === null)
-			) {
-				retrySettings.provider = {
-					...(providerSettings ?? {}),
-					maxRetryDelayMs: retrySettings.maxDelayMs,
-				};
-			}
-			delete retrySettings.maxDelayMs;
-		}
-
+		migrateLegacyQueueMode(settings);
+		migrateLegacyWebsocketSetting(settings);
+		migrateLegacySkillsSetting(settings);
+		migrateLegacyRetryDelaySetting(settings);
 		return settings as Settings;
 	}
 
@@ -737,21 +750,21 @@ export class SettingsManager {
 		this.save();
 	}
 
-	getSteeringMode(): "all" | "one-at-a-time" {
+	getSteeringMode(): QueueMode {
 		return this.settings.steeringMode || "one-at-a-time";
 	}
 
-	setSteeringMode(mode: "all" | "one-at-a-time"): void {
+	setSteeringMode(mode: QueueMode): void {
 		this.globalSettings.steeringMode = mode;
 		this.markModified("steeringMode");
 		this.save();
 	}
 
-	getFollowUpMode(): "all" | "one-at-a-time" {
+	getFollowUpMode(): QueueMode {
 		return this.settings.followUpMode || "one-at-a-time";
 	}
 
-	setFollowUpMode(mode: "all" | "one-at-a-time"): void {
+	setFollowUpMode(mode: QueueMode): void {
 		this.globalSettings.followUpMode = mode;
 		this.markModified("followUpMode");
 		this.save();
@@ -767,11 +780,11 @@ export class SettingsManager {
 		this.save();
 	}
 
-	getDefaultThinkingLevel(): "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | undefined {
+	getDefaultThinkingLevel(): ThinkingLevel | undefined {
 		return this.settings.defaultThinkingLevel;
 	}
 
-	setDefaultThinkingLevel(level: "off" | "minimal" | "low" | "medium" | "high" | "xhigh"): void {
+	setDefaultThinkingLevel(level: ThinkingLevel): void {
 		this.globalSettings.defaultThinkingLevel = level;
 		this.markModified("defaultThinkingLevel");
 		this.save();
@@ -808,7 +821,7 @@ export class SettingsManager {
 		return this.settings.compaction?.keepRecentTokens ?? 20000;
 	}
 
-	getCompactionSettings(): { enabled: boolean; reserveTokens: number; keepRecentTokens: number } {
+	getCompactionSettings(): ResolvedCompactionSettings {
 		return {
 			enabled: this.getCompactionEnabled(),
 			reserveTokens: this.getCompactionReserveTokens(),
@@ -816,7 +829,7 @@ export class SettingsManager {
 		};
 	}
 
-	getBranchSummarySettings(): { reserveTokens: number; skipPrompt: boolean } {
+	getBranchSummarySettings(): ResolvedBranchSummarySettings {
 		return {
 			reserveTokens: this.settings.branchSummary?.reserveTokens ?? 16384,
 			skipPrompt: this.settings.branchSummary?.skipPrompt ?? false,
@@ -840,7 +853,7 @@ export class SettingsManager {
 		this.save();
 	}
 
-	getRetrySettings(): { enabled: boolean; maxRetries: number; baseDelayMs: number } {
+	getRetrySettings(): RetryPolicy {
 		return {
 			enabled: this.getRetryEnabled(),
 			maxRetries: this.settings.retry?.maxRetries ?? 3,
@@ -865,7 +878,7 @@ export class SettingsManager {
 		return parseTimeoutSetting(this.settings.websocketConnectTimeoutMs, "websocketConnectTimeoutMs");
 	}
 
-	getProviderRetrySettings(): { timeoutMs?: number; maxRetries?: number; maxRetryDelayMs: number } {
+	getProviderRetrySettings(): ResolvedProviderRetrySettings {
 		return {
 			timeoutMs: this.settings.retry?.provider?.timeoutMs,
 			maxRetries: this.settings.retry?.provider?.maxRetries,
@@ -1167,23 +1180,23 @@ export class SettingsManager {
 		this.save();
 	}
 
-	getDoubleEscapeAction(): "fork" | "tree" | "none" {
+	getDoubleEscapeAction(): DoubleEscapeAction {
 		return this.settings.doubleEscapeAction ?? "tree";
 	}
 
-	setDoubleEscapeAction(action: "fork" | "tree" | "none"): void {
+	setDoubleEscapeAction(action: DoubleEscapeAction): void {
 		this.globalSettings.doubleEscapeAction = action;
 		this.markModified("doubleEscapeAction");
 		this.save();
 	}
 
-	getTreeFilterMode(): "default" | "no-tools" | "user-only" | "labeled-only" | "all" {
+	getTreeFilterMode(): TreeFilterMode {
 		const mode = this.settings.treeFilterMode;
 		const valid = ["default", "no-tools", "user-only", "labeled-only", "all"];
 		return mode && valid.includes(mode) ? mode : "default";
 	}
 
-	setTreeFilterMode(mode: "default" | "no-tools" | "user-only" | "labeled-only" | "all"): void {
+	setTreeFilterMode(mode: TreeFilterMode): void {
 		this.globalSettings.treeFilterMode = mode;
 		this.markModified("treeFilterMode");
 		this.save();

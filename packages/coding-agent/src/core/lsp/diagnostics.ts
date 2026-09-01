@@ -1,7 +1,8 @@
 import { Text } from "@fleetagent/pi-tui";
 import { type Static, Type } from "typebox";
 import { type Diagnostic, DiagnosticSeverity } from "vscode-languageserver-protocol";
-import type { ToolDefinition } from "../extensions/types.ts";
+import type { Theme } from "../../modes/interactive/theme/theme.ts";
+import type { AgentToolResult, ToolDefinition } from "../extensions/types.ts";
 import type { ToolOperations } from "../tools/operations.ts";
 import { throwIfAborted } from "./abort.ts";
 import type { LspRuntimeState } from "./integration.ts";
@@ -172,6 +173,37 @@ async function delay(ms: number, signal?: AbortSignal): Promise<void> {
 	});
 }
 
+function cachedWorkspaceDiagnostics(state: LspRuntimeState): AgentToolResult<LspDiagnosticsDetails> {
+	const routes = state.manager
+		.getRunningClients()
+		.filter((route) => route.target.server.features?.diagnostics !== false);
+	if (routes.length === 0) {
+		return {
+			content: [{ type: "text", text: "No capable running LSP server is available for cached diagnostics." }],
+			details: { count: 0, errors: 0, warnings: 0, files: 0, unavailable: true },
+		};
+	}
+	const formatted = formatWorkspaceDiagnostics(state, routes);
+	return { content: [{ type: "text", text: formatted.text }], details: formatted.details };
+}
+
+function renderCompactDiagnosticsResult(details: LspDiagnosticsDetails, theme: Theme): Text {
+	if (details.count === 0) {
+		return new Text(
+			theme.fg(
+				details.unavailable ? "error" : "success",
+				details.unavailable ? "LSP unavailable" : "No diagnostics",
+			),
+			0,
+			0,
+		);
+	}
+	const parts = [`${details.count} diagnostic(s)`];
+	if (details.errors > 0) parts.push(`${details.errors} error(s)`);
+	if (details.warnings > 0) parts.push(`${details.warnings} warning(s)`);
+	return new Text(theme.fg(details.errors > 0 ? "error" : "warning", parts.join(", ")), 0, 0);
+}
+
 export function createLspDiagnosticsTool(
 	getState: () => LspRuntimeState,
 	getOperations?: () => ToolOperations,
@@ -192,21 +224,7 @@ export function createLspDiagnosticsTool(
 			const state = getState();
 			const operations = getOperations?.() ?? ctx.toolOperations;
 			await state.manager.setToolOperations(operations, signal);
-			if (params.path === "*") {
-				const routes = state.manager
-					.getRunningClients()
-					.filter((route) => route.target.server.features?.diagnostics !== false);
-				if (routes.length === 0) {
-					return {
-						content: [
-							{ type: "text", text: "No capable running LSP server is available for cached diagnostics." },
-						],
-						details: { count: 0, errors: 0, warnings: 0, files: 0, unavailable: true },
-					};
-				}
-				const formatted = formatWorkspaceDiagnostics(state, routes);
-				return { content: [{ type: "text", text: formatted.text }], details: formatted.details };
-			}
+			if (params.path === "*") return cachedWorkspaceDiagnostics(state);
 			let collection = await state.manager.getClientRoutesForFeature(params.path, "diagnostics", signal);
 			if (collection.routes.length === 0) {
 				const message =
@@ -282,20 +300,7 @@ export function createLspDiagnosticsTool(
 				const output = result.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n");
 				return new Text(theme.fg(details.unavailable ? "error" : "toolOutput", output), 0, 0);
 			}
-			if (details.count === 0) {
-				return new Text(
-					theme.fg(
-						details.unavailable ? "error" : "success",
-						details.unavailable ? "LSP unavailable" : "No diagnostics",
-					),
-					0,
-					0,
-				);
-			}
-			const parts = [`${details.count} diagnostic(s)`];
-			if (details.errors > 0) parts.push(`${details.errors} error(s)`);
-			if (details.warnings > 0) parts.push(`${details.warnings} warning(s)`);
-			return new Text(theme.fg(details.errors > 0 ? "error" : "warning", parts.join(", ")), 0, 0);
+			return renderCompactDiagnosticsResult(details, theme);
 		},
 	};
 }

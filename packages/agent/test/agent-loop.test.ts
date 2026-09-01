@@ -1,16 +1,30 @@
 import {
+	type AssistantContent,
 	type AssistantMessage,
 	type AssistantMessageEvent,
 	EventStream,
 	type Message,
 	type Model,
+	type StopReason,
 	type UserMessage,
 } from "@fleetagent/pi-ai";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { agentLoop, agentLoopContinue } from "../src/agent-loop.ts";
-import type { AgentContext, AgentEvent, AgentLoopConfig, AgentMessage, AgentTool } from "../src/types.ts";
+import type {
+	AgentContext,
+	AgentEvent,
+	AgentEventOfType,
+	AgentLoopConfig,
+	AgentMessage,
+	AgentTool,
+} from "../src/types.ts";
 
+// pi-ignore noNearIdenticalDataStructures: This agent-core mock tool payload is test-owned and evolves independently from the coding-agent file-edit contract.
+interface EditReplacement {
+	oldText: string;
+	newText: string;
+}
 // Mock stream for testing - mimics MockAssistantStream
 class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
 	constructor() {
@@ -51,10 +65,7 @@ function createModel(): Model<"openai-responses"> {
 	};
 }
 
-function createAssistantMessage(
-	content: AssistantMessage["content"],
-	stopReason: AssistantMessage["stopReason"] = "stop",
-): AssistantMessage {
+function createAssistantMessage(content: AssistantContent[], stopReason: StopReason = "stop"): AssistantMessage {
 	return {
 		role: "assistant",
 		content,
@@ -251,9 +262,10 @@ describe("agentLoop with AgentMessage", () => {
 			model: createModel(),
 			convertToLlm: (messages) => {
 				// Filter out notifications, convert rest
-				convertedMessages = messages
-					.filter((m) => (m as { role: string }).role !== "notification")
-					.filter((m) => m.role === "user" || m.role === "assistant" || m.role === "toolResult") as Message[];
+				convertedMessages = messages.filter((message) => {
+					const role = (message as { role: string }).role;
+					return role !== "notification" && (role === "user" || role === "assistant" || role === "toolResult");
+				}) as Message[];
 				return convertedMessages;
 			},
 		};
@@ -468,7 +480,7 @@ describe("agentLoop with AgentMessage", () => {
 	it("should prepare tool arguments for validation", async () => {
 		const replaceSchema = Type.Object({ oldText: Type.String(), newText: Type.String() });
 		const toolSchema = Type.Object({ edits: Type.Array(replaceSchema) });
-		const executed: Array<Array<{ oldText: string; newText: string }>> = [];
+		const executed: EditReplacement[][] = [];
 		const tool: AgentTool<typeof toolSchema, { count: number }> = {
 			name: "edit",
 			label: "Edit",
@@ -476,15 +488,15 @@ describe("agentLoop with AgentMessage", () => {
 			parameters: toolSchema,
 			prepareArguments(args) {
 				if (!args || typeof args !== "object") {
-					return args as { edits: { oldText: string; newText: string }[] };
+					return args as { edits: EditReplacement[] };
 				}
 				const input = args as {
-					edits?: Array<{ oldText: string; newText: string }>;
+					edits?: EditReplacement[];
 					oldText?: string;
 					newText?: string;
 				};
 				if (typeof input.oldText !== "string" || typeof input.newText !== "string") {
-					return args as { edits: { oldText: string; newText: string }[] };
+					return args as { edits: EditReplacement[] };
 				}
 				return {
 					edits: [...(input.edits ?? []), { oldText: input.oldText, newText: input.newText }],
@@ -723,7 +735,7 @@ describe("agentLoop with AgentMessage", () => {
 		expect(executed).toEqual(["first", "second"]);
 
 		const toolEnds = events.filter(
-			(e): e is Extract<AgentEvent, { type: "tool_execution_end" }> => e.type === "tool_execution_end",
+			(e): e is AgentEventOfType<"tool_execution_end"> => e.type === "tool_execution_end",
 		);
 		expect(toolEnds.length).toBe(2);
 		expect(toolEnds[0].isError).toBe(false);

@@ -174,7 +174,7 @@ Relative fixed paths resolve from the configuration source.
 }
 ```
 
-Pi searches from the document directory upward and selects the nearest directory containing a marker. Discovery uses the active `ToolOperations` file backend, including SSH and remote backends; it does not probe the host filesystem for remote workspaces. `fallback: "session"` uses the active backend cwd when no marker is found; `fallback: "none"` leaves the document unrouted. `stopAt` limits the upward search and is source-relative when not absolute. Replacing the backend or changing its cwd invalidates cached roots and stale server instances.
+Pi searches from the document directory upward and selects the nearest directory containing a marker. Discovery uses the active `ToolOperations` file backend, including remote daemon backends; it does not probe the host filesystem for remote workspaces. `fallback: "session"` uses the active backend cwd when no marker is found; `fallback: "none"` leaves the document unrouted. `stopAt` limits the upward search and is source-relative when not absolute. Replacing the backend or changing its cwd invalidates cached roots and stale server instances.
 
 ## Transports and lifecycle
 
@@ -261,7 +261,7 @@ The required lifecycle combinations are: `spawn` → managed, TCP/Unix/named pip
 
 Use `pathMappings` when agent-visible paths differ from file URIs seen by the language server. Outgoing document and workspace URIs must map through the selected route. Pi maps interpreted URI fields in incoming results when possible; unmapped locations and edit previews are labeled as unmapped rather than treated as local paths.
 
-For example, Pi's SSH/container tool backend may expose `/workspace`, while a daemon sees the same files at `/srv/repos/app`:
+For example, a container daemon may expose `/workspace`, while its language server sees the same files at `/srv/repos/app`:
 
 ```json
 {
@@ -495,5 +495,5 @@ Project-settings spawn and attached endpoint definitions are blocked unless the 
 
 - Synchronization does not start an inactive server; invoke an LSP tool first when needed.
 - The server's advertised text-document sync capability controls open/change/save/close notifications.
-- Inspect `synchronizationError` in status, especially after switching to an SSH, container, or daemon backend.
+- Inspect `synchronizationError` in status, especially after switching to a container or remote daemon backend.
 - Unexpected disconnects are reconnectable; the next routed request starts a replacement and replays open documents.

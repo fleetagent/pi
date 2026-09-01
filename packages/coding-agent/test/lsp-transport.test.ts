@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { InitializeParams } from "vscode-languageserver-protocol";
+import type { DidChangeConfigurationParams, InitializeParams } from "vscode-languageserver-protocol";
 import {
 	AbstractMessageWriter,
 	createMessageConnection,
@@ -26,6 +26,13 @@ import {
 	resolveLspConnectionFactory,
 } from "../src/core/lsp/transport.ts";
 
+// pi-ignore noNearIdenticalDataStructures: Test TCP listen targets follow Node server fixture needs, while daemon endpoints are validated runtime configuration and evolve independently.
+interface TcpListenOptions {
+	host: string;
+	port: number;
+}
+
+type TestServerListenTarget = TcpListenOptions | string;
 const tempDirs: string[] = [];
 const servers: Server[] = [];
 const sockets = new Set<Socket>();
@@ -62,7 +69,7 @@ async function createTempDir(): Promise<string> {
 	return directory;
 }
 
-async function listen(server: Server, options: { host: string; port: number } | string): Promise<void> {
+async function listen(server: Server, options: TestServerListenTarget): Promise<void> {
 	server.on("connection", (socket) => {
 		sockets.add(socket);
 		socket.once("close", () => sockets.delete(socket));
@@ -245,7 +252,7 @@ describe("LSP transports", () => {
 				workspaceFoldersResult = await connection.sendRequest("workspace/workspaceFolders");
 				configurationReady?.();
 			});
-			connection.onNotification("workspace/didChangeConfiguration", (params: { settings: unknown }) => {
+			connection.onNotification("workspace/didChangeConfiguration", (params: DidChangeConfigurationParams) => {
 				changedSettings = params.settings;
 			});
 			connection.onRequest(
@@ -605,18 +612,21 @@ describe("LSP transports", () => {
 		const sendRequest = vi.fn();
 		const sendNotification = vi.fn();
 		const dispose = vi.fn();
-		Object.assign(
-			client as unknown as {
-				connectionHandle: LspConnectionHandle;
-				connection: {
-					sendRequest: typeof sendRequest;
-					sendNotification: typeof sendNotification;
-					dispose: typeof dispose;
-				};
-				initialized: boolean;
-			},
-			{ connectionHandle: handle, connection: { sendRequest, sendNotification, dispose }, initialized: true },
-		);
+		interface InvalidationConnectionFixture {
+			sendRequest: typeof sendRequest;
+			sendNotification: typeof sendNotification;
+			dispose: typeof dispose;
+		}
+		interface InvalidatableClientFixture {
+			connectionHandle: LspConnectionHandle;
+			connection: InvalidationConnectionFixture;
+			initialized: boolean;
+		}
+		Object.assign(client as unknown as InvalidatableClientFixture, {
+			connectionHandle: handle,
+			connection: { sendRequest, sendNotification, dispose },
+			initialized: true,
+		});
 
 		const invalidation = client.invalidate();
 		expect(client.isDisposed).toBe(true);

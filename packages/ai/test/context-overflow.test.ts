@@ -298,10 +298,10 @@ describe("Context overflow error handling", () => {
 
 	describe.skipIf(!process.env.CEREBRAS_API_KEY)("Cerebras", () => {
 		it("available model - should detect overflow via isContextOverflow", async () => {
-			const preferredCerebrasModelIds: string[] = ["gpt-oss-120b", "zai-glm-4.7", "llama3.1-8b"];
+			const preferredCerebrasModelIds = new Set(["gpt-oss-120b", "zai-glm-4.7", "llama3.1-8b"]);
 			const cerebrasModels = getModels("cerebras");
 			const model =
-				cerebrasModels.find((candidate) => preferredCerebrasModelIds.includes(candidate.id)) ?? cerebrasModels[0];
+				cerebrasModels.find((candidate) => preferredCerebrasModelIds.has(candidate.id)) ?? cerebrasModels[0];
 			if (!model) {
 				throw new Error("No Cerebras models available");
 			}

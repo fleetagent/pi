@@ -1,4 +1,4 @@
-import type { ThinkingLevel } from "@fleetagent/pi-agent-core";
+import type { QueueMode, ThinkingLevel } from "@fleetagent/pi-agent-core";
 import type { Transport } from "@fleetagent/pi-ai";
 import {
 	Container,
@@ -14,7 +14,13 @@ import {
 	type TuiMode,
 } from "@fleetagent/pi-tui";
 import { formatHttpIdleTimeoutMs, HTTP_IDLE_TIMEOUT_CHOICES } from "../../../core/http-dispatcher.ts";
-import type { FullscreenExitOutput, MermaidRenderingMode, WarningSettings } from "../../../core/settings-manager.ts";
+import type {
+	DoubleEscapeAction,
+	FullscreenExitOutput,
+	MermaidRenderingMode,
+	TreeFilterMode,
+	WarningSettings,
+} from "../../../core/settings-manager.ts";
 import { getSelectListTheme, getSettingsListTheme, theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyDisplayText } from "./keybinding-hints.ts";
@@ -40,8 +46,8 @@ export interface SettingsConfig {
 	autoResizeImages: boolean;
 	blockImages: boolean;
 	enableSkillCommands: boolean;
-	steeringMode: "all" | "one-at-a-time";
-	followUpMode: "all" | "one-at-a-time";
+	steeringMode: QueueMode;
+	followUpMode: QueueMode;
 	transport: Transport;
 	httpIdleTimeoutMs: number;
 	thinkingLevel: ThinkingLevel;
@@ -52,8 +58,8 @@ export interface SettingsConfig {
 	mermaidRenderingMode: MermaidRenderingMode;
 	collapseChangelog: boolean;
 	enableInstallTelemetry: boolean;
-	doubleEscapeAction: "fork" | "tree" | "none";
-	treeFilterMode: "default" | "no-tools" | "user-only" | "labeled-only" | "all";
+	doubleEscapeAction: DoubleEscapeAction;
+	treeFilterMode: TreeFilterMode;
 	showHardwareCursor: boolean;
 	editorPaddingX: number;
 	outputPad: 0 | 1;
@@ -74,8 +80,8 @@ export interface SettingsCallbacks {
 	onAutoResizeImagesChange: (enabled: boolean) => void;
 	onBlockImagesChange: (blocked: boolean) => void;
 	onEnableSkillCommandsChange: (enabled: boolean) => void;
-	onSteeringModeChange: (mode: "all" | "one-at-a-time") => void;
-	onFollowUpModeChange: (mode: "all" | "one-at-a-time") => void;
+	onSteeringModeChange: (mode: QueueMode) => void;
+	onFollowUpModeChange: (mode: QueueMode) => void;
 	onTransportChange: (transport: Transport) => void;
 	onHttpIdleTimeoutMsChange: (timeoutMs: number) => void;
 	onThinkingLevelChange: (level: ThinkingLevel) => void;
@@ -85,8 +91,8 @@ export interface SettingsCallbacks {
 	onMermaidRenderingModeChange: (mode: MermaidRenderingMode) => void;
 	onCollapseChangelogChange: (collapsed: boolean) => void;
 	onEnableInstallTelemetryChange: (enabled: boolean) => void;
-	onDoubleEscapeActionChange: (action: "fork" | "tree" | "none") => void;
-	onTreeFilterModeChange: (mode: "default" | "no-tools" | "user-only" | "labeled-only" | "all") => void;
+	onDoubleEscapeActionChange: (action: DoubleEscapeAction) => void;
+	onTreeFilterModeChange: (mode: TreeFilterMode) => void;
 	onShowHardwareCursorChange: (enabled: boolean) => void;
 	onEditorPaddingXChange: (padding: number) => void;
 	onOutputPadChange: (padding: 0 | 1) => void;

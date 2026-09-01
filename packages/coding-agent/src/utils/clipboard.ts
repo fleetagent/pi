@@ -70,6 +70,91 @@ export async function readClipboardText(): Promise<string | null> {
 	}
 }
 
+type ClipboardCopyAttempt = boolean | Promise<boolean>;
+
+function writeWaylandClipboard(text: string): Promise<number> {
+	return new Promise((resolve) => {
+		const proc = spawn("wl-copy", [], { stdio: ["pipe", "ignore", "ignore"] });
+		proc.on("error", () => resolve(1));
+		proc.on("close", (code) => resolve(code ?? 1));
+		proc.stdin.on("error", () => {
+			// Ignore EPIPE errors if wl-copy exits early.
+		});
+		proc.stdin.write(text);
+		proc.stdin.end();
+	});
+}
+
+function copyToX11IfAvailable(options: NativeClipboardExecOptions, hasX11Display: boolean): boolean {
+	if (!hasX11Display) return false;
+	copyToX11Clipboard(options);
+	return true;
+}
+
+function copyToWaylandClipboard(
+	text: string,
+	options: NativeClipboardExecOptions,
+	hasX11Display: boolean,
+): ClipboardCopyAttempt {
+	try {
+		// Verify wl-copy exists (spawn errors are async and won't be caught).
+		execSync("which wl-copy", { stdio: "ignore" });
+	} catch {
+		return copyToX11IfAvailable(options, hasX11Display);
+	}
+	return writeWaylandClipboard(text).then(
+		(exitCode) => {
+			if (exitCode === 0) return true;
+			try {
+				return copyToX11IfAvailable(options, hasX11Display);
+			} catch {
+				return copyToX11IfAvailable(options, hasX11Display);
+			}
+		},
+		() => copyToX11IfAvailable(options, hasX11Display),
+	);
+}
+
+function copyToLinuxClipboard(text: string, options: NativeClipboardExecOptions): ClipboardCopyAttempt {
+	if (process.env.TERMUX_VERSION) {
+		try {
+			execSync("termux-clipboard-set", options);
+			return true;
+		} catch {
+			// Fall back to Wayland or X11 tools.
+		}
+	}
+	const hasWaylandDisplay = Boolean(process.env.WAYLAND_DISPLAY);
+	const hasX11Display = Boolean(process.env.DISPLAY);
+	if (isWaylandSession() && hasWaylandDisplay) {
+		const attempt = copyToWaylandClipboard(text, options, hasX11Display);
+		return attempt instanceof Promise ? attempt.catch(() => false) : attempt;
+	}
+	if (!hasX11Display) return false;
+	copyToX11Clipboard(options);
+	return true;
+}
+
+function copyWithPlatformTools(
+	text: string,
+	currentPlatform: NodeJS.Platform,
+	options: NativeClipboardExecOptions,
+): ClipboardCopyAttempt {
+	try {
+		if (currentPlatform === "darwin") {
+			execSync("pbcopy", options);
+			return true;
+		}
+		if (currentPlatform === "win32") {
+			execSync("clip", options);
+			return true;
+		}
+		return copyToLinuxClipboard(text, options);
+	} catch {
+		return false;
+	}
+}
+
 export async function copyToClipboard(text: string): Promise<void> {
 	let copied = false;
 
@@ -102,66 +187,8 @@ export async function copyToClipboard(text: string): Promise<void> {
 	const options: NativeClipboardExecOptions = { input: text, timeout: 5000, stdio: ["pipe", "ignore", "ignore"] };
 
 	if (!copied) {
-		try {
-			if (p === "darwin") {
-				execSync("pbcopy", options);
-				copied = true;
-			} else if (p === "win32") {
-				execSync("clip", options);
-				copied = true;
-			} else {
-				// Linux. Try Termux, Wayland, or X11 clipboard tools.
-				if (process.env.TERMUX_VERSION) {
-					try {
-						execSync("termux-clipboard-set", options);
-						copied = true;
-					} catch {
-						// Fall back to Wayland or X11 tools.
-					}
-				}
-
-				if (!copied) {
-					const hasWaylandDisplay = Boolean(process.env.WAYLAND_DISPLAY);
-					const hasX11Display = Boolean(process.env.DISPLAY);
-					const isWayland = isWaylandSession();
-					if (isWayland && hasWaylandDisplay) {
-						try {
-							// Verify wl-copy exists (spawn errors are async and won't be caught)
-							execSync("which wl-copy", { stdio: "ignore" });
-							// wl-copy with execSync hangs due to fork behavior; use spawn instead.
-							// Await the exit code and only claim success on a clean exit, so a
-							// failed wl-copy falls through to the xclip/OSC 52 fallbacks.
-							const wlCopyExit = await new Promise<number>((resolve) => {
-								const proc = spawn("wl-copy", [], { stdio: ["pipe", "ignore", "ignore"] });
-								proc.on("error", () => resolve(1));
-								proc.on("close", (code) => resolve(code ?? 1));
-								proc.stdin.on("error", () => {
-									// Ignore EPIPE errors if wl-copy exits early
-								});
-								proc.stdin.write(text);
-								proc.stdin.end();
-							});
-							if (wlCopyExit === 0) {
-								copied = true;
-							} else if (hasX11Display) {
-								copyToX11Clipboard(options);
-								copied = true;
-							}
-						} catch {
-							if (hasX11Display) {
-								copyToX11Clipboard(options);
-								copied = true;
-							}
-						}
-					} else if (hasX11Display) {
-						copyToX11Clipboard(options);
-						copied = true;
-					}
-				}
-			}
-		} catch {
-			// Fall through to OSC 52 fallback.
-		}
+		const copyAttempt = copyWithPlatformTools(text, p, options);
+		copied = copyAttempt instanceof Promise ? await copyAttempt : copyAttempt;
 	}
 
 	if (remote || !copied) {

@@ -5,6 +5,7 @@
  * This tests the fix for WSL2/WSLg where clipboard often provides image/bmp
  * instead of image/png.
  */
+import type * as ChildProcessModule from "child_process";
 import { describe, expect, test, vi } from "vitest";
 
 function createTinyBmp1x1Red24bpp(): Uint8Array {
@@ -43,7 +44,7 @@ function createTinyBmp1x1Red24bpp(): Uint8Array {
 
 // Mock wl-paste to return BMP
 vi.mock("child_process", async () => {
-	const actual = await vi.importActual<typeof import("child_process")>("child_process");
+	const actual = await vi.importActual<typeof ChildProcessModule>("child_process");
 	return {
 		...actual,
 		spawnSync: vi.fn((command: string, args: string[]) => {

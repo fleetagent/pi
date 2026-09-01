@@ -12,6 +12,7 @@ import {
 	type KnownProvider,
 	loadCachedModelCatalog,
 	type Model,
+	type ModelInputModality,
 	type OAuthProviderInterface,
 	type OpenAICompletionsCompat,
 	type OpenAIResponsesCompat,
@@ -138,6 +139,7 @@ const AnthropicMessagesCompatSchema = Type.Object({
 	supportsLongCacheRetention: Type.Optional(Type.Boolean()),
 });
 
+type ProviderCompatibility = OpenAICompletionsCompat | OpenAIResponsesCompat | AnthropicMessagesCompat;
 const ProviderCompatSchema = Type.Union([
 	OpenAICompletionsCompatSchema,
 	OpenAIResponsesCompatSchema,
@@ -202,6 +204,8 @@ const ProviderConfigSchema = Type.Object({
 	modelOverrides: Type.Optional(Type.Record(Type.String(), ModelOverrideSchema)),
 });
 
+type ModelDefinition = Static<typeof ModelDefinitionSchema>;
+type ModelsProviderConfig = Static<typeof ProviderConfigSchema>;
 const ModelsConfigSchema = Type.Object({
 	providers: Type.Record(Type.String(), ProviderConfigSchema),
 });
@@ -333,14 +337,14 @@ function emptyCustomModelsResult(error?: string): CustomModelsResult {
 }
 
 function mergeCompat(
-	baseCompat: Model<Api>["compat"],
-	overrideCompat: ModelOverride["compat"],
-): Model<Api>["compat"] | undefined {
+	baseCompat: ProviderCompatibility | undefined,
+	overrideCompat: ProviderCompatibility | undefined,
+): ProviderCompatibility | undefined {
 	if (!overrideCompat) return baseCompat;
 
-	const base = baseCompat as OpenAICompletionsCompat | OpenAIResponsesCompat | AnthropicMessagesCompat | undefined;
-	const override = overrideCompat as OpenAICompletionsCompat | OpenAIResponsesCompat | AnthropicMessagesCompat;
-	const merged = { ...base, ...override } as OpenAICompletionsCompat | OpenAIResponsesCompat | AnthropicMessagesCompat;
+	const base = baseCompat;
+	const override = overrideCompat;
+	const merged = { ...base, ...override } as ProviderCompatibility;
 
 	const baseCompletions = base as OpenAICompletionsCompat | undefined;
 	const overrideCompletions = override as OpenAICompletionsCompat;
@@ -360,7 +364,7 @@ function mergeCompat(
 		};
 	}
 
-	return merged as Model<Api>["compat"];
+	return merged;
 }
 
 /**
@@ -394,6 +398,71 @@ function applyModelOverride(model: Model<Api>, override: ModelOverride): Model<A
 	result.compat = mergeCompat(model.compat, override.compat);
 
 	return result;
+}
+
+function validateConfiguredModel(
+	providerName: string,
+	model: ModelDefinition,
+	hasProviderApi: boolean,
+	isBuiltInProvider: boolean,
+): void {
+	if (!hasProviderApi && !model.api && !isBuiltInProvider) {
+		throw new Error(
+			`Provider ${providerName}, model ${model.id}: no "api" specified. Set at provider or model level.`,
+		);
+	}
+	if (!model.id) throw new Error(`Provider ${providerName}: model missing "id"`);
+	if (model.contextWindow !== undefined && model.contextWindow <= 0) {
+		throw new Error(`Provider ${providerName}, model ${model.id}: invalid contextWindow`);
+	}
+	if (model.maxTokens !== undefined && model.maxTokens <= 0) {
+		throw new Error(`Provider ${providerName}, model ${model.id}: invalid maxTokens`);
+	}
+}
+
+function validateModelsProviderConfig(
+	providerName: string,
+	config: ModelsProviderConfig,
+	isBuiltInProvider: boolean,
+): void {
+	const models = config.models ?? [];
+	const hasModelOverrides = config.modelOverrides && Object.keys(config.modelOverrides).length > 0;
+	if (models.length === 0) {
+		if (!config.baseUrl && !config.headers && !config.compat && !hasModelOverrides) {
+			throw new Error(
+				`Provider ${providerName}: must specify "baseUrl", "headers", "compat", "modelOverrides", or "models".`,
+			);
+		}
+		return;
+	}
+	if (!isBuiltInProvider && !config.baseUrl) {
+		throw new Error(`Provider ${providerName}: "baseUrl" is required when defining custom models.`);
+	}
+	if (!isBuiltInProvider && !config.apiKey) {
+		throw new Error(`Provider ${providerName}: "apiKey" is required when defining custom models.`);
+	}
+	for (const model of models) {
+		validateConfiguredModel(providerName, model, !!config.api, isBuiltInProvider);
+	}
+}
+interface BuiltInProviderDefaults {
+	api: string;
+	baseUrl: string;
+}
+
+function resolveBuiltInProviderDefaults(
+	providerName: string,
+	builtInProviders: Set<string>,
+	cache: Map<string, BuiltInProviderDefaults>,
+): BuiltInProviderDefaults | undefined {
+	if (!builtInProviders.has(providerName)) return undefined;
+	const cached = cache.get(providerName);
+	if (cached) return cached;
+	const builtIn = getModels(providerName as KnownProvider) as Model<Api>[];
+	if (builtIn.length === 0) return undefined;
+	const defaults = { api: builtIn[0].api, baseUrl: builtIn[0].baseUrl };
+	cache.set(providerName, defaults);
+	return defaults;
 }
 
 /** Clear the config value command cache. Exported for testing. */
@@ -516,11 +585,27 @@ export class ModelRegistry {
 	/** Merge custom models into built-in list by provider+id (custom wins on conflicts). */
 	private mergeCustomModels(builtInModels: Model<Api>[], customModels: Model<Api>[]): Model<Api>[] {
 		const merged = [...builtInModels];
+		const modelIndexes = new Map<string, Map<string, number>>();
+		for (let index = 0; index < merged.length; index++) {
+			const model = merged[index];
+			let providerIndexes = modelIndexes.get(model.provider);
+			if (!providerIndexes) {
+				providerIndexes = new Map();
+				modelIndexes.set(model.provider, providerIndexes);
+			}
+			if (!providerIndexes.has(model.id)) providerIndexes.set(model.id, index);
+		}
 		for (const customModel of customModels) {
-			const existingIndex = merged.findIndex((m) => m.provider === customModel.provider && m.id === customModel.id);
-			if (existingIndex >= 0) {
+			let providerIndexes = modelIndexes.get(customModel.provider);
+			if (!providerIndexes) {
+				providerIndexes = new Map();
+				modelIndexes.set(customModel.provider, providerIndexes);
+			}
+			const existingIndex = providerIndexes.get(customModel.id);
+			if (existingIndex !== undefined) {
 				merged[existingIndex] = customModel;
 			} else {
+				providerIndexes.set(customModel.id, merged.length);
 				merged.push(customModel);
 			}
 		}
@@ -545,33 +630,7 @@ export class ModelRegistry {
 				return emptyCustomModelsResult(`Invalid models.json schema:\n${errors}\n\nFile: ${modelsJsonPath}`);
 			}
 
-			const config = parsed as ModelsConfig;
-
-			// Additional validation
-			this.validateConfig(config);
-
-			const overrides = new Map<string, ProviderOverride>();
-			const modelOverrides = new Map<string, Map<string, ModelOverride>>();
-
-			for (const [providerName, providerConfig] of Object.entries(config.providers)) {
-				if (providerConfig.baseUrl || providerConfig.compat) {
-					overrides.set(providerName, {
-						baseUrl: providerConfig.baseUrl,
-						compat: providerConfig.compat,
-					});
-				}
-
-				this.storeProviderRequestConfig(providerName, providerConfig);
-
-				if (providerConfig.modelOverrides) {
-					modelOverrides.set(providerName, new Map(Object.entries(providerConfig.modelOverrides)));
-					for (const [modelId, modelOverride] of Object.entries(providerConfig.modelOverrides)) {
-						this.storeModelHeaders(providerName, modelId, modelOverride.headers);
-					}
-				}
-			}
-
-			return { models: this.parseModels(config), overrides, modelOverrides, error: undefined };
+			return this.applyCustomModelsConfig(parsed as ModelsConfig);
 		} catch (error) {
 			if (error instanceof SyntaxError) {
 				return emptyCustomModelsResult(`Failed to parse models.json: ${error.message}\n\nFile: ${modelsJsonPath}`);
@@ -582,106 +641,82 @@ export class ModelRegistry {
 		}
 	}
 
-	private validateConfig(config: ModelsConfig): void {
-		const builtInProviders = new Set<string>(getProviders());
+	private applyCustomModelsConfig(config: ModelsConfig): CustomModelsResult {
+		this.validateConfig(config);
 
+		const overrides = new Map<string, ProviderOverride>();
+		const modelOverrides = new Map<string, Map<string, ModelOverride>>();
 		for (const [providerName, providerConfig] of Object.entries(config.providers)) {
-			const isBuiltIn = builtInProviders.has(providerName);
-			const hasProviderApi = !!providerConfig.api;
-			const models = providerConfig.models ?? [];
-			const hasModelOverrides =
-				providerConfig.modelOverrides && Object.keys(providerConfig.modelOverrides).length > 0;
-
-			if (models.length === 0) {
-				// Override-only config: needs baseUrl, headers, compat, modelOverrides, or some combination.
-				if (!providerConfig.baseUrl && !providerConfig.headers && !providerConfig.compat && !hasModelOverrides) {
-					throw new Error(
-						`Provider ${providerName}: must specify "baseUrl", "headers", "compat", "modelOverrides", or "models".`,
-					);
-				}
-			} else if (!isBuiltIn) {
-				// Non-built-in providers with custom models require endpoint + auth.
-				if (!providerConfig.baseUrl) {
-					throw new Error(`Provider ${providerName}: "baseUrl" is required when defining custom models.`);
-				}
-				if (!providerConfig.apiKey) {
-					throw new Error(`Provider ${providerName}: "apiKey" is required when defining custom models.`);
-				}
+			if (providerConfig.baseUrl || providerConfig.compat) {
+				overrides.set(providerName, {
+					baseUrl: providerConfig.baseUrl,
+					compat: providerConfig.compat,
+				});
 			}
-			// Built-in providers with custom models: baseUrl/apiKey/api are optional,
-			// inherited from built-in models. Auth comes from env vars / auth storage.
 
-			for (const modelDef of models) {
-				const hasModelApi = !!modelDef.api;
+			this.storeProviderRequestConfig(providerName, providerConfig);
+			if (!providerConfig.modelOverrides) continue;
 
-				if (!hasProviderApi && !hasModelApi && !isBuiltIn) {
-					throw new Error(
-						`Provider ${providerName}, model ${modelDef.id}: no "api" specified. Set at provider or model level.`,
-					);
-				}
-				// For built-in providers, api is optional — inherited from built-in models.
-
-				if (!modelDef.id) throw new Error(`Provider ${providerName}: model missing "id"`);
-				// Validate contextWindow/maxTokens only if provided (they have defaults)
-				if (modelDef.contextWindow !== undefined && modelDef.contextWindow <= 0)
-					throw new Error(`Provider ${providerName}, model ${modelDef.id}: invalid contextWindow`);
-				if (modelDef.maxTokens !== undefined && modelDef.maxTokens <= 0)
-					throw new Error(`Provider ${providerName}, model ${modelDef.id}: invalid maxTokens`);
+			modelOverrides.set(providerName, new Map(Object.entries(providerConfig.modelOverrides)));
+			for (const [modelId, modelOverride] of Object.entries(providerConfig.modelOverrides)) {
+				this.storeModelHeaders(providerName, modelId, modelOverride.headers);
 			}
 		}
+
+		return { models: this.parseModels(config), overrides, modelOverrides, error: undefined };
+	}
+	private validateConfig(config: ModelsConfig): void {
+		const builtInProviders = new Set<string>(getProviders());
+		for (const [providerName, providerConfig] of Object.entries(config.providers)) {
+			validateModelsProviderConfig(providerName, providerConfig, builtInProviders.has(providerName));
+		}
+	}
+
+	private parseModelDefinition(
+		providerName: string,
+		providerConfig: ModelsProviderConfig,
+		modelDef: ModelDefinition,
+		builtInDefaults: BuiltInProviderDefaults | undefined,
+	): Model<Api> | undefined {
+		const api = modelDef.api ?? providerConfig.api ?? builtInDefaults?.api;
+		if (!api) return undefined;
+		const baseUrl = modelDef.baseUrl ?? providerConfig.baseUrl ?? builtInDefaults?.baseUrl;
+		if (!baseUrl) return undefined;
+
+		const compat = mergeCompat(providerConfig.compat, modelDef.compat);
+		this.storeModelHeaders(providerName, modelDef.id, modelDef.headers);
+		const defaultCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+		return {
+			id: modelDef.id,
+			name: modelDef.name ?? modelDef.id,
+			api: api as Api,
+			provider: providerName,
+			baseUrl,
+			reasoning: modelDef.reasoning ?? false,
+			thinkingLevelMap: modelDef.thinkingLevelMap,
+			input: (modelDef.input ?? ["text"]) as ("text" | "image")[],
+			cost: modelDef.cost ?? defaultCost,
+			contextWindow: modelDef.contextWindow ?? 128000,
+			maxTokens: modelDef.maxTokens ?? 16384,
+			headers: undefined,
+			compat,
+		} as Model<Api>;
 	}
 
 	private parseModels(config: ModelsConfig): Model<Api>[] {
 		const models: Model<Api>[] = [];
 		const builtInProviders = new Set<string>(getProviders());
-
-		// Cache built-in defaults (api, baseUrl) per provider, extracted from first model.
-		const builtInDefaultsCache = new Map<string, { api: string; baseUrl: string }>();
-		const getBuiltInDefaults = (providerName: string): { api: string; baseUrl: string } | undefined => {
-			if (!builtInProviders.has(providerName)) return undefined;
-			if (builtInDefaultsCache.has(providerName)) return builtInDefaultsCache.get(providerName);
-			const builtIn = getModels(providerName as KnownProvider) as Model<Api>[];
-			if (builtIn.length === 0) return undefined;
-			const defaults = { api: builtIn[0].api, baseUrl: builtIn[0].baseUrl };
-			builtInDefaultsCache.set(providerName, defaults);
-			return defaults;
-		};
+		const builtInDefaultsCache = new Map<string, BuiltInProviderDefaults>();
 
 		for (const [providerName, providerConfig] of Object.entries(config.providers)) {
 			const modelDefs = providerConfig.models ?? [];
-			if (modelDefs.length === 0) continue; // Override-only, no custom models
-
-			const builtInDefaults = getBuiltInDefaults(providerName);
-
+			if (modelDefs.length === 0) continue;
+			const builtInDefaults = resolveBuiltInProviderDefaults(providerName, builtInProviders, builtInDefaultsCache);
 			for (const modelDef of modelDefs) {
-				const api = modelDef.api ?? providerConfig.api ?? builtInDefaults?.api;
-				if (!api) continue;
-
-				const baseUrl = modelDef.baseUrl ?? providerConfig.baseUrl ?? builtInDefaults?.baseUrl;
-				if (!baseUrl) continue;
-
-				const compat = mergeCompat(providerConfig.compat, modelDef.compat);
-				this.storeModelHeaders(providerName, modelDef.id, modelDef.headers);
-
-				const defaultCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
-				models.push({
-					id: modelDef.id,
-					name: modelDef.name ?? modelDef.id,
-					api: api as Api,
-					provider: providerName,
-					baseUrl,
-					reasoning: modelDef.reasoning ?? false,
-					thinkingLevelMap: modelDef.thinkingLevelMap,
-					input: (modelDef.input ?? ["text"]) as ("text" | "image")[],
-					cost: modelDef.cost ?? defaultCost,
-					contextWindow: modelDef.contextWindow ?? 128000,
-					maxTokens: modelDef.maxTokens ?? 16384,
-					headers: undefined,
-					compat,
-				} as Model<Api>);
+				const model = this.parseModelDefinition(providerName, providerConfig, modelDef, builtInDefaults);
+				if (model) models.push(model);
 			}
 		}
-
 		return models;
 	}
 
@@ -723,14 +758,7 @@ export class ModelRegistry {
 		return `${provider}:${modelId}`;
 	}
 
-	private storeProviderRequestConfig(
-		providerName: string,
-		config: {
-			apiKey?: string;
-			headers?: ProviderHeaders;
-			authHeader?: boolean;
-		},
-	): void {
+	private storeProviderRequestConfig(providerName: string, config: ProviderRequestConfig): void {
 		if (!config.apiKey && !config.headers && !config.authHeader) {
 			return;
 		}
@@ -1014,6 +1042,21 @@ export class ModelRegistry {
 /**
  * Input type for registerProvider API.
  */
+export interface ProviderModelConfigInput {
+	id: string;
+	name: string;
+	api?: Api;
+	baseUrl?: string;
+	reasoning: boolean;
+	thinkingLevelMap?: Model<Api>["thinkingLevelMap"];
+	input: ModelInputModality[];
+	cost: Model<Api>["cost"];
+	contextWindow: number;
+	maxTokens: number;
+	headers?: ProviderHeaders;
+	compat?: Model<Api>["compat"];
+}
+
 export interface ProviderConfigInput {
 	name?: string;
 	baseUrl?: string;
@@ -1024,18 +1067,5 @@ export interface ProviderConfigInput {
 	authHeader?: boolean;
 	/** OAuth provider for /login support */
 	oauth?: Omit<OAuthProviderInterface, "id">;
-	models?: Array<{
-		id: string;
-		name: string;
-		api?: Api;
-		baseUrl?: string;
-		reasoning: boolean;
-		thinkingLevelMap?: Model<Api>["thinkingLevelMap"];
-		input: ("text" | "image")[];
-		cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
-		contextWindow: number;
-		maxTokens: number;
-		headers?: ProviderHeaders;
-		compat?: Model<Api>["compat"];
-	}>;
+	models?: ProviderModelConfigInput[];
 }

@@ -2,6 +2,7 @@ import type { ResourceDiagnostic } from "./diagnostics.ts";
 import {
 	formatInstructionResourcesForPrompt,
 	type InstructionResource,
+	type InstructionResourceDirectoryOptions,
 	type InstructionResourceFrontmatter,
 	InstructionResourceLoader,
 } from "./instruction-resource-loader.ts";
@@ -16,12 +17,7 @@ export interface LoadSkillsResult {
 	diagnostics: ResourceDiagnostic[];
 }
 
-export interface LoadSkillsFromDirOptions {
-	/** Directory to scan for skills */
-	dir: string;
-	/** Source identifier for these skills */
-	source: string;
-}
+export type LoadSkillsFromDirOptions = InstructionResourceDirectoryOptions;
 
 export interface LoadSkillsOptions {
 	/** Working directory for project-local skills. */

@@ -9,7 +9,14 @@ function escapeHtml(value: string): string {
 		.replaceAll("'", "&#39;");
 }
 
-function renderPage(options: { title: string; heading: string; message: string; details?: string }): string {
+interface OAuthPageOptions {
+	title: string;
+	heading: string;
+	message: string;
+	details?: string;
+}
+
+function renderPage(options: OAuthPageOptions): string {
 	const title = escapeHtml(options.title);
 	const heading = escapeHtml(options.heading);
 	const message = escapeHtml(options.message);

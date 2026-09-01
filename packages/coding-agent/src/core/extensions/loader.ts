@@ -43,6 +43,9 @@ import type {
 	MessageRenderer,
 	ProviderConfig,
 	RegisteredCommand,
+	RegisterFlagOptions,
+	RegisterShortcutOptions,
+	RegisterToolOptions,
 	ToolDefinition,
 } from "./types.ts";
 
@@ -125,6 +128,7 @@ function getAliases(): Record<string, string> {
 }
 
 type HandlerFn = (...args: unknown[]) => Promise<unknown>;
+type ExtensionInstructionKind = "skill" | "rule";
 
 /**
  * Create a runtime with throwing stubs for action methods.
@@ -211,7 +215,10 @@ function createExtensionAPI(
 	const extensionDir = path.dirname(extension.resolvedPath);
 	const resolveLocalPath = (filePath: string): string =>
 		path.isAbsolute(filePath) ? filePath : path.resolve(extensionDir, filePath);
-	const resolveInstructionPath = (instruction: ExtensionInstructionRegistration, kind: "skill" | "rule"): string => {
+	const resolveInstructionPath = (
+		instruction: ExtensionInstructionRegistration,
+		kind: ExtensionInstructionKind,
+	): string => {
 		if (instruction.filePath) {
 			return resolveLocalPath(instruction.filePath);
 		}
@@ -257,7 +264,7 @@ function createExtensionAPI(
 			extension.handlers.set(event, list);
 		},
 
-		registerTool(tool: ToolDefinition, options?: { lazy?: boolean }): void {
+		registerTool(tool: ToolDefinition, options?: RegisterToolOptions): void {
 			runtime.assertActive();
 			extension.tools.set(tool.name, {
 				definition: tool,
@@ -349,21 +356,12 @@ function createExtensionAPI(
 			}
 		},
 
-		registerShortcut(
-			shortcut: KeyId,
-			options: {
-				description?: string;
-				handler: (ctx: import("./types.ts").ExtensionContext) => Promise<void> | void;
-			},
-		): void {
+		registerShortcut(shortcut: KeyId, options: RegisterShortcutOptions): void {
 			runtime.assertActive();
 			extension.shortcuts.set(shortcut, { shortcut, extensionPath: extension.path, ...options });
 		},
 
-		registerFlag(
-			name: string,
-			options: { description?: string; type: "boolean" | "string"; default?: boolean | string },
-		): void {
+		registerFlag(name: string, options: RegisterFlagOptions): void {
 			runtime.assertActive();
 			extension.flags.set(name, { name, extensionPath: extension.path, ...options });
 			if (options.default !== undefined && !runtime.flagValues.has(name)) {
@@ -524,12 +522,17 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 	};
 }
 
+interface ExtensionLoadResult {
+	extension: Extension | null;
+	error: string | null;
+}
+
 async function loadExtension(
 	extensionPath: string,
 	cwd: string,
 	eventBus: EventBus,
 	runtime: ExtensionRuntime,
-): Promise<{ extension: Extension | null; error: string | null }> {
+): Promise<ExtensionLoadResult> {
 	const resolvedPath = resolvePath(extensionPath, cwd, { normalizeUnicodeSpaces: true });
 
 	try {

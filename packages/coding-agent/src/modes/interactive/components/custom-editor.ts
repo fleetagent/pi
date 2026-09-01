@@ -27,6 +27,46 @@ export class CustomEditor extends Editor {
 		this.actionHandlers.set(action, handler);
 	}
 
+	private handleInterruptInput(data: string): boolean {
+		if (!this.keybindings.matches(data, "app.interrupt")) return false;
+		if (!this.isShowingAutocomplete()) {
+			const handler = this.onEscape ?? this.actionHandlers.get("app.interrupt");
+			if (handler) {
+				handler();
+				return true;
+			}
+		}
+		super.handleInput(data);
+		return true;
+	}
+
+	private handleExitInput(data: string): boolean {
+		if (!this.keybindings.matches(data, "app.exit") || this.getText().length > 0) return false;
+		const handler = this.onCtrlD ?? this.actionHandlers.get("app.exit");
+		handler?.();
+		return true;
+	}
+
+	private handleExplicitHistoryBinding(data: string): boolean {
+		if (
+			!this.keybindings.matches(data, "tui.editor.historyPrevious") &&
+			!this.keybindings.matches(data, "tui.editor.historyNext")
+		) {
+			return false;
+		}
+		super.handleInput(data);
+		return true;
+	}
+
+	private handleAppAction(data: string): boolean {
+		for (const [action, handler] of this.actionHandlers) {
+			if (action === "app.interrupt" || action === "app.exit" || !this.keybindings.matches(data, action)) continue;
+			handler();
+			return true;
+		}
+		return false;
+	}
+
 	handleInput(data: string): void {
 		// Check extension-registered shortcuts first
 		if (this.onExtensionShortcut?.(data)) {
@@ -39,50 +79,13 @@ export class CustomEditor extends Editor {
 			return;
 		}
 
-		// Check app keybindings first
-
-		// Escape/interrupt - only if autocomplete is NOT active
-		if (this.keybindings.matches(data, "app.interrupt")) {
-			if (!this.isShowingAutocomplete()) {
-				// Use dynamic onEscape if set, otherwise registered handler
-				const handler = this.onEscape ?? this.actionHandlers.get("app.interrupt");
-				if (handler) {
-					handler();
-					return;
-				}
-			}
-			// Let parent handle escape for autocomplete cancellation
-			super.handleInput(data);
-			return;
-		}
-
-		// Exit (Ctrl+D) - only when editor is empty
-		if (this.keybindings.matches(data, "app.exit")) {
-			if (this.getText().length === 0) {
-				const handler = this.onCtrlD ?? this.actionHandlers.get("app.exit");
-				if (handler) handler();
-				return;
-			}
-			// Fall through to editor handling for delete-char-forward when not empty
-		}
+		if (this.handleInterruptInput(data)) return;
+		if (this.handleExitInput(data)) return;
 
 		// Explicit history bindings take precedence over app actions while the editor is focused.
 		// This lets users bind Ctrl+P even though it cycles models by default.
-		if (
-			this.keybindings.matches(data, "tui.editor.historyPrevious") ||
-			this.keybindings.matches(data, "tui.editor.historyNext")
-		) {
-			super.handleInput(data);
-			return;
-		}
-
-		// Check all other app actions
-		for (const [action, handler] of this.actionHandlers) {
-			if (action !== "app.interrupt" && action !== "app.exit" && this.keybindings.matches(data, action)) {
-				handler();
-				return;
-			}
-		}
+		if (this.handleExplicitHistoryBinding(data)) return;
+		if (this.handleAppAction(data)) return;
 
 		// Pass to parent for editor handling
 		super.handleInput(data);

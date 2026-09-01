@@ -1,4 +1,5 @@
 import type { AgentMessage } from "@fleetagent/pi-agent-core";
+import type * as PiAiModule from "@fleetagent/pi-ai";
 import type { AssistantMessage, Model } from "@fleetagent/pi-ai";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -13,7 +14,7 @@ const { completeSimpleMock } = vi.hoisted(() => ({
 }));
 
 vi.mock("@fleetagent/pi-ai", async (importOriginal) => {
-	const actual = await importOriginal<typeof import("@fleetagent/pi-ai")>();
+	const actual = await importOriginal<typeof PiAiModule>();
 	return {
 		...actual,
 		completeSimple: completeSimpleMock,

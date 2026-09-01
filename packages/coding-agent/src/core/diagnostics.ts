@@ -1,5 +1,8 @@
+type ResourceCollisionCategory = "extension" | "skill" | "rule" | "prompt" | "theme";
+type ResourceDiagnosticCategory = "warning" | "error" | "collision";
+
 export interface ResourceCollision {
-	resourceType: "extension" | "skill" | "rule" | "prompt" | "theme";
+	resourceType: ResourceCollisionCategory;
 	name: string; // skill/rule name, command/tool/flag name, prompt name, theme name
 	winnerPath: string;
 	loserPath: string;
@@ -8,7 +11,7 @@ export interface ResourceCollision {
 }
 
 export interface ResourceDiagnostic {
-	type: "warning" | "error" | "collision";
+	type: ResourceDiagnosticCategory;
 	message: string;
 	path?: string;
 	collision?: ResourceCollision;

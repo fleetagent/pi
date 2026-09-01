@@ -32,13 +32,17 @@ function mockToken(): string {
 	return `aaa.${payload}.bbb`;
 }
 
-function buildSSEPayload({
-	status,
-	includeDone = false,
-}: {
-	status: "completed" | "incomplete";
+type SseResponseStatus = "completed" | "incomplete";
+type SseLineEnding = "\n" | "\r\n" | "\r";
+
+interface SsePayloadOptions {
+	status: SseResponseStatus;
 	includeDone?: boolean;
-}): string {
+}
+
+type MockWebSocketProtocols = string | string[] | { headers?: Record<string, string> };
+
+function buildSSEPayload({ status, includeDone = false }: SsePayloadOptions): string {
 	const terminalType = status === "incomplete" ? "response.incomplete" : "response.completed";
 	const events = [
 		`data: ${JSON.stringify({
@@ -94,9 +98,98 @@ function createCodexModel(): Model<"openai-codex-responses"> {
 	};
 }
 
+interface SessionHeaderRequestFixture {
+	sessionId: string;
+	responseStream: ReadableStream<Uint8Array>;
+}
+
+async function handleSessionHeaderRequest(
+	input: string | URL,
+	init: RequestInit | undefined,
+	fixture: SessionHeaderRequestFixture,
+): Promise<Response> {
+	const url = typeof input === "string" ? input : input.toString();
+	if (url === "https://api.github.com/repos/openai/codex/releases/latest") {
+		return new Response(JSON.stringify({ tag_name: "rust-v0.0.0" }), { status: 200 });
+	}
+	if (url.startsWith("https://raw.githubusercontent.com/openai/codex/")) {
+		return new Response("PROMPT", { status: 200, headers: { etag: '"etag"' } });
+	}
+	if (url !== "https://chatgpt.com/backend-api/codex/responses") {
+		return new Response("not found", { status: 404 });
+	}
+	const headers = init?.headers instanceof Headers ? init.headers : undefined;
+	expect(headers?.get("session-id")).toBe(fixture.sessionId);
+	expect(headers?.has("session_id")).toBe(false);
+	expect(headers?.get("x-client-request-id")).toBe(fixture.sessionId);
+	const body = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : null;
+	expect(body?.prompt_cache_key).toBe(fixture.sessionId);
+	return new Response(fixture.responseStream, {
+		status: 200,
+		headers: { "content-type": "text/event-stream" },
+	});
+}
+
+interface SessionlessHeaderRequestFixture {
+	responseStream: ReadableStream<Uint8Array>;
+}
+
+async function handleSessionlessHeaderRequest(
+	input: string | URL,
+	init: RequestInit | undefined,
+	fixture: SessionlessHeaderRequestFixture,
+): Promise<Response> {
+	const url = typeof input === "string" ? input : input.toString();
+	if (url === "https://api.github.com/repos/openai/codex/releases/latest") {
+		return new Response(JSON.stringify({ tag_name: "rust-v0.0.0" }), { status: 200 });
+	}
+	if (url.startsWith("https://raw.githubusercontent.com/openai/codex/")) {
+		return new Response("PROMPT", { status: 200, headers: { etag: '"etag"' } });
+	}
+	if (url !== "https://chatgpt.com/backend-api/codex/responses") {
+		return new Response("not found", { status: 404 });
+	}
+	const headers = init?.headers instanceof Headers ? init.headers : undefined;
+	expect(headers?.has("session-id")).toBe(false);
+	expect(headers?.has("session_id")).toBe(false);
+	expect(headers?.has("x-client-request-id")).toBe(false);
+	return new Response(fixture.responseStream, {
+		status: 200,
+		headers: { "content-type": "text/event-stream" },
+	});
+}
+
+interface ReasoningRequestFixture {
+	responseStream: ReadableStream<Uint8Array>;
+	requestedReasoning?: unknown;
+}
+
+function handleReasoningRequest(
+	input: string | URL,
+	init: RequestInit | undefined,
+	fixture: ReasoningRequestFixture,
+): Response {
+	const url = typeof input === "string" ? input : input.toString();
+	if (url === "https://api.github.com/repos/openai/codex/releases/latest") {
+		return new Response(JSON.stringify({ tag_name: "rust-v0.0.0" }), { status: 200 });
+	}
+	if (url.startsWith("https://raw.githubusercontent.com/openai/codex/")) {
+		return new Response("PROMPT", { status: 200, headers: { etag: '"etag"' } });
+	}
+	if (url !== "https://chatgpt.com/backend-api/codex/responses") {
+		return new Response("not found", { status: 404 });
+	}
+	const body = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : null;
+	fixture.requestedReasoning = body?.reasoning;
+	return new Response(fixture.responseStream, {
+		status: 200,
+		headers: { "content-type": "text/event-stream" },
+	});
+}
+
 describe("openai-codex streaming", () => {
 	it("produces identical events for LF and CRLF SSE framing", async () => {
-		const runFixture = async (lineEnding: "\n" | "\r\n" | "\r") => {
+		const runFixture = async (lineEnding: SseLineEnding) => {
 			const payload = buildSSEPayload({ status: "completed" }).replaceAll("\n", lineEnding);
 			const splitAt = payload.indexOf(`${lineEnding}${lineEnding}`) + 1;
 			const encoder = new TextEncoder();
@@ -289,21 +382,21 @@ describe("openai-codex streaming", () => {
 			if (url.startsWith("https://raw.githubusercontent.com/openai/codex/")) {
 				return new Response("PROMPT", { status: 200, headers: { etag: '"etag"' } });
 			}
-			if (url === "https://chatgpt.com/backend-api/codex/responses") {
-				const headers = init?.headers instanceof Headers ? init.headers : undefined;
-				expect(headers?.get("Authorization")).toBe(`Bearer ${token}`);
-				expect(headers?.get("chatgpt-account-id")).toBe("acc_test");
-				expect(headers?.get("OpenAI-Beta")).toBe("responses=experimental");
-				expect(headers?.get("originator")).toBe("pi");
-				expect(headers?.get("User-Agent")).toMatch(/^pi \((?!browser\))/);
-				expect(headers?.get("accept")).toBe("text/event-stream");
-				expect(headers?.has("x-api-key")).toBe(false);
-				return new Response(stream, {
-					status: 200,
-					headers: { "content-type": "text/event-stream" },
-				});
+			if (url !== "https://chatgpt.com/backend-api/codex/responses") {
+				return new Response("not found", { status: 404 });
 			}
-			return new Response("not found", { status: 404 });
+			const headers = init?.headers instanceof Headers ? init.headers : undefined;
+			expect(headers?.get("Authorization")).toBe(`Bearer ${token}`);
+			expect(headers?.get("chatgpt-account-id")).toBe("acc_test");
+			expect(headers?.get("OpenAI-Beta")).toBe("responses=experimental");
+			expect(headers?.get("originator")).toBe("pi");
+			expect(headers?.get("User-Agent")).toMatch(/^pi \((?!browser\))/);
+			expect(headers?.get("accept")).toBe("text/event-stream");
+			expect(headers?.has("x-api-key")).toBe(false);
+			return new Response(stream, {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			});
 		});
 
 		vi.stubGlobal("fetch", fetchMock);
@@ -681,32 +774,10 @@ describe("openai-codex streaming", () => {
 		});
 
 		const sessionId = "test-session-123";
-		const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
-			const url = typeof input === "string" ? input : input.toString();
-			if (url === "https://api.github.com/repos/openai/codex/releases/latest") {
-				return new Response(JSON.stringify({ tag_name: "rust-v0.0.0" }), { status: 200 });
-			}
-			if (url.startsWith("https://raw.githubusercontent.com/openai/codex/")) {
-				return new Response("PROMPT", { status: 200, headers: { etag: '"etag"' } });
-			}
-			if (url === "https://chatgpt.com/backend-api/codex/responses") {
-				const headers = init?.headers instanceof Headers ? init.headers : undefined;
-				// Verify sessionId is set in headers
-				expect(headers?.get("session-id")).toBe(sessionId);
-				expect(headers?.has("session_id")).toBe(false);
-				expect(headers?.get("x-client-request-id")).toBe(sessionId);
-
-				// Verify sessionId is set in request body as prompt_cache_key
-				const body = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : null;
-				expect(body?.prompt_cache_key).toBe(sessionId);
-
-				return new Response(stream, {
-					status: 200,
-					headers: { "content-type": "text/event-stream" },
-				});
-			}
-			return new Response("not found", { status: 404 });
-		});
+		const fixture: SessionHeaderRequestFixture = { sessionId, responseStream: stream };
+		const fetchMock = vi.fn((input: string | URL, init?: RequestInit) =>
+			handleSessionHeaderRequest(input, init, fixture),
+		);
 
 		vi.stubGlobal("fetch", fetchMock);
 
@@ -797,7 +868,7 @@ describe("openai-codex streaming", () => {
 		let requestedReasoning: unknown;
 
 		const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
-			const url = typeof input === "string" ? input : input.toString();
+			const url = input.toString();
 			if (url === "https://api.github.com/repos/openai/codex/releases/latest") {
 				return new Response(JSON.stringify({ tag_name: "rust-v0.0.0" }), { status: 200 });
 			}
@@ -847,73 +918,21 @@ describe("openai-codex streaming", () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "pi-codex-stream-"));
 		process.env.PI_CODING_AGENT_DIR = tempDir;
 
-		const payload = Buffer.from(
-			JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "acc_test" } }),
-			"utf8",
-		).toString("base64");
-		const token = `aaa.${payload}.bbb`;
+		const token = mockToken();
+		const sse = buildSSEPayload({ status: "completed" });
 
-		const sse = `${[
-			`data: ${JSON.stringify({
-				type: "response.output_item.added",
-				item: { type: "message", id: "msg_1", role: "assistant", status: "in_progress", content: [] },
-			})}`,
-			`data: ${JSON.stringify({ type: "response.content_part.added", part: { type: "output_text", text: "" } })}`,
-			`data: ${JSON.stringify({ type: "response.output_text.delta", delta: "Hello" })}`,
-			`data: ${JSON.stringify({
-				type: "response.output_item.done",
-				item: {
-					type: "message",
-					id: "msg_1",
-					role: "assistant",
-					status: "completed",
-					content: [{ type: "output_text", text: "Hello" }],
-				},
-			})}`,
-			`data: ${JSON.stringify({
-				type: "response.completed",
-				response: {
-					status: "completed",
-					usage: {
-						input_tokens: 5,
-						output_tokens: 3,
-						total_tokens: 8,
-						input_tokens_details: { cached_tokens: 0 },
-					},
-				},
-			})}`,
-		].join("\n\n")}\n\n`;
-
-		let requestedReasoning: unknown;
 		const encoder = new TextEncoder();
-		const stream = new ReadableStream<Uint8Array>({
+		const responseStream = new ReadableStream<Uint8Array>({
 			start(controller) {
 				controller.enqueue(encoder.encode(sse));
 				controller.close();
 			},
 		});
-
-		const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
-			const url = typeof input === "string" ? input : input.toString();
-			if (url === "https://api.github.com/repos/openai/codex/releases/latest") {
-				return new Response(JSON.stringify({ tag_name: "rust-v0.0.0" }), { status: 200 });
-			}
-			if (url.startsWith("https://raw.githubusercontent.com/openai/codex/")) {
-				return new Response("PROMPT", { status: 200, headers: { etag: '"etag"' } });
-			}
-			if (url === "https://chatgpt.com/backend-api/codex/responses") {
-				const body = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : null;
-				requestedReasoning = body?.reasoning;
-
-				return new Response(stream, {
-					status: 200,
-					headers: { "content-type": "text/event-stream" },
-				});
-			}
-			return new Response("not found", { status: 404 });
-		});
-
-		vi.stubGlobal("fetch", fetchMock);
+		const fixture: ReasoningRequestFixture = { responseStream };
+		vi.stubGlobal(
+			"fetch",
+			vi.fn((input: string | URL, init?: RequestInit) => handleReasoningRequest(input, init, fixture)),
+		);
 
 		const model: Model<"openai-codex-responses"> = {
 			id: modelId,
@@ -940,7 +959,7 @@ describe("openai-codex streaming", () => {
 			transport: "sse",
 		});
 		await streamResult.result();
-		expect(requestedReasoning).toEqual({ effort: "low", summary: "auto" });
+		expect(fixture.requestedReasoning).toEqual({ effort: "low", summary: "auto" });
 	});
 
 	it.each([
@@ -1091,28 +1110,10 @@ describe("openai-codex streaming", () => {
 			},
 		});
 
-		const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
-			const url = typeof input === "string" ? input : input.toString();
-			if (url === "https://api.github.com/repos/openai/codex/releases/latest") {
-				return new Response(JSON.stringify({ tag_name: "rust-v0.0.0" }), { status: 200 });
-			}
-			if (url.startsWith("https://raw.githubusercontent.com/openai/codex/")) {
-				return new Response("PROMPT", { status: 200, headers: { etag: '"etag"' } });
-			}
-			if (url === "https://chatgpt.com/backend-api/codex/responses") {
-				const headers = init?.headers instanceof Headers ? init.headers : undefined;
-				// Verify headers are not set when sessionId is not provided
-				expect(headers?.has("session-id")).toBe(false);
-				expect(headers?.has("session_id")).toBe(false);
-				expect(headers?.has("x-client-request-id")).toBe(false);
-
-				return new Response(stream, {
-					status: 200,
-					headers: { "content-type": "text/event-stream" },
-				});
-			}
-			return new Response("not found", { status: 404 });
-		});
+		const fixture: SessionlessHeaderRequestFixture = { responseStream: stream };
+		const fetchMock = vi.fn((input: string | URL, init?: RequestInit) =>
+			handleSessionlessHeaderRequest(input, init, fixture),
+		);
 
 		vi.stubGlobal("fetch", fetchMock);
 
@@ -1149,7 +1150,7 @@ describe("openai-codex streaming", () => {
 		class MockWebSocket {
 			private listeners = new Map<string, Set<(event: unknown) => void>>();
 
-			constructor(_url: string, protocols?: string | string[] | { headers?: Record<string, string> }) {
+			constructor(_url: string, protocols?: MockWebSocketProtocols) {
 				if (protocols && typeof protocols === "object" && !Array.isArray(protocols)) {
 					capturedWebSocketHeaders = protocols.headers;
 				}
@@ -1268,7 +1269,7 @@ describe("openai-codex streaming", () => {
 			readyState = MockWebSocket.OPEN;
 			private listeners = new Map<string, Set<(event: unknown) => void>>();
 
-			constructor(_url: string, _protocols?: string | string[] | { headers?: Record<string, string> }) {
+			constructor(_url: string, _protocols?: MockWebSocketProtocols) {
 				queueMicrotask(() => this.dispatch("open", {}));
 			}
 

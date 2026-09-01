@@ -32,15 +32,21 @@ function enableAll(enabledIds: EnabledIds, allIds: string[], targetIds?: string[
 	if (enabledIds === null) return null; // Already all enabled
 	const targets = targetIds ?? allIds;
 	const result = [...enabledIds];
+	const enabledSet = new Set(enabledIds);
 	for (const id of targets) {
-		if (!result.includes(id)) result.push(id);
+		if (!enabledSet.has(id)) {
+			enabledSet.add(id);
+			result.push(id);
+		}
 	}
 	return result.length === allIds.length ? null : result;
 }
 
 function clearAll(enabledIds: EnabledIds, allIds: string[], targetIds?: string[]): EnabledIds {
 	if (enabledIds === null) {
-		return targetIds ? allIds.filter((id) => !targetIds.includes(id)) : [];
+		if (!targetIds) return [];
+		const targets = new Set(targetIds);
+		return allIds.filter((id) => !targets.has(id));
 	}
 	const targets = new Set(targetIds ?? enabledIds);
 	return enabledIds.filter((id) => !targets.has(id));
@@ -231,120 +237,121 @@ export class ScopedModelsSelectorComponent extends Container implements Focusabl
 		}
 	}
 
+	private moveSelection(direction: -1 | 1): void {
+		if (this.filteredItems.length === 0) return;
+		if (direction < 0) {
+			this.selectedIndex = this.selectedIndex === 0 ? this.filteredItems.length - 1 : this.selectedIndex - 1;
+		} else {
+			this.selectedIndex = this.selectedIndex === this.filteredItems.length - 1 ? 0 : this.selectedIndex + 1;
+		}
+		this.updateList();
+	}
+
+	private commitEnabledModelChange(enabledIds: EnabledIds, selectedIndexDelta = 0): void {
+		this.enabledIds = enabledIds;
+		this.isDirty = true;
+		this.selectedIndex += selectedIndexDelta;
+		this.refresh();
+		this.notifyChange();
+	}
+
+	private reorderSelectedModel(direction: -1 | 1): void {
+		if (this.enabledIds === null) return;
+		const item = this.filteredItems[this.selectedIndex];
+		if (!item || !isEnabled(this.enabledIds, item.fullId)) return;
+		const currentIndex = this.enabledIds.indexOf(item.fullId);
+		const newIndex = currentIndex + direction;
+		if (newIndex < 0 || newIndex >= this.enabledIds.length) return;
+		this.commitEnabledModelChange(move(this.enabledIds, item.fullId, direction), direction);
+	}
+
+	private toggleSelectedModel(): void {
+		const item = this.filteredItems[this.selectedIndex];
+		if (!item) return;
+		this.commitEnabledModelChange(toggle(this.enabledIds, item.fullId));
+	}
+
+	private setTargetModelsEnabled(enabled: boolean): void {
+		const targetIds = this.searchInput.getValue() ? this.filteredItems.map((item) => item.fullId) : undefined;
+		const enabledIds = enabled
+			? enableAll(this.enabledIds, this.allIds, targetIds)
+			: clearAll(this.enabledIds, this.allIds, targetIds);
+		this.commitEnabledModelChange(enabledIds);
+	}
+
+	private toggleSelectedProvider(): void {
+		const item = this.filteredItems[this.selectedIndex];
+		if (!item) return;
+		const providerIds = this.allIds.filter((id) => this.modelsById.get(id)!.provider === item.model.provider);
+		const allEnabled = providerIds.every((id) => isEnabled(this.enabledIds, id));
+		const enabledIds = allEnabled
+			? clearAll(this.enabledIds, this.allIds, providerIds)
+			: enableAll(this.enabledIds, this.allIds, providerIds);
+		this.commitEnabledModelChange(enabledIds);
+	}
+
+	private persistEnabledModels(): void {
+		this.callbacks.onPersist(this.enabledIds === null ? null : [...this.enabledIds]);
+		this.isDirty = false;
+		this.footerText.setText(this.getFooterText());
+	}
+
+	private clearSearchOrCancel(): void {
+		if (!this.searchInput.getValue()) {
+			this.callbacks.onCancel();
+			return;
+		}
+		this.searchInput.setValue("");
+		this.refresh();
+	}
+
 	handleInput(data: string): void {
 		const kb = getKeybindings();
 
 		// Navigation
 		if (kb.matches(data, "tui.select.up")) {
-			if (this.filteredItems.length === 0) return;
-			this.selectedIndex = this.selectedIndex === 0 ? this.filteredItems.length - 1 : this.selectedIndex - 1;
-			this.updateList();
+			this.moveSelection(-1);
 			return;
 		}
 		if (kb.matches(data, "tui.select.down")) {
-			if (this.filteredItems.length === 0) return;
-			this.selectedIndex = this.selectedIndex === this.filteredItems.length - 1 ? 0 : this.selectedIndex + 1;
-			this.updateList();
+			this.moveSelection(1);
 			return;
 		}
 
-		// Reorder enabled models
 		const reorderUp = kb.matches(data, "app.models.reorderUp");
 		const reorderDown = kb.matches(data, "app.models.reorderDown");
 		if (reorderUp || reorderDown) {
-			if (this.enabledIds === null) return;
-			const item = this.filteredItems[this.selectedIndex];
-			if (item && isEnabled(this.enabledIds, item.fullId)) {
-				const delta = reorderUp ? -1 : 1;
-				const currentIndex = this.enabledIds.indexOf(item.fullId);
-				const newIndex = currentIndex + delta;
-				// Only move if within bounds
-				if (newIndex >= 0 && newIndex < this.enabledIds.length) {
-					this.enabledIds = move(this.enabledIds, item.fullId, delta);
-					this.isDirty = true;
-					this.selectedIndex += delta;
-					this.refresh();
-					this.notifyChange();
-				}
-			}
+			this.reorderSelectedModel(reorderUp ? -1 : 1);
 			return;
 		}
-
-		// Toggle on Enter
 		if (kb.matches(data, "tui.select.confirm")) {
-			const item = this.filteredItems[this.selectedIndex];
-			if (item) {
-				this.enabledIds = toggle(this.enabledIds, item.fullId);
-				this.isDirty = true;
-				this.refresh();
-				this.notifyChange();
-			}
+			this.toggleSelectedModel();
 			return;
 		}
-
-		// Enable all (filtered if search active, otherwise all)
 		if (kb.matches(data, "app.models.enableAll")) {
-			const targetIds = this.searchInput.getValue() ? this.filteredItems.map((i) => i.fullId) : undefined;
-			this.enabledIds = enableAll(this.enabledIds, this.allIds, targetIds);
-			this.isDirty = true;
-			this.refresh();
-			this.notifyChange();
+			this.setTargetModelsEnabled(true);
 			return;
 		}
-
-		// Clear all (filtered if search active, otherwise all)
 		if (kb.matches(data, "app.models.clearAll")) {
-			const targetIds = this.searchInput.getValue() ? this.filteredItems.map((i) => i.fullId) : undefined;
-			this.enabledIds = clearAll(this.enabledIds, this.allIds, targetIds);
-			this.isDirty = true;
-			this.refresh();
-			this.notifyChange();
+			this.setTargetModelsEnabled(false);
 			return;
 		}
-
-		// Toggle provider of current item
 		if (kb.matches(data, "app.models.toggleProvider")) {
-			const item = this.filteredItems[this.selectedIndex];
-			if (item) {
-				const provider = item.model.provider;
-				const providerIds = this.allIds.filter((id) => this.modelsById.get(id)!.provider === provider);
-				const allEnabled = providerIds.every((id) => isEnabled(this.enabledIds, id));
-				this.enabledIds = allEnabled
-					? clearAll(this.enabledIds, this.allIds, providerIds)
-					: enableAll(this.enabledIds, this.allIds, providerIds);
-				this.isDirty = true;
-				this.refresh();
-				this.notifyChange();
-			}
+			this.toggleSelectedProvider();
 			return;
 		}
-
-		// Save/persist to settings
 		if (kb.matches(data, "app.models.save")) {
-			this.callbacks.onPersist(this.enabledIds === null ? null : [...this.enabledIds]);
-			this.isDirty = false;
-			this.footerText.setText(this.getFooterText());
+			this.persistEnabledModels();
 			return;
 		}
-
-		// Ctrl+C - clear search or cancel if empty
 		if (matchesKey(data, Key.ctrl("c"))) {
-			if (this.searchInput.getValue()) {
-				this.searchInput.setValue("");
-				this.refresh();
-			} else {
-				this.callbacks.onCancel();
-			}
+			this.clearSearchOrCancel();
 			return;
 		}
-
-		// Escape - cancel
 		if (matchesKey(data, Key.escape)) {
 			this.callbacks.onCancel();
 			return;
 		}
-
-		// Pass everything else to search input
 		this.searchInput.handleInput(data);
 		this.refresh();
 	}

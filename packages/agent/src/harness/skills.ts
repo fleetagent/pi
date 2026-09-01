@@ -1,12 +1,11 @@
 import ignore from "ignore";
 import { parse } from "yaml";
-import { type ExecutionEnv, type FileInfo, type Result, type Skill, toError } from "./types.ts";
+import { type ExecutionEnv, type FileError, type FileInfo, type Result, type Skill, toError } from "./types.ts";
 
 const MAX_NAME_LENGTH = 64;
 const MAX_DESCRIPTION_LENGTH = 1024;
 const IGNORE_FILE_NAMES = [".gitignore", ".ignore", ".fdignore"];
-
-type IgnoreMatcher = ReturnType<typeof ignore>;
+type SkillPathKind = "file" | "directory";
 
 export type SkillDiagnosticCode =
 	| "file_info_failed"
@@ -27,12 +26,56 @@ export interface SkillDiagnostic {
 	path: string;
 }
 
+function appendFileInfoDiagnostic(diagnostics: SkillDiagnostic[], error: FileError, path: string): void {
+	if (error.code === "not_found") return;
+	diagnostics.push({ type: "warning", code: "file_info_failed", message: error.message, path });
+}
+
 interface SkillFrontmatter {
 	name?: string;
 	description?: string;
 	"disable-model-invocation"?: boolean;
 	[key: string]: unknown;
 }
+
+/** Skills and warnings produced by a directory load. */
+export interface LoadSkillsResult {
+	skills: Skill[];
+	diagnostics: SkillDiagnostic[];
+}
+
+/** Source-tagged directory passed to the sourced skill loader. */
+export type SourcedSkillInput<TSource> = {
+	path: string;
+	source: TSource;
+};
+
+/** Loaded skill paired with its caller-defined provenance. */
+export interface SourcedSkill<TSkill extends Skill, TSource> {
+	skill: TSkill;
+	source: TSource;
+}
+
+/** Skill diagnostic paired with its caller-defined provenance. */
+export interface SourcedSkillDiagnostic<TSource> extends SkillDiagnostic {
+	source: TSource;
+}
+
+/** Skills and diagnostics produced by a sourced directory load. */
+export interface LoadSourcedSkillsResult<TSkill extends Skill, TSource> {
+	skills: SourcedSkill<TSkill, TSource>[];
+	diagnostics: SourcedSkillDiagnostic<TSource>[];
+}
+
+interface SkillFileLoadResult {
+	skill: Skill | null;
+	diagnostics: SkillDiagnostic[];
+}
+
+type ParsedFrontmatter<T> = {
+	frontmatter: T;
+	body: string;
+};
 
 /** Format a skill invocation prompt, optionally appending additional user instructions. */
 export function formatSkillInvocation(skill: Skill, additionalInstructions?: string): string {
@@ -46,10 +89,7 @@ export function formatSkillInvocation(skill: Skill, additionalInstructions?: str
  * Traverses directories recursively, loads `SKILL.md` files, loads direct root `.md` files as skills, honors ignore files,
  * and returns diagnostics for invalid skill files. Missing input directories are skipped.
  */
-export async function loadSkills(
-	env: ExecutionEnv,
-	dirs: string | string[],
-): Promise<{ skills: Skill[]; diagnostics: SkillDiagnostic[] }> {
+export async function loadSkills(env: ExecutionEnv, dirs: string | string[]): Promise<LoadSkillsResult> {
 	const skills: Skill[] = [];
 	const diagnostics: SkillDiagnostic[] = [];
 	for (const dir of Array.isArray(dirs) ? dirs : [dirs]) {
@@ -82,14 +122,11 @@ export async function loadSkills(
  */
 export async function loadSourcedSkills<TSource, TSkill extends Skill = Skill>(
 	env: ExecutionEnv,
-	inputs: Array<{ path: string; source: TSource }>,
+	inputs: SourcedSkillInput<TSource>[],
 	mapSkill?: (skill: Skill, source: TSource) => TSkill,
-): Promise<{
-	skills: Array<{ skill: TSkill; source: TSource }>;
-	diagnostics: Array<SkillDiagnostic & { source: TSource }>;
-}> {
-	const skills: Array<{ skill: TSkill; source: TSource }> = [];
-	const diagnostics: Array<SkillDiagnostic & { source: TSource }> = [];
+): Promise<LoadSourcedSkillsResult<TSkill, TSource>> {
+	const skills: SourcedSkill<TSkill, TSource>[] = [];
+	const diagnostics: SourcedSkillDiagnostic<TSource>[] = [];
 	for (const input of inputs) {
 		const result = await loadSkills(env, input.path);
 		for (const skill of result.skills) {
@@ -100,83 +137,97 @@ export async function loadSourcedSkills<TSource, TSkill extends Skill = Skill>(
 	return { skills, diagnostics };
 }
 
+async function findDirectorySkill(
+	env: ExecutionEnv,
+	entries: FileInfo[],
+	ignoreMatcher: ignore.Ignore,
+	rootDir: string,
+	diagnostics: SkillDiagnostic[],
+): Promise<SkillFileLoadResult | undefined> {
+	for (const entry of entries) {
+		if (entry.name !== "SKILL.md") continue;
+		if ((await resolveKind(env, entry, diagnostics)) !== "file") continue;
+		if (ignoreMatcher.ignores(relativeEnvPath(rootDir, entry.path))) continue;
+		return loadSkillFromFile(env, entry.path);
+	}
+	return undefined;
+}
+
+function shouldSkipChildSkillEntry(entry: FileInfo): boolean {
+	return entry.name.startsWith(".") || entry.name === "node_modules";
+}
+
+async function loadChildSkillEntry(
+	env: ExecutionEnv,
+	entry: FileInfo,
+	includeRootFiles: boolean,
+	ignoreMatcher: ignore.Ignore,
+	rootDir: string,
+	diagnostics: SkillDiagnostic[],
+): Promise<LoadSkillsResult> {
+	if (shouldSkipChildSkillEntry(entry)) return { skills: [], diagnostics: [] };
+	const kind = await resolveKind(env, entry, diagnostics);
+	if (!kind) return { skills: [], diagnostics: [] };
+	const relPath = relativeEnvPath(rootDir, entry.path);
+	const ignorePath = kind === "directory" ? `${relPath}/` : relPath;
+	if (ignoreMatcher.ignores(ignorePath)) return { skills: [], diagnostics: [] };
+	if (kind === "directory") return loadSkillsFromDirInternal(env, entry.path, false, ignoreMatcher, rootDir);
+	if (!includeRootFiles || !entry.name.endsWith(".md")) return { skills: [], diagnostics: [] };
+	const result = await loadSkillFromFile(env, entry.path);
+	return { skills: result.skill ? [result.skill] : [], diagnostics: result.diagnostics };
+}
+
+function mergeSkillsResult(target: LoadSkillsResult, source: LoadSkillsResult): void {
+	target.skills.push(...source.skills);
+	target.diagnostics.push(...source.diagnostics);
+}
+
 async function loadSkillsFromDirInternal(
 	env: ExecutionEnv,
 	dir: string,
 	includeRootFiles: boolean,
-	ignoreMatcher: IgnoreMatcher,
+	ignoreMatcher: ignore.Ignore,
 	rootDir: string,
-): Promise<{ skills: Skill[]; diagnostics: SkillDiagnostic[] }> {
-	const skills: Skill[] = [];
-	const diagnostics: SkillDiagnostic[] = [];
-
+): Promise<LoadSkillsResult> {
+	const result: LoadSkillsResult = { skills: [], diagnostics: [] };
 	const dirInfoResult = await env.fileInfo(dir);
 	if (!dirInfoResult.ok) {
-		if (dirInfoResult.error.code !== "not_found") {
-			diagnostics.push({
-				type: "warning",
-				code: "file_info_failed",
-				message: dirInfoResult.error.message,
-				path: dir,
-			});
-		}
-		return { skills, diagnostics };
+		appendFileInfoDiagnostic(result.diagnostics, dirInfoResult.error, dir);
+		return result;
 	}
-	const dirInfo = dirInfoResult.value;
-	if ((await resolveKind(env, dirInfo, diagnostics)) !== "directory") return { skills, diagnostics };
+	if ((await resolveKind(env, dirInfoResult.value, result.diagnostics)) !== "directory") return result;
 
-	await addIgnoreRules(env, ignoreMatcher, dir, rootDir, diagnostics);
-
+	await addIgnoreRules(env, ignoreMatcher, dir, rootDir, result.diagnostics);
 	const entriesResult = await env.listDir(dir);
 	if (!entriesResult.ok) {
-		diagnostics.push({ type: "warning", code: "list_failed", message: entriesResult.error.message, path: dir });
-		return { skills, diagnostics };
+		result.diagnostics.push({
+			type: "warning",
+			code: "list_failed",
+			message: entriesResult.error.message,
+			path: dir,
+		});
+		return result;
 	}
 	const entries = entriesResult.value;
-
-	for (const entry of entries) {
-		if (entry.name !== "SKILL.md") continue;
-		const fullPath = entry.path;
-		const kind = await resolveKind(env, entry, diagnostics);
-		if (kind !== "file") continue;
-		const relPath = relativeEnvPath(rootDir, fullPath);
-		if (ignoreMatcher.ignores(relPath)) continue;
-
-		const result = await loadSkillFromFile(env, fullPath);
-		if (result.skill) skills.push(result.skill);
-		diagnostics.push(...result.diagnostics);
-		return { skills, diagnostics };
+	const directorySkill = await findDirectorySkill(env, entries, ignoreMatcher, rootDir, result.diagnostics);
+	if (directorySkill) {
+		if (directorySkill.skill) result.skills.push(directorySkill.skill);
+		result.diagnostics.push(...directorySkill.diagnostics);
+		return result;
 	}
 
 	for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-		if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
-		const fullPath = entry.path;
-		const kind = await resolveKind(env, entry, diagnostics);
-		if (!kind) continue;
-
-		const relPath = relativeEnvPath(rootDir, fullPath);
-		const ignorePath = kind === "directory" ? `${relPath}/` : relPath;
-		if (ignoreMatcher.ignores(ignorePath)) continue;
-
-		if (kind === "directory") {
-			const result = await loadSkillsFromDirInternal(env, fullPath, false, ignoreMatcher, rootDir);
-			skills.push(...result.skills);
-			diagnostics.push(...result.diagnostics);
-			continue;
-		}
-
-		if (kind !== "file" || !includeRootFiles || !entry.name.endsWith(".md")) continue;
-		const result = await loadSkillFromFile(env, fullPath);
-		if (result.skill) skills.push(result.skill);
-		diagnostics.push(...result.diagnostics);
+		mergeSkillsResult(
+			result,
+			await loadChildSkillEntry(env, entry, includeRootFiles, ignoreMatcher, rootDir, result.diagnostics),
+		);
 	}
-
-	return { skills, diagnostics };
+	return result;
 }
 
 async function addIgnoreRules(
 	env: ExecutionEnv,
-	ig: IgnoreMatcher,
+	ig: ignore.Ignore,
 	dir: string,
 	rootDir: string,
 	diagnostics: SkillDiagnostic[],
@@ -230,10 +281,7 @@ function prefixIgnorePattern(line: string, prefix: string): string | null {
 	return negated ? `!${prefixed}` : prefixed;
 }
 
-async function loadSkillFromFile(
-	env: ExecutionEnv,
-	filePath: string,
-): Promise<{ skill: Skill | null; diagnostics: SkillDiagnostic[] }> {
+async function loadSkillFromFile(env: ExecutionEnv, filePath: string): Promise<SkillFileLoadResult> {
 	const diagnostics: SkillDiagnostic[] = [];
 	const rawContent = await env.readTextFile(filePath);
 	if (!rawContent.ok) {
@@ -300,9 +348,7 @@ function validateDescription(description: string | undefined): string[] {
 	return errors;
 }
 
-function parseFrontmatter<T extends Record<string, unknown>>(
-	content: string,
-): Result<{ frontmatter: T; body: string }, Error> {
+function parseFrontmatter<T extends Record<string, unknown>>(content: string): Result<ParsedFrontmatter<T>, Error> {
 	try {
 		const normalized = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 		if (!normalized.startsWith("---")) return { ok: true, value: { frontmatter: {} as T, body: normalized } };
@@ -320,7 +366,7 @@ async function resolveKind(
 	env: ExecutionEnv,
 	info: FileInfo,
 	diagnostics: SkillDiagnostic[],
-): Promise<"file" | "directory" | undefined> {
+): Promise<SkillPathKind | undefined> {
 	if (info.kind === "file" || info.kind === "directory") return info.kind;
 	const canonicalPath = await env.canonicalPath(info.path);
 	if (!canonicalPath.ok) {

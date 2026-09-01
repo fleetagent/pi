@@ -1,7 +1,15 @@
 import { Text } from "@fleetagent/pi-tui";
 import { type Static, Type } from "typebox";
-import type { CodeAction, Command, Diagnostic, TextEdit, WorkspaceEdit } from "vscode-languageserver-protocol";
-import type { ToolDefinition } from "../extensions/types.ts";
+import type {
+	CodeAction,
+	Command,
+	Diagnostic,
+	Position,
+	Range,
+	TextEdit,
+	WorkspaceEdit,
+} from "vscode-languageserver-protocol";
+import type { AgentToolResult, ToolDefinition } from "../extensions/types.ts";
 import type { ToolOperations } from "../tools/operations.ts";
 import { throwIfAborted } from "./abort.ts";
 import type { LspRuntimeState } from "./integration.ts";
@@ -36,6 +44,15 @@ const codeActionsSchema = Type.Object({
 type RenameInput = Static<typeof renameSchema>;
 type CodeActionsInput = Static<typeof codeActionsSchema>;
 
+interface OneBasedPosition {
+	line: number;
+	character: number;
+}
+
+interface LspFileInput {
+	path: string;
+}
+
 export interface LspRenameDetails {
 	fileCount: number;
 	editCount: number;
@@ -50,8 +67,13 @@ export interface LspCodeActionsDetails {
 
 type CodeActionResponse = (CodeAction | Command)[] | null;
 
+interface TextDocumentEditReference {
+	uri: string;
+	version?: number | null;
+}
+
 type TextDocumentEditLike = {
-	textDocument: { uri: string; version?: number | null };
+	textDocument: TextDocumentEditReference;
 	edits: TextEdit[];
 };
 
@@ -59,6 +81,18 @@ interface WorkspaceEditEntry {
 	path: string;
 	edit: TextEdit;
 	version?: number | null;
+}
+
+interface WorkspaceEditCollection {
+	entries: WorkspaceEditEntry[];
+	resourceOperations: ResourceOperationPreview[];
+	versionErrors: string[];
+}
+
+interface WorkspaceEditCollectionContext {
+	state: LspRuntimeState;
+	route: LspClientRoute;
+	validateDocumentVersions: boolean;
 }
 
 interface WorkspaceEditPreview {
@@ -82,7 +116,13 @@ interface AggregatedAction {
 	preferred: boolean;
 }
 
-function toPosition(input: { line: number; character: number }): { line: number; character: number } {
+interface CodeActionRouteOutcome {
+	route: LspClientRoute;
+	items: (CodeAction | Command)[];
+	failure?: LspClientRouteFailure;
+}
+
+function toPosition(input: OneBasedPosition): Position {
 	return { line: input.line - 1, character: input.character - 1 };
 }
 
@@ -164,51 +204,54 @@ function normalizeResourceOperation(
 	return { line: `[unknown workspace operation: ${signature}]`, paths: [], signature };
 }
 
-function collectWorkspaceEditPreview(
-	state: LspRuntimeState,
-	route: LspClientRoute,
-	edit: WorkspaceEdit | undefined,
-	validateDocumentVersions = false,
-): WorkspaceEditPreview {
-	if (!edit) {
-		return { lines: [], fileCount: 0, editCount: 0, truncated: false, signature: "[]", versionErrors: [] };
+function documentVersionError(
+	context: WorkspaceEditCollectionContext,
+	uri: string,
+	path: string,
+	version: number | null | undefined,
+): string | undefined {
+	if (!context.validateDocumentVersions || typeof version !== "number") return undefined;
+	const trackedVersion = context.state.fileSync.getTrackedVersion(uri, context.route.target.instanceKey);
+	if (trackedVersion === undefined) {
+		return `unknown tracked version for ${path}; response requires document version ${version}`;
 	}
-	const entries: WorkspaceEditEntry[] = [];
-	const resourceOperations: ResourceOperationPreview[] = [];
-	const versionErrors: string[] = [];
-	if (edit.documentChanges) {
-		for (const change of edit.documentChanges) {
-			if (isTextDocumentEditLike(change)) {
-				const path = relativeUriPath(state, route, change.textDocument.uri);
-				const version = change.textDocument.version;
-				if (validateDocumentVersions && typeof version === "number") {
-					const trackedVersion = state.fileSync.getTrackedVersion(
-						change.textDocument.uri,
-						route.target.instanceKey,
-					);
-					if (trackedVersion === undefined) {
-						versionErrors.push(
-							`unknown tracked version for ${path}; response requires document version ${version}`,
-						);
-					} else if (trackedVersion !== version) {
-						versionErrors.push(
-							`stale document version ${version}; tracked version is ${trackedVersion} for ${path}`,
-						);
-					}
-				}
-				for (const textEdit of change.edits) entries.push({ path, edit: textEdit, version });
-			} else {
-				resourceOperations.push(normalizeResourceOperation(state, route, change));
-			}
+	if (trackedVersion !== version) {
+		return `stale document version ${version}; tracked version is ${trackedVersion} for ${path}`;
+	}
+	return undefined;
+}
+
+function collectDocumentChanges(
+	context: WorkspaceEditCollectionContext,
+	edit: WorkspaceEdit,
+	collection: WorkspaceEditCollection,
+): void {
+	for (const change of edit.documentChanges ?? []) {
+		if (!isTextDocumentEditLike(change)) {
+			collection.resourceOperations.push(normalizeResourceOperation(context.state, context.route, change));
+			continue;
 		}
+		const path = relativeUriPath(context.state, context.route, change.textDocument.uri);
+		const version = change.textDocument.version;
+		const versionError = documentVersionError(context, change.textDocument.uri, path, version);
+		if (versionError) collection.versionErrors.push(versionError);
+		for (const textEdit of change.edits) collection.entries.push({ path, edit: textEdit, version });
 	}
-	if (edit.changes) {
-		for (const [uri, edits] of Object.entries(edit.changes)) {
-			const path = relativeUriPath(state, route, uri);
-			for (const textEdit of edits) entries.push({ path, edit: textEdit });
-		}
+}
+
+function collectUriTextEdits(
+	context: WorkspaceEditCollectionContext,
+	edit: WorkspaceEdit,
+	collection: WorkspaceEditCollection,
+): void {
+	for (const [uri, edits] of Object.entries(edit.changes ?? {})) {
+		const path = relativeUriPath(context.state, context.route, uri);
+		for (const textEdit of edits) collection.entries.push({ path, edit: textEdit });
 	}
-	entries.sort(
+}
+
+function sortWorkspaceEditCollection(collection: WorkspaceEditCollection): void {
+	collection.entries.sort(
 		(left, right) =>
 			left.path.localeCompare(right.path) ||
 			left.edit.range.start.line - right.edit.range.start.line ||
@@ -217,10 +260,13 @@ function collectWorkspaceEditPreview(
 			left.edit.range.end.character - right.edit.range.end.character ||
 			left.edit.newText.localeCompare(right.edit.newText),
 	);
-	resourceOperations.sort((left, right) => left.signature.localeCompare(right.signature));
+	collection.resourceOperations.sort((left, right) => left.signature.localeCompare(right.signature));
+}
+
+function renderWorkspaceEditLines(collection: WorkspaceEditCollection): string[] {
 	const lines: string[] = [];
 	let previousDocument: string | undefined;
-	for (const entry of entries) {
+	for (const entry of collection.entries) {
 		const versionLabel =
 			entry.version === undefined
 				? ""
@@ -234,28 +280,48 @@ function collectWorkspaceEditPreview(
 		}
 		lines.push(`  ${formatTextEdit(entry.edit)}`);
 	}
-	for (const operation of resourceOperations) lines.push(operation.line);
+	for (const operation of collection.resourceOperations) lines.push(operation.line);
+	return lines;
+}
+
+function workspaceEditSignature(collection: WorkspaceEditCollection): string {
+	if (collection.entries.length === 0 && collection.resourceOperations.length === 0) return "[]";
+	return stableSerialize({
+		entries: collection.entries.map((entry) => ({
+			path: entry.path,
+			range: entry.edit.range,
+			newText: entry.edit.newText,
+		})),
+		resourceOperations: collection.resourceOperations.map((operation) => operation.signature),
+	});
+}
+
+function collectWorkspaceEditPreview(
+	state: LspRuntimeState,
+	route: LspClientRoute,
+	edit: WorkspaceEdit | undefined,
+	validateDocumentVersions = false,
+): WorkspaceEditPreview {
+	if (!edit) {
+		return { lines: [], fileCount: 0, editCount: 0, truncated: false, signature: "[]", versionErrors: [] };
+	}
+	const context: WorkspaceEditCollectionContext = { state, route, validateDocumentVersions };
+	const collection: WorkspaceEditCollection = { entries: [], resourceOperations: [], versionErrors: [] };
+	collectDocumentChanges(context, edit, collection);
+	collectUriTextEdits(context, edit, collection);
+	sortWorkspaceEditCollection(collection);
+	const lines = renderWorkspaceEditLines(collection);
 	const shown = lines.slice(0, MAX_EDIT_LINES);
 	return {
 		lines: shown,
 		fileCount: new Set([
-			...entries.map((entry) => entry.path),
-			...resourceOperations.flatMap((operation) => operation.paths),
+			...collection.entries.map((entry) => entry.path),
+			...collection.resourceOperations.flatMap((operation) => operation.paths),
 		]).size,
-		editCount: entries.length + resourceOperations.length,
+		editCount: collection.entries.length + collection.resourceOperations.length,
 		truncated: shown.length < lines.length,
-		signature:
-			entries.length === 0 && resourceOperations.length === 0
-				? "[]"
-				: stableSerialize({
-						entries: entries.map((entry) => ({
-							path: entry.path,
-							range: entry.edit.range,
-							newText: entry.edit.newText,
-						})),
-						resourceOperations: resourceOperations.map((operation) => operation.signature),
-					}),
-		versionErrors,
+		signature: workspaceEditSignature(collection),
+		versionErrors: collection.versionErrors,
 	};
 }
 
@@ -263,17 +329,11 @@ function isCodeAction(item: CodeAction | Command): item is CodeAction {
 	return typeof item.command !== "string";
 }
 
-function comparePosition(
-	left: { line: number; character: number },
-	right: { line: number; character: number },
-): number {
+function comparePosition(left: Position, right: Position): number {
 	return left.line - right.line || left.character - right.character;
 }
 
-function rangesOverlap(
-	left: { start: { line: number; character: number }; end: { line: number; character: number } },
-	right: { start: { line: number; character: number }; end: { line: number; character: number } },
-): boolean {
+function rangesOverlap(left: Range, right: Range): boolean {
 	return comparePosition(left.end, right.start) >= 0 && comparePosition(right.end, left.start) >= 0;
 }
 
@@ -288,7 +348,7 @@ function failureText(failures: readonly LspClientRouteFailure[]): string {
 
 async function getClientsAndSync(
 	state: LspRuntimeState,
-	input: { path: string },
+	input: LspFileInput,
 	operations: ToolOperations,
 	feature: LspToolFeature,
 	signal?: AbortSignal,
@@ -351,6 +411,153 @@ function actionKey(item: CodeAction | Command, preview: WorkspaceEditPreview): s
 		});
 	}
 	return stableSerialize({ title: item.title, command: item.command, arguments: item.arguments });
+}
+
+async function requestCodeActions(
+	route: LspClientRoute,
+	input: CodeActionsInput,
+	range: Range,
+	signal: AbortSignal | undefined,
+): Promise<CodeActionRouteOutcome> {
+	try {
+		const uri = route.target.serverUri;
+		const diagnostics = route.client
+
+			.getDiagnostics(uri)
+
+			.filter((diagnostic: Diagnostic) => rangesOverlap(diagnostic.range, range));
+		const response = await route.client.sendRequest<CodeActionResponse>(
+			"textDocument/codeAction",
+			{
+				textDocument: { uri },
+				range,
+				context: { diagnostics, only: input.kind ? [input.kind] : undefined },
+			},
+			signal,
+		);
+		return { route, items: response ?? [] };
+	} catch (error) {
+		rethrowIfAborted(signal);
+		return {
+			route,
+			items: [],
+			failure: {
+				serverId: route.target.serverId,
+				reason: error instanceof Error ? error.message : String(error),
+			},
+		};
+	}
+}
+
+function aggregateCodeActions(state: LspRuntimeState, outcomes: readonly CodeActionRouteOutcome[]): AggregatedAction[] {
+	const aggregated = new Map<string, AggregatedAction>();
+	for (const outcome of outcomes) {
+		for (const item of outcome.items) {
+			const preview = collectWorkspaceEditPreview(state, outcome.route, isCodeAction(item) ? item.edit : undefined);
+			const key = actionKey(item, preview);
+			const existing = aggregated.get(key);
+			if (existing) {
+				if (!existing.serverIds.includes(outcome.route.target.serverId)) {
+					existing.serverIds.push(outcome.route.target.serverId);
+				}
+				existing.preferred ||= isCodeAction(item) && item.isPreferred === true;
+				continue;
+			}
+			aggregated.set(key, {
+				item,
+				route: outcome.route,
+				serverIds: [outcome.route.target.serverId],
+				preferred: isCodeAction(item) && item.isPreferred === true,
+			});
+		}
+	}
+	return [...aggregated.values()];
+}
+
+function renderCodeActionLines(
+	state: LspRuntimeState,
+	actions: readonly AggregatedAction[],
+	attribute: boolean,
+): string[] {
+	const lines: string[] = [];
+	for (const [index, action] of actions.slice(0, MAX_ACTIONS).entries()) {
+		const provider = attribute ? `[${action.serverIds.join(", ")}] ` : "";
+		if (!isCodeAction(action.item)) {
+			lines.push(`${index + 1}. ${provider}${action.item.title} [command-only: ${action.item.command}]`);
+			continue;
+		}
+		const kind = action.item.kind ? ` [${action.item.kind}]` : "";
+		const preferred = action.preferred ? " preferred" : "";
+		lines.push(`${index + 1}. ${provider}${action.item.title}${kind}${preferred}`);
+		const preview = collectWorkspaceEditPreview(state, action.route, action.item.edit);
+		for (const line of preview.lines.slice(0, 8)) lines.push(`   ${line}`);
+		if (preview.truncated) lines.push("   [edit preview truncated]");
+	}
+	if (actions.length > MAX_ACTIONS) lines.push(`[Showing ${MAX_ACTIONS} of ${actions.length} actions.]`);
+	return lines;
+}
+
+function consensusRenamePreview(
+	newName: string,
+	previews: RenamePreviewResult[],
+	failures: readonly LspClientRouteFailure[],
+	matchedServerCount: number,
+): AgentToolResult<LspRenameDetails> {
+	const bySignature = new Map<string, RenamePreviewResult[]>();
+	for (const preview of previews) {
+		bySignature.set(preview.preview.signature, [...(bySignature.get(preview.preview.signature) ?? []), preview]);
+	}
+	if (bySignature.size > 1) {
+		const sections = [...bySignature.values()].map((group) => {
+			const first = group[0];
+			return first.preview.editCount === 0
+				? `[${group.map((entry) => entry.serverId).join(", ")}] no edits`
+				: `[${group.map((entry) => entry.serverId).join(", ")}] ${first.preview.editCount} edit(s):\n${first.preview.lines.join("\n")}`;
+		});
+		return {
+			content: [
+				{
+					type: "text",
+					text: `Conflicting rename previews for ${JSON.stringify(newName)}. No preview was selected and no changes were applied.\n\n${sections.join("\n\n")}${failureText(failures)}`,
+				},
+			],
+			details: {
+				fileCount: Math.max(...previews.map((entry) => entry.preview.fileCount)),
+				editCount: Math.max(...previews.map((entry) => entry.preview.editCount)),
+				conflict: true,
+			},
+		};
+	}
+	const matching = [...bySignature.values()][0];
+	const selected = matching[0];
+	if (selected.preview.editCount === 0) {
+		const providers = matching.map((entry) => entry.serverId).join(", ");
+		return {
+			content: [
+				{
+					type: "text",
+					text: `Rename preview: no edits. Successful provider(s): ${providers}. No changes were applied.${failureText(failures)}`,
+				},
+			],
+			details: { fileCount: 0, editCount: 0 },
+		};
+	}
+	const attribution =
+		matchedServerCount > 1 ? ` Selected provider(s): ${matching.map((entry) => entry.serverId).join(", ")}.` : "";
+	const suffix = selected.preview.truncated ? `\n[Showing ${selected.preview.lines.length} edit preview lines.]` : "";
+	return {
+		content: [
+			{
+				type: "text",
+				text: `Rename preview for ${JSON.stringify(newName)}: ${selected.preview.editCount} edit(s) across ${selected.preview.fileCount} file(s).${attribution} No changes were applied.\n\n${selected.preview.lines.join("\n")}${suffix}${failureText(failures)}`,
+			},
+		],
+		details: {
+			fileCount: selected.preview.fileCount,
+			editCount: selected.preview.editCount,
+			...(selected.preview.truncated ? { truncated: true } : {}),
+		},
+	};
 }
 
 export function createLspRenameTool(
@@ -445,68 +652,7 @@ export function createLspRenameTool(
 					},
 				};
 			}
-			const bySignature = new Map<string, RenamePreviewResult[]>();
-			for (const preview of previews) {
-				bySignature.set(preview.preview.signature, [
-					...(bySignature.get(preview.preview.signature) ?? []),
-					preview,
-				]);
-			}
-			if (bySignature.size > 1) {
-				const sections = [...bySignature.values()].map((group) => {
-					const first = group[0];
-					return first.preview.editCount === 0
-						? `[${group.map((entry) => entry.serverId).join(", ")}] no edits`
-						: `[${group.map((entry) => entry.serverId).join(", ")}] ${first.preview.editCount} edit(s):\n${first.preview.lines.join("\n")}`;
-				});
-				return {
-					content: [
-						{
-							type: "text",
-							text: `Conflicting rename previews for ${JSON.stringify(input.newName)}. No preview was selected and no changes were applied.\n\n${sections.join("\n\n")}${failureText(failures)}`,
-						},
-					],
-					details: {
-						fileCount: Math.max(...previews.map((entry) => entry.preview.fileCount)),
-						editCount: Math.max(...previews.map((entry) => entry.preview.editCount)),
-						conflict: true,
-					},
-				};
-			}
-			const matching = [...bySignature.values()][0];
-			const selected = matching[0];
-			if (selected.preview.editCount === 0) {
-				const providers = matching.map((entry) => entry.serverId).join(", ");
-				return {
-					content: [
-						{
-							type: "text",
-							text: `Rename preview: no edits. Successful provider(s): ${providers}. No changes were applied.${failureText(failures)}`,
-						},
-					],
-					details: { fileCount: 0, editCount: 0 },
-				};
-			}
-			const attribution =
-				collection.matchedServerCount > 1
-					? ` Selected provider(s): ${matching.map((entry) => entry.serverId).join(", ")}.`
-					: "";
-			const suffix = selected.preview.truncated
-				? `\n[Showing ${selected.preview.lines.length} edit preview lines.]`
-				: "";
-			return {
-				content: [
-					{
-						type: "text",
-						text: `Rename preview for ${JSON.stringify(input.newName)}: ${selected.preview.editCount} edit(s) across ${selected.preview.fileCount} file(s).${attribution} No changes were applied.\n\n${selected.preview.lines.join("\n")}${suffix}${failureText(failures)}`,
-					},
-				],
-				details: {
-					fileCount: selected.preview.fileCount,
-					editCount: selected.preview.editCount,
-					...(selected.preview.truncated ? { truncated: true } : {}),
-				},
-			};
+			return consensusRenamePreview(input.newName, previews, failures, collection.matchedServerCount);
 		},
 		renderCall(args, theme) {
 			return new Text(
@@ -549,71 +695,21 @@ export function createLspCodeActionsTool(
 					details: { count: 0, preferredCount: 0 },
 				};
 			}
-			const start = toPosition(input);
-			const end = {
-				line: (input.endLine ?? input.line) - 1,
-				character: (input.endCharacter ?? input.character) - 1,
+			const range: Range = {
+				start: toPosition(input),
+				end: {
+					line: (input.endLine ?? input.line) - 1,
+					character: (input.endCharacter ?? input.character) - 1,
+				},
 			};
 			const outcomes = await Promise.all(
-				collection.routes.map(async (route) => {
-					try {
-						const uri = route.target.serverUri;
-						const diagnostics = route.client
-							.getDiagnostics(uri)
-							.filter((diagnostic: Diagnostic) => rangesOverlap(diagnostic.range, { start, end }));
-						const response = await route.client.sendRequest<CodeActionResponse>(
-							"textDocument/codeAction",
-							{
-								textDocument: { uri },
-								range: { start, end },
-								context: { diagnostics, only: input.kind ? [input.kind] : undefined },
-							},
-							signal,
-						);
-						return { route, items: response ?? [] };
-					} catch (error) {
-						rethrowIfAborted(signal);
-						return {
-							route,
-							items: [],
-							failure: {
-								serverId: route.target.serverId,
-								reason: error instanceof Error ? error.message : String(error),
-							} satisfies LspClientRouteFailure,
-						};
-					}
-				}),
+				collection.routes.map((route) => requestCodeActions(route, input, range, signal)),
 			);
 			const failures = [
 				...collection.failures,
 				...outcomes.flatMap((outcome) => (outcome.failure ? [outcome.failure] : [])),
 			];
-			const aggregated = new Map<string, AggregatedAction>();
-			for (const outcome of outcomes) {
-				for (const item of outcome.items) {
-					const preview = collectWorkspaceEditPreview(
-						state,
-						outcome.route,
-						isCodeAction(item) ? item.edit : undefined,
-					);
-					const key = actionKey(item, preview);
-					const existing = aggregated.get(key);
-					if (existing) {
-						if (!existing.serverIds.includes(outcome.route.target.serverId)) {
-							existing.serverIds.push(outcome.route.target.serverId);
-						}
-						existing.preferred ||= isCodeAction(item) && item.isPreferred === true;
-					} else {
-						aggregated.set(key, {
-							item,
-							route: outcome.route,
-							serverIds: [outcome.route.target.serverId],
-							preferred: isCodeAction(item) && item.isPreferred === true,
-						});
-					}
-				}
-			}
-			const actions = [...aggregated.values()];
+			const actions = aggregateCodeActions(state, outcomes);
 			if (actions.length === 0) {
 				return {
 					content: [{ type: "text", text: `No code actions available.${failureText(failures)}` }],
@@ -621,22 +717,7 @@ export function createLspCodeActionsTool(
 				};
 			}
 			const preferredCount = actions.filter((action) => action.preferred).length;
-			const attribute = collection.matchedServerCount > 1;
-			const lines: string[] = [];
-			for (const [index, action] of actions.slice(0, MAX_ACTIONS).entries()) {
-				const provider = attribute ? `[${action.serverIds.join(", ")}] ` : "";
-				if (isCodeAction(action.item)) {
-					const kind = action.item.kind ? ` [${action.item.kind}]` : "";
-					const preferred = action.preferred ? " preferred" : "";
-					lines.push(`${index + 1}. ${provider}${action.item.title}${kind}${preferred}`);
-					const preview = collectWorkspaceEditPreview(state, action.route, action.item.edit);
-					for (const line of preview.lines.slice(0, 8)) lines.push(`   ${line}`);
-					if (preview.truncated) lines.push("   [edit preview truncated]");
-				} else {
-					lines.push(`${index + 1}. ${provider}${action.item.title} [command-only: ${action.item.command}]`);
-				}
-			}
-			if (actions.length > MAX_ACTIONS) lines.push(`[Showing ${MAX_ACTIONS} of ${actions.length} actions.]`);
+			const lines = renderCodeActionLines(state, actions, collection.matchedServerCount > 1);
 			return {
 				content: [
 					{

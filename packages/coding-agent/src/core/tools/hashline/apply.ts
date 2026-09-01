@@ -4,6 +4,7 @@ import { _lineHashesPure, HASH_SEP } from "./hash.ts";
 import {
 	assertNoBarePrefix,
 	type BDupWarn,
+	type BoundaryDuplicateKind,
 	descEdit,
 	fmtMismatch,
 	type HEdit,
@@ -48,17 +49,40 @@ type RESpan = {
 	replacement: string;
 };
 
+interface EditConflictSide {
+	index: number;
+	label: string;
+}
+
+interface BoundaryWarningFormatOptions {
+	kind: BoundaryDuplicateKind;
+	survivingContent: string;
+	matchIndex: number;
+	resultLines: string[];
+	resultHashes: string[];
+}
+
+interface ChangedLineRange {
+	firstChangedLine: number;
+	lastChangedLine: number;
+}
+
+export interface ApplyEditsResult {
+	content: string;
+	firstChangedLine: ChangedLineRange["firstChangedLine"] | undefined;
+	lastChangedLine: ChangedLineRange["lastChangedLine"] | undefined;
+	warnings?: string[];
+	noopEdits?: NEdit[];
+	boundaryWarnings?: BDupWarn[];
+}
+
 function assertNotEmpty(originalContent: string, result: string): void {
 	if (originalContent.length > 0 && result.length === 0) {
 		throw new Error("[E_WOULD_EMPTY] Cannot empty a non-empty file via edit.");
 	}
 }
 
-function throwConflict(
-	left: { index: number; label: string },
-	right: { index: number; label: string },
-	reason: string,
-): never {
+function throwConflict(left: EditConflictSide, right: EditConflictSide, reason: string): never {
 	throw new Error(
 		`[E_EDIT_CONFLICT] Edit ${left.index} (${left.label}) and edit ${right.index} (${right.label}) ${reason}.`,
 	);
@@ -128,15 +152,19 @@ function resToSpan(edit: RHEdit, index: number, content: string, lineIndex: LIdx
 }
 
 function assertNoConflict(spans: RESpan[]): void {
-	for (let leftIndex = 0; leftIndex < spans.length; leftIndex++) {
-		const left = spans[leftIndex]!;
-		for (let rightIndex = leftIndex + 1; rightIndex < spans.length; rightIndex++) {
-			const right = spans[rightIndex]!;
-
-			if (left.start < right.end && right.start < left.end) {
-				throwConflict(left, right, "overlap on the same original line range");
-			}
+	if (spans.length < 2) return;
+	const ordered = [...spans].sort(
+		(left, right) => left.start - right.start || right.end - left.end || left.index - right.index,
+	);
+	let furthestEndSpan = ordered[0]!;
+	for (let index = 1; index < ordered.length; index++) {
+		const current = ordered[index]!;
+		if (furthestEndSpan.start < current.end && current.start < furthestEndSpan.end) {
+			const [left, right] =
+				furthestEndSpan.index < current.index ? [furthestEndSpan, current] : [current, furthestEndSpan];
+			throwConflict(left, right, "overlap on the same original line range");
 		}
+		if (current.end > furthestEndSpan.end) furthestEndSpan = current;
 	}
 }
 
@@ -190,13 +218,7 @@ function assemble(content: string, spans: RESpan[], signal: AbortSignal | undefi
  * `replace` (no `read` round-trip required, since the hashes are current and
  * staleness is per-line). Rows are plain `HASH│content` — no annotations.
  */
-export function fmtBoundaryWarning(params: {
-	kind: "trailing" | "leading";
-	survivingContent: string;
-	matchIndex: number;
-	resultLines: string[];
-	resultHashes: string[];
-}): string {
+export function fmtBoundaryWarning(params: BoundaryWarningFormatOptions): string {
 	const header =
 		params.kind === "trailing"
 			? "Boundary duplication (trailing): the last replacement line duplicated the next line. This happens when `content_lines` includes a line that was already outside the replaced range. Delete the duplicate — the original line outside the range is still there."
@@ -235,14 +257,7 @@ export function applyEdits(
 	signal?: AbortSignal,
 	precomputedHashes?: string[],
 	filePath?: string,
-): {
-	content: string;
-	firstChangedLine: number | undefined;
-	lastChangedLine: number | undefined;
-	warnings?: string[];
-	noopEdits?: NEdit[];
-	boundaryWarnings?: BDupWarn[];
-} {
+): ApplyEditsResult {
 	abortIf(signal);
 	if (!edits.length)
 		return {
@@ -296,11 +311,32 @@ export function fmtRegion(hashes: string[], lines: string[]): string {
 	}
 	return lines.map((line, index) => `${hashes[index]}${HASH_SEP}${line}`).join("\n");
 }
+function characterIndexToLineNumber(characterIndex: number, text: string): number {
+	let line = 1;
+	for (let index = 0; index < characterIndex && index < text.length; index++) {
+		if (text[index] === "\n") line++;
+	}
+	return line;
+}
+interface ChangedRangeScan {
+	original: string;
+	result: string;
+	firstDifferenceIndex: number;
+	lastResultDifferenceIndex: number;
+	firstChangedLine: number;
+}
 
-export function changedRange(
-	original: string,
-	result: string,
-): { firstChangedLine: number; lastChangedLine: number } | null {
+function resolveLastChangedLine(scan: ChangedRangeScan): number {
+	if (scan.lastResultDifferenceIndex < scan.firstDifferenceIndex) {
+		return scan.result.length === 0 ? 1 : cntLines(scan.result);
+	}
+	if (scan.firstDifferenceIndex === 0 && scan.original.length > 0 && scan.result.endsWith(scan.original)) {
+		return scan.firstChangedLine;
+	}
+	return characterIndexToLineNumber(scan.lastResultDifferenceIndex + 1, scan.result);
+}
+
+export function changedRange(original: string, result: string): ChangedLineRange | null {
 	if (original === result) return null;
 
 	if (original.length === 0) {
@@ -331,23 +367,14 @@ export function changedRange(
 		lastRes--;
 	}
 
-	function idxToLine(charIdx: number, text: string): number {
-		let line = 1;
-		for (let i = 0; i < charIdx && i < text.length; i++) {
-			if (text[i] === "\n") line++;
-		}
-		return line;
-	}
-
-	const firstChangedLine = idxToLine(firstDiff + 1, result);
-	let lastChangedLine: number;
-	if (lastRes < firstDiff) {
-		lastChangedLine = result.length === 0 ? 1 : cntLines(result);
-	} else if (firstDiff === 0 && original.length > 0 && result.endsWith(original)) {
-		lastChangedLine = firstChangedLine;
-	} else {
-		lastChangedLine = idxToLine(lastRes + 1, result);
-	}
+	const firstChangedLine = characterIndexToLineNumber(firstDiff + 1, result);
+	const lastChangedLine = resolveLastChangedLine({
+		original,
+		result,
+		firstDifferenceIndex: firstDiff,
+		lastResultDifferenceIndex: lastRes,
+		firstChangedLine,
+	});
 
 	return { firstChangedLine, lastChangedLine };
 }

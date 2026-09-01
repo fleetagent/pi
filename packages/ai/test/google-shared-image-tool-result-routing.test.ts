@@ -1,12 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { convertMessages } from "../src/providers/google-shared.ts";
-import type { Context, Model } from "../src/types.ts";
+import type { Context, Model, Provider } from "../src/types.ts";
 
-function makeModel<TApi extends "google-generative-ai">(
-	api: TApi,
-	provider: Model<TApi>["provider"],
-	id: string,
-): Model<TApi> {
+function makeModel<TApi extends "google-generative-ai">(api: TApi, provider: Provider, id: string): Model<TApi> {
 	return {
 		id,
 		name: id,
@@ -21,7 +17,7 @@ function makeModel<TApi extends "google-generative-ai">(
 	};
 }
 
-function makeContext(model: { api: string; provider: string; id: string }): Context {
+function makeContext(model: Model<"google-generative-ai">): Context {
 	const now = Date.now();
 	return {
 		messages: [

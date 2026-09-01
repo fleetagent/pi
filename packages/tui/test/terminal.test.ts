@@ -53,6 +53,12 @@ describe("ProcessTerminal Kitty keyboard protocol negotiation", () => {
 		cleanup(): void;
 	};
 
+	interface KeyboardProtocolNegotiationResult {
+		kittyProtocolActive: boolean;
+		writes: string[];
+		input?: string;
+	}
+
 	function setupNegotiation(): NegotiationHarness {
 		const terminal = new ProcessTerminal();
 		const writes: string[] = [];
@@ -104,7 +110,7 @@ describe("ProcessTerminal Kitty keyboard protocol negotiation", () => {
 		};
 	}
 
-	function runNegotiation(response: string): { kittyProtocolActive: boolean; writes: string[]; input?: string } {
+	function runNegotiation(response: string): KeyboardProtocolNegotiationResult {
 		const harness = setupNegotiation();
 		try {
 			harness.send(response);

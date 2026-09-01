@@ -1,6 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { streamOpenAICompletions } from "../src/providers/openai-completions.ts";
 import type { Context, Model } from "../src/types.ts";
+import type { MockCompletionPromise } from "./openai-mock-types.ts";
+
+interface CompletionRetryOptions {
+	maxRetries?: number;
+	maxRetryDelayMs?: number;
+}
 
 const mockState = vi.hoisted(() => ({
 	requestOptions: [] as unknown[],
@@ -25,12 +31,7 @@ vi.mock("openai", () => {
 							};
 						},
 					};
-					const promise = Promise.resolve(stream) as Promise<typeof stream> & {
-						withResponse: () => Promise<{
-							data: typeof stream;
-							response: { status: number; headers: Headers };
-						}>;
-					};
+					const promise = Promise.resolve(stream) as MockCompletionPromise<typeof stream>;
 					promise.withResponse = async () => {
 						const error = mockState.requestErrors.shift();
 						if (error) throw error;
@@ -66,7 +67,7 @@ const context: Context = {
 	tools: [],
 };
 
-async function consume(options?: { maxRetries?: number; maxRetryDelayMs?: number }) {
+async function consume(options?: CompletionRetryOptions) {
 	const stream = streamOpenAICompletions(model, context, { apiKey: "test", ...options });
 	for await (const _event of stream) {
 		void _event;

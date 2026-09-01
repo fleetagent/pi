@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { AgentToolResult } from "@fleetagent/pi-agent-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { executeBashWithOperations } from "../src/core/bash-executor.ts";
 import { createBashTool, createLocalBashOperations } from "../src/core/tools/bash.ts";
@@ -61,7 +62,7 @@ async function withTimeout<T>(promise: Promise<T>, ms: number, onTimeout: () => 
 	});
 }
 
-function getTextOutput(result: { content?: Array<{ type: string; text?: string }> }): string {
+function getTextOutput(result: AgentToolResult<unknown>): string {
 	return (
 		result.content
 			?.filter((block) => block.type === "text")

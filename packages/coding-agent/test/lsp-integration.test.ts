@@ -2,9 +2,10 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import type { AgentToolResult } from "@fleetagent/pi-agent-core";
 import { Value } from "typebox/value";
 import { afterEach, describe, expect, it } from "vitest";
-import type { Diagnostic, ServerCapabilities } from "vscode-languageserver-protocol";
+import type { CodeActionParams, Diagnostic, ServerCapabilities } from "vscode-languageserver-protocol";
 import { DiagnosticSeverity, TextDocumentSyncKind } from "vscode-languageserver-protocol";
 import type { MessageConnection } from "vscode-languageserver-protocol/node.js";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition, ToolResultEvent } from "../src/core/extensions/types.ts";
@@ -33,6 +34,17 @@ import { LocalSessionManager } from "../src/core/session/local-session-manager.t
 import { LocalToolOperations, type ToolBackendInfo, type ToolOperations } from "../src/core/tools/operations.ts";
 
 const tempDirs: string[] = [];
+
+function remoteBackendInfo(cwd: string, id = "remote"): ToolBackendInfo {
+	return {
+		type: "remote",
+		cwd,
+		url: `ws://${id}.test/pi/workspace`,
+		protocol: "ws",
+		configured: true,
+		workspace: { id, root: cwd, pathFlavor: "posix" },
+	};
+}
 
 class FakeLspClient extends LspClient {
 	private fakeInitialized = false;
@@ -181,7 +193,7 @@ function testServer(overrides: Partial<LspConfiguredServer> = {}): LspConfigured
 	};
 }
 
-function text(result: Awaited<ReturnType<ToolDefinition["execute"]>>): string {
+function text(result: AgentToolResult<unknown>): string {
 	const content = result.content[0];
 	return content?.type === "text" ? content.text : "";
 }
@@ -199,10 +211,22 @@ function createContext(cwd: string): ExtensionContext {
 	} as unknown as ExtensionContext;
 }
 
+interface SingleClientLspTestState {
+	cwd: string;
+	state: LspRuntimeState;
+	client: FakeLspClient;
+}
+
+interface MultiClientLspTestState {
+	cwd: string;
+	state: LspRuntimeState;
+	clients: Map<string, FakeLspClient>;
+}
+
 async function createStateWithClient(
 	responses: Record<string, unknown> = {},
 	diagnostics: Record<string, Diagnostic[]> = {},
-): Promise<{ cwd: string; state: LspRuntimeState; client: FakeLspClient }> {
+): Promise<SingleClientLspTestState> {
 	const cwd = await createTempDir();
 	await writeFile(join(cwd, "fixture.ts"), "const value = 1;\nvalue;\n", "utf8");
 	let client: FakeLspClient | undefined;
@@ -224,7 +248,7 @@ async function createStateWithClient(
 async function createMultiToolState(
 	servers: LspConfiguredServer[],
 	configure: (client: FakeLspClient) => void,
-): Promise<{ cwd: string; state: LspRuntimeState; clients: Map<string, FakeLspClient> }> {
+): Promise<MultiClientLspTestState> {
 	const cwd = await createTempDir();
 	await writeFile(join(cwd, "fixture.ts"), "const value = 1;\nvalue;\n", "utf8");
 	const clients = new Map<string, FakeLspClient>();
@@ -1105,7 +1129,7 @@ describe("LSP manager lifecycle", () => {
 
 		class RemoteOperations extends LocalToolOperations {
 			override getBackendInfo(): ToolBackendInfo {
-				return { type: "ssh", cwd: this.cwd, remote: "example.test", configured: true };
+				return remoteBackendInfo(this.cwd, "example");
 			}
 		}
 		const remoteContext = {
@@ -1159,7 +1183,8 @@ describe("LSP manager lifecycle", () => {
 });
 
 describe("LSP tool formatting", () => {
-	it("requires positive integer positions in every position-based tool schema", () => {
+	// pi-ignore noExcessiveCollectionIterations: The schema matrix is fixed at 30 primary position checks and 6 code-action range checks.
+	function validatePositiveIntegerPositionSchemas(): void {
 		const state = (): LspRuntimeState => {
 			throw new Error("schema validation must not access runtime state");
 		};
@@ -1195,7 +1220,11 @@ describe("LSP tool formatting", () => {
 				).toBe(false);
 			}
 		}
-	});
+	}
+	it(
+		"requires positive integer positions in every position-based tool schema",
+		validatePositiveIntegerPositionSchemas,
+	);
 
 	it("returns diagnostics from the cache and exposes schema", async () => {
 		const { state, client } = await createStateWithClient();
@@ -1232,7 +1261,7 @@ describe("LSP tool formatting", () => {
 		client.setDiagnostics(target.serverUri, [diagnostic("overlapping diagnostic")]);
 		let contextDiagnostics: Diagnostic[] | undefined;
 		client.setResponseHandler("textDocument/codeAction", (params) => {
-			contextDiagnostics = (params as { context?: { diagnostics?: Diagnostic[] } }).context?.diagnostics;
+			contextDiagnostics = (params as CodeActionParams).context.diagnostics;
 			return [];
 		});
 
@@ -3337,7 +3366,7 @@ describe("LSP document synchronization", () => {
 					}
 					return Buffer.from("const value = 1;\n");
 				},
-				getBackendInfo: () => ({ type: "ssh", cwd: "/repo", remote, configured: true }),
+				getBackendInfo: () => remoteBackendInfo("/repo", remote),
 			}) as unknown as ToolOperations;
 		const first = createOperations("first", true);
 		await manager.setToolOperations(first);
@@ -3384,7 +3413,7 @@ describe("LSP document synchronization", () => {
 		let starts = 0;
 		const manager = new LspManager(cwd, {
 			configuration: { enabled: true, servers: [testServer()] },
-			getToolBackendInfo: () => ({ type: "ssh", cwd, remote: "example.test", configured: true }),
+			getToolBackendInfo: () => remoteBackendInfo(cwd, "example"),
 			createClient: (options) => {
 				starts++;
 				return new FakeLspClient(options);
@@ -3405,7 +3434,7 @@ describe("LSP document synchronization", () => {
 					testServer({ pathMappings: [{ agentRoot: join(cwd, "other"), serverRootUri: "file:///server/other" }] }),
 				],
 			},
-			getToolBackendInfo: () => ({ type: "ssh", cwd, remote: "example.test", configured: true }),
+			getToolBackendInfo: () => remoteBackendInfo(cwd, "example"),
 		});
 		expect(await incompatible.getUnavailableReason("fixture.ts")).toContain(
 			"outside all configured agent path mappings",
@@ -3676,7 +3705,7 @@ describe("LSP selector routing and URI mapping", () => {
 					accesses[index]?.push(path);
 					if (path !== marker) throw new Error("missing");
 				},
-				getBackendInfo: () => ({ type: "ssh", cwd, remote: `backend-${index}`, configured: true }),
+				getBackendInfo: () => remoteBackendInfo(cwd, `backend-${index}`),
 			}) as unknown as ToolOperations;
 		const server = testServer({
 			workspace: { type: "markers", markers: ["package.json"], fallback: "session" },
@@ -3715,14 +3744,14 @@ describe("LSP selector routing and URI mapping", () => {
 				markAccessStarted();
 				await accessGate;
 			},
-			getBackendInfo: () => ({ type: "ssh", cwd: "/repo", remote: "first", configured: true }) as const,
+			getBackendInfo: () => remoteBackendInfo("/repo", "first"),
 		} as unknown as ToolOperations;
 		const second = {
 			cwd: "/repo",
 			access: async () => {
 				throw new Error("missing");
 			},
-			getBackendInfo: () => ({ type: "ssh", cwd: "/repo", remote: "second", configured: true }) as const,
+			getBackendInfo: () => remoteBackendInfo("/repo", "second"),
 		} as unknown as ToolOperations;
 		await manager.setToolOperations(first);
 		const stale = manager.getPrimaryTarget("/repo/pkg/src/index.ts");
@@ -3751,7 +3780,7 @@ describe("LSP selector routing and URI mapping", () => {
 			access: async () => {
 				throw new Error("missing");
 			},
-			getBackendInfo: () => ({ type: "ssh", cwd: "/remote", remote: "backend", configured: true }) as const,
+			getBackendInfo: () => remoteBackendInfo("/remote", "backend"),
 		} as unknown as ToolOperations;
 		await manager.setToolOperations(operations);
 		expect((await manager.getPrimaryTarget("src/index.ts"))?.workspaceRoot).toBe("/remote");
@@ -3778,7 +3807,7 @@ describe("LSP selector routing and URI mapping", () => {
 			({
 				cwd,
 				access: async () => {},
-				getBackendInfo: () => ({ type: "ssh", cwd, remote, configured: true }),
+				getBackendInfo: () => remoteBackendInfo(cwd, remote),
 			}) as unknown as ToolOperations;
 		await manager.setToolOperations(operations("/first", "first"));
 		const firstClient = await manager.getClientForFile("src/index.ts");

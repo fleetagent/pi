@@ -379,12 +379,12 @@ export async function loadPromptTemplatesWithOperations(
 		}
 		if (isUnderPath(resolvedPath, projectPromptsDir)) {
 			return createSyntheticSourceInfo(resolvedPath, {
-				source: "ssh",
+				source: "remote",
 				scope: "project",
 				baseDir: projectPromptsDir,
 			});
 		}
-		return createSyntheticSourceInfo(resolvedPath, { source: "ssh", baseDir: dirname(resolvedPath) });
+		return createSyntheticSourceInfo(resolvedPath, { source: "remote", baseDir: dirname(resolvedPath) });
 	};
 	if (includeDefaults) {
 		templates.push(...(await loadTemplatesFromDirWithOperations(operations, globalPromptsDir, getSourceInfo)));

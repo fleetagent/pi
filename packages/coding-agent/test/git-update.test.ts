@@ -15,6 +15,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DefaultPackageManager } from "../src/core/package-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 
+interface PackageManagerCommandOptions {
+	cwd?: string;
+}
 // Helper to run git commands in a directory
 function git(args: string[], cwd: string): string {
 	const result = spawnSync("git", args, {
@@ -123,7 +126,7 @@ describe("DefaultPackageManager git update", () => {
 
 			const executedCommands: string[] = [];
 			const managerWithInternals = packageManager as unknown as {
-				runCommand: (command: string, args: string[], options?: { cwd?: string }) => Promise<void>;
+				runCommand: (command: string, args: string[], options?: PackageManagerCommandOptions) => Promise<void>;
 			};
 			managerWithInternals.runCommand = async (command, args, options) => {
 				executedCommands.push(`${command} ${args.join(" ")}`);
@@ -190,7 +193,7 @@ describe("DefaultPackageManager git update", () => {
 
 			const executedCommands: string[] = [];
 			const managerWithInternals = packageManager as unknown as {
-				runCommand: (command: string, args: string[], options?: { cwd?: string }) => Promise<void>;
+				runCommand: (command: string, args: string[], options?: PackageManagerCommandOptions) => Promise<void>;
 			};
 			managerWithInternals.runCommand = async (command, args, options) => {
 				executedCommands.push(`${command} ${args.join(" ")}`);
@@ -352,7 +355,7 @@ describe("DefaultPackageManager git update", () => {
 
 			const executedCommands: string[] = [];
 			const managerWithInternals = packageManager as unknown as {
-				runCommand: (command: string, args: string[], options?: { cwd?: string }) => Promise<void>;
+				runCommand: (command: string, args: string[], options?: PackageManagerCommandOptions) => Promise<void>;
 			};
 			managerWithInternals.runCommand = async (command, args, options) => {
 				executedCommands.push(`${command} ${args.join(" ")}`);
@@ -392,8 +395,12 @@ describe("DefaultPackageManager git update", () => {
 
 			const executedCommands: string[] = [];
 			const managerWithInternals = packageManager as unknown as {
-				runCommand: (command: string, args: string[], options?: { cwd?: string }) => Promise<void>;
-				runCommandCapture: (command: string, args: string[], options?: { cwd?: string }) => Promise<string>;
+				runCommand: (command: string, args: string[], options?: PackageManagerCommandOptions) => Promise<void>;
+				runCommandCapture: (
+					command: string,
+					args: string[],
+					options?: PackageManagerCommandOptions,
+				) => Promise<string>;
 			};
 			managerWithInternals.runCommand = async (command, args) => {
 				executedCommands.push(`${command} ${args.join(" ")}`);
@@ -439,7 +446,7 @@ describe("DefaultPackageManager git update", () => {
 
 			const executedCommands: string[] = [];
 			const managerWithInternals = packageManager as unknown as {
-				runCommand: (command: string, args: string[], options?: { cwd?: string }) => Promise<void>;
+				runCommand: (command: string, args: string[], options?: PackageManagerCommandOptions) => Promise<void>;
 			};
 			managerWithInternals.runCommand = async (command, args) => {
 				executedCommands.push(`${command} ${args.join(" ")}`);

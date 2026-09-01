@@ -1,10 +1,11 @@
-import { getKeybindings } from "../keybindings.ts";
+import { getKeybindings, type KeybindingsManager } from "../keybindings.ts";
 import { decodeKittyPrintable } from "../keys.ts";
 import { KillRing } from "../kill-ring.ts";
 import { type Component, CURSOR_MARKER, type Focusable } from "../tui.ts";
 import { UndoStack } from "../undo-stack.ts";
 import { getGraphemeSegmenter, isWhitespaceChar, sliceByColumn, visibleWidth } from "../utils.ts";
 import { findWordBackward, findWordForward } from "../word-navigation.ts";
+import type { PasteInputResult } from "./editor.ts";
 
 const segmenter = getGraphemeSegmenter();
 
@@ -13,6 +14,12 @@ interface InputState {
 	cursor: number;
 }
 
+interface InputVisibleWindow {
+	text: string;
+	cursor: number;
+}
+
+type InputAction = "kill" | "yank" | "type-word";
 /**
  * Input component - single-line text input with horizontal scrolling
  */
@@ -31,7 +38,7 @@ export class Input implements Component, Focusable {
 
 	// Kill ring for Emacs-style kill/yank operations
 	private killRing = new KillRing();
-	private lastAction: "kill" | "yank" | "type-word" | null = null;
+	private lastAction: InputAction | null = null;
 
 	// Undo support
 	private undoStack = new UndoStack<InputState>();
@@ -45,169 +52,114 @@ export class Input implements Component, Focusable {
 		this.cursor = Math.min(this.cursor, value.length);
 	}
 
-	handleInput(data: string): void {
-		// Handle bracketed paste mode
-		// Start of paste: \x1b[200~
-		// End of paste: \x1b[201~
-
-		// Check if we're starting a bracketed paste
-		if (data.includes("\x1b[200~")) {
+	private handleBracketedPasteInput(data: string): PasteInputResult {
+		let remainingData = data;
+		if (remainingData.includes("\x1b[200~")) {
 			this.isInPaste = true;
 			this.pasteBuffer = "";
-			data = data.replace("\x1b[200~", "");
+			remainingData = remainingData.replace("\x1b[200~", "");
 		}
+		if (!this.isInPaste) return { data: remainingData, consumed: false };
+		this.pasteBuffer += remainingData;
+		const endIndex = this.pasteBuffer.indexOf("\x1b[201~");
+		if (endIndex === -1) return { data: remainingData, consumed: true };
+		const pasteContent = this.pasteBuffer.substring(0, endIndex);
+		this.handlePaste(pasteContent);
+		this.isInPaste = false;
+		const trailingInput = this.pasteBuffer.substring(endIndex + 6);
+		this.pasteBuffer = "";
+		if (trailingInput) this.handleInput(trailingInput);
+		return { data: remainingData, consumed: true };
+	}
 
-		// If we're in a paste, buffer the data
-		if (this.isInPaste) {
-			// Check if this chunk contains the end marker
-			this.pasteBuffer += data;
-
-			const endIndex = this.pasteBuffer.indexOf("\x1b[201~");
-			if (endIndex !== -1) {
-				// Extract the pasted content
-				const pasteContent = this.pasteBuffer.substring(0, endIndex);
-
-				// Process the complete paste
-				this.handlePaste(pasteContent);
-
-				// Reset paste state
-				this.isInPaste = false;
-
-				// Handle any remaining input after the paste marker
-				const remaining = this.pasteBuffer.substring(endIndex + 6); // 6 = length of \x1b[201~
-				this.pasteBuffer = "";
-				if (remaining) {
-					this.handleInput(remaining);
-				}
-			}
-			return;
+	private handleControlInput(data: string, keybindings: KeybindingsManager): boolean {
+		if (keybindings.matches(data, "tui.select.cancel")) {
+			this.onEscape?.();
+			return true;
 		}
-
-		const kb = getKeybindings();
-
-		// Escape/Cancel
-		if (kb.matches(data, "tui.select.cancel")) {
-			if (this.onEscape) this.onEscape();
-			return;
-		}
-
-		// Undo
-		if (kb.matches(data, "tui.editor.undo")) {
+		if (keybindings.matches(data, "tui.editor.undo")) {
 			this.undo();
-			return;
+			return true;
 		}
+		if (!keybindings.matches(data, "tui.input.submit") && data !== "\n") return false;
+		this.onSubmit?.(this.value);
+		return true;
+	}
 
-		// Submit
-		if (kb.matches(data, "tui.input.submit") || data === "\n") {
-			if (this.onSubmit) this.onSubmit(this.value);
-			return;
-		}
+	private handleDeletionInput(data: string, keybindings: KeybindingsManager): boolean {
+		if (keybindings.matches(data, "tui.editor.deleteCharBackward")) this.handleBackspace();
+		else if (keybindings.matches(data, "tui.editor.deleteCharForward")) this.handleForwardDelete();
+		else if (keybindings.matches(data, "tui.editor.deleteWordBackward")) this.deleteWordBackwards();
+		else if (keybindings.matches(data, "tui.editor.deleteWordForward")) this.deleteWordForward();
+		else if (keybindings.matches(data, "tui.editor.deleteToLineStart")) this.deleteToLineStart();
+		else if (keybindings.matches(data, "tui.editor.deleteToLineEnd")) this.deleteToLineEnd();
+		else return false;
+		return true;
+	}
 
-		// Deletion
-		if (kb.matches(data, "tui.editor.deleteCharBackward")) {
-			this.handleBackspace();
-			return;
-		}
+	private handleKillRingInput(data: string, keybindings: KeybindingsManager): boolean {
+		if (keybindings.matches(data, "tui.editor.yank")) this.yank();
+		else if (keybindings.matches(data, "tui.editor.yankPop")) this.yankPop();
+		else return false;
+		return true;
+	}
 
-		if (kb.matches(data, "tui.editor.deleteCharForward")) {
-			this.handleForwardDelete();
-			return;
-		}
+	private moveCursorLeft(): void {
+		this.lastAction = null;
+		if (this.cursor === 0) return;
+		const beforeCursor = this.value.slice(0, this.cursor);
+		const graphemes = [...segmenter.segment(beforeCursor)];
+		const lastGrapheme = graphemes[graphemes.length - 1];
+		this.cursor -= lastGrapheme ? lastGrapheme.segment.length : 1;
+	}
 
-		if (kb.matches(data, "tui.editor.deleteWordBackward")) {
-			this.deleteWordBackwards();
-			return;
-		}
+	private moveCursorRight(): void {
+		this.lastAction = null;
+		if (this.cursor >= this.value.length) return;
+		const afterCursor = this.value.slice(this.cursor);
+		const graphemes = [...segmenter.segment(afterCursor)];
+		const firstGrapheme = graphemes[0];
+		this.cursor += firstGrapheme ? firstGrapheme.segment.length : 1;
+	}
 
-		if (kb.matches(data, "tui.editor.deleteWordForward")) {
-			this.deleteWordForward();
-			return;
-		}
-
-		if (kb.matches(data, "tui.editor.deleteToLineStart")) {
-			this.deleteToLineStart();
-			return;
-		}
-
-		if (kb.matches(data, "tui.editor.deleteToLineEnd")) {
-			this.deleteToLineEnd();
-			return;
-		}
-
-		// Kill ring actions
-		if (kb.matches(data, "tui.editor.yank")) {
-			this.yank();
-			return;
-		}
-		if (kb.matches(data, "tui.editor.yankPop")) {
-			this.yankPop();
-			return;
-		}
-
-		// Cursor movement
-		if (kb.matches(data, "tui.editor.cursorLeft")) {
-			this.lastAction = null;
-			if (this.cursor > 0) {
-				const beforeCursor = this.value.slice(0, this.cursor);
-				const graphemes = [...segmenter.segment(beforeCursor)];
-				const lastGrapheme = graphemes[graphemes.length - 1];
-				this.cursor -= lastGrapheme ? lastGrapheme.segment.length : 1;
-			}
-			return;
-		}
-
-		if (kb.matches(data, "tui.editor.cursorRight")) {
-			this.lastAction = null;
-			if (this.cursor < this.value.length) {
-				const afterCursor = this.value.slice(this.cursor);
-				const graphemes = [...segmenter.segment(afterCursor)];
-				const firstGrapheme = graphemes[0];
-				this.cursor += firstGrapheme ? firstGrapheme.segment.length : 1;
-			}
-			return;
-		}
-
-		if (kb.matches(data, "tui.editor.cursorLineStart")) {
+	private handleCursorMovementInput(data: string, keybindings: KeybindingsManager): boolean {
+		if (keybindings.matches(data, "tui.editor.cursorLeft")) this.moveCursorLeft();
+		else if (keybindings.matches(data, "tui.editor.cursorRight")) this.moveCursorRight();
+		else if (keybindings.matches(data, "tui.editor.cursorLineStart")) {
 			this.lastAction = null;
 			this.cursor = 0;
-			return;
-		}
-
-		if (kb.matches(data, "tui.editor.cursorLineEnd")) {
+		} else if (keybindings.matches(data, "tui.editor.cursorLineEnd")) {
 			this.lastAction = null;
 			this.cursor = this.value.length;
-			return;
-		}
+		} else if (keybindings.matches(data, "tui.editor.cursorWordLeft")) this.moveWordBackwards();
+		else if (keybindings.matches(data, "tui.editor.cursorWordRight")) this.moveWordForwards();
+		else return false;
+		return true;
+	}
 
-		if (kb.matches(data, "tui.editor.cursorWordLeft")) {
-			this.moveWordBackwards();
-			return;
-		}
-
-		if (kb.matches(data, "tui.editor.cursorWordRight")) {
-			this.moveWordForwards();
-			return;
-		}
-
-		// Kitty CSI-u printable character (e.g. \x1b[97u for 'a').
-		// Terminals with Kitty protocol flag 1 (disambiguate) send CSI-u for all keys,
-		// including plain printable characters. Decode before the control-char check
-		// since CSI-u sequences contain \x1b which would be rejected.
+	private handlePrintableInput(data: string): void {
 		const kittyPrintable = decodeKittyPrintable(data);
 		if (kittyPrintable !== undefined) {
 			this.insertCharacter(kittyPrintable);
 			return;
 		}
-
-		// Regular character input - accept printable characters including Unicode,
-		// but reject control characters (C0: 0x00-0x1F, DEL: 0x7F, C1: 0x80-0x9F)
-		const hasControlChars = [...data].some((ch) => {
-			const code = ch.charCodeAt(0);
+		const hasControlChars = [...data].some((character) => {
+			const code = character.charCodeAt(0);
 			return code < 32 || code === 0x7f || (code >= 0x80 && code <= 0x9f);
 		});
-		if (!hasControlChars) {
-			this.insertCharacter(data);
-		}
+		if (!hasControlChars) this.insertCharacter(data);
+	}
+
+	handleInput(data: string): void {
+		const paste = this.handleBracketedPasteInput(data);
+		if (paste.consumed) return;
+		data = paste.data;
+		const keybindings = getKeybindings();
+		if (this.handleControlInput(data, keybindings)) return;
+		if (this.handleDeletionInput(data, keybindings)) return;
+		if (this.handleKillRingInput(data, keybindings)) return;
+		if (this.handleCursorMovementInput(data, keybindings)) return;
+		this.handlePrintableInput(data);
 	}
 
 	private insertCharacter(char: string): void {
@@ -375,51 +327,33 @@ export class Input implements Component, Focusable {
 		// No cached state to invalidate currently
 	}
 
+	private getVisibleWindow(availableWidth: number): InputVisibleWindow {
+		const totalWidth = visibleWidth(this.value);
+		if (totalWidth < availableWidth) return { text: this.value, cursor: this.cursor };
+
+		const scrollWidth = this.cursor === this.value.length ? availableWidth - 1 : availableWidth;
+		if (scrollWidth <= 0) return { text: "", cursor: 0 };
+
+		const cursorColumn = visibleWidth(this.value.slice(0, this.cursor));
+		const halfWidth = Math.floor(scrollWidth / 2);
+		let startColumn: number;
+		if (cursorColumn < halfWidth) startColumn = 0;
+		else if (cursorColumn > totalWidth - halfWidth) startColumn = Math.max(0, totalWidth - scrollWidth);
+		else startColumn = Math.max(0, cursorColumn - halfWidth);
+
+		const text = sliceByColumn(this.value, startColumn, scrollWidth, true);
+		const beforeCursor = sliceByColumn(this.value, startColumn, Math.max(0, cursorColumn - startColumn), true);
+		return { text, cursor: beforeCursor.length };
+	}
+
 	render(width: number): string[] {
-		// Calculate visible window
 		const prompt = "> ";
 		const availableWidth = width - prompt.length;
+		if (availableWidth <= 0) return [prompt];
 
-		if (availableWidth <= 0) {
-			return [prompt];
-		}
-
-		let visibleText = "";
-		let cursorDisplay = this.cursor;
-		const totalWidth = visibleWidth(this.value);
-
-		if (totalWidth < availableWidth) {
-			// Everything fits (leave room for cursor at end)
-			visibleText = this.value;
-		} else {
-			// Need horizontal scrolling
-			// Reserve one column for cursor if it's at the end
-			const scrollWidth = this.cursor === this.value.length ? availableWidth - 1 : availableWidth;
-			const cursorCol = visibleWidth(this.value.slice(0, this.cursor));
-
-			if (scrollWidth > 0) {
-				const halfWidth = Math.floor(scrollWidth / 2);
-				let startCol = 0;
-
-				if (cursorCol < halfWidth) {
-					// Cursor near start
-					startCol = 0;
-				} else if (cursorCol > totalWidth - halfWidth) {
-					// Cursor near end
-					startCol = Math.max(0, totalWidth - scrollWidth);
-				} else {
-					// Cursor in middle
-					startCol = Math.max(0, cursorCol - halfWidth);
-				}
-
-				visibleText = sliceByColumn(this.value, startCol, scrollWidth, true);
-				const beforeCursor = sliceByColumn(this.value, startCol, Math.max(0, cursorCol - startCol), true);
-				cursorDisplay = beforeCursor.length;
-			} else {
-				visibleText = "";
-				cursorDisplay = 0;
-			}
-		}
+		const visibleWindow = this.getVisibleWindow(availableWidth);
+		const visibleText = visibleWindow.text;
+		const cursorDisplay = visibleWindow.cursor;
 
 		// Build line with fake cursor
 		// Insert cursor character at cursor position

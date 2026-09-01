@@ -1,8 +1,17 @@
 import { Box, type Component, Container, getCapabilities, Image, Spacer, Text, type TUI } from "@fleetagent/pi-tui";
-import type { ToolDefinition, ToolRenderContext } from "../../../core/extensions/types.ts";
+import type {
+	ToolCallRenderer,
+	ToolDefinition,
+	ToolRenderContext,
+	ToolRenderShell,
+	ToolResultRenderer,
+} from "../../../core/extensions/types.ts";
 import { createAllToolDefinitions, type ToolName } from "../../../core/tools/index.ts";
 import { LocalToolOperations } from "../../../core/tools/operations.ts";
-import { getTextOutput as getRenderedTextOutput } from "../../../core/tools/render-utils.ts";
+import {
+	getTextOutput as getRenderedTextOutput,
+	type ToolTextOutputContent,
+} from "../../../core/tools/render-utils.ts";
 import { convertToPng } from "../../../utils/image-convert.ts";
 import { theme } from "../theme/theme.ts";
 
@@ -10,6 +19,13 @@ export interface ToolExecutionOptions {
 	showImages?: boolean;
 	imageWidthCells?: number;
 }
+export interface ToolExecutionDisplayResult {
+	content: ToolTextOutputContent[];
+	details?: any;
+	isError: boolean;
+}
+
+type ToolBackgroundFormatter = (text: string) => string;
 
 export class ToolExecutionComponent extends Container {
 	private contentBox: Box;
@@ -33,11 +49,7 @@ export class ToolExecutionComponent extends Container {
 	private cwd: string;
 	private executionStarted = false;
 	private argsComplete = false;
-	private result?: {
-		content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
-		isError: boolean;
-		details?: any;
-	};
+	private result?: ToolExecutionDisplayResult;
 	private convertedImages: Map<number, { data: string; mimeType: string }> = new Map();
 	private hideComponent = false;
 
@@ -79,7 +91,7 @@ export class ToolExecutionComponent extends Container {
 		this.updateDisplay();
 	}
 
-	private getCallRenderer(): ToolDefinition<any, any>["renderCall"] | undefined {
+	private getCallRenderer(): ToolCallRenderer<any, any> | undefined {
 		if (!this.builtInToolDefinition) {
 			return this.toolDefinition?.renderCall;
 		}
@@ -89,7 +101,7 @@ export class ToolExecutionComponent extends Container {
 		return this.toolDefinition.renderCall ?? this.builtInToolDefinition.renderCall;
 	}
 
-	private getResultRenderer(): ToolDefinition<any, any>["renderResult"] | undefined {
+	private getResultRenderer(): ToolResultRenderer<any, any, any> | undefined {
 		if (!this.builtInToolDefinition) {
 			return this.toolDefinition?.renderResult;
 		}
@@ -103,7 +115,7 @@ export class ToolExecutionComponent extends Container {
 		return this.builtInToolDefinition !== undefined || this.toolDefinition !== undefined;
 	}
 
-	private getRenderShell(): "default" | "self" {
+	private getRenderShell(): ToolRenderShell {
 		if (!this.builtInToolDefinition) {
 			return this.toolDefinition?.renderShell ?? "default";
 		}
@@ -162,14 +174,7 @@ export class ToolExecutionComponent extends Container {
 		this.ui.requestRender();
 	}
 
-	updateResult(
-		result: {
-			content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
-			details?: any;
-			isError: boolean;
-		},
-		isPartial = false,
-	): void {
+	updateResult(result: ToolExecutionDisplayResult, isPartial = false): void {
 		this.result = result;
 		this.isPartial = isPartial;
 		this.updateDisplay();
@@ -226,112 +231,115 @@ export class ToolExecutionComponent extends Container {
 		return super.render(width);
 	}
 
-	private updateDisplay(): void {
-		const bgFn = this.isPartial
-			? (text: string) => theme.bg("toolPendingBg", text)
-			: this.result?.isError
-				? (text: string) => theme.bg("toolErrorBg", text)
-				: (text: string) => theme.bg("toolSuccessBg", text);
+	private getBackgroundFormatter(): ToolBackgroundFormatter {
+		if (this.isPartial) return (text) => theme.bg("toolPendingBg", text);
+		if (this.result?.isError) return (text) => theme.bg("toolErrorBg", text);
+		return (text) => theme.bg("toolSuccessBg", text);
+	}
 
-		let hasContent = false;
-		this.hideComponent = false;
-		if (this.hasRendererDefinition()) {
-			const renderContainer = this.getRenderShell() === "self" ? this.selfRenderContainer : this.contentBox;
-			if (renderContainer instanceof Box) {
-				renderContainer.setBgFn(bgFn);
-			}
-			renderContainer.clear();
-
-			const callRenderer = this.getCallRenderer();
-			if (!callRenderer) {
-				renderContainer.addChild(this.createCallFallback());
-				hasContent = true;
-			} else {
-				try {
-					const component = callRenderer(this.args, theme, this.getRenderContext(this.callRendererComponent));
-					this.callRendererComponent = component;
-					renderContainer.addChild(component);
-					hasContent = true;
-				} catch {
-					this.callRendererComponent = undefined;
-					renderContainer.addChild(this.createCallFallback());
-					hasContent = true;
-				}
-			}
-
-			if (this.result) {
-				const resultRenderer = this.getResultRenderer();
-				if (!resultRenderer) {
-					const component = this.createResultFallback();
-					if (component) {
-						renderContainer.addChild(component);
-						hasContent = true;
-					}
-				} else {
-					try {
-						const component = resultRenderer(
-							{ content: this.result.content as any, details: this.result.details },
-							{ expanded: this.expanded, isPartial: this.isPartial },
-							theme,
-							this.getRenderContext(this.resultRendererComponent),
-						);
-						this.resultRendererComponent = component;
-						renderContainer.addChild(component);
-						hasContent = true;
-					} catch {
-						this.resultRendererComponent = undefined;
-						const component = this.createResultFallback();
-						if (component) {
-							renderContainer.addChild(component);
-							hasContent = true;
-						}
-					}
-				}
-			}
-		} else {
-			this.contentText.setCustomBgFn(bgFn);
-			this.contentText.setText(this.formatToolExecution());
-			hasContent = true;
+	private renderToolCall(renderContainer: Container): boolean {
+		const callRenderer = this.getCallRenderer();
+		if (!callRenderer) {
+			renderContainer.addChild(this.createCallFallback());
+			return true;
 		}
-
-		for (const img of this.imageComponents) {
-			this.removeChild(img);
+		try {
+			const component = callRenderer(this.args, theme, this.getRenderContext(this.callRendererComponent));
+			this.callRendererComponent = component;
+			renderContainer.addChild(component);
+		} catch {
+			this.callRendererComponent = undefined;
+			renderContainer.addChild(this.createCallFallback());
 		}
+		return true;
+	}
+
+	private renderToolResult(renderContainer: Container): boolean {
+		if (!this.result) return false;
+		const resultRenderer = this.getResultRenderer();
+		if (!resultRenderer) {
+			const component = this.createResultFallback();
+			if (!component) return false;
+			renderContainer.addChild(component);
+			return true;
+		}
+		try {
+			const component = resultRenderer(
+				{ content: this.result.content as any, details: this.result.details },
+				{ expanded: this.expanded, isPartial: this.isPartial },
+				theme,
+				this.getRenderContext(this.resultRendererComponent),
+			);
+			this.resultRendererComponent = component;
+			renderContainer.addChild(component);
+			return true;
+		} catch {
+			this.resultRendererComponent = undefined;
+			const component = this.createResultFallback();
+			if (!component) return false;
+			renderContainer.addChild(component);
+			return true;
+		}
+	}
+
+	private renderDefinitionContent(backgroundFormatter: ToolBackgroundFormatter): boolean {
+		const renderContainer = this.getRenderShell() === "self" ? this.selfRenderContainer : this.contentBox;
+		if (renderContainer instanceof Box) renderContainer.setBgFn(backgroundFormatter);
+		renderContainer.clear();
+		const callHasContent = this.renderToolCall(renderContainer);
+		const resultHasContent = this.renderToolResult(renderContainer);
+		return callHasContent || resultHasContent;
+	}
+
+	private renderGenericContent(backgroundFormatter: ToolBackgroundFormatter): boolean {
+		this.contentText.setCustomBgFn(backgroundFormatter);
+		this.contentText.setText(this.formatToolExecution());
+		return true;
+	}
+
+	private clearRenderedImages(): void {
+		for (const image of this.imageComponents) this.removeChild(image);
 		this.imageComponents = [];
-		for (const spacer of this.imageSpacers) {
-			this.removeChild(spacer);
-		}
+		for (const spacer of this.imageSpacers) this.removeChild(spacer);
 		this.imageSpacers = [];
+	}
 
-		if (this.result) {
-			const imageBlocks = this.result.content.filter((c) => c.type === "image");
-			const caps = getCapabilities();
-			for (let i = 0; i < imageBlocks.length; i++) {
-				const img = imageBlocks[i];
-				if (caps.images && this.showImages && img.data && img.mimeType) {
-					const converted = this.convertedImages.get(i);
-					const imageData = converted?.data ?? img.data;
-					const imageMimeType = converted?.mimeType ?? img.mimeType;
-					if (caps.images === "kitty" && imageMimeType !== "image/png") continue;
-
-					const spacer = new Spacer(1);
-					this.addChild(spacer);
-					this.imageSpacers.push(spacer);
-					const imageComponent = new Image(
-						imageData,
-						imageMimeType,
-						{ fallbackColor: (s: string) => theme.fg("toolOutput", s) },
-						{ maxWidthCells: this.imageWidthCells },
-					);
-					this.imageComponents.push(imageComponent);
-					this.addChild(imageComponent);
-				}
-			}
+	private renderResultImages(): void {
+		if (!this.result) return;
+		const imageBlocks = this.result.content.filter((content) => content.type === "image");
+		const capabilities = getCapabilities();
+		for (let index = 0; index < imageBlocks.length; index++) {
+			const image = imageBlocks[index];
+			if (!capabilities.images || !this.showImages || !image.data || !image.mimeType) continue;
+			const converted = this.convertedImages.get(index);
+			const imageData = converted?.data ?? image.data;
+			const imageMimeType = converted?.mimeType ?? image.mimeType;
+			if (capabilities.images === "kitty" && imageMimeType !== "image/png") continue;
+			const spacer = new Spacer(1);
+			this.addChild(spacer);
+			this.imageSpacers.push(spacer);
+			const imageComponent = new Image(
+				imageData,
+				imageMimeType,
+				{ fallbackColor: (text: string) => theme.fg("toolOutput", text) },
+				{ maxWidthCells: this.imageWidthCells },
+			);
+			this.imageComponents.push(imageComponent);
+			this.addChild(imageComponent);
 		}
+	}
 
-		if (this.hasRendererDefinition() && !hasContent && this.imageComponents.length === 0) {
-			this.hideComponent = true;
-		}
+	private updateDisplay(): void {
+		const backgroundFormatter = this.getBackgroundFormatter();
+		this.hideComponent = false;
+		const hasRendererDefinition = this.hasRendererDefinition();
+		const hasContent = hasRendererDefinition
+			? this.renderDefinitionContent(backgroundFormatter)
+			: this.renderGenericContent(backgroundFormatter);
+
+		this.clearRenderedImages();
+		this.renderResultImages();
+		if (hasRendererDefinition && !hasContent && this.imageComponents.length === 0) this.hideComponent = true;
 	}
 
 	private getTextOutput(): string {

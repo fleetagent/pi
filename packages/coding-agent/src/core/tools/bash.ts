@@ -1,4 +1,4 @@
-import type { AgentTool } from "@fleetagent/pi-agent-core";
+import type { AgentTool, AgentToolResult } from "@fleetagent/pi-agent-core";
 import { Container, Text, truncateToWidth } from "@fleetagent/pi-tui";
 import { type Static, Type } from "typebox";
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
@@ -7,7 +7,7 @@ import { theme } from "../../modes/interactive/theme/theme.ts";
 import { getShellEnv } from "../../utils/shell.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
 import { LocalToolOperations, type ToolBackendInfo, type ToolOperations } from "./operations.ts";
-import { OutputAccumulator } from "./output-accumulator.ts";
+import { OutputAccumulator, type OutputSnapshot } from "./output-accumulator.ts";
 import { formatBackendIcon, getTextOutput, invalidArgText, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult } from "./truncate.ts";
@@ -30,7 +30,12 @@ export interface BashToolDetails {
  * This is useful for extensions that intercept user_bash and still want pi's
  * standard local shell behavior while wrapping or rewriting commands.
  */
-export function createLocalBashOperations(options?: { cwd?: string; shellPath?: string }): ToolOperations {
+export interface LocalBashOperationsOptions {
+	cwd?: string;
+	shellPath?: string;
+}
+
+export function createLocalBashOperations(options?: LocalBashOperationsOptions): ToolOperations {
 	return new LocalToolOperations(options?.cwd ?? process.cwd(), { shellPath: options?.shellPath });
 }
 
@@ -84,20 +89,14 @@ function formatDuration(ms: number): string {
 function formatBackendSuffix(backendInfo: ToolBackendInfo | undefined): string {
 	if (!backendInfo) return "";
 	if (backendInfo.type === "local") return theme.fg("muted", ` [local ${backendInfo.cwd}]`);
-	if (backendInfo.type === "remote") {
-		return backendInfo.configured
-			? theme.fg("muted", ` [remote ${backendInfo.url}:${backendInfo.cwd}]`)
-			: theme.fg("warning", ` [remote not configured ${backendInfo.cwd}]`);
-	}
-	return theme.fg("muted", ` [ssh ${backendInfo.remote}:${backendInfo.cwd}]`);
+	return backendInfo.configured
+		? theme.fg("muted", ` [remote ${backendInfo.url}:${backendInfo.cwd}]`)
+		: theme.fg("warning", ` [remote not configured ${backendInfo.cwd}]`);
 }
 
-function formatBashCall(
-	args: { command?: string; timeout?: number } | undefined,
-	backendInfo?: ToolBackendInfo,
-): string {
+function formatBashCall(args: Partial<BashToolInput> | undefined, backendInfo?: ToolBackendInfo): string {
 	const command = str(args?.command);
-	const timeout = args?.timeout as number | undefined;
+	const timeout = args?.timeout;
 	const timeoutSuffix = timeout ? theme.fg("muted", ` (timeout ${timeout}s)`) : "";
 	const commandDisplay = command === null ? invalidArgText(theme) : command ? command : theme.fg("toolOutput", "...");
 	return (
@@ -105,12 +104,82 @@ function formatBashCall(
 	);
 }
 
+function getBashDisplayOutput(
+	result: AgentToolResult<BashToolDetails | undefined>,
+	showImages: boolean,
+	isPartial: boolean,
+): string {
+	const output = getTextOutput(result, showImages).trim();
+	const truncation = result.details?.truncation;
+	const fullOutputPath = result.details?.fullOutputPath;
+	if (isPartial || !truncation?.truncated || !fullOutputPath || !output.endsWith("]")) return output;
+	const footerStart = output.lastIndexOf("\n\n[");
+	if (footerStart === -1 || !output.slice(footerStart).includes(fullOutputPath)) return output;
+	return output.slice(0, footerStart).trimEnd();
+}
+
+function addBashOutput(
+	component: BashResultRenderComponent,
+	state: BashResultRenderState,
+	output: string,
+	options: ToolRenderResultOptions,
+): void {
+	if (!output) return;
+	const styledOutput = output
+		.split("\n")
+		.map((line) => theme.fg("toolOutput", line))
+		.join("\n");
+	if (options.expanded) {
+		component.addChild(new Text(`\n${styledOutput}`, 0, 0));
+		return;
+	}
+	component.addChild({
+		render: (width: number) => {
+			if (state.cachedLines === undefined || state.cachedWidth !== width) {
+				const preview = truncateToVisualLines(styledOutput, BASH_PREVIEW_LINES, width);
+				state.cachedLines = preview.visualLines;
+				state.cachedSkipped = preview.skippedCount;
+				state.cachedWidth = width;
+			}
+			if (state.cachedSkipped && state.cachedSkipped > 0) {
+				const hint =
+					theme.fg("muted", `... (${state.cachedSkipped} earlier lines,`) +
+					` ${keyHint("app.tools.expand", "to expand")})`;
+				return ["", truncateToWidth(hint, width, "..."), ...(state.cachedLines ?? [])];
+			}
+			return ["", ...(state.cachedLines ?? [])];
+		},
+		invalidate: () => {
+			state.cachedWidth = undefined;
+			state.cachedLines = undefined;
+			state.cachedSkipped = undefined;
+		},
+	});
+}
+
+function addBashOutputWarnings(
+	component: BashResultRenderComponent,
+	truncation: TruncationResult | undefined,
+	fullOutputPath: string | undefined,
+): void {
+	if (!truncation?.truncated && !fullOutputPath) return;
+	const warnings: string[] = [];
+	if (fullOutputPath) warnings.push(`Full output: ${fullOutputPath}`);
+	if (truncation?.truncated) {
+		if (truncation.truncatedBy === "lines") {
+			warnings.push(`Truncated: showing ${truncation.outputLines} of ${truncation.totalLines} lines`);
+		} else {
+			warnings.push(
+				`Truncated: ${truncation.outputLines} lines shown (${formatSize(truncation.maxBytes ?? DEFAULT_MAX_BYTES)} limit)`,
+			);
+		}
+	}
+	component.addChild(new Text(`\n${theme.fg("warning", `[${warnings.join(". ")}]`)}`, 0, 0));
+}
+
 function rebuildBashResultRenderComponent(
 	component: BashResultRenderComponent,
-	result: {
-		content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
-		details?: BashToolDetails;
-	},
+	result: AgentToolResult<BashToolDetails | undefined>,
 	options: ToolRenderResultOptions,
 	showImages: boolean,
 	startedAt: number | undefined,
@@ -119,85 +188,39 @@ function rebuildBashResultRenderComponent(
 ): void {
 	const state = component.state;
 	component.clear();
-
-	let output = getTextOutput(result as any, showImages).trim();
-	const truncation = result.details?.truncation;
-	const fullOutputPath = result.details?.fullOutputPath;
-	if (!options.isPartial && truncation?.truncated && fullOutputPath && output.endsWith("]")) {
-		const footerStart = output.lastIndexOf("\n\n[");
-		if (footerStart !== -1 && output.slice(footerStart).includes(fullOutputPath)) {
-			output = output.slice(0, footerStart).trimEnd();
-		}
-	}
-
-	if (output) {
-		const styledOutput = output
-			.split("\n")
-			.map((line) => theme.fg("toolOutput", line))
-			.join("\n");
-
-		if (options.expanded) {
-			component.addChild(new Text(`\n${styledOutput}`, 0, 0));
-		} else {
-			component.addChild({
-				render: (width: number) => {
-					if (state.cachedLines === undefined || state.cachedWidth !== width) {
-						const preview = truncateToVisualLines(styledOutput, BASH_PREVIEW_LINES, width);
-						state.cachedLines = preview.visualLines;
-						state.cachedSkipped = preview.skippedCount;
-						state.cachedWidth = width;
-					}
-					if (state.cachedSkipped && state.cachedSkipped > 0) {
-						const hint =
-							theme.fg("muted", `... (${state.cachedSkipped} earlier lines,`) +
-							` ${keyHint("app.tools.expand", "to expand")})`;
-						return ["", truncateToWidth(hint, width, "..."), ...(state.cachedLines ?? [])];
-					}
-					return ["", ...(state.cachedLines ?? [])];
-				},
-				invalidate: () => {
-					state.cachedWidth = undefined;
-					state.cachedLines = undefined;
-					state.cachedSkipped = undefined;
-				},
-			});
-		}
-	}
-
-	if (truncation?.truncated || fullOutputPath) {
-		const warnings: string[] = [];
-		if (fullOutputPath) {
-			warnings.push(`Full output: ${fullOutputPath}`);
-		}
-		if (truncation?.truncated) {
-			if (truncation.truncatedBy === "lines") {
-				warnings.push(`Truncated: showing ${truncation.outputLines} of ${truncation.totalLines} lines`);
-			} else {
-				warnings.push(
-					`Truncated: ${truncation.outputLines} lines shown (${formatSize(truncation.maxBytes ?? DEFAULT_MAX_BYTES)} limit)`,
-				);
-			}
-		}
-		component.addChild(new Text(`\n${theme.fg("warning", `[${warnings.join(". ")}]`)}`, 0, 0));
-	}
-
-	if (startedAt !== undefined) {
-		const label = options.isPartial ? "Elapsed" : "Took";
-		const endTime = endedAt ?? Date.now();
-		component.addChild(
-			new Text(
-				`\n${theme.fg("muted", `${label} ${formatDuration(endTime - startedAt)}`)}${formatBackendSuffix(backendInfo)}`,
-				0,
-				0,
-			),
-		);
-	}
+	const output = getBashDisplayOutput(result, showImages, options.isPartial);
+	addBashOutput(component, state, output, options);
+	addBashOutputWarnings(component, result.details?.truncation, result.details?.fullOutputPath);
+	if (startedAt === undefined) return;
+	const label = options.isPartial ? "Elapsed" : "Took";
+	const endTime = endedAt ?? Date.now();
+	component.addChild(
+		new Text(
+			`\n${theme.fg("muted", `${label} ${formatDuration(endTime - startedAt)}`)}${formatBackendSuffix(backendInfo)}`,
+			0,
+			0,
+		),
+	);
 }
 
-export function createBashToolDefinition(
-	operations: ToolOperations,
-	options?: BashToolOptions,
-): ToolDefinition<typeof bashSchema, BashToolDetails | undefined, BashRenderState> {
+function appendBashStatus(text: string, status: string): string {
+	return `${text ? `${text}\n\n` : ""}${status}`;
+}
+
+function throwBashExecutionError(error: unknown, outputText: string): never {
+	if (error instanceof Error && error.message === "aborted") {
+		throw new Error(appendBashStatus(outputText, "Command aborted"));
+	}
+	if (error instanceof Error && error.message.startsWith("timeout:")) {
+		const timeoutSeconds = error.message.split(":")[1];
+		throw new Error(appendBashStatus(outputText, `Command timed out after ${timeoutSeconds} seconds`));
+	}
+	throw error;
+}
+
+export type BashToolDefinition = ToolDefinition<typeof bashSchema, BashToolDetails | undefined, BashRenderState>;
+
+export function createBashToolDefinition(operations: ToolOperations, options?: BashToolOptions): BashToolDefinition {
 	const ops = operations;
 	const commandPrefix = options?.commandPrefix;
 	const spawnHook = options?.spawnHook;
@@ -207,13 +230,7 @@ export function createBashToolDefinition(
 		description: `Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.`,
 		promptSnippet: "Execute bash commands (ls, grep, find, etc.)",
 		parameters: bashSchema,
-		async execute(
-			_toolCallId,
-			{ command, timeout }: { command: string; timeout?: number },
-			signal?: AbortSignal,
-			onUpdate?,
-			_ctx?,
-		) {
+		async execute(_toolCallId, { command, timeout }: BashToolInput, signal?: AbortSignal, onUpdate?, _ctx?) {
 			const resolvedCommand = commandPrefix ? `${commandPrefix}\n${command}` : command;
 			const spawnContext = resolveSpawnContext(resolvedCommand, ops.cwd, spawnHook);
 			const output = new OutputAccumulator({ tempFilePrefix: "pi-bash" });
@@ -275,7 +292,7 @@ export function createBashToolDefinition(
 				return snapshot;
 			};
 
-			const formatOutput = (snapshot: Awaited<ReturnType<typeof finishOutput>>, emptyText = "(no output)") => {
+			const formatOutput = (snapshot: OutputSnapshot, emptyText = "(no output)") => {
 				const truncation = snapshot.truncation;
 				let text = snapshot.content || emptyText;
 				let details: BashToolDetails | undefined;
@@ -295,8 +312,6 @@ export function createBashToolDefinition(
 				return { text, details };
 			};
 
-			const appendStatus = (text: string, status: string) => `${text ? `${text}\n\n` : ""}${status}`;
-
 			try {
 				let exitCode: number | null;
 				try {
@@ -311,20 +326,13 @@ export function createBashToolDefinition(
 				} catch (err) {
 					const snapshot = await finishOutput();
 					const { text } = formatOutput(snapshot, "");
-					if (err instanceof Error && err.message === "aborted") {
-						throw new Error(appendStatus(text, "Command aborted"));
-					}
-					if (err instanceof Error && err.message.startsWith("timeout:")) {
-						const timeoutSecs = err.message.split(":")[1];
-						throw new Error(appendStatus(text, `Command timed out after ${timeoutSecs} seconds`));
-					}
-					throw err;
+					throwBashExecutionError(err, text);
 				}
 
 				const snapshot = await finishOutput();
 				const { text: outputText, details } = formatOutput(snapshot);
 				if (exitCode !== 0 && exitCode !== null) {
-					throw new Error(appendStatus(outputText, `Command exited with code ${exitCode}`));
+					throw new Error(appendBashStatus(outputText, `Command exited with code ${exitCode}`));
 				}
 				return { content: [{ type: "text", text: outputText }], details };
 			} finally {

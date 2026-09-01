@@ -81,6 +81,7 @@ const sessionEntryGetSchema = Type.Object({
 	}),
 });
 
+export type SessionHistoryToolName = "session_search" | "session_entry_get";
 export type SessionSearchToolInput = Static<typeof sessionSearchSchema>;
 export type SessionEntryGetToolInput = Static<typeof sessionEntryGetSchema>;
 export type SessionSearchScope = "branch" | "all";
@@ -137,9 +138,14 @@ interface SearchCorpus {
 	truncated: boolean;
 }
 
+interface SessionSearchContextLine {
+	lineNumber: number;
+	line: string;
+}
+
 interface CollectedMatch extends SessionSearchMatch {
-	contextBefore: Array<{ lineNumber: number; line: string }>;
-	contextAfter: Array<{ lineNumber: number; line: string }>;
+	contextBefore: SessionSearchContextLine[];
+	contextAfter: SessionSearchContextLine[];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -162,25 +168,33 @@ function sanitizeImageData(value: unknown): unknown {
 	return result;
 }
 
+function estimateSerializedArrayBytes(values: unknown[], limit: number, seen: Set<object>): number {
+	let total = 2;
+	for (const value of values) {
+		total += estimateSerializedBytes(value, limit - total, seen) + 1;
+		if (total > limit) return total;
+	}
+	return total;
+}
+
+function estimateSerializedRecordBytes(value: Record<string, unknown>, limit: number, seen: Set<object>): number {
+	let total = 2;
+	for (const key in value) {
+		if (!Object.hasOwn(value, key)) continue;
+		total += Buffer.byteLength(key, "utf8") * 6 + estimateSerializedBytes(value[key], limit - total, seen) + 4;
+		if (total > limit) return total;
+	}
+	return total;
+}
+
 function estimateSerializedBytes(value: unknown, limit: number, seen = new Set<object>()): number {
 	if (typeof value === "string") return Buffer.byteLength(value, "utf8") * 6 + 2;
 	if (typeof value !== "object" || value === null) return Buffer.byteLength(String(value), "utf8");
 	if (seen.has(value)) return 0;
 	seen.add(value);
-	let total = 2;
-	if (Array.isArray(value)) {
-		for (const child of value) {
-			total += estimateSerializedBytes(child, limit - total, seen) + 1;
-			if (total > limit) return total;
-		}
-	} else if (isRecord(value)) {
-		for (const key in value) {
-			if (!Object.hasOwn(value, key)) continue;
-			total += Buffer.byteLength(key, "utf8") * 6 + estimateSerializedBytes(value[key], limit - total, seen) + 4;
-			if (total > limit) return total;
-		}
-	}
-	return total;
+	if (Array.isArray(value)) return estimateSerializedArrayBytes(value, limit, seen);
+	if (isRecord(value)) return estimateSerializedRecordBytes(value, limit, seen);
+	return 2;
 }
 
 interface BoundedLineCollector {
@@ -192,6 +206,51 @@ interface BoundedLineCollector {
 	appendLine(line: string): boolean;
 	omitOversizedLine(): boolean;
 	appendText(text: string): boolean;
+}
+interface SearchLineTextSegment {
+	kind: "line";
+	line: string;
+	nextStart: number;
+}
+
+interface OversizedSearchTextSegment {
+	kind: "oversized";
+	complete: boolean;
+}
+
+type SearchTextSegment = SearchLineTextSegment | OversizedSearchTextSegment;
+
+function readSearchTextSegment(text: string, start: number): SearchTextSegment {
+	const windowEnd = Math.min(text.length, start + MAX_SEARCH_LINE_LENGTH + 1);
+	const window = text.slice(start, windowEnd);
+	const lineFeed = window.indexOf("\n");
+	const carriageReturn = window.indexOf("\r");
+	let separatorIndex = lineFeed;
+	if (separatorIndex < 0 || (carriageReturn >= 0 && carriageReturn < separatorIndex)) {
+		separatorIndex = carriageReturn;
+	}
+	if (separatorIndex < 0) {
+		if (window.length > MAX_SEARCH_LINE_LENGTH) {
+			return { kind: "oversized", complete: windowEnd === text.length };
+		}
+		return { kind: "line", line: window, nextStart: text.length };
+	}
+
+	const separatorPosition = start + separatorIndex;
+	const separatorLength = text[separatorPosition] === "\r" && text[separatorPosition + 1] === "\n" ? 2 : 1;
+	return {
+		kind: "line",
+		line: window.slice(0, separatorIndex),
+		nextStart: separatorPosition + separatorLength,
+	};
+}
+function appendOversizedSearchTextSegment(
+	collector: BoundedLineCollector,
+	segment: OversizedSearchTextSegment,
+): boolean {
+	if (!collector.omitOversizedLine()) return false;
+	if (!segment.complete) collector.limitReached = true;
+	return segment.complete;
 }
 
 function createBoundedLineCollector(maxLines: number, maxBytes: number): BoundedLineCollector {
@@ -230,29 +289,39 @@ function createBoundedLineCollector(maxLines: number, maxBytes: number): Bounded
 			if (text.length === 0) return collector.appendLine("");
 			let start = 0;
 			while (start < text.length) {
-				const windowEnd = Math.min(text.length, start + MAX_SEARCH_LINE_LENGTH + 1);
-				const window = text.slice(start, windowEnd);
-				const lineFeed = window.indexOf("\n");
-				const carriageReturn = window.indexOf("\r");
-				const candidates = [lineFeed, carriageReturn].filter((index) => index >= 0);
-				if (candidates.length === 0) {
-					if (window.length > MAX_SEARCH_LINE_LENGTH) {
-						if (!collector.omitOversizedLine()) return false;
-						if (windowEnd < text.length) collector.limitReached = true;
-						return windowEnd === text.length;
-					}
-					return collector.appendLine(window);
-				}
-				const separatorIndex = Math.min(...candidates);
-				if (!collector.appendLine(window.slice(0, separatorIndex))) return false;
-				const separatorPosition = start + separatorIndex;
-				start =
-					separatorPosition + (text[separatorPosition] === "\r" && text[separatorPosition + 1] === "\n" ? 2 : 1);
+				const segment = readSearchTextSegment(text, start);
+				if (segment.kind === "oversized") return appendOversizedSearchTextSegment(collector, segment);
+				if (!collector.appendLine(segment.line)) return false;
+				start = segment.nextStart;
 			}
 			return true;
 		},
 	};
 	return collector;
+}
+
+function appendSearchArrayValues(collector: BoundedLineCollector, values: unknown[], seen: Set<object>): boolean {
+	for (let index = 0; index < values.length; index++) {
+		if (!appendSearchValue(collector, values[index], seen, `[${index}]`)) return false;
+	}
+	return true;
+}
+
+function appendSearchRecordValue(
+	collector: BoundedLineCollector,
+	value: Record<string, unknown>,
+	seen: Set<object>,
+): boolean {
+	if (value.type === "image" && typeof value.data === "string") {
+		return collector.appendLine(
+			`[image ${typeof value.mimeType === "string" ? value.mimeType : "unknown"} data omitted: ${value.data.length} chars]`,
+		);
+	}
+	for (const key in value) {
+		if (!Object.hasOwn(value, key)) continue;
+		if (!appendSearchValue(collector, value[key], seen, key)) return false;
+	}
+	return true;
 }
 
 function appendSearchValue(
@@ -266,23 +335,29 @@ function appendSearchValue(
 	if (typeof value !== "object" || value === null) return collector.appendLine(String(value));
 	if (seen.has(value)) return collector.appendLine("[circular value omitted]");
 	seen.add(value);
-	if (Array.isArray(value)) {
-		for (let index = 0; index < value.length; index++) {
-			if (!appendSearchValue(collector, value[index], seen, `[${index}]`)) return false;
-		}
-		return true;
-	}
+	if (Array.isArray(value)) return appendSearchArrayValues(collector, value, seen);
 	if (!isRecord(value)) return collector.appendLine(String(value));
-	if (value.type === "image" && typeof value.data === "string") {
-		return collector.appendLine(
-			`[image ${typeof value.mimeType === "string" ? value.mimeType : "unknown"} data omitted: ${value.data.length} chars]`,
-		);
+	return appendSearchRecordValue(collector, value, seen);
+}
+
+function appendSearchContentBlock(collector: BoundedLineCollector, block: Record<string, unknown>): void {
+	switch (block.type) {
+		case "text":
+			if (typeof block.text === "string") collector.appendText(block.text);
+			break;
+		case "thinking":
+			if (typeof block.thinking !== "string") break;
+			collector.appendLine("thinking:");
+			collector.appendText(block.thinking);
+			break;
+		case "toolCall":
+			collector.appendLine(`tool_call: ${typeof block.name === "string" ? block.name : "unknown"}`);
+			if (block.arguments !== undefined) appendSearchValue(collector, block.arguments);
+			break;
+		case "image":
+			collector.appendLine(`[image ${typeof block.mimeType === "string" ? block.mimeType : "unknown"} omitted]`);
+			break;
 	}
-	for (const key in value) {
-		if (!Object.hasOwn(value, key)) continue;
-		if (!appendSearchValue(collector, value[key], seen, key)) return false;
-	}
-	return true;
 }
 
 function appendContentLines(collector: BoundedLineCollector, content: unknown): void {
@@ -293,82 +368,97 @@ function appendContentLines(collector: BoundedLineCollector, content: unknown): 
 	if (!Array.isArray(content)) return;
 	for (const block of content) {
 		if (collector.limitReached) break;
-		if (!isRecord(block)) continue;
-		if (block.type === "text" && typeof block.text === "string") {
-			collector.appendText(block.text);
-		} else if (block.type === "thinking" && typeof block.thinking === "string") {
-			collector.appendLine("thinking:");
-			collector.appendText(block.thinking);
-		} else if (block.type === "toolCall") {
-			collector.appendLine(`tool_call: ${typeof block.name === "string" ? block.name : "unknown"}`);
-			if (block.arguments !== undefined) appendSearchValue(collector, block.arguments);
-		} else if (block.type === "image") {
-			collector.appendLine(`[image ${typeof block.mimeType === "string" ? block.mimeType : "unknown"} omitted]`);
-		}
+		if (isRecord(block)) appendSearchContentBlock(collector, block);
 	}
 }
 
-function createSearchDocument(entry: SessionEntry, maxLines: number, maxBytes: number): SearchDocument | undefined {
-	const collector = createBoundedLineCollector(maxLines, maxBytes);
-	const finish = (role?: string): SearchDocument => ({
+function finishSearchDocument(entry: SessionEntry, collector: BoundedLineCollector, role?: string): SearchDocument {
+	return {
 		entry,
 		role,
 		lines: collector.lines,
 		bytes: collector.bytes,
 		truncated: collector.truncated,
 		limitReached: collector.limitReached,
-	});
-	if (entry.type === "message") {
-		const message = entry.message;
-		const role = message.role;
-		if (role === "bashExecution" && message.excludeFromContext) return undefined;
-		if (role === "custom" && message.customType === STRUCTURED_RESPONSE_INTERNAL_CUSTOM_TYPE) return undefined;
-		collector.appendLine(`role: ${role}`);
-		if (role === "user" || role === "assistant" || role === "toolResult" || role === "custom") {
-			if (role === "toolResult") collector.appendLine(`tool_name: ${message.toolName}`);
-			if (role === "custom") collector.appendLine(`custom_type: ${message.customType}`);
+	};
+}
+
+function createMessageSearchDocument(entry: SessionEntry, collector: BoundedLineCollector): SearchDocument | undefined {
+	if (entry.type !== "message") return undefined;
+	const message = entry.message;
+	const role = message.role;
+	if (role === "bashExecution" && message.excludeFromContext) return undefined;
+	if (role === "custom" && message.customType === STRUCTURED_RESPONSE_INTERNAL_CUSTOM_TYPE) return undefined;
+	collector.appendLine(`role: ${role}`);
+	switch (role) {
+		case "user":
+		case "assistant":
 			appendContentLines(collector, message.content);
-		} else if (role === "bashExecution") {
+			break;
+		case "toolResult":
+			collector.appendLine(`tool_name: ${message.toolName}`);
+			appendContentLines(collector, message.content);
+			break;
+		case "custom":
+			collector.appendLine(`custom_type: ${message.customType}`);
+			appendContentLines(collector, message.content);
+			break;
+		case "bashExecution":
 			collector.appendLine("command:");
 			collector.appendText(message.command);
 			collector.appendLine("output:");
 			collector.appendText(message.output);
-		} else if (role === "branchSummary" || role === "compactionSummary") {
+			break;
+		case "branchSummary":
+		case "compactionSummary":
 			collector.appendText(message.summary);
-		}
-		return finish(role);
+			break;
 	}
+	return finishSearchDocument(entry, collector, role);
+}
 
+function createMetadataSearchDocument(
+	entry: SessionEntry,
+	collector: BoundedLineCollector,
+): SearchDocument | undefined {
+	if (entry.type === "message") return undefined;
 	switch (entry.type) {
 		case "compaction":
 			collector.appendLine("compaction summary:");
 			collector.appendText(entry.summary);
-			return finish();
+			return finishSearchDocument(entry, collector);
 		case "branch_summary":
 			collector.appendLine("branch summary:");
 			collector.appendText(entry.summary);
-			return finish();
+			return finishSearchDocument(entry, collector);
 		case "custom_message":
 			if (entry.customType === STRUCTURED_RESPONSE_INTERNAL_CUSTOM_TYPE) return undefined;
 			collector.appendLine(`custom_type: ${entry.customType}`);
 			appendContentLines(collector, entry.content);
-			return finish("custom");
+			return finishSearchDocument(entry, collector, "custom");
 		case "thinking_level_change":
 			collector.appendLine(`thinking_level: ${entry.thinkingLevel}`);
-			return finish();
+			return finishSearchDocument(entry, collector);
 		case "model_change":
 			collector.appendLine(`model: ${entry.provider}/${entry.modelId}`);
-			return finish();
+			return finishSearchDocument(entry, collector);
 		case "label":
 			collector.appendLine(`label target: ${entry.targetId}`);
 			collector.appendLine(`label: ${entry.label ?? "(cleared)"}`);
-			return finish();
+			return finishSearchDocument(entry, collector);
 		case "session_info":
 			collector.appendLine(`session_name: ${entry.name ?? ""}`);
-			return finish();
+			return finishSearchDocument(entry, collector);
 		case "custom":
 			return undefined;
 	}
+}
+
+function createSearchDocument(entry: SessionEntry, maxLines: number, maxBytes: number): SearchDocument | undefined {
+	const collector = createBoundedLineCollector(maxLines, maxBytes);
+	return entry.type === "message"
+		? createMessageSearchDocument(entry, collector)
+		: createMetadataSearchDocument(entry, collector);
 }
 
 function containsToolCall(entry: SessionEntry, toolCallId: string): boolean {
@@ -549,7 +639,12 @@ function formatMatches(
 	return blocks.join("\n\n");
 }
 
-function truncateToolOutput(output: string): { text: string; truncated: boolean } {
+interface TruncatedSessionToolOutput {
+	text: string;
+	truncated: boolean;
+}
+
+function truncateToolOutput(output: string): TruncatedSessionToolOutput {
 	const initial = truncateHead(output, { maxBytes: DEFAULT_MAX_BYTES, maxLines: DEFAULT_MAX_LINES });
 	if (!initial.truncated) return { text: output, truncated: false };
 	const notice = "\n\n[Session tool output truncated. Refine the request.]";

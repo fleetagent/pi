@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent, type StreamFn } from "@fleetagent/pi-agent-core";
 import {
+	type AssistantContent,
 	type AssistantMessage,
 	type AssistantMessageEvent,
 	EventStream,
@@ -61,7 +62,7 @@ function createAssistantMessage(text: string): AssistantMessage {
 	return createAssistantContentMessage([{ type: "text", text }]);
 }
 
-function createAssistantContentMessage(content: AssistantMessage["content"]): AssistantMessage {
+function createAssistantContentMessage(content: AssistantContent[]): AssistantMessage {
 	return {
 		role: "assistant",
 		content,
@@ -106,15 +107,26 @@ function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function createRuntimeHost(options: {
+interface RpcPromptRuntimeOptions {
 	withAuth: boolean;
 	responseDelayMs: number;
 	model?: Model<any>;
 	streamFn?: StreamFn;
-}): {
-	runtimeHost: PiAgentRuntimeHost;
+}
+
+interface RpcFixtureLifecycle {
 	cleanup: () => Promise<void>;
-} {
+}
+
+interface RpcPromptRuntimeFixture extends RpcFixtureLifecycle {
+	runtimeHost: PiAgentRuntimeHost;
+}
+
+interface StartedRpcModeFixture extends RpcFixtureLifecycle {
+	lineHandler: (line: string) => void;
+}
+
+function createRuntimeHost(options: RpcPromptRuntimeOptions): RpcPromptRuntimeFixture {
 	const tempDir = join(tmpdir(), `pi-rpc-prompt-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 	mkdirSync(tempDir, { recursive: true });
 
@@ -190,15 +202,7 @@ function createRuntimeHost(options: {
 	};
 }
 
-async function startRpcMode(options: {
-	withAuth: boolean;
-	responseDelayMs: number;
-	model?: Model<any>;
-	streamFn?: StreamFn;
-}): Promise<{
-	lineHandler: (line: string) => void;
-	cleanup: () => Promise<void>;
-}> {
+async function startRpcMode(options: RpcPromptRuntimeOptions): Promise<StartedRpcModeFixture> {
 	rpcIo.outputLines = [];
 	rpcIo.lineHandler = undefined;
 

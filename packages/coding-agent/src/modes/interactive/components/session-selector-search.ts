@@ -1,24 +1,25 @@
-import { fuzzyMatch } from "@fleetagent/pi-tui";
+import { type FuzzyMatch, fuzzyMatch } from "@fleetagent/pi-tui";
 import type { SessionInfo } from "../../../core/session/types.ts";
 
 export type SortMode = "threaded" | "recent" | "relevance";
 
 export type NameFilter = "all" | "named";
 
+export type SearchQueryMode = "tokens" | "regex";
+export type SearchTokenKind = "fuzzy" | "phrase";
+
+export interface SearchToken {
+	kind: SearchTokenKind;
+	value: string;
+}
+
 export interface ParsedSearchQuery {
-	mode: "tokens" | "regex";
-	tokens: { kind: "fuzzy" | "phrase"; value: string }[];
+	mode: SearchQueryMode;
+	tokens: SearchToken[];
 	regex: RegExp | null;
 	/** If set, parsing failed and we should treat query as non-matching. */
 	error?: string;
 }
-
-export interface MatchResult {
-	matches: boolean;
-	/** Lower is better; only meaningful when matches === true */
-	score: number;
-}
-
 function normalizeWhitespaceLower(text: string): string {
 	return text.toLowerCase().replace(/\s+/g, " ").trim();
 }
@@ -36,84 +37,84 @@ function matchesNameFilter(session: SessionInfo, filter: NameFilter): boolean {
 	return hasSessionName(session);
 }
 
-export function parseSearchQuery(query: string): ParsedSearchQuery {
-	const trimmed = query.trim();
-	if (!trimmed) {
-		return { mode: "tokens", tokens: [], regex: null };
+function parseRegexSearchQuery(trimmed: string): ParsedSearchQuery {
+	const pattern = trimmed.slice(3).trim();
+	if (!pattern) return { mode: "regex", tokens: [], regex: null, error: "Empty regex" };
+	try {
+		return { mode: "regex", tokens: [], regex: new RegExp(pattern, "i") };
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		return { mode: "regex", tokens: [], regex: null, error: message };
 	}
+}
 
-	// Regex mode: re:<pattern>
-	if (trimmed.startsWith("re:")) {
-		const pattern = trimmed.slice(3).trim();
-		if (!pattern) {
-			return { mode: "regex", tokens: [], regex: null, error: "Empty regex" };
-		}
-		try {
-			return { mode: "regex", tokens: [], regex: new RegExp(pattern, "i") };
-		} catch (err) {
-			const msg = err instanceof Error ? err.message : String(err);
-			return { mode: "regex", tokens: [], regex: null, error: msg };
-		}
-	}
-
-	// Token mode with quote support.
-	// Example: foo "node cve" bar
-	const tokens: { kind: "fuzzy" | "phrase"; value: string }[] = [];
-	let buf = "";
+function parseTokenSearchQuery(trimmed: string): ParsedSearchQuery {
+	const tokens: SearchToken[] = [];
+	let buffer = "";
 	let inQuote = false;
-	let hadUnclosedQuote = false;
-
-	const flush = (kind: "fuzzy" | "phrase"): void => {
-		const v = buf.trim();
-		buf = "";
-		if (!v) return;
-		tokens.push({ kind, value: v });
+	const flush = (kind: SearchTokenKind): void => {
+		const value = buffer.trim();
+		buffer = "";
+		if (value) tokens.push({ kind, value });
 	};
 
-	for (let i = 0; i < trimmed.length; i++) {
-		const ch = trimmed[i]!;
-		if (ch === '"') {
-			if (inQuote) {
-				flush("phrase");
-				inQuote = false;
-			} else {
-				flush("fuzzy");
-				inQuote = true;
-			}
+	for (let index = 0; index < trimmed.length; index += 1) {
+		const character = trimmed[index]!;
+		if (character === '"') {
+			flush(inQuote ? "phrase" : "fuzzy");
+			inQuote = !inQuote;
 			continue;
 		}
-
-		if (!inQuote && /\s/.test(ch)) {
+		if (!inQuote && /\s/.test(character)) {
 			flush("fuzzy");
 			continue;
 		}
-
-		buf += ch;
+		buffer += character;
 	}
 
 	if (inQuote) {
-		hadUnclosedQuote = true;
-	}
-
-	// If quotes were unbalanced, fall back to plain whitespace tokenization.
-	if (hadUnclosedQuote) {
 		return {
 			mode: "tokens",
 			tokens: trimmed
 				.split(/\s+/)
-				.map((t) => t.trim())
-				.filter((t) => t.length > 0)
-				.map((t) => ({ kind: "fuzzy" as const, value: t })),
+				.map((token) => token.trim())
+				.filter((token) => token.length > 0)
+				.map((token) => ({ kind: "fuzzy" as const, value: token })),
 			regex: null,
 		};
 	}
-
-	flush(inQuote ? "phrase" : "fuzzy");
-
+	flush("fuzzy");
 	return { mode: "tokens", tokens, regex: null };
 }
 
-export function matchSession(session: SessionInfo, parsed: ParsedSearchQuery): MatchResult {
+export function parseSearchQuery(query: string): ParsedSearchQuery {
+	const trimmed = query.trim();
+	if (!trimmed) return { mode: "tokens", tokens: [], regex: null };
+	return trimmed.startsWith("re:") ? parseRegexSearchQuery(trimmed) : parseTokenSearchQuery(trimmed);
+}
+
+interface SessionSearchScoreState {
+	total: number;
+	normalizedText: string | null;
+}
+
+function accumulateSearchTokenScore(token: SearchToken, text: string, state: SessionSearchScoreState): boolean {
+	if (token.kind === "fuzzy") {
+		const match = fuzzyMatch(token.value, text);
+		if (!match.matches) return false;
+		state.total += match.score;
+		return true;
+	}
+
+	if (state.normalizedText === null) state.normalizedText = normalizeWhitespaceLower(text);
+	const phrase = normalizeWhitespaceLower(token.value);
+	if (!phrase) return true;
+	const index = state.normalizedText.indexOf(phrase);
+	if (index < 0) return false;
+	state.total += index * 0.1;
+	return true;
+}
+export function matchSession(session: SessionInfo, parsed: ParsedSearchQuery): FuzzyMatch {
 	const text = getSessionSearchText(session);
 
 	if (parsed.mode === "regex") {
@@ -129,28 +130,11 @@ export function matchSession(session: SessionInfo, parsed: ParsedSearchQuery): M
 		return { matches: true, score: 0 };
 	}
 
-	let totalScore = 0;
-	let normalizedText: string | null = null;
-
+	const scoreState: SessionSearchScoreState = { total: 0, normalizedText: null };
 	for (const token of parsed.tokens) {
-		if (token.kind === "phrase") {
-			if (normalizedText === null) {
-				normalizedText = normalizeWhitespaceLower(text);
-			}
-			const phrase = normalizeWhitespaceLower(token.value);
-			if (!phrase) continue;
-			const idx = normalizedText.indexOf(phrase);
-			if (idx < 0) return { matches: false, score: 0 };
-			totalScore += idx * 0.1;
-			continue;
-		}
-
-		const m = fuzzyMatch(token.value, text);
-		if (!m.matches) return { matches: false, score: 0 };
-		totalScore += m.score;
+		if (!accumulateSearchTokenScore(token, text, scoreState)) return { matches: false, score: 0 };
 	}
-
-	return { matches: true, score: totalScore };
+	return { matches: true, score: scoreState.total };
 }
 
 export function filterAndSortSessions(

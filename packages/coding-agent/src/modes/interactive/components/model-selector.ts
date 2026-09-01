@@ -164,8 +164,14 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		}
 
 		this.allModels = this.sortModels(models);
+		const registeredModels = new Map<string, Map<string, Model<any>>>();
+		for (const model of this.modelRegistry.getAll()) {
+			const providerModels = registeredModels.get(model.provider) ?? new Map<string, Model<any>>();
+			if (!providerModels.has(model.id)) providerModels.set(model.id, model);
+			registeredModels.set(model.provider, providerModels);
+		}
 		this.scopedModels = this.scopedModels.map((scoped) => {
-			const refreshed = this.modelRegistry.find(scoped.model.provider, scoped.model.id);
+			const refreshed = registeredModels.get(scoped.model.provider)?.get(scoped.model.id);
 			return refreshed ? { ...scoped, model: refreshed } : scoped;
 		});
 		this.scopedModelItems = this.scopedModels.map((scoped) => ({
@@ -229,6 +235,21 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		this.updateList();
 	}
 
+	private appendModelListStatus(): void {
+		if (this.errorMessage) {
+			for (const line of this.errorMessage.split("\n")) {
+				this.listContainer.addChild(new Text(theme.fg("error", line), 0, 0));
+			}
+			return;
+		}
+		if (this.filteredModels.length === 0) {
+			this.listContainer.addChild(new Text(theme.fg("muted", "  No matching models"), 0, 0));
+			return;
+		}
+		const selected = this.filteredModels[this.selectedIndex];
+		this.listContainer.addChild(new Spacer(1));
+		this.listContainer.addChild(new Text(theme.fg("muted", `  Model Name: ${selected.model.name}`), 0, 0));
+	}
 	private updateList(): void {
 		this.listContainer.clear();
 
@@ -271,61 +292,55 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		}
 
 		// Show error message or "no results" if empty
-		if (this.errorMessage) {
-			// Show error in red
-			const errorLines = this.errorMessage.split("\n");
-			for (const line of errorLines) {
-				this.listContainer.addChild(new Text(theme.fg("error", line), 0, 0));
-			}
-		} else if (this.filteredModels.length === 0) {
-			this.listContainer.addChild(new Text(theme.fg("muted", "  No matching models"), 0, 0));
+		this.appendModelListStatus();
+	}
+
+	private toggleModelScope(): void {
+		if (this.scopedModelItems.length === 0) return;
+		const nextScope: ModelScope = this.scope === "all" ? "scoped" : "all";
+		this.setScope(nextScope);
+		this.scopeHintText?.setText(this.getScopeHintText());
+	}
+
+	private moveSelection(direction: -1 | 1): void {
+		if (this.filteredModels.length === 0) return;
+		if (direction < 0) {
+			this.selectedIndex = this.selectedIndex === 0 ? this.filteredModels.length - 1 : this.selectedIndex - 1;
 		} else {
-			const selected = this.filteredModels[this.selectedIndex];
-			this.listContainer.addChild(new Spacer(1));
-			this.listContainer.addChild(new Text(theme.fg("muted", `  Model Name: ${selected.model.name}`), 0, 0));
+			this.selectedIndex = this.selectedIndex === this.filteredModels.length - 1 ? 0 : this.selectedIndex + 1;
 		}
+		this.updateList();
+	}
+
+	private selectHighlightedModel(): void {
+		const selectedModel = this.filteredModels[this.selectedIndex];
+		if (selectedModel) this.handleSelect(selectedModel.model);
 	}
 
 	handleInput(keyData: string): void {
 		const kb = getKeybindings();
 		if (kb.matches(keyData, "tui.input.tab")) {
-			if (this.scopedModelItems.length > 0) {
-				const nextScope: ModelScope = this.scope === "all" ? "scoped" : "all";
-				this.setScope(nextScope);
-				if (this.scopeHintText) {
-					this.scopeHintText.setText(this.getScopeHintText());
-				}
-			}
+			this.toggleModelScope();
 			return;
 		}
-		// Up arrow - wrap to bottom when at top
 		if (kb.matches(keyData, "tui.select.up")) {
-			if (this.filteredModels.length === 0) return;
-			this.selectedIndex = this.selectedIndex === 0 ? this.filteredModels.length - 1 : this.selectedIndex - 1;
-			this.updateList();
+			this.moveSelection(-1);
+			return;
 		}
-		// Down arrow - wrap to top when at bottom
-		else if (kb.matches(keyData, "tui.select.down")) {
-			if (this.filteredModels.length === 0) return;
-			this.selectedIndex = this.selectedIndex === this.filteredModels.length - 1 ? 0 : this.selectedIndex + 1;
-			this.updateList();
+		if (kb.matches(keyData, "tui.select.down")) {
+			this.moveSelection(1);
+			return;
 		}
-		// Enter
-		else if (kb.matches(keyData, "tui.select.confirm")) {
-			const selectedModel = this.filteredModels[this.selectedIndex];
-			if (selectedModel) {
-				this.handleSelect(selectedModel.model);
-			}
+		if (kb.matches(keyData, "tui.select.confirm")) {
+			this.selectHighlightedModel();
+			return;
 		}
-		// Escape or Ctrl+C
-		else if (kb.matches(keyData, "tui.select.cancel")) {
+		if (kb.matches(keyData, "tui.select.cancel")) {
 			this.onCancelCallback();
+			return;
 		}
-		// Pass everything else to search input
-		else {
-			this.searchInput.handleInput(keyData);
-			this.filterModels(this.searchInput.getValue());
-		}
+		this.searchInput.handleInput(keyData);
+		this.filterModels(this.searchInput.getValue());
 	}
 
 	private handleSelect(model: Model<any>): void {

@@ -5,6 +5,14 @@ import { afterEach, describe, expect, it } from "vitest";
 import { formatRulesForPrompt, loadRulesFromDir, type Rule } from "../src/core/rules.ts";
 import { createSyntheticSourceInfo } from "../src/core/source-info.ts";
 
+interface TestRuleOptions {
+	name: string;
+	description: string;
+	filePath: string;
+	baseDir: string;
+	disableModelInvocation?: boolean;
+}
+
 const tempDirs: string[] = [];
 
 function createTempDir(): string {
@@ -13,13 +21,7 @@ function createTempDir(): string {
 	return dir;
 }
 
-function createTestRule(options: {
-	name: string;
-	description: string;
-	filePath: string;
-	baseDir: string;
-	disableModelInvocation?: boolean;
-}): Rule {
+function createTestRule(options: TestRuleOptions): Rule {
 	return {
 		name: options.name,
 		description: options.description,

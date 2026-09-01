@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { transformMessages } from "../src/providers/transform-messages.ts";
-import type { AssistantMessage, Message, Model, ToolCall } from "../src/types.ts";
+import type { AssistantContent, AssistantMessage, Message, Model, ToolCall } from "../src/types.ts";
 
 // Normalize function matching what anthropic.ts uses
 function anthropicNormalizeToolCallId(
@@ -26,7 +26,7 @@ function makeCopilotClaudeModel(): Model<"anthropic-messages"> {
 	};
 }
 
-function makeAssistantMessage(content: AssistantMessage["content"]): AssistantMessage {
+function makeAssistantMessage(content: AssistantContent[]): AssistantMessage {
 	return {
 		role: "assistant",
 		content,

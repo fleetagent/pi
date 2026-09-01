@@ -1,4 +1,11 @@
-import type { Component, Terminal, TUI, TuiMode } from "@fleetagent/pi-tui";
+import type {
+	Component,
+	ScrollViewScrollbar,
+	Terminal,
+	TUI,
+	TuiMainScreenRenderState,
+	TuiMode,
+} from "@fleetagent/pi-tui";
 import {
 	Container,
 	isViewportTUI,
@@ -12,15 +19,23 @@ import {
 } from "@fleetagent/pi-tui";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
+import type {
+	ExtensionFooterFactory,
+	ExtensionHeaderFactory,
+	TerminalInputHandler,
+} from "../src/core/extensions/types.ts";
+import type { HookExecutionNotice } from "../src/core/hooks/types.ts";
 import type { FullscreenExitOutput } from "../src/core/settings-manager.ts";
+import type { HookExecutionComponent } from "../src/modes/interactive/components/hook-execution.ts";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
 import { UserMessageComponent } from "../src/modes/interactive/components/user-message.ts";
+import type { InteractiveTui } from "../src/modes/interactive/interactive-mode.ts";
 import {
 	createInteractiveTui,
 	createInteractiveTuiReference,
 	InteractiveMode,
 } from "../src/modes/interactive/interactive-mode.ts";
-import { initTheme, type Theme } from "../src/modes/interactive/theme/theme.ts";
+import { getMarkdownTheme, initTheme } from "../src/modes/interactive/theme/theme.ts";
 
 const clipboardMocks = vi.hoisted(() => ({
 	copyToClipboard: vi.fn<(text: string) => Promise<void>>(),
@@ -35,6 +50,7 @@ vi.mock("../src/utils/clipboard.ts", () => ({
 class RecordingTerminal extends VirtualTerminal implements Terminal {
 	readonly writes: string[] = [];
 	readonly progressStates: boolean[] = [];
+	enteredAlternateScreen = false;
 	startCount = 0;
 	stopCount = 0;
 
@@ -44,6 +60,7 @@ class RecordingTerminal extends VirtualTerminal implements Terminal {
 	}
 	override write(data: string): void {
 		this.writes.push(data);
+		if (data.includes("\x1b[?1049h")) this.enteredAlternateScreen = true;
 		super.write(data);
 	}
 
@@ -60,6 +77,64 @@ class RecordingTerminal extends VirtualTerminal implements Terminal {
 class FocusText extends Text {
 	focused = false;
 	handleInput(_data: string): void {}
+}
+
+interface MountRootSettingsManager {
+	getFullscreenScrollbar(): ScrollViewScrollbar;
+}
+
+interface MountRootSession {
+	settingsManager: MountRootSettingsManager;
+}
+
+interface MountRootRuntimeHost {
+	session: MountRootSession;
+}
+
+interface DisposableComponentLifecycle {
+	dispose?(): void;
+}
+
+interface HeaderOptions {
+	verbose?: boolean;
+}
+
+interface HeaderSettingsManager {
+	getQuietStartup(): boolean;
+}
+
+interface CopyCommandSession {
+	getLastAssistantText(): string | undefined;
+}
+
+interface HookNoticeSession {
+	getSessionId(): string;
+}
+
+interface RenderRequestUi {
+	requestRender(): void;
+}
+
+interface RightClickPasteRenderer {
+	getFocusedComponent(): Component | null;
+}
+
+interface InteractiveModeSwitchOptions {
+	tuiMode?: TuiMode;
+}
+
+interface InteractiveModeSwitchSettingsManager {
+	getShowTerminalProgress(): boolean;
+}
+
+interface InteractiveModeSwitchSession {
+	settingsManager: InteractiveModeSwitchSettingsManager;
+	isStreaming: boolean;
+	isCompacting: boolean;
+}
+
+interface InteractiveModeSwitchRuntimeHost {
+	session: InteractiveModeSwitchSession;
 }
 
 type MountRootContext = {
@@ -81,64 +156,81 @@ type MountRootContext = {
 	customFooter: Component | undefined;
 	editor: Component;
 	renderWidgets: () => void;
-	runtimeHost: {
-		session: { settingsManager: { getFullscreenScrollbar(): "hidden" | "auto" | "always" } };
-	};
+	runtimeHost: MountRootRuntimeHost;
 };
 
 type SetFooterContext = {
 	ui: TUI;
-	customFooter: (Component & { dispose?(): void }) | undefined;
+	customFooter: (Component & DisposableComponentLifecycle) | undefined;
 	footer: Component;
 	footerContainer: Container;
 	footerDataProvider: unknown;
 };
 
 type HeaderContext = {
-	options: { verbose?: boolean };
-	settingsManager: { getQuietStartup(): boolean };
+	options: HeaderOptions;
+	settingsManager: HeaderSettingsManager;
 	version: string;
 	headerContainer: Container;
 	builtInHeader: Component | undefined;
-	customHeader: (Component & { dispose?(): void }) | undefined;
+	customHeader: (Component & DisposableComponentLifecycle) | undefined;
 	toolOutputExpanded: boolean;
 	ui: TUI;
 	getStartupExpansionState(): boolean;
 };
 
 type CopyCommandContext = {
-	session: { getLastAssistantText: () => string | undefined };
+	session: CopyCommandSession;
 	ui: TuiMainScreen | TuiAltScreen;
 	showStatus: (message: string) => void;
 	showError: (message: string) => void;
 };
 
+type HookNoticeContext = {
+	activeSession: HookNoticeSession;
+	hookExecutionSession: object | undefined;
+	hookExecutionNotices: HookExecutionNotice[];
+	hookExecutionComponents: HookExecutionComponent[];
+	chatContainer: Container;
+	ui: RenderRequestUi;
+	getMarkdownThemeWithSettings: typeof getMarkdownTheme;
+};
+
+interface CopyCommandInvocationOptions {
+	flashConfirmation?: boolean;
+}
+
+interface RightClickPasteContext {
+	renderer: RightClickPasteRenderer;
+	ui: RenderRequestUi;
+}
+
+interface TranscriptRetirementContext {
+	transcriptScrollView: ScrollView | undefined;
+	chatContainer: Container;
+	pendingMessagesContainer: Container;
+	compactionQueuedMessages: unknown[];
+	streamingComponent: unknown;
+	streamingMessage: unknown;
+	pendingTools: Map<string, unknown>;
+	renderInitialMessages(): void;
+}
+
+interface TerminalInputSubscription {
+	handler: TerminalInputHandler;
+	unsubscribe(): void;
+}
+
 type InteractiveModePrototype = {
 	initializeBuiltInHeader(this: HeaderContext): void;
 	mountRootComponents(this: MountRootContext): void;
-	setExtensionFooter(
-		this: SetFooterContext,
-		factory: ((tui: TUI, theme: Theme, footerData: unknown) => Component & { dispose?(): void }) | undefined,
-	): void;
-	setExtensionHeader(
-		this: HeaderContext,
-		factory: ((tui: TUI, theme: Theme) => Component & { dispose?(): void }) | undefined,
-	): void;
-	handleCopyCommand(this: CopyCommandContext, options?: { flashConfirmation?: boolean }): Promise<void>;
-	handleRightClickPaste(this: {
-		renderer: { getFocusedComponent(): Component | null };
-		ui: { requestRender(): void };
-	}): Promise<void>;
-	retireAndRenderCurrentTranscript(this: {
-		transcriptScrollView: ScrollView | undefined;
-		chatContainer: Container;
-		pendingMessagesContainer: Container;
-		compactionQueuedMessages: unknown[];
-		streamingComponent: unknown;
-		streamingMessage: unknown;
-		pendingTools: Map<string, unknown>;
-		renderInitialMessages(): void;
-	}): void;
+	setExtensionFooter(this: SetFooterContext, factory: ExtensionFooterFactory | undefined): void;
+	setExtensionHeader(this: HeaderContext, factory: ExtensionHeaderFactory | undefined): void;
+	addHookExecutionNotice(this: HookNoticeContext, notice: HookExecutionNotice): void;
+	renderHookExecutionNotices(this: HookNoticeContext): void;
+	handleCopyCommand(this: CopyCommandContext, options?: CopyCommandInvocationOptions): Promise<void>;
+	handleRightClickPaste(this: RightClickPasteContext): Promise<void>;
+	retireAndRenderCurrentTranscript(this: TranscriptRetirementContext): void;
 };
 
 const interactiveModePrototype = InteractiveMode.prototype as unknown as InteractiveModePrototype;
@@ -170,7 +262,7 @@ describe("createInteractiveTuiReference", () => {
 		expect(fullscreenRequestRender).toHaveBeenCalledOnce();
 	});
 });
-function createRootContext(ui: TUI, fullscreenScrollbar: "hidden" | "auto" | "always" = "auto"): MountRootContext {
+function createRootContext(ui: TUI, fullscreenScrollbar: ScrollViewScrollbar = "auto"): MountRootContext {
 	const withText = (text: string): Container => {
 		const container = new Container();
 		container.addChild(new Text(text, 0, 0));
@@ -227,8 +319,7 @@ describe("createInteractiveTui", () => {
 			expect(isViewportTUI(ui)).toBe(mode === "fullscreen");
 			ui.start();
 			await terminal.waitForRender();
-			expect(terminal.writes.some((write) => write.includes("\x1b[?1049h"))).toBe(mode === "fullscreen");
-			ui.stop({ preserveScreen: true });
+			expect(terminal.enteredAlternateScreen).toBe(mode === "fullscreen");
 		}
 	});
 
@@ -313,6 +404,59 @@ describe("createInteractiveTui", () => {
 		expect(requestRender).not.toHaveBeenCalled();
 	});
 
+	it("retains hook cards across transcript rebuilds within the active session", () => {
+		initTheme("dark");
+		const context: HookNoticeContext = {
+			activeSession: { getSessionId: () => "shared-session-id" },
+			hookExecutionSession: undefined,
+			hookExecutionNotices: [],
+			hookExecutionComponents: [],
+			chatContainer: new Container(),
+			ui: { requestRender: vi.fn() },
+			getMarkdownThemeWithSettings: getMarkdownTheme,
+		};
+		const notice: HookExecutionNotice = {
+			event: "Stop",
+			calls: [
+				{
+					type: "command",
+					label: "node check.mjs",
+					source: { kind: "project", path: "/workspace/.pi/settings.json" },
+					status: "completed",
+					exitCode: 0,
+					durationMs: 10,
+				},
+			],
+			returnedPrompts: ["hook feedback"],
+		};
+
+		interactiveModePrototype.addHookExecutionNotice.call(context, notice);
+		expect(stripTerminalSequences(context.chatContainer.render(100).join("\n"))).toContain("hook feedback");
+		context.chatContainer.clear();
+		interactiveModePrototype.renderHookExecutionNotices.call(context);
+		expect(stripTerminalSequences(context.chatContainer.render(100).join("\n"))).toContain("hook feedback");
+
+		for (let index = 1; index <= 200; index++) {
+			interactiveModePrototype.addHookExecutionNotice.call(context, {
+				...notice,
+				returnedPrompts: [`hook feedback ${index}`],
+			});
+		}
+		expect(context.hookExecutionNotices).toHaveLength(200);
+		expect(context.hookExecutionComponents).toHaveLength(200);
+		expect(context.chatContainer.children).toHaveLength(200);
+		const boundedRender = stripTerminalSequences(context.chatContainer.render(100).join("\n"));
+		expect(boundedRender).not.toContain("hook feedback\n");
+		expect(boundedRender).toContain("hook feedback 200");
+
+		context.activeSession = { getSessionId: () => "shared-session-id" };
+		interactiveModePrototype.addHookExecutionNotice.call(context, { ...notice, event: "SessionEnd" });
+		expect(context.hookExecutionNotices).toHaveLength(1);
+		expect(context.hookExecutionComponents).toHaveLength(1);
+		expect(context.chatContainer.children).toHaveLength(1);
+		expect(context.hookExecutionNotices[0].event).toBe("SessionEnd");
+	});
+
 	it("replaces the renderer while preserving state and prints transcript output on shutdown", async () => {
 		const terminal = new RecordingTerminal(40, 8);
 		const renderer = createInteractiveTui({
@@ -329,23 +473,14 @@ describe("createInteractiveTui", () => {
 		renderer.setFocus(component);
 
 		type SwitchContext = {
-			renderer: ReturnType<typeof createInteractiveTui>;
+			renderer: InteractiveTui;
 			ui: TUI;
-			mainScreenRenderState: ReturnType<TuiMainScreen["captureRenderState"]> | undefined;
+			mainScreenRenderState: TuiMainScreenRenderState | undefined;
 			fullscreenLayoutRoot: Component;
 			onRightClickPaste: () => void;
-			options: { tuiMode?: TuiMode };
-			extensionTerminalInputSubscriptions: Set<{
-				handler: (data: string) => { consume?: boolean; data?: string } | undefined;
-				unsubscribe: () => void;
-			}>;
-			runtimeHost: {
-				session: {
-					settingsManager: { getShowTerminalProgress(): boolean };
-					isStreaming: boolean;
-					isCompacting: boolean;
-				};
-			};
+			options: InteractiveModeSwitchOptions;
+			extensionTerminalInputSubscriptions: Set<TerminalInputSubscription>;
+			runtimeHost: InteractiveModeSwitchRuntimeHost;
 		};
 		const context = Object.assign(Object.create(InteractiveMode.prototype), {
 			renderer,
@@ -367,10 +502,7 @@ describe("createInteractiveTui", () => {
 		context.ui = stableUi;
 		const { addExtensionTerminalInputListener, stopInteractiveTui, switchTuiMode } =
 			InteractiveMode.prototype as unknown as {
-				addExtensionTerminalInputListener(
-					this: SwitchContext,
-					handler: (data: string) => { consume?: boolean; data?: string } | undefined,
-				): () => void;
+				addExtensionTerminalInputListener(this: SwitchContext, handler: TerminalInputHandler): () => void;
 				stopInteractiveTui(this: SwitchContext, fullscreenExitOutput: FullscreenExitOutput): void;
 				switchTuiMode(this: SwitchContext, mode: TuiMode, restoreProgress?: boolean): boolean;
 			};
@@ -433,22 +565,13 @@ describe("createInteractiveTui", () => {
 		renderer.addChild(component);
 
 		type SelectionSwitchContext = {
-			renderer: ReturnType<typeof createInteractiveTui>;
+			renderer: InteractiveTui;
 			ui: TUI;
-			mainScreenRenderState: ReturnType<TuiMainScreen["captureRenderState"]> | undefined;
+			mainScreenRenderState: TuiMainScreenRenderState | undefined;
 			fullscreenLayoutRoot: Component;
-			options: { tuiMode?: TuiMode };
-			extensionTerminalInputSubscriptions: Set<{
-				handler: (data: string) => { consume?: boolean; data?: string } | undefined;
-				unsubscribe: () => void;
-			}>;
-			runtimeHost: {
-				session: {
-					settingsManager: { getShowTerminalProgress(): boolean };
-					isStreaming: boolean;
-					isCompacting: boolean;
-				};
-			};
+			options: InteractiveModeSwitchOptions;
+			extensionTerminalInputSubscriptions: Set<TerminalInputSubscription>;
+			runtimeHost: InteractiveModeSwitchRuntimeHost;
 		};
 		const context = Object.assign(Object.create(InteractiveMode.prototype), {
 			renderer,
@@ -658,11 +781,19 @@ describe("createInteractiveTui", () => {
 		] as const) {
 			terminal.resize(columns, rows);
 			await terminal.waitForRender();
-			const viewport = terminal.getViewport();
-			expect(viewport).toHaveLength(rows);
-			expect(viewport.every((line) => visibleWidth(line) <= columns)).toBe(true);
-			expect(viewport.some((line) => line.includes("editor"))).toBe(true);
-			expect(viewport.some((line) => line.includes("footer"))).toBe(true);
+			const viewportState = { columns, rows, lines: terminal.getViewport() };
+			expect(viewportState.lines).toHaveLength(viewportState.rows);
+			let overflowCount = 0;
+			let editorLineCount = 0;
+			let footerLineCount = 0;
+			for (const line of viewportState.lines) {
+				overflowCount += Number(visibleWidth(line) > viewportState.columns);
+				editorLineCount += Number(line.includes("editor"));
+				footerLineCount += Number(line.includes("footer"));
+			}
+			expect(overflowCount).toBe(0);
+			expect(editorLineCount).toBeGreaterThan(0);
+			expect(footerLineCount).toBeGreaterThan(0);
 			expect(context.fullscreenLayoutRoot).toBe(root);
 			expect(context.transcriptScrollView).toBe(transcript);
 		}

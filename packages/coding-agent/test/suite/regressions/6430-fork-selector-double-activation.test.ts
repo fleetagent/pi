@@ -1,24 +1,48 @@
 import { fauxAssistantMessage } from "@fleetagent/pi-ai";
 import { setKeybindings } from "@fleetagent/pi-tui";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ForkableUserMessage } from "../../../src/core/agent-session.ts";
 import { KeybindingsManager } from "../../../src/core/keybindings.ts";
+import type { PiAgentForkResult } from "../../../src/core/pi-agent.ts";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../../../src/modes/interactive/theme/theme.ts";
 import { createHarness, type Harness } from "../harness.ts";
 
 type SelectableFocus = { handleInput(keyData: string): void };
-type ForkSelectorContext = {
-	session: { getUserMessagesForForking(): Array<{ entryId: string; text: string }> };
+
+interface ForkSelectorView {
+	component: unknown;
+	focus: SelectableFocus;
+}
+
+type ForkSelectorFactory = (done: () => void) => ForkSelectorView;
+
+interface ForkSelectorSession {
+	getUserMessagesForForking(): ForkableUserMessage[];
+}
+
+interface ForkSelectorRuntimeHost {
+	fork(entryId: string): Promise<PiAgentForkResult>;
+}
+
+interface ForkSelectorUI {
+	requestRender(): void;
+}
+
+interface ForkSelectorEditor {
+	setText(text: string): void;
+}
+
+interface ForkSelectorContext {
+	session: ForkSelectorSession;
 	showStatus(message: string): void;
-	showSelector(factory: (done: () => void) => { component: unknown; focus: SelectableFocus }): void;
-	runtimeHost: {
-		fork(entryId: string): Promise<{ cancelled: boolean; selectedText?: string }>;
-	};
-	ui: { requestRender(): void };
+	showSelector(factory: ForkSelectorFactory): void;
+	runtimeHost: ForkSelectorRuntimeHost;
+	ui: ForkSelectorUI;
 	renderCurrentSessionState(): void;
-	editor: { setText(text: string): void };
+	editor: ForkSelectorEditor;
 	showError(message: string): void;
-};
+}
 
 type InteractiveModePrototype = {
 	showUserMessageSelector(this: ForkSelectorContext): void;
@@ -47,10 +71,10 @@ describe("regression #6430: fork selector closes before asynchronous fork", () =
 		harness.setResponses([fauxAssistantMessage("seed reply")]);
 		await harness.session.prompt("fork from here");
 
-		let resolveFork: ((result: { cancelled: boolean; selectedText?: string }) => void) | undefined;
+		let resolveFork: ((result: PiAgentForkResult) => void) | undefined;
 		const fork = vi.fn(
 			() =>
-				new Promise<{ cancelled: boolean; selectedText?: string }>((resolve) => {
+				new Promise<PiAgentForkResult>((resolve) => {
 					resolveFork = resolve;
 				}),
 		);

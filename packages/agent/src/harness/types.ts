@@ -1,5 +1,6 @@
 import type { ImageContent, Model, SimpleStreamOptions, TextContent, Transport } from "@fleetagent/pi-ai";
 import type { AgentEvent, AgentMessage, AgentTool, QueueMode, ThinkingLevel } from "../index.ts";
+import type { CompactionPreparation } from "./compaction/compaction.ts";
 import type { Session } from "./session/session.ts";
 
 /** Result of a fallible operation. Expected failures are returned as `ok: false` instead of thrown. */
@@ -257,6 +258,40 @@ export interface ExecutionEnvExecOptions {
 	onStderr?: (chunk: string) => void;
 }
 
+/** Successful result from {@link Shell.exec}. */
+// pi-ignore noNearIdenticalDataStructures: A successful harness execution always has a numeric exit code, while the coding-agent Docker runner models signal termination with null.
+export interface ExecutionEnvExecResult {
+	stdout: string;
+	stderr: string;
+	exitCode: number;
+}
+
+/** Options for reading a bounded sequence of UTF-8 text lines. */
+export interface ReadTextLinesOptions {
+	/** Maximum number of lines to read. Defaults to no limit. */
+	maxLines?: number;
+	/** Abort signal used to cancel the read. */
+	abortSignal?: AbortSignal;
+}
+
+/** Options for creating a directory. */
+export interface CreateDirOptions {
+	/** Create missing parent directories. Defaults to true. */
+	recursive?: boolean;
+	/** Abort signal used to cancel directory creation. */
+	abortSignal?: AbortSignal;
+}
+
+/** Options for removing a file or directory. */
+export interface RemovePathOptions {
+	/** Remove directory contents recursively. Defaults to false. */
+	recursive?: boolean;
+	/** Ignore missing paths. Defaults to false. */
+	force?: boolean;
+	/** Abort signal used to cancel removal. */
+	abortSignal?: AbortSignal;
+}
+
 /**
  * Filesystem capability used by the harness.
  *
@@ -277,10 +312,7 @@ export interface FileSystem {
 	/** Read a UTF-8 text file. */
 	readTextFile(path: string, abortSignal?: AbortSignal): Promise<Result<string, FileError>>;
 	/** Read UTF-8 text lines. Implementations should stop once `maxLines` lines have been read. */
-	readTextLines(
-		path: string,
-		options?: { maxLines?: number; abortSignal?: AbortSignal },
-	): Promise<Result<string[], FileError>>;
+	readTextLines(path: string, options?: ReadTextLinesOptions): Promise<Result<string[], FileError>>;
 	/** Read a binary file. */
 	readBinaryFile(path: string, abortSignal?: AbortSignal): Promise<Result<Uint8Array, FileError>>;
 	/** Create or overwrite a file, creating parent directories when supported. */
@@ -298,23 +330,13 @@ export interface FileSystem {
 	/** Return false for missing paths. Other errors, such as permission failures, return a {@link FileError}. */
 	exists(path: string, abortSignal?: AbortSignal): Promise<Result<boolean, FileError>>;
 	/** Create a directory. Defaults: `recursive: true`, no abort signal. */
-	createDir(
-		path: string,
-		options?: { recursive?: boolean; abortSignal?: AbortSignal },
-	): Promise<Result<void, FileError>>;
+	createDir(path: string, options?: CreateDirOptions): Promise<Result<void, FileError>>;
 	/** Remove a file or directory. Defaults: `recursive: false`, `force: false`, no abort signal. */
-	remove(
-		path: string,
-		options?: { recursive?: boolean; force?: boolean; abortSignal?: AbortSignal },
-	): Promise<Result<void, FileError>>;
+	remove(path: string, options?: RemovePathOptions): Promise<Result<void, FileError>>;
 	/** Create a temporary directory and return its absolute path. Defaults: `prefix: "tmp-"`, no abort signal. */
 	createTempDir(prefix?: string, abortSignal?: AbortSignal): Promise<Result<string, FileError>>;
 	/** Create a temporary file and return its absolute path. Defaults: `prefix: ""`, `suffix: ""`, no abort signal. */
-	createTempFile(options?: {
-		prefix?: string;
-		suffix?: string;
-		abortSignal?: AbortSignal;
-	}): Promise<Result<string, FileError>>;
+	createTempFile(options?: CreateTempFileOptions): Promise<Result<string, FileError>>;
 
 	/** Release filesystem resources. Must be best-effort and must not throw or reject. */
 	cleanup(): Promise<void>;
@@ -323,10 +345,7 @@ export interface FileSystem {
 /** Shell execution capability used by the harness. */
 export interface Shell {
 	/** Execute a shell command in {@link FileSystem.cwd} unless `options.cwd` is provided. */
-	exec(
-		command: string,
-		options?: ExecutionEnvExecOptions,
-	): Promise<Result<{ stdout: string; stderr: string; exitCode: number }, ExecutionError>>;
+	exec(command: string, options?: ExecutionEnvExecOptions): Promise<Result<ExecutionEnvExecResult, ExecutionError>>;
 	/** Release shell resources. Must be best-effort and must not throw or reject. */
 	cleanup(): Promise<void>;
 }
@@ -334,6 +353,7 @@ export interface Shell {
 /** Filesystem and process execution environment used by the harness. */
 export interface ExecutionEnv extends FileSystem, Shell {}
 
+// pi-ignore noNearIdenticalDataStructures: The agent package owns its backend-neutral session tree schema independently from the coding-agent package's persisted session format.
 export interface SessionTreeEntryBase {
 	type: string;
 	id: string;
@@ -416,10 +436,27 @@ export type SessionTreeEntry =
 	| SessionInfoEntry
 	| LeafEntry;
 
+/** Session-tree entry selected by its discriminant. */
+export type SessionTreeEntryOfType<TType extends SessionTreeEntry["type"]> = Extract<SessionTreeEntry, { type: TType }>;
+
+/** Summary appended when moving a session to another tree entry. */
+export interface SessionMoveSummary {
+	summary: string;
+	details?: unknown;
+	fromHook?: boolean;
+}
+
+// pi-ignore noNearIdenticalDataStructures: Agent-harness session state and coding-agent persisted session context are separate package APIs with independent storage lifecycles.
+export interface SessionModelReference {
+	provider: string;
+	modelId: string;
+}
+
+// pi-ignore noNearIdenticalDataStructures: Harness context and coding-agent session context belong to separate package APIs and session implementations.
 export interface SessionContext {
 	messages: AgentMessage[];
 	thinkingLevel: string;
-	model: { provider: string; modelId: string } | null;
+	model: SessionModelReference | null;
 }
 
 export interface SessionMetadata {
@@ -441,9 +478,7 @@ export interface SessionStorage<TMetadata extends SessionMetadata = SessionMetad
 	createEntryId(): Promise<string>;
 	appendEntry(entry: SessionTreeEntry): Promise<void>;
 	getEntry(id: string): Promise<SessionTreeEntry | undefined>;
-	findEntries<TType extends SessionTreeEntry["type"]>(
-		type: TType,
-	): Promise<Array<Extract<SessionTreeEntry, { type: TType }>>>;
+	findEntries<TType extends SessionTreeEntry["type"]>(type: TType): Promise<Array<SessionTreeEntryOfType<TType>>>;
 	getLabel(id: string): Promise<string | undefined>;
 	getPathToRoot(leafId: string | null): Promise<SessionTreeEntry[]>;
 	getEntries(): Promise<SessionTreeEntry[]>;
@@ -455,9 +490,12 @@ export interface SessionCreateOptions {
 	id?: string;
 }
 
+/** Placement of the selected entry in a forked session's retained history. */
+export type SessionForkPosition = "before" | "at";
+
 export interface SessionForkOptions {
 	entryId?: string;
-	position?: "before" | "at";
+	position?: SessionForkPosition;
 	id?: string;
 }
 
@@ -527,6 +565,7 @@ export interface BeforeAgentStartEvent<
 	resources: AgentHarnessResources<TSkill, TPromptTemplate>;
 }
 
+// pi-ignore noNearIdenticalDataStructures: This harness lifecycle event is distinct from the coding-agent extension event API despite sharing its current payload.
 export interface ContextEvent {
 	type: "context";
 	messages: AgentMessage[];
@@ -545,6 +584,7 @@ export interface BeforeProviderPayloadEvent {
 	payload: unknown;
 }
 
+// pi-ignore noNearIdenticalDataStructures: Provider responses are surfaced independently by the harness and coding-agent extension lifecycle APIs.
 export interface AfterProviderResponseEvent {
 	type: "after_provider_response";
 	status: number;
@@ -582,6 +622,7 @@ export interface SessionCompactEvent {
 	fromHook: boolean;
 }
 
+// pi-ignore noNearIdenticalDataStructures: Harness tree navigation uses the agent session model, while coding-agent extensions use the coding-agent session model.
 export interface SessionBeforeTreeEvent {
 	type: "session_before_tree";
 	preparation: TreePreparation;
@@ -596,13 +637,16 @@ export interface SessionTreeEvent {
 	fromHook?: boolean;
 }
 
+export type HarnessModelSelectionSource = "set" | "restore";
+
 export interface ModelSelectEvent {
 	type: "model_select";
 	model: Model<any>;
 	previousModel: Model<any> | undefined;
-	source: "set" | "restore";
+	source: HarnessModelSelectionSource;
 }
 
+// pi-ignore noNearIdenticalDataStructures: Thinking-level selection is independently owned by the harness and coding-agent extension event APIs.
 export interface ThinkingLevelSelectEvent {
 	type: "thinking_level_select";
 	level: ThinkingLevel;
@@ -679,9 +723,16 @@ export interface SessionBeforeCompactResult {
 	compaction?: CompactResult;
 }
 
+// pi-ignore noNearIdenticalDataStructures: Agent-harness tree summaries and coding-agent extension summaries belong to independent package lifecycle APIs.
+export interface SessionBeforeTreeSummary {
+	summary: string;
+	details?: unknown;
+}
+
+// pi-ignore noNearIdenticalDataStructures: Agent-harness tree hook results and coding-agent extension hook results evolve with separate event contracts.
 export interface SessionBeforeTreeResult {
 	cancel?: boolean;
-	summary?: { summary: string; details?: unknown };
+	summary?: SessionBeforeTreeSummary;
 	customInstructions?: string;
 	replaceInstructions?: boolean;
 	label?: string;
@@ -724,33 +775,18 @@ export interface CompactResult {
 	details?: unknown;
 }
 
+// pi-ignore noNearIdenticalDataStructures: Harness navigation options are a lower-level API distinct from coding-agent session and extension command options.
+export interface NavigateTreeOptions {
+	summarize?: boolean;
+	customInstructions?: string;
+	replaceInstructions?: boolean;
+	label?: string;
+}
+
 export interface NavigateTreeResult {
 	cancelled: boolean;
 	editorText?: string;
 	summaryEntry?: BranchSummaryEntry;
-}
-
-export interface CompactionSettings {
-	enabled: boolean;
-	reserveTokens: number;
-	keepRecentTokens: number;
-}
-
-export interface CompactionPreparation {
-	firstKeptEntryId: string;
-	messagesToSummarize: AgentMessage[];
-	turnPrefixMessages: AgentMessage[];
-	isSplitTurn: boolean;
-	tokensBefore: number;
-	previousSummary?: string;
-	fileOps: FileOperations;
-	settings: CompactionSettings;
-}
-
-export interface FileOperations {
-	read: Set<string>;
-	written: Set<string>;
-	edited: Set<string>;
 }
 
 export interface TreePreparation {
@@ -764,20 +800,33 @@ export interface TreePreparation {
 	label?: string;
 }
 
-export interface GenerateBranchSummaryOptions {
-	model: Model<any>;
-	apiKey: string;
-	headers?: Record<string, string>;
-	signal: AbortSignal;
-	customInstructions?: string;
-	replaceInstructions?: boolean;
-	reserveTokens?: number;
-}
+export type { GenerateBranchSummaryOptions } from "./compaction/branch-summarization.ts";
+export type { CompactionSettings } from "./compaction/compaction.ts";
+export type { FileOperations } from "./compaction/utils.ts";
+export type { CompactionPreparation };
 
 export interface BranchSummaryResult {
 	summary: string;
 	readFiles: string[];
 	modifiedFiles: string[];
+}
+
+export interface AgentHarnessSystemPromptContext<
+	TSkill extends Skill = Skill,
+	TPromptTemplate extends PromptTemplate = PromptTemplate,
+	TTool extends AgentTool = AgentTool,
+> {
+	env: ExecutionEnv;
+	session: Session;
+	model: Model<any>;
+	thinkingLevel: ThinkingLevel;
+	activeTools: TTool[];
+	resources: AgentHarnessResources<TSkill, TPromptTemplate>;
+}
+
+export interface AgentHarnessRequestAuth {
+	apiKey: string;
+	headers?: Record<string, string>;
 }
 
 export interface AgentHarnessOptions<
@@ -795,17 +844,8 @@ export interface AgentHarnessOptions<
 	resources?: AgentHarnessResources<TSkill, TPromptTemplate>;
 	systemPrompt?:
 		| string
-		| ((context: {
-				env: ExecutionEnv;
-				session: Session;
-				model: Model<any>;
-				thinkingLevel: ThinkingLevel;
-				activeTools: TTool[];
-				resources: AgentHarnessResources<TSkill, TPromptTemplate>;
-		  }) => string | Promise<string>);
-	getApiKeyAndHeaders?: (
-		model: Model<any>,
-	) => Promise<{ apiKey: string; headers?: Record<string, string> } | undefined>;
+		| ((context: AgentHarnessSystemPromptContext<TSkill, TPromptTemplate, TTool>) => string | Promise<string>);
+	getApiKeyAndHeaders?: (model: Model<any>) => Promise<AgentHarnessRequestAuth | undefined>;
 	/** Curated stream/provider request options. Snapshotted at turn start. */
 	streamOptions?: AgentHarnessStreamOptions;
 	model: Model<any>;
@@ -813,6 +853,16 @@ export interface AgentHarnessOptions<
 	activeToolNames?: string[];
 	steeringMode?: QueueMode;
 	followUpMode?: QueueMode;
+}
+
+/** Options for creating a temporary file. */
+export interface CreateTempFileOptions {
+	/** Prefix added before the generated file name. Defaults to an empty string. */
+	prefix?: string;
+	/** Suffix added after the generated file name. Defaults to an empty string. */
+	suffix?: string;
+	/** Abort signal used to cancel temporary file creation. */
+	abortSignal?: AbortSignal;
 }
 
 export type { AgentHarness } from "./agent-harness.ts";

@@ -12,6 +12,11 @@ import { ToolExecutionComponent } from "../src/modes/interactive/components/tool
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 
+interface CapturedToolUpdateContent {
+	type: string;
+	text?: string;
+}
+
 function createBaseToolDefinition(name = "custom_tool"): ToolDefinition {
 	return {
 		name,
@@ -105,7 +110,7 @@ describe("ToolExecutionComponent parity", () => {
 	});
 
 	test("bash execute emits an initial empty partial update before output arrives", async () => {
-		const updates: Array<{ content: Array<{ type: string; text?: string }>; details?: unknown }> = [];
+		const updates: Array<{ content: CapturedToolUpdateContent[]; details?: unknown }> = [];
 		const operations = new LocalToolOperations(process.cwd());
 		operations.exec = async () => {
 			await new Promise((resolve) => setTimeout(resolve, 10));
@@ -116,7 +121,7 @@ describe("ToolExecutionComponent parity", () => {
 			"tool-bash-1",
 			{ command: "sleep 10" },
 			undefined,
-			(update) => updates.push(update as { content: Array<{ type: string; text?: string }>; details?: unknown }),
+			(update) => updates.push(update as { content: CapturedToolUpdateContent[]; details?: unknown }),
 			{} as never,
 		);
 		expect(updates).toEqual([{ content: [], details: undefined }]);

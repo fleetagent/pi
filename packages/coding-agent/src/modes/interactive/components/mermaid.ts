@@ -1,6 +1,6 @@
-import { Marked, type Token, visibleWidth } from "@fleetagent/pi-tui";
+import { Marked, type Token, type Tokens, visibleWidth } from "@fleetagent/pi-tui";
 import { type MermaidArt, render, type Span } from "grok-mermaid";
-import type { MarkdownTransformer } from "../../../core/extensions/types.ts";
+import type { MarkdownTransformContext, MarkdownTransformer } from "../../../core/extensions/types.ts";
 import type { MermaidRenderingMode } from "../../../core/settings-manager.ts";
 import type { Theme } from "../theme/theme.ts";
 
@@ -26,7 +26,13 @@ export interface MermaidTransformerOptions {
 	renderMermaid?: MermaidRenderer;
 }
 
-function isMermaid(token: Token): token is Token & { type: "code"; text: string; lang?: string } {
+interface MermaidTransformRuntime {
+	context: MarkdownTransformContext;
+	options: MermaidTransformerOptions;
+	renderMermaid: MermaidRenderer;
+}
+
+function isMermaid(token: Token): token is Tokens.Code {
 	return token.type === "code" && token.lang?.trim().split(/\s+/, 1)[0]?.toLowerCase() === "mermaid";
 }
 
@@ -35,44 +41,53 @@ interface SourceToken {
 	raw: string;
 }
 
-function lexPreservingSource(markdown: string): SourceToken[] | undefined {
-	if (!markdown.includes("\r")) {
-		let offset = 0;
-		const sourceTokens: SourceToken[] = [];
-		for (const token of markdownParser.lexer(markdown)) {
-			if (!markdown.startsWith(token.raw, offset)) {
-				return undefined;
-			}
-			offset += token.raw.length;
-			sourceTokens.push({ token, raw: token.raw });
-		}
-		return offset === markdown.length ? sourceTokens : undefined;
-	}
+interface NormalizedMarkdownSource {
+	normalized: string;
+	originalOffsets: number[];
+}
+
+interface SourceLineEndings {
+	lineEnding: string;
+	trailingLineEnding: string;
+}
+
+function normalizeMarkdownLineEndings(markdown: string): NormalizedMarkdownSource {
 	let normalized = "";
 	const originalOffsets = [0];
 	for (let index = 0; index < markdown.length; ) {
 		if (markdown[index] === "\r") {
 			normalized += "\n";
 			index += markdown[index + 1] === "\n" ? 2 : 1;
-			originalOffsets.push(index);
 		} else {
 			normalized += markdown[index];
 			index++;
-			originalOffsets.push(index);
 		}
+		originalOffsets.push(index);
 	}
+	return { normalized, originalOffsets };
+}
 
-	let normalizedOffset = 0;
+function lexNormalizedSource(
+	original: string,
+	normalized: string,
+	originalOffsets?: number[],
+): SourceToken[] | undefined {
+	let offset = 0;
 	const sourceTokens: SourceToken[] = [];
 	for (const token of markdownParser.lexer(normalized)) {
-		if (!normalized.startsWith(token.raw, normalizedOffset)) {
-			return undefined;
-		}
-		const start = normalizedOffset;
-		normalizedOffset += token.raw.length;
-		sourceTokens.push({ token, raw: markdown.slice(originalOffsets[start], originalOffsets[normalizedOffset]) });
+		if (!normalized.startsWith(token.raw, offset)) return undefined;
+		const start = offset;
+		offset += token.raw.length;
+		const raw = originalOffsets ? original.slice(originalOffsets[start], originalOffsets[offset]) : token.raw;
+		sourceTokens.push({ token, raw });
 	}
-	return normalizedOffset === normalized.length ? sourceTokens : undefined;
+	return offset === normalized.length ? sourceTokens : undefined;
+}
+
+function lexPreservingSource(markdown: string): SourceToken[] | undefined {
+	if (!markdown.includes("\r")) return lexNormalizedSource(markdown, markdown);
+	const { normalized, originalOffsets } = normalizeMarkdownLineEndings(markdown);
+	return lexNormalizedSource(markdown, normalized, originalOffsets);
 }
 function codeSpan(line: string): string {
 	const content = line || "\u00a0";
@@ -82,7 +97,7 @@ function codeSpan(line: string): string {
 	return `${fence}${padding}${content}${padding}${fence}`;
 }
 
-function sourceLineEndings(raw: string): { lineEnding: string; trailingLineEnding: string } {
+function sourceLineEndings(raw: string): SourceLineEndings {
 	const trailingLineEnding = /(\r\n|\r|\n)$/.exec(raw)?.[1] ?? "";
 	return {
 		lineEnding: trailingLineEnding || /(\r\n|\r|\n)/.exec(raw)?.[1] || "\n",
@@ -116,6 +131,25 @@ function hasSafeWarnings(warnings: unknown[]): warnings is string[] {
 	return true;
 }
 
+function validateArtRow(plainRow: unknown, styledRow: unknown, artWidth: number): number | undefined {
+	if (!hasSafeText(plainRow) || !Array.isArray(styledRow)) return undefined;
+	const rowWidth = visibleWidth(plainRow);
+	if (!Number.isSafeInteger(rowWidth) || rowWidth > artWidth) return undefined;
+
+	let reconstructed = "";
+	for (const span of styledRow) {
+		if (
+			!isRecord(span) ||
+			!hasSafeText(span.text) ||
+			typeof span.cls !== "string" ||
+			!SPAN_CLASSES.has(span.cls as Span["cls"])
+		) {
+			return undefined;
+		}
+		reconstructed += span.text;
+	}
+	return reconstructed === plainRow ? rowWidth : undefined;
+}
 function validateArt(value: unknown, availableWidth: number): MermaidArt | undefined {
 	if (!Number.isSafeInteger(availableWidth) || availableWidth < 0 || !isRecord(value)) {
 		return undefined;
@@ -136,37 +170,14 @@ function validateArt(value: unknown, availableWidth: number): MermaidArt | undef
 	) {
 		return undefined;
 	}
-
+	const artWidth = width as number;
 	let measuredWidth = 0;
 	for (let rowIndex = 0; rowIndex < plain.length; rowIndex++) {
-		const plainRow = plain[rowIndex];
-		const styledRow = styled[rowIndex];
-		if (!hasSafeText(plainRow) || !Array.isArray(styledRow)) {
-			return undefined;
-		}
-		const rowWidth = visibleWidth(plainRow);
-		if (!Number.isSafeInteger(rowWidth) || rowWidth > (width as number)) {
-			return undefined;
-		}
+		const rowWidth = validateArtRow(plain[rowIndex], styled[rowIndex], artWidth);
+		if (rowWidth === undefined) return undefined;
 		measuredWidth = Math.max(measuredWidth, rowWidth);
-
-		let reconstructed = "";
-		for (const span of styledRow) {
-			if (
-				!isRecord(span) ||
-				!hasSafeText(span.text) ||
-				typeof span.cls !== "string" ||
-				!SPAN_CLASSES.has(span.cls as Span["cls"])
-			) {
-				return undefined;
-			}
-			reconstructed += span.text;
-		}
-		if (reconstructed !== plainRow) {
-			return undefined;
-		}
 	}
-	if (measuredWidth !== width) {
+	if (measuredWidth !== artWidth) {
 		return undefined;
 	}
 	return value as unknown as MermaidArt;
@@ -222,53 +233,46 @@ function renderWarning(art: MermaidArt, theme: Theme | undefined): string | unde
 	return isSgrOnlyStyle(styledWarning, warning) ? codeSpan(styledWarning) : undefined;
 }
 
+function transformMermaidSourceToken(sourceToken: SourceToken, runtime: MermaidTransformRuntime): string {
+	const { token, raw } = sourceToken;
+	if (!isMermaid(token) || raw.length > MAX_MERMAID_SOURCE_LENGTH) return raw;
+	try {
+		const art = validateArt(runtime.renderMermaid(token.text), runtime.context.availableWidth);
+		if (!art) return raw;
+		const { lineEnding, trailingLineEnding } = sourceLineEndings(raw);
+		if (!runtime.context.isStreaming && art.warnings.length > 0) {
+			const warning = renderWarning(art, runtime.options.theme);
+			const separator = trailingLineEnding ? "" : lineEnding;
+			const suffix = trailingLineEnding ? `  ${trailingLineEnding}` : "";
+			return warning ? `${raw}${separator}${warning}${suffix}` : raw;
+		}
+		const lines = runtime.options.theme ? themedLines(art, runtime.options.theme) : art.plain;
+		if (!lines) return raw;
+		const hardBreak = `  ${lineEnding}`;
+		const suffix = trailingLineEnding ? `  ${trailingLineEnding}` : "";
+		return `${lines.map(codeSpan).join(hardBreak)}${suffix}`;
+	} catch {
+		return raw;
+	}
+}
+
+function shouldRenderMermaid(mode: MermaidRenderingMode, context: MarkdownTransformContext): boolean {
+	return (
+		mode !== "off" && context.messageType !== "assistant-thinking" && (!context.isStreaming || mode === "streaming")
+	);
+}
+
 /** Create a pure transformer that replaces eligible top-level Mermaid fences with bounded terminal art. */
 export function createMermaidMarkdownTransformer(options: MermaidTransformerOptions): MarkdownTransformer {
 	const renderMermaid = options.renderMermaid ?? (render as MermaidRenderer);
 	return (markdown, context) => {
 		const mode = options.getMode();
-		if (
-			mode === "off" ||
-			context.messageType === "assistant-thinking" ||
-			(context.isStreaming && mode !== "streaming")
-		) {
-			return markdown;
-		}
-
+		if (!shouldRenderMermaid(mode, context)) return markdown;
 		try {
 			const sourceTokens = lexPreservingSource(markdown);
-			if (!sourceTokens) {
-				return markdown;
-			}
-			return sourceTokens
-				.map(({ token, raw }) => {
-					if (!isMermaid(token) || raw.length > MAX_MERMAID_SOURCE_LENGTH) {
-						return raw;
-					}
-					try {
-						const art = validateArt(renderMermaid(token.text), context.availableWidth);
-						if (!art) {
-							return raw;
-						}
-						const { lineEnding, trailingLineEnding } = sourceLineEndings(raw);
-						if (!context.isStreaming && art.warnings.length > 0) {
-							const warning = renderWarning(art, options.theme);
-							const separator = trailingLineEnding ? "" : lineEnding;
-							const suffix = trailingLineEnding ? `  ${trailingLineEnding}` : "";
-							return warning ? `${raw}${separator}${warning}${suffix}` : raw;
-						}
-						const lines = options.theme ? themedLines(art, options.theme) : art.plain;
-						if (!lines) {
-							return raw;
-						}
-						const hardBreak = `  ${lineEnding}`;
-						const suffix = trailingLineEnding ? `  ${trailingLineEnding}` : "";
-						return `${lines.map(codeSpan).join(hardBreak)}${suffix}`;
-					} catch {
-						return raw;
-					}
-				})
-				.join("");
+			if (!sourceTokens) return markdown;
+			const runtime: MermaidTransformRuntime = { context, options, renderMermaid };
+			return sourceTokens.map((sourceToken) => transformMermaidSourceToken(sourceToken, runtime)).join("");
 		} catch {
 			return markdown;
 		}

@@ -1,17 +1,33 @@
 import { describe, expect, it, vi } from "vitest";
+import type { ExtensionForkOptions } from "../src/core/extensions/types.ts";
+import type { PiAgentForkResult } from "../src/core/pi-agent.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 
-type CloneCommandContext = {
-	activeSession: { getLeafId: () => string | null };
-	runtimeHost: {
-		fork: (entryId: string, options?: { position?: "before" | "at" }) => Promise<{ cancelled: boolean }>;
-	};
+interface CloneCommandActiveSession {
+	getLeafId: () => string | null;
+}
+
+interface CloneCommandRuntimeHost {
+	fork: (entryId: string, options?: ExtensionForkOptions) => Promise<PiAgentForkResult>;
+}
+
+interface CloneCommandEditor {
+	setText: (text: string) => void;
+}
+
+interface CloneCommandUI {
+	requestRender: () => void;
+}
+
+interface CloneCommandContext {
+	activeSession: CloneCommandActiveSession;
+	runtimeHost: CloneCommandRuntimeHost;
 	renderCurrentSessionState: () => void;
-	editor: { setText: (text: string) => void };
+	editor: CloneCommandEditor;
 	showStatus: (message: string) => void;
 	showError: (message: string) => void;
-	ui: { requestRender: () => void };
-};
+	ui: CloneCommandUI;
+}
 
 type InteractiveModePrototype = {
 	handleCloneCommand(this: CloneCommandContext): Promise<void>;

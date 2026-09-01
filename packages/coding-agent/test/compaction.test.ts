@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@fleetagent/pi-agent-core";
-import type { AssistantMessage, Usage } from "@fleetagent/pi-ai";
+import type { AssistantMessage, TextContent, Usage } from "@fleetagent/pi-ai";
 import { getModel } from "@fleetagent/pi-ai";
 import { readFileSync } from "fs";
 import { join } from "path";
@@ -174,12 +174,12 @@ function extractText(messages: AgentMessage[]): string {
 					return typeof message.content === "string"
 						? message.content
 						: message.content
-								.filter((block): block is { type: "text"; text: string } => block.type === "text")
+								.filter((block): block is TextContent => block.type === "text")
 								.map((block) => block.text)
 								.join(" ");
 				case "assistant":
 					return message.content
-						.filter((block): block is { type: "text"; text: string } => block.type === "text")
+						.filter((block): block is TextContent => block.type === "text")
 						.map((block) => block.text)
 						.join(" ");
 				case "branchSummary":
@@ -190,7 +190,7 @@ function extractText(messages: AgentMessage[]): string {
 					return typeof message.content === "string"
 						? message.content
 						: message.content
-								.filter((block): block is { type: "text"; text: string } => block.type === "text")
+								.filter((block): block is TextContent => block.type === "text")
 								.map((block) => block.text)
 								.join(" ");
 				case "bashExecution":

@@ -33,6 +33,78 @@ export function sessionEntryToContextMessages(entry: SessionEntry): AgentMessage
 	return [];
 }
 
+// pi-ignore noNearIdenticalDataStructures: Coding-agent persisted entries and agent harness storage entries use package-owned context pipelines that evolve independently.
+interface SessionPathState {
+	thinkingLevel: string;
+	model: SessionContext["model"];
+	compaction: CompactionEntry | null;
+}
+
+function traceSessionPath(leaf: SessionEntry, byId: Map<string, SessionEntry>): SessionEntry[] {
+	const path: SessionEntry[] = [];
+	let current: SessionEntry | undefined = leaf;
+	while (current) {
+		path.unshift(current);
+		current = current.parentId ? byId.get(current.parentId) : undefined;
+	}
+	return path;
+}
+
+function inspectSessionPath(path: SessionEntry[]): SessionPathState {
+	let thinkingLevel = "off";
+	let model: SessionContext["model"] = null;
+	let compaction: CompactionEntry | null = null;
+	for (const entry of path) {
+		switch (entry.type) {
+			case "thinking_level_change":
+				thinkingLevel = entry.thinkingLevel;
+				break;
+			case "model_change":
+				model = { provider: entry.provider, modelId: entry.modelId };
+				break;
+			case "message":
+				if (entry.message.role === "assistant") {
+					model = { provider: entry.message.provider, modelId: entry.message.model };
+				}
+				break;
+			case "compaction":
+				compaction = entry;
+		}
+	}
+	return { thinkingLevel, model, compaction };
+}
+
+function appendSessionContextMessages(
+	messages: AgentMessage[],
+	path: SessionEntry[],
+	startIndex: number,
+	endIndex: number,
+): void {
+	for (let index = startIndex; index < endIndex; index++) {
+		const entry = path[index];
+		// The active compaction summary is inserted explicitly. Older compaction
+		// entries in the retained path must not become additional context summaries.
+		if (entry.type !== "compaction") messages.push(...sessionEntryToContextMessages(entry));
+	}
+}
+
+function buildSessionContextMessages(path: SessionEntry[], compaction: CompactionEntry | null): AgentMessage[] {
+	const messages: AgentMessage[] = [];
+	if (!compaction) {
+		appendSessionContextMessages(messages, path, 0, path.length);
+		return messages;
+	}
+
+	messages.push(createCompactionSummaryMessage(compaction.summary, compaction.tokensBefore, compaction.timestamp));
+	const compactionIndex = path.findIndex((entry) => entry.type === "compaction" && entry.id === compaction.id);
+	const firstKeptIndex = path.findIndex(
+		(entry, index) => index < compactionIndex && entry.id === compaction.firstKeptEntryId,
+	);
+	if (firstKeptIndex >= 0) appendSessionContextMessages(messages, path, firstKeptIndex, compactionIndex);
+	appendSessionContextMessages(messages, path, compactionIndex + 1, path.length);
+	return messages;
+}
+
 /**
  * Build the session context from entries using tree traversal.
  * If leafId is provided, walks from that entry to root.
@@ -43,85 +115,14 @@ export function buildSessionContext(
 	leafId?: string | null,
 	byId?: Map<string, SessionEntry>,
 ): SessionContext {
-	if (!byId) {
-		byId = new Map<string, SessionEntry>();
-		for (const entry of entries) {
-			byId.set(entry.id, entry);
-		}
-	}
+	if (leafId === null) return { messages: [], thinkingLevel: "off", model: null };
 
-	let leaf: SessionEntry | undefined;
-	if (leafId === null) {
-		return { messages: [], thinkingLevel: "off", model: null };
-	}
-	if (leafId) {
-		leaf = byId.get(leafId);
-	}
-	if (!leaf) {
-		leaf = entries[entries.length - 1];
-	}
+	const entriesById = byId ?? new Map(entries.map((entry) => [entry.id, entry]));
+	const requestedLeaf = leafId ? entriesById.get(leafId) : undefined;
+	const leaf = requestedLeaf ?? entries[entries.length - 1];
+	if (!leaf) return { messages: [], thinkingLevel: "off", model: null };
 
-	if (!leaf) {
-		return { messages: [], thinkingLevel: "off", model: null };
-	}
-
-	const path: SessionEntry[] = [];
-	let current: SessionEntry | undefined = leaf;
-	while (current) {
-		path.unshift(current);
-		current = current.parentId ? byId.get(current.parentId) : undefined;
-	}
-
-	let thinkingLevel = "off";
-	let model: { provider: string; modelId: string } | null = null;
-	let compaction: CompactionEntry | null = null;
-
-	for (const entry of path) {
-		if (entry.type === "thinking_level_change") {
-			thinkingLevel = entry.thinkingLevel;
-		} else if (entry.type === "model_change") {
-			model = { provider: entry.provider, modelId: entry.modelId };
-		} else if (entry.type === "message" && entry.message.role === "assistant") {
-			model = { provider: entry.message.provider, modelId: entry.message.model };
-		} else if (entry.type === "compaction") {
-			compaction = entry;
-		}
-	}
-
-	const messages: AgentMessage[] = [];
-
-	const appendMessages = (entry: SessionEntry) => {
-		// The active compaction summary is inserted explicitly below. Older compaction
-		// entries in the retained path must not become additional context summaries.
-		if (entry.type !== "compaction") {
-			messages.push(...sessionEntryToContextMessages(entry));
-		}
-	};
-
-	if (compaction) {
-		messages.push(createCompactionSummaryMessage(compaction.summary, compaction.tokensBefore, compaction.timestamp));
-
-		const compactionIdx = path.findIndex((entry) => entry.type === "compaction" && entry.id === compaction.id);
-
-		let foundFirstKept = false;
-		for (let i = 0; i < compactionIdx; i++) {
-			const entry = path[i];
-			if (entry.id === compaction.firstKeptEntryId) {
-				foundFirstKept = true;
-			}
-			if (foundFirstKept) {
-				appendMessages(entry);
-			}
-		}
-
-		for (let i = compactionIdx + 1; i < path.length; i++) {
-			appendMessages(path[i]);
-		}
-	} else {
-		for (const entry of path) {
-			appendMessages(entry);
-		}
-	}
-
-	return { messages, thinkingLevel, model };
+	const path = traceSessionPath(leaf, entriesById);
+	const { thinkingLevel, model, compaction } = inspectSessionPath(path);
+	return { messages: buildSessionContextMessages(path, compaction), thinkingLevel, model };
 }

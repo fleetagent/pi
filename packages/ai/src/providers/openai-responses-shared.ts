@@ -1,8 +1,9 @@
 import type OpenAI from "openai";
 import type {
+	Response as OpenAIResponse,
 	Tool as OpenAITool,
-	ResponseCreateParamsStreaming,
 	ResponseFunctionCallOutputItemList,
+	ResponseFunctionToolCall,
 	ResponseInput,
 	ResponseInputContent,
 	ResponseInputImage,
@@ -21,11 +22,14 @@ import type {
 	Model,
 	StopReason,
 	TextContent,
+	TextSignaturePhase,
 	TextSignatureV1,
 	ThinkingContent,
 	Tool,
 	ToolCall,
+	ToolResultMessage,
 	Usage,
+	UserMessage,
 } from "../types.ts";
 import type { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { shortHash } from "../utils/hash.ts";
@@ -37,15 +41,18 @@ import { transformMessages } from "./transform-messages.ts";
 // Utilities
 // =============================================================================
 
-function encodeTextSignatureV1(id: string, phase?: TextSignatureV1["phase"]): string {
+interface ParsedTextSignature {
+	id: string;
+	phase?: TextSignaturePhase;
+}
+
+function encodeTextSignatureV1(id: string, phase?: TextSignaturePhase): string {
 	const payload: TextSignatureV1 = { v: 1, id };
 	if (phase) payload.phase = phase;
 	return JSON.stringify(payload);
 }
 
-function parseTextSignature(
-	signature: string | undefined,
-): { id: string; phase?: TextSignatureV1["phase"] } | undefined {
+function parseTextSignature(signature: string | undefined): ParsedTextSignature | undefined {
 	if (!signature) return undefined;
 	if (signature.startsWith("{")) {
 		try {
@@ -63,16 +70,15 @@ function parseTextSignature(
 	return { id: signature };
 }
 
+export type OpenAIResponseServiceTier = "auto" | "default" | "flex" | "scale" | "priority" | null;
+
 export interface OpenAIResponsesStreamOptions {
-	serviceTier?: ResponseCreateParamsStreaming["service_tier"];
+	serviceTier?: OpenAIResponseServiceTier;
 	resolveServiceTier?: (
-		responseServiceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
-		requestServiceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
-	) => ResponseCreateParamsStreaming["service_tier"] | undefined;
-	applyServiceTierPricing?: (
-		usage: Usage,
-		serviceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
-	) => void;
+		responseServiceTier: OpenAIResponseServiceTier | undefined,
+		requestServiceTier: OpenAIResponseServiceTier | undefined,
+	) => OpenAIResponseServiceTier | undefined;
+	applyServiceTierPricing?: (usage: Usage, serviceTier: OpenAIResponseServiceTier | undefined) => void;
 }
 
 export interface ConvertResponsesMessagesOptions {
@@ -87,6 +93,162 @@ export interface ConvertResponsesToolsOptions {
 // Message conversion
 // =============================================================================
 
+function normalizeResponsesIdPart(part: string): string {
+	const sanitized = part.replace(/[^a-zA-Z0-9_-]/g, "_");
+	const normalized = sanitized.length > 64 ? sanitized.slice(0, 64) : sanitized;
+	return normalized.replace(/_+$/, "");
+}
+
+function buildForeignResponsesItemId(itemId: string): string {
+	const normalized = `fc_${shortHash(itemId)}`;
+	return normalized.length > 64 ? normalized.slice(0, 64) : normalized;
+}
+
+function normalizeResponsesToolCallId<TApi extends Api>(
+	id: string,
+	model: Model<TApi>,
+	source: AssistantMessage,
+	allowedToolCallProviders: ReadonlySet<string>,
+): string {
+	if (!allowedToolCallProviders.has(model.provider)) return normalizeResponsesIdPart(id);
+	if (!id.includes("|")) return normalizeResponsesIdPart(id);
+	const [callId, itemId] = id.split("|");
+	const normalizedCallId = normalizeResponsesIdPart(callId);
+	const isForeignToolCall = source.provider !== model.provider || source.api !== model.api;
+	let normalizedItemId = isForeignToolCall ? buildForeignResponsesItemId(itemId) : normalizeResponsesIdPart(itemId);
+	// OpenAI Responses API requires item IDs to start with "fc".
+	if (!normalizedItemId.startsWith("fc_")) normalizedItemId = normalizeResponsesIdPart(`fc_${normalizedItemId}`);
+	return `${normalizedCallId}|${normalizedItemId}`;
+}
+
+function convertResponsesUserMessage(message: UserMessage): ResponseInput {
+	if (typeof message.content === "string") {
+		return [
+			{
+				role: "user",
+				content: [{ type: "input_text", text: sanitizeSurrogates(message.content) }],
+			},
+		];
+	}
+	const content: ResponseInputContent[] = message.content.map((item): ResponseInputContent => {
+		if (item.type === "text") {
+			return {
+				type: "input_text",
+				text: sanitizeSurrogates(item.text),
+			} satisfies ResponseInputText;
+		}
+		return {
+			type: "input_image",
+			detail: "auto",
+			image_url: `data:${item.mimeType};base64,${item.data}`,
+		} satisfies ResponseInputImage;
+	});
+	return content.length === 0 ? [] : [{ role: "user", content }];
+}
+
+function resolveResponsesMessageId(
+	textBlock: TextContent,
+	messageIndex: number,
+	textBlockIndex: number,
+): ParsedTextSignature {
+	const parsedSignature = parseTextSignature(textBlock.textSignature);
+	const fallbackId = textBlockIndex === 0 ? `msg_pi_${messageIndex}` : `msg_pi_${messageIndex}_${textBlockIndex}`;
+	if (!parsedSignature?.id) return { id: fallbackId };
+	return {
+		...parsedSignature,
+		id: parsedSignature.id.length > 64 ? `msg_${shortHash(parsedSignature.id)}` : parsedSignature.id,
+	};
+}
+
+function convertResponsesTextBlock(
+	block: TextContent,
+	messageIndex: number,
+	textBlockIndex: number,
+): ResponseOutputMessage {
+	const signature = resolveResponsesMessageId(block, messageIndex, textBlockIndex);
+	return {
+		type: "message",
+		role: "assistant",
+		content: [{ type: "output_text", text: sanitizeSurrogates(block.text), annotations: [] }],
+		status: "completed",
+		id: signature.id,
+		phase: signature.phase,
+	};
+}
+
+function convertResponsesToolCall(block: ToolCall, isDifferentModel: boolean): ResponseFunctionToolCall {
+	const [callId, rawItemId] = block.id.split("|");
+	const itemId = isDifferentModel && rawItemId?.startsWith("fc_") ? undefined : rawItemId;
+	return {
+		type: "function_call",
+		id: itemId,
+		call_id: callId,
+		name: block.name,
+		arguments: JSON.stringify(block.arguments),
+	};
+}
+
+function convertResponsesAssistantMessage<TApi extends Api>(
+	message: AssistantMessage,
+	model: Model<TApi>,
+	messageIndex: number,
+): ResponseInput {
+	const output: ResponseInput = [];
+	const isDifferentModel =
+		message.model !== model.id && message.provider === model.provider && message.api === model.api;
+	let textBlockIndex = 0;
+	for (const block of message.content) {
+		if (block.type === "thinking") {
+			if (block.thinkingSignature) output.push(JSON.parse(block.thinkingSignature) as ResponseReasoningItem);
+			continue;
+		}
+		if (block.type === "text") {
+			output.push(convertResponsesTextBlock(block, messageIndex, textBlockIndex));
+			textBlockIndex++;
+			continue;
+		}
+		if (block.type === "toolCall") output.push(convertResponsesToolCall(block, isDifferentModel));
+	}
+	return output;
+}
+
+function buildResponsesToolOutput(
+	message: ToolResultMessage,
+	supportsImages: boolean,
+): string | ResponseFunctionCallOutputItemList {
+	const textResult = message.content
+		.filter((content): content is TextContent => content.type === "text")
+		.map((content) => content.text)
+		.join("\n");
+	const hasImages = message.content.some((content): content is ImageContent => content.type === "image");
+	const hasText = textResult.length > 0;
+	if (!hasImages || !supportsImages) {
+		return sanitizeSurrogates(hasText ? textResult : hasImages ? "(see attached image)" : "(no tool output)");
+	}
+	const contentParts: ResponseFunctionCallOutputItemList = [];
+	if (hasText) contentParts.push({ type: "input_text", text: sanitizeSurrogates(textResult) });
+	for (const block of message.content) {
+		if (block.type !== "image") continue;
+		contentParts.push({
+			type: "input_image",
+			detail: "auto",
+			image_url: `data:${block.mimeType};base64,${block.data}`,
+		});
+	}
+	return contentParts;
+}
+
+function convertResponsesToolResult<TApi extends Api>(message: ToolResultMessage, model: Model<TApi>): ResponseInput {
+	const [callId] = message.toolCallId.split("|");
+	return [
+		{
+			type: "function_call_output",
+			call_id: callId,
+			output: buildResponsesToolOutput(message, model.input.includes("image")),
+		},
+	];
+}
+
 export function convertResponsesMessages<TApi extends Api>(
 	model: Model<TApi>,
 	context: Context,
@@ -94,174 +256,25 @@ export function convertResponsesMessages<TApi extends Api>(
 	options?: ConvertResponsesMessagesOptions,
 ): ResponseInput {
 	const messages: ResponseInput = [];
-
-	const normalizeIdPart = (part: string): string => {
-		const sanitized = part.replace(/[^a-zA-Z0-9_-]/g, "_");
-		const normalized = sanitized.length > 64 ? sanitized.slice(0, 64) : sanitized;
-		return normalized.replace(/_+$/, "");
-	};
-
-	const buildForeignResponsesItemId = (itemId: string): string => {
-		const normalized = `fc_${shortHash(itemId)}`;
-		return normalized.length > 64 ? normalized.slice(0, 64) : normalized;
-	};
-
-	const normalizeToolCallId = (id: string, _targetModel: Model<TApi>, source: AssistantMessage): string => {
-		if (!allowedToolCallProviders.has(model.provider)) return normalizeIdPart(id);
-		if (!id.includes("|")) return normalizeIdPart(id);
-		const [callId, itemId] = id.split("|");
-		const normalizedCallId = normalizeIdPart(callId);
-		const isForeignToolCall = source.provider !== model.provider || source.api !== model.api;
-		let normalizedItemId = isForeignToolCall ? buildForeignResponsesItemId(itemId) : normalizeIdPart(itemId);
-		// OpenAI Responses API requires item id to start with "fc"
-		if (!normalizedItemId.startsWith("fc_")) {
-			normalizedItemId = normalizeIdPart(`fc_${normalizedItemId}`);
-		}
-		return `${normalizedCallId}|${normalizedItemId}`;
-	};
-
+	const normalizeToolCallId = (id: string, _targetModel: Model<TApi>, source: AssistantMessage): string =>
+		normalizeResponsesToolCallId(id, model, source, allowedToolCallProviders);
 	const transformedMessages = transformMessages(context.messages, model, normalizeToolCallId);
-
-	const includeSystemPrompt = options?.includeSystemPrompt ?? true;
-	if (includeSystemPrompt && context.systemPrompt) {
-		const role = model.reasoning ? "developer" : "system";
+	if ((options?.includeSystemPrompt ?? true) && context.systemPrompt) {
 		messages.push({
-			role,
+			role: model.reasoning ? "developer" : "system",
 			content: sanitizeSurrogates(context.systemPrompt),
 		});
 	}
-
-	let msgIndex = 0;
-	for (const msg of transformedMessages) {
-		if (msg.role === "user") {
-			if (typeof msg.content === "string") {
-				messages.push({
-					role: "user",
-					content: [{ type: "input_text", text: sanitizeSurrogates(msg.content) }],
-				});
-			} else {
-				const content: ResponseInputContent[] = msg.content.map((item): ResponseInputContent => {
-					if (item.type === "text") {
-						return {
-							type: "input_text",
-							text: sanitizeSurrogates(item.text),
-						} satisfies ResponseInputText;
-					}
-					return {
-						type: "input_image",
-						detail: "auto",
-						image_url: `data:${item.mimeType};base64,${item.data}`,
-					} satisfies ResponseInputImage;
-				});
-				if (content.length === 0) continue;
-				messages.push({
-					role: "user",
-					content,
-				});
-			}
-		} else if (msg.role === "assistant") {
-			const output: ResponseInput = [];
-			const assistantMsg = msg as AssistantMessage;
-			const isDifferentModel =
-				assistantMsg.model !== model.id &&
-				assistantMsg.provider === model.provider &&
-				assistantMsg.api === model.api;
-			let textBlockIndex = 0;
-
-			for (const block of msg.content) {
-				if (block.type === "thinking") {
-					if (block.thinkingSignature) {
-						const reasoningItem = JSON.parse(block.thinkingSignature) as ResponseReasoningItem;
-						output.push(reasoningItem);
-					}
-				} else if (block.type === "text") {
-					const textBlock = block as TextContent;
-					const parsedSignature = parseTextSignature(textBlock.textSignature);
-					const fallbackMessageId =
-						textBlockIndex === 0 ? `msg_pi_${msgIndex}` : `msg_pi_${msgIndex}_${textBlockIndex}`;
-					textBlockIndex++;
-					// OpenAI requires id to be max 64 characters
-					let msgId = parsedSignature?.id;
-					if (!msgId) {
-						msgId = fallbackMessageId;
-					} else if (msgId.length > 64) {
-						msgId = `msg_${shortHash(msgId)}`;
-					}
-					output.push({
-						type: "message",
-						role: "assistant",
-						content: [{ type: "output_text", text: sanitizeSurrogates(textBlock.text), annotations: [] }],
-						status: "completed",
-						id: msgId,
-						phase: parsedSignature?.phase,
-					} satisfies ResponseOutputMessage);
-				} else if (block.type === "toolCall") {
-					const toolCall = block as ToolCall;
-					const [callId, itemIdRaw] = toolCall.id.split("|");
-					let itemId: string | undefined = itemIdRaw;
-
-					// For different-model messages, set id to undefined to avoid pairing validation.
-					// OpenAI tracks which fc_xxx IDs were paired with rs_xxx reasoning items.
-					// By omitting the id, we avoid triggering that validation (like cross-provider does).
-					if (isDifferentModel && itemId?.startsWith("fc_")) {
-						itemId = undefined;
-					}
-
-					output.push({
-						type: "function_call",
-						id: itemId,
-						call_id: callId,
-						name: toolCall.name,
-						arguments: JSON.stringify(toolCall.arguments),
-					});
-				}
-			}
-			if (output.length === 0) continue;
-			messages.push(...output);
-		} else if (msg.role === "toolResult") {
-			const textResult = msg.content
-				.filter((c): c is TextContent => c.type === "text")
-				.map((c) => c.text)
-				.join("\n");
-			const hasImages = msg.content.some((c): c is ImageContent => c.type === "image");
-			const hasText = textResult.length > 0;
-			const [callId] = msg.toolCallId.split("|");
-
-			let output: string | ResponseFunctionCallOutputItemList;
-			if (hasImages && model.input.includes("image")) {
-				const contentParts: ResponseFunctionCallOutputItemList = [];
-
-				if (hasText) {
-					contentParts.push({
-						type: "input_text",
-						text: sanitizeSurrogates(textResult),
-					});
-				}
-
-				for (const block of msg.content) {
-					if (block.type === "image") {
-						contentParts.push({
-							type: "input_image",
-							detail: "auto",
-							image_url: `data:${block.mimeType};base64,${block.data}`,
-						});
-					}
-				}
-
-				output = contentParts;
-			} else {
-				output = sanitizeSurrogates(hasText ? textResult : hasImages ? "(see attached image)" : "(no tool output)");
-			}
-
-			messages.push({
-				type: "function_call_output",
-				call_id: callId,
-				output,
-			});
-		}
-		msgIndex++;
+	let messageIndex = 0;
+	for (const message of transformedMessages) {
+		let converted: ResponseInput;
+		if (message.role === "user") converted = convertResponsesUserMessage(message);
+		else if (message.role === "assistant") converted = convertResponsesAssistantMessage(message, model, messageIndex);
+		else converted = convertResponsesToolResult(message, model);
+		if (converted.length === 0) continue;
+		messages.push(...converted);
+		messageIndex++;
 	}
-
 	return messages;
 }
 
@@ -285,10 +298,346 @@ export function convertResponsesTools(tools: Tool[], options?: ConvertResponsesT
 // =============================================================================
 type StreamingToolCall = ToolCall & { partialJson: string };
 
-type ResponsesOutputSlot =
-	| { type: "thinking"; block: ThinkingContent; contentIndex: number }
-	| { type: "text"; block: TextContent; contentIndex: number }
-	| { type: "toolCall"; block: StreamingToolCall; contentIndex: number };
+interface ResponsesThinkingOutputSlot {
+	type: "thinking";
+	block: ThinkingContent;
+	contentIndex: number;
+}
+
+interface ResponsesTextOutputSlot {
+	type: "text";
+	block: TextContent;
+	contentIndex: number;
+}
+
+interface ResponsesToolCallOutputSlot {
+	type: "toolCall";
+	block: StreamingToolCall;
+	contentIndex: number;
+}
+
+type ResponsesOutputSlot = ResponsesThinkingOutputSlot | ResponsesTextOutputSlot | ResponsesToolCallOutputSlot;
+
+interface ResponsesStreamState<TApi extends Api> {
+	output: AssistantMessage;
+	stream: AssistantMessageEventStream;
+	model: Model<TApi>;
+	options: OpenAIResponsesStreamOptions | undefined;
+	sawTerminalResponseEvent: boolean;
+	outputSlots: Map<number, ResponsesOutputSlot>;
+	reasoningBlocksById: Map<string, ThinkingContent>;
+}
+
+function applyResponsesMessagePhaseStopReason(output: AssistantMessage, item: ResponseOutputItem): void {
+	if (item.type === "message" && item.phase === "final_answer") output.stopReason = "stop";
+}
+
+function getResponsesThinkingSlot<TApi extends Api>(
+	state: ResponsesStreamState<TApi>,
+	outputIndex: number,
+): ResponsesThinkingOutputSlot | undefined {
+	const slot = state.outputSlots.get(outputIndex);
+	return slot?.type === "thinking" ? slot : undefined;
+}
+
+function getResponsesTextSlot<TApi extends Api>(
+	state: ResponsesStreamState<TApi>,
+	outputIndex: number,
+): ResponsesTextOutputSlot | undefined {
+	const slot = state.outputSlots.get(outputIndex);
+	return slot?.type === "text" ? slot : undefined;
+}
+
+function getResponsesToolCallSlot<TApi extends Api>(
+	state: ResponsesStreamState<TApi>,
+	outputIndex: number,
+): ResponsesToolCallOutputSlot | undefined {
+	const slot = state.outputSlots.get(outputIndex);
+	return slot?.type === "toolCall" ? slot : undefined;
+}
+
+function createResponsesOutputSlot<TApi extends Api>(
+	state: ResponsesStreamState<TApi>,
+	outputIndex: number,
+	item: ResponseOutputItem,
+): ResponsesOutputSlot | undefined {
+	switch (item.type) {
+		case "reasoning": {
+			const block: ThinkingContent = { type: "thinking", thinking: "" };
+			state.output.content.push(block);
+			const slot: ResponsesThinkingOutputSlot = {
+				type: "thinking",
+				block,
+				contentIndex: state.output.content.length - 1,
+			};
+			state.outputSlots.set(outputIndex, slot);
+			state.stream.push({ type: "thinking_start", contentIndex: slot.contentIndex, partial: state.output });
+			return slot;
+		}
+		case "message": {
+			applyResponsesMessagePhaseStopReason(state.output, item);
+			const block: TextContent = { type: "text", text: "" };
+			state.output.content.push(block);
+			const slot: ResponsesTextOutputSlot = {
+				type: "text",
+				block,
+				contentIndex: state.output.content.length - 1,
+			};
+			state.outputSlots.set(outputIndex, slot);
+			state.stream.push({ type: "text_start", contentIndex: slot.contentIndex, partial: state.output });
+			return slot;
+		}
+		case "function_call": {
+			const block: StreamingToolCall = {
+				type: "toolCall",
+				id: `${item.call_id}|${item.id}`,
+				name: item.name,
+				arguments: {},
+				partialJson: item.arguments || "",
+			};
+			state.output.content.push(block);
+			const slot: ResponsesToolCallOutputSlot = {
+				type: "toolCall",
+				block,
+				contentIndex: state.output.content.length - 1,
+			};
+			state.outputSlots.set(outputIndex, slot);
+			state.stream.push({ type: "toolcall_start", contentIndex: slot.contentIndex, partial: state.output });
+			return slot;
+		}
+		default:
+			return undefined;
+	}
+}
+
+function getOrCreateResponsesOutputSlot<TApi extends Api>(
+	state: ResponsesStreamState<TApi>,
+	outputIndex: number,
+	item: ResponseOutputItem,
+): ResponsesOutputSlot | undefined {
+	return state.outputSlots.get(outputIndex) ?? createResponsesOutputSlot(state, outputIndex, item);
+}
+
+function backfillResponsesReasoningSignatures<TApi extends Api>(
+	state: ResponsesStreamState<TApi>,
+	responseOutput: ResponseOutputItem[],
+): void {
+	for (const item of responseOutput) {
+		if (item.type !== "reasoning" || !item.encrypted_content) continue;
+		const block = state.reasoningBlocksById.get(item.id);
+		if (!block?.thinkingSignature) continue;
+		const storedItem = JSON.parse(block.thinkingSignature) as ResponseReasoningItem;
+		if (storedItem.encrypted_content) continue;
+		block.thinkingSignature = JSON.stringify({ ...storedItem, encrypted_content: item.encrypted_content });
+	}
+}
+
+function finalizeResponsesResponse<TApi extends Api>(
+	state: ResponsesStreamState<TApi>,
+	response: OpenAIResponse,
+): void {
+	state.sawTerminalResponseEvent = true;
+	backfillResponsesReasoningSignatures(state, response.output ?? []);
+	if (response.id) state.output.responseId = response.id;
+	if (response.usage) {
+		const inputDetails = response.usage.input_tokens_details as
+			| { cached_tokens?: number; cache_write_tokens?: number }
+			| undefined;
+		const cachedTokens = inputDetails?.cached_tokens || 0;
+		const cacheWriteTokens = inputDetails?.cache_write_tokens || 0;
+		state.output.usage = {
+			input: Math.max(0, (response.usage.input_tokens || 0) - cachedTokens - cacheWriteTokens),
+			output: response.usage.output_tokens || 0,
+			cacheRead: cachedTokens,
+			cacheWrite: cacheWriteTokens,
+			reasoning: response.usage.output_tokens_details?.reasoning_tokens || 0,
+			totalTokens: response.usage.total_tokens || 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+	}
+	calculateCost(state.model, state.output.usage);
+	if (state.options?.applyServiceTierPricing) {
+		const serviceTier = state.options.resolveServiceTier
+			? state.options.resolveServiceTier(response.service_tier, state.options.serviceTier)
+			: (response.service_tier ?? state.options.serviceTier);
+		state.options.applyServiceTierPricing(state.output.usage, serviceTier);
+	}
+	state.output.rawStopReason = response.status;
+	state.output.stopReason = mapStopReason(response.status);
+	if (state.output.content.some((block) => block.type === "toolCall") && state.output.stopReason === "stop") {
+		state.output.stopReason = "toolUse";
+	}
+}
+
+function appendResponsesThinkingDelta<TApi extends Api>(
+	state: ResponsesStreamState<TApi>,
+	outputIndex: number,
+	delta: string,
+): void {
+	const slot = getResponsesThinkingSlot(state, outputIndex);
+	if (!slot) return;
+	slot.block.thinking += delta;
+	state.stream.push({
+		type: "thinking_delta",
+		contentIndex: slot.contentIndex,
+		delta,
+		partial: state.output,
+	});
+}
+
+function appendResponsesTextDelta<TApi extends Api>(
+	state: ResponsesStreamState<TApi>,
+	outputIndex: number,
+	delta: string,
+): void {
+	const slot = getResponsesTextSlot(state, outputIndex);
+	if (!slot) return;
+	slot.block.text += delta;
+	state.stream.push({ type: "text_delta", contentIndex: slot.contentIndex, delta, partial: state.output });
+}
+
+function appendResponsesToolCallDelta<TApi extends Api>(
+	state: ResponsesStreamState<TApi>,
+	outputIndex: number,
+	delta: string,
+): void {
+	const slot = getResponsesToolCallSlot(state, outputIndex);
+	if (!slot) return;
+	slot.block.partialJson += delta;
+	slot.block.arguments = parseStreamingJson(slot.block.partialJson);
+	state.stream.push({ type: "toolcall_delta", contentIndex: slot.contentIndex, delta, partial: state.output });
+}
+
+function completeResponsesToolCallArguments<TApi extends Api>(
+	state: ResponsesStreamState<TApi>,
+	outputIndex: number,
+	argumentsJson: string,
+): void {
+	const slot = getResponsesToolCallSlot(state, outputIndex);
+	if (!slot) return;
+	const previousPartialJson = slot.block.partialJson;
+	slot.block.partialJson = argumentsJson;
+	slot.block.arguments = parseStreamingJson(slot.block.partialJson);
+	if (!argumentsJson.startsWith(previousPartialJson)) return;
+	const delta = argumentsJson.slice(previousPartialJson.length);
+	if (delta.length > 0) {
+		state.stream.push({ type: "toolcall_delta", contentIndex: slot.contentIndex, delta, partial: state.output });
+	}
+}
+
+function finalizeResponsesOutputItem<TApi extends Api>(
+	state: ResponsesStreamState<TApi>,
+	outputIndex: number,
+	item: ResponseOutputItem,
+): void {
+	applyResponsesMessagePhaseStopReason(state.output, item);
+	const slot = getOrCreateResponsesOutputSlot(state, outputIndex, item);
+	switch (item.type) {
+		case "reasoning":
+			if (slot?.type !== "thinking") return;
+			slot.block.thinking =
+				item.summary?.map((summary) => summary.text).join("\n\n") ||
+				item.content?.map((content) => content.text).join("\n\n") ||
+				slot.block.thinking;
+			slot.block.thinkingSignature = JSON.stringify(item);
+			state.reasoningBlocksById.set(item.id, slot.block);
+			state.stream.push({
+				type: "thinking_end",
+				contentIndex: slot.contentIndex,
+				content: slot.block.thinking,
+				partial: state.output,
+			});
+			state.outputSlots.delete(outputIndex);
+			return;
+		case "message":
+			if (slot?.type !== "text") return;
+			slot.block.text =
+				item.content
+					?.map((content) => (content.type === "output_text" ? content.text : content.refusal))
+					.join("") || "";
+			slot.block.textSignature = encodeTextSignatureV1(item.id, item.phase ?? undefined);
+			state.stream.push({
+				type: "text_end",
+				contentIndex: slot.contentIndex,
+				content: slot.block.text,
+				partial: state.output,
+			});
+			state.outputSlots.delete(outputIndex);
+			return;
+		case "function_call":
+			if (slot?.type !== "toolCall") return;
+			slot.block.arguments = parseStreamingJson(item.arguments || slot.block.partialJson || "{}");
+			delete (slot.block as { partialJson?: string }).partialJson;
+			state.stream.push({
+				type: "toolcall_end",
+				contentIndex: slot.contentIndex,
+				toolCall: slot.block,
+				partial: state.output,
+			});
+			state.outputSlots.delete(outputIndex);
+			return;
+		default:
+			return;
+	}
+}
+
+function failResponsesStream<TApi extends Api>(
+	state: ResponsesStreamState<TApi>,
+	response: OpenAIResponse | undefined,
+): never {
+	state.sawTerminalResponseEvent = true;
+	state.output.rawStopReason = response?.status;
+	const error = response?.error;
+	const details = response?.incomplete_details;
+	const message = error
+		? `${error.code || "unknown"}: ${error.message || "no message"}`
+		: details?.reason
+			? `incomplete: ${details.reason}`
+			: "Unknown error (no error details in response)";
+	throw new Error(message);
+}
+
+function processResponsesStreamEvent<TApi extends Api>(
+	state: ResponsesStreamState<TApi>,
+	event: ResponseStreamEvent,
+): void {
+	switch (event.type) {
+		case "response.created":
+			state.output.responseId = event.response.id;
+			break;
+		case "response.output_item.added":
+			createResponsesOutputSlot(state, event.output_index, event.item);
+			break;
+		case "response.reasoning_summary_text.delta":
+		case "response.reasoning_text.delta":
+			appendResponsesThinkingDelta(state, event.output_index, event.delta);
+			break;
+		case "response.reasoning_summary_part.done":
+			appendResponsesThinkingDelta(state, event.output_index, "\n\n");
+			break;
+		case "response.output_text.delta":
+		case "response.refusal.delta":
+			appendResponsesTextDelta(state, event.output_index, event.delta);
+			break;
+		case "response.function_call_arguments.delta":
+			appendResponsesToolCallDelta(state, event.output_index, event.delta);
+			break;
+		case "response.function_call_arguments.done":
+			completeResponsesToolCallArguments(state, event.output_index, event.arguments);
+			break;
+		case "response.output_item.done":
+			finalizeResponsesOutputItem(state, event.output_index, event.item);
+			break;
+		case "response.completed":
+		case "response.incomplete":
+			finalizeResponsesResponse(state, event.response);
+			break;
+		case "error":
+			throw new Error(`Error Code ${event.code}: ${event.message}` || "Unknown error");
+		case "response.failed":
+			failResponsesStream(state, event.response);
+	}
+}
 
 export async function processResponsesStream<TApi extends Api>(
 	openaiStream: AsyncIterable<ResponseStreamEvent>,
@@ -297,264 +646,17 @@ export async function processResponsesStream<TApi extends Api>(
 	model: Model<TApi>,
 	options?: OpenAIResponsesStreamOptions,
 ): Promise<void> {
-	let sawTerminalResponseEvent = false;
-	const outputSlots = new Map<number, ResponsesOutputSlot>();
-	const reasoningBlocksById = new Map<string, ThinkingContent>();
-	const applyMessagePhaseStopReason = (item: ResponseOutputItem): void => {
-		if (item.type === "message" && item.phase === "final_answer") {
-			output.stopReason = "stop";
-		}
+	const state: ResponsesStreamState<TApi> = {
+		output,
+		stream,
+		model,
+		options,
+		sawTerminalResponseEvent: false,
+		outputSlots: new Map(),
+		reasoningBlocksById: new Map(),
 	};
-	const getSlot = <TType extends ResponsesOutputSlot["type"]>(
-		outputIndex: number,
-		type: TType,
-	): Extract<ResponsesOutputSlot, { type: TType }> | undefined => {
-		const slot = outputSlots.get(outputIndex);
-		return slot?.type === type ? (slot as Extract<ResponsesOutputSlot, { type: TType }>) : undefined;
-	};
-	const createSlot = (outputIndex: number, item: ResponseOutputItem): ResponsesOutputSlot | undefined => {
-		if (item.type === "reasoning") {
-			const block: ThinkingContent = { type: "thinking", thinking: "" };
-			output.content.push(block);
-			const slot = {
-				type: "thinking",
-				block,
-				contentIndex: output.content.length - 1,
-			} satisfies ResponsesOutputSlot;
-			outputSlots.set(outputIndex, slot);
-			stream.push({ type: "thinking_start", contentIndex: slot.contentIndex, partial: output });
-			return slot;
-		}
-		if (item.type === "message") {
-			applyMessagePhaseStopReason(item);
-			const block: TextContent = { type: "text", text: "" };
-			output.content.push(block);
-			const slot = { type: "text", block, contentIndex: output.content.length - 1 } satisfies ResponsesOutputSlot;
-			outputSlots.set(outputIndex, slot);
-			stream.push({ type: "text_start", contentIndex: slot.contentIndex, partial: output });
-			return slot;
-		}
-		if (item.type === "function_call") {
-			const block: StreamingToolCall = {
-				type: "toolCall",
-				id: `${item.call_id}|${item.id}`,
-				name: item.name,
-				arguments: {},
-				partialJson: item.arguments || "",
-			};
-			output.content.push(block);
-			const slot = {
-				type: "toolCall",
-				block,
-				contentIndex: output.content.length - 1,
-			} satisfies ResponsesOutputSlot;
-			outputSlots.set(outputIndex, slot);
-			stream.push({ type: "toolcall_start", contentIndex: slot.contentIndex, partial: output });
-			return slot;
-		}
-		return undefined;
-	};
-	const getOrCreateSlot = (outputIndex: number, item: ResponseOutputItem): ResponsesOutputSlot | undefined => {
-		return outputSlots.get(outputIndex) ?? createSlot(outputIndex, item);
-	};
-	// Azure OpenAI can omit reasoning.encrypted_content from response.output_item.done
-	// and provide it only in the terminal response output. Backfill it so store:false
-	// multi-turn replay remains stateless.
-	const backfillReasoningSignatures = (responseOutput: ResponseOutputItem[]): void => {
-		for (const item of responseOutput) {
-			if (item.type !== "reasoning" || !item.encrypted_content) continue;
-			const block = reasoningBlocksById.get(item.id);
-			if (!block?.thinkingSignature) continue;
-
-			const storedItem = JSON.parse(block.thinkingSignature) as ResponseReasoningItem;
-			if (storedItem.encrypted_content) continue;
-			block.thinkingSignature = JSON.stringify({
-				...storedItem,
-				encrypted_content: item.encrypted_content,
-			});
-		}
-	};
-	const finalizeResponse = (
-		response: Extract<ResponseStreamEvent, { type: "response.completed" | "response.incomplete" }>["response"],
-	): void => {
-		sawTerminalResponseEvent = true;
-		backfillReasoningSignatures(response.output ?? []);
-		if (response.id) output.responseId = response.id;
-		if (response.usage) {
-			const inputDetails = response.usage.input_tokens_details as
-				| { cached_tokens?: number; cache_write_tokens?: number }
-				| undefined;
-			const cachedTokens = inputDetails?.cached_tokens || 0;
-			const cacheWriteTokens = inputDetails?.cache_write_tokens || 0;
-			output.usage = {
-				// OpenAI includes cached and cache-write tokens in input_tokens.
-				input: Math.max(0, (response.usage.input_tokens || 0) - cachedTokens - cacheWriteTokens),
-				output: response.usage.output_tokens || 0,
-				cacheRead: cachedTokens,
-				cacheWrite: cacheWriteTokens,
-				reasoning: response.usage.output_tokens_details?.reasoning_tokens || 0,
-				totalTokens: response.usage.total_tokens || 0,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			};
-		}
-		calculateCost(model, output.usage);
-		if (options?.applyServiceTierPricing) {
-			const serviceTier = options.resolveServiceTier
-				? options.resolveServiceTier(response.service_tier, options.serviceTier)
-				: (response.service_tier ?? options.serviceTier);
-			options.applyServiceTierPricing(output.usage, serviceTier);
-		}
-		output.rawStopReason = response.status;
-		output.stopReason = mapStopReason(response.status);
-		if (output.content.some((block) => block.type === "toolCall") && output.stopReason === "stop") {
-			output.stopReason = "toolUse";
-		}
-	};
-
-	for await (const event of openaiStream) {
-		if (event.type === "response.created") {
-			output.responseId = event.response.id;
-		} else if (event.type === "response.output_item.added") {
-			createSlot(event.output_index, event.item);
-		} else if (event.type === "response.reasoning_summary_text.delta") {
-			const slot = getSlot(event.output_index, "thinking");
-			if (!slot) continue;
-			slot.block.thinking += event.delta;
-			stream.push({
-				type: "thinking_delta",
-				contentIndex: slot.contentIndex,
-				delta: event.delta,
-				partial: output,
-			});
-		} else if (event.type === "response.reasoning_summary_part.done") {
-			const slot = getSlot(event.output_index, "thinking");
-			if (!slot) continue;
-			slot.block.thinking += "\n\n";
-			stream.push({
-				type: "thinking_delta",
-				contentIndex: slot.contentIndex,
-				delta: "\n\n",
-				partial: output,
-			});
-		} else if (event.type === "response.reasoning_text.delta") {
-			const slot = getSlot(event.output_index, "thinking");
-			if (!slot) continue;
-			slot.block.thinking += event.delta;
-			stream.push({
-				type: "thinking_delta",
-				contentIndex: slot.contentIndex,
-				delta: event.delta,
-				partial: output,
-			});
-		} else if (event.type === "response.output_text.delta") {
-			const slot = getSlot(event.output_index, "text");
-			if (!slot) continue;
-			slot.block.text += event.delta;
-			stream.push({
-				type: "text_delta",
-				contentIndex: slot.contentIndex,
-				delta: event.delta,
-				partial: output,
-			});
-		} else if (event.type === "response.refusal.delta") {
-			const slot = getSlot(event.output_index, "text");
-			if (!slot) continue;
-			slot.block.text += event.delta;
-			stream.push({
-				type: "text_delta",
-				contentIndex: slot.contentIndex,
-				delta: event.delta,
-				partial: output,
-			});
-		} else if (event.type === "response.function_call_arguments.delta") {
-			const slot = getSlot(event.output_index, "toolCall");
-			if (!slot) continue;
-			slot.block.partialJson += event.delta;
-			slot.block.arguments = parseStreamingJson(slot.block.partialJson);
-			stream.push({
-				type: "toolcall_delta",
-				contentIndex: slot.contentIndex,
-				delta: event.delta,
-				partial: output,
-			});
-		} else if (event.type === "response.function_call_arguments.done") {
-			const slot = getSlot(event.output_index, "toolCall");
-			if (!slot) continue;
-			const previousPartialJson = slot.block.partialJson;
-			slot.block.partialJson = event.arguments;
-			slot.block.arguments = parseStreamingJson(slot.block.partialJson);
-
-			if (event.arguments.startsWith(previousPartialJson)) {
-				const delta = event.arguments.slice(previousPartialJson.length);
-				if (delta.length > 0) {
-					stream.push({
-						type: "toolcall_delta",
-						contentIndex: slot.contentIndex,
-						delta,
-						partial: output,
-					});
-				}
-			}
-		} else if (event.type === "response.output_item.done") {
-			const item = event.item;
-			applyMessagePhaseStopReason(item);
-			const slot = getOrCreateSlot(event.output_index, item);
-
-			if (item.type === "reasoning" && slot?.type === "thinking") {
-				const summaryText = item.summary?.map((summary) => summary.text).join("\n\n") || "";
-				const contentText = item.content?.map((content) => content.text).join("\n\n") || "";
-				slot.block.thinking = summaryText || contentText || slot.block.thinking;
-				slot.block.thinkingSignature = JSON.stringify(item);
-				reasoningBlocksById.set(item.id, slot.block);
-				stream.push({
-					type: "thinking_end",
-					contentIndex: slot.contentIndex,
-					content: slot.block.thinking,
-					partial: output,
-				});
-				outputSlots.delete(event.output_index);
-			} else if (item.type === "message" && slot?.type === "text") {
-				slot.block.text =
-					item.content
-						?.map((content) => (content.type === "output_text" ? content.text : content.refusal))
-						.join("") || "";
-				slot.block.textSignature = encodeTextSignatureV1(item.id, item.phase ?? undefined);
-				stream.push({
-					type: "text_end",
-					contentIndex: slot.contentIndex,
-					content: slot.block.text,
-					partial: output,
-				});
-				outputSlots.delete(event.output_index);
-			} else if (item.type === "function_call" && slot?.type === "toolCall") {
-				slot.block.arguments = parseStreamingJson(item.arguments || slot.block.partialJson || "{}");
-				delete (slot.block as { partialJson?: string }).partialJson;
-				stream.push({
-					type: "toolcall_end",
-					contentIndex: slot.contentIndex,
-					toolCall: slot.block,
-					partial: output,
-				});
-				outputSlots.delete(event.output_index);
-			}
-		} else if (event.type === "response.completed" || event.type === "response.incomplete") {
-			finalizeResponse(event.response);
-		} else if (event.type === "error") {
-			throw new Error(`Error Code ${event.code}: ${event.message}` || "Unknown error");
-		} else if (event.type === "response.failed") {
-			sawTerminalResponseEvent = true;
-			output.rawStopReason = event.response?.status;
-			const error = event.response?.error;
-			const details = event.response?.incomplete_details;
-			const message = error
-				? `${error.code || "unknown"}: ${error.message || "no message"}`
-				: details?.reason
-					? `incomplete: ${details.reason}`
-					: "Unknown error (no error details in response)";
-			throw new Error(message);
-		}
-	}
-	if (!sawTerminalResponseEvent) {
+	for await (const event of openaiStream) processResponsesStreamEvent(state, event);
+	if (!state.sawTerminalResponseEvent) {
 		throw new Error("OpenAI Responses stream ended before a terminal response event");
 	}
 }

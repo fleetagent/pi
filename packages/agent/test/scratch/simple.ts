@@ -13,13 +13,14 @@ import {
 	type Skill,
 } from "../../src/index.ts";
 
-type Source = { type: "project" | "user" | "path"; dir: string };
+type ResourceSourceKind = "project" | "user" | "path";
+type Source = { type: ResourceSourceKind; dir: string };
 type SourcedSkill = Skill & { source: Source };
 type SourcedPromptTemplate = PromptTemplate & { source: Source };
 
 const env = new NodeExecutionEnv({ cwd: process.cwd() });
 
-const source = (type: Source["type"], dir: string) => ({ path: dir, source: { type, dir } });
+const source = (type: ResourceSourceKind, dir: string) => ({ path: dir, source: { type, dir } });
 const { skills: sourcedSkills } = await loadSourcedSkills<Source, SourcedSkill>(
 	env,
 	[

@@ -46,13 +46,18 @@ export function clampReasoning(effort: ThinkingLevel | undefined): Exclude<Think
 	return effort === "xhigh" ? "high" : effort;
 }
 
+interface ThinkingTokenAllocation {
+	maxTokens: number;
+	thinkingBudget: number;
+}
+
 export function adjustMaxTokensForThinking(
 	// Undefined means no explicit caller cap. Use the model cap and fit thinking inside it.
 	baseMaxTokens: number | undefined,
 	modelMaxTokens: number,
 	reasoningLevel: ThinkingLevel,
 	customBudgets?: ThinkingBudgets,
-): { maxTokens: number; thinkingBudget: number } {
+): ThinkingTokenAllocation {
 	const defaultBudgets: ThinkingBudgets = {
 		minimal: 1024,
 		low: 2048,

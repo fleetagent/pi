@@ -3,14 +3,10 @@ import type { AddressInfo } from "node:net";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { streamAnthropic } from "../src/providers/anthropic.ts";
-import type { Context, Model, Tool } from "../src/types.ts";
+import type { AnthropicMessagesCompat, Context, Model, Tool } from "../src/types.ts";
+import type { CapturedAnthropicRequest } from "./anthropic-utils.ts";
 
-interface CapturedRequest {
-	headers: IncomingMessage["headers"];
-	body: Record<string, unknown>;
-}
-
-function createModel(baseUrl: string, compat?: Model<"anthropic-messages">["compat"]): Model<"anthropic-messages"> {
+function createModel(baseUrl: string, compat?: AnthropicMessagesCompat): Model<"anthropic-messages"> {
 	return {
 		id: "claude-opus-4-7",
 		name: "Claude Opus 4.7",
@@ -53,10 +49,10 @@ function writeEmptySseResponse(response: ServerResponse): void {
 }
 
 async function captureAnthropicRequest(
-	compat: Model<"anthropic-messages">["compat"],
+	compat: AnthropicMessagesCompat | undefined,
 	context: Context,
-): Promise<CapturedRequest> {
-	let capturedRequest: CapturedRequest | undefined;
+): Promise<CapturedAnthropicRequest> {
+	let capturedRequest: CapturedAnthropicRequest | undefined;
 
 	const server = createServer(async (request, response) => {
 		capturedRequest = {

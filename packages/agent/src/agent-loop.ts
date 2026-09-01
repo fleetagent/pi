@@ -5,6 +5,7 @@
 
 import {
 	type AssistantMessage,
+	type AssistantMessageEventStream,
 	type Context,
 	EventStream,
 	streamSimple,
@@ -15,6 +16,7 @@ import type {
 	AgentContext,
 	AgentEvent,
 	AgentLoopConfig,
+	AgentLoopTurnUpdate,
 	AgentMessage,
 	AgentTool,
 	AgentToolCall,
@@ -202,6 +204,166 @@ function terminateDetachedAgentStream(
 	stream.push({ type: "agent_end", messages: [...state.messages] });
 }
 
+interface AgentLoopRuntimeState {
+	context: AgentContext;
+	config: AgentLoopConfig;
+}
+
+interface AgentLoopExecution {
+	newMessages: AgentMessage[];
+	signal: AbortSignal | undefined;
+	emit: AgentEventSink;
+	streamFn: StreamFn | undefined;
+}
+
+interface TurnSequenceResult {
+	state: AgentLoopRuntimeState;
+	firstTurn: boolean;
+	terminated: boolean;
+}
+
+interface AssistantTurnResult {
+	terminated: boolean;
+	message: AssistantMessage;
+	toolResults: ToolResultMessage[];
+	hasMoreToolCalls: boolean;
+}
+
+async function emitSubsequentTurnStart(firstTurn: boolean, emit: AgentEventSink): Promise<void> {
+	if (!firstTurn) await emit({ type: "turn_start" });
+}
+
+async function injectPendingMessages(
+	pendingMessages: AgentMessage[],
+	currentContext: AgentContext,
+	newMessages: AgentMessage[],
+	emit: AgentEventSink,
+): Promise<void> {
+	for (const message of pendingMessages) {
+		await emit({ type: "message_start", message });
+		await emit({ type: "message_end", message });
+		currentContext.messages.push(message);
+		newMessages.push(message);
+	}
+}
+
+async function executeAssistantTurn(
+	currentContext: AgentContext,
+	newMessages: AgentMessage[],
+	config: AgentLoopConfig,
+	signal: AbortSignal | undefined,
+	emit: AgentEventSink,
+	streamFn?: StreamFn,
+): Promise<AssistantTurnResult> {
+	const message = await streamAssistantResponse(currentContext, config, signal, emit, streamFn);
+	newMessages.push(message);
+	if (message.stopReason === "error" || message.stopReason === "aborted") {
+		await emit({ type: "turn_end", message, toolResults: [] });
+		await emit({ type: "agent_end", messages: newMessages });
+		return { terminated: true, message, toolResults: [], hasMoreToolCalls: false };
+	}
+
+	const toolCalls = message.content.filter((content) => content.type === "toolCall");
+	const toolResults: ToolResultMessage[] = [];
+	let hasMoreToolCalls = false;
+	if (toolCalls.length > 0) {
+		const executedToolBatch = await executeToolCalls(currentContext, message, config, signal, emit);
+		toolResults.push(...executedToolBatch.messages);
+		hasMoreToolCalls = !executedToolBatch.terminate;
+		for (const result of toolResults) {
+			currentContext.messages.push(result);
+			newMessages.push(result);
+		}
+	}
+	await emit({ type: "turn_end", message, toolResults });
+	return { terminated: false, message, toolResults, hasMoreToolCalls };
+}
+
+function applyNextTurnUpdate(
+	context: AgentContext,
+	config: AgentLoopConfig,
+	update: AgentLoopTurnUpdate | undefined,
+): AgentLoopRuntimeState {
+	if (!update) return { context, config };
+	const nextContext = update.context ? { ...update.context, messages: [...update.context.messages] } : context;
+	const reasoning =
+		update.thinkingLevel === undefined
+			? config.reasoning
+			: update.thinkingLevel === "off"
+				? undefined
+				: update.thinkingLevel;
+	return {
+		context: nextContext,
+		config: { ...config, model: update.model ?? config.model, reasoning },
+	};
+}
+
+async function prepareFollowingTurn(
+	turn: AssistantTurnResult,
+	context: AgentContext,
+	newMessages: AgentMessage[],
+	config: AgentLoopConfig,
+): Promise<AgentLoopRuntimeState> {
+	const update = await config.prepareNextTurn?.({
+		message: turn.message,
+		toolResults: turn.toolResults,
+		context,
+		newMessages,
+	});
+	return applyNextTurnUpdate(context, config, update);
+}
+
+async function shouldStopAfterCompletedTurn(
+	turn: AssistantTurnResult,
+	context: AgentContext,
+	newMessages: AgentMessage[],
+	config: AgentLoopConfig,
+): Promise<boolean> {
+	return (
+		(await config.shouldStopAfterTurn?.({
+			message: turn.message,
+			toolResults: turn.toolResults,
+			context,
+			newMessages,
+		})) ?? false
+	);
+}
+
+async function runTurnSequence(
+	initialState: AgentLoopRuntimeState,
+	initialPendingMessages: AgentMessage[],
+	firstTurn: boolean,
+	execution: AgentLoopExecution,
+): Promise<TurnSequenceResult> {
+	let state = initialState;
+	let pendingMessages = initialPendingMessages;
+	let hasMoreToolCalls = true;
+	while (hasMoreToolCalls || pendingMessages.length > 0) {
+		await emitSubsequentTurnStart(firstTurn, execution.emit);
+		firstTurn = false;
+		await injectPendingMessages(pendingMessages, state.context, execution.newMessages, execution.emit);
+		pendingMessages = [];
+
+		const turn = await executeAssistantTurn(
+			state.context,
+			execution.newMessages,
+			state.config,
+			execution.signal,
+			execution.emit,
+			execution.streamFn,
+		);
+		if (turn.terminated) return { state, firstTurn, terminated: true };
+		hasMoreToolCalls = turn.hasMoreToolCalls;
+		state = await prepareFollowingTurn(turn, state.context, execution.newMessages, state.config);
+		if (await shouldStopAfterCompletedTurn(turn, state.context, execution.newMessages, state.config)) {
+			await execution.emit({ type: "agent_end", messages: execution.newMessages });
+			return { state, firstTurn, terminated: true };
+		}
+		pendingMessages = (await state.config.getSteeringMessages?.()) || [];
+	}
+	return { state, firstTurn, terminated: false };
+}
+
 /**
  * Main loop logic shared by agentLoop and agentLoopContinue.
  */
@@ -213,117 +375,81 @@ async function runLoop(
 	emit: AgentEventSink,
 	streamFn?: StreamFn,
 ): Promise<void> {
-	let currentContext = initialContext;
-	let config = initialConfig;
+	let state: AgentLoopRuntimeState = { context: initialContext, config: initialConfig };
 	let firstTurn = true;
-	// Check for steering messages at start (user may have typed while waiting)
-	let pendingMessages: AgentMessage[] = (await config.getSteeringMessages?.()) || [];
+	let pendingMessages: AgentMessage[] = (await state.config.getSteeringMessages?.()) || [];
+	const execution: AgentLoopExecution = { newMessages, signal, emit, streamFn };
 
-	// Outer loop: continues when queued follow-up messages arrive after agent would stop
 	while (true) {
-		let hasMoreToolCalls = true;
+		const sequence = await runTurnSequence(state, pendingMessages, firstTurn, execution);
+		if (sequence.terminated) return;
+		state = sequence.state;
+		firstTurn = sequence.firstTurn;
 
-		// Inner loop: process tool calls and steering messages
-		while (hasMoreToolCalls || pendingMessages.length > 0) {
-			if (!firstTurn) {
-				await emit({ type: "turn_start" });
-			} else {
-				firstTurn = false;
-			}
-
-			// Process pending messages (inject before next assistant response)
-			if (pendingMessages.length > 0) {
-				for (const message of pendingMessages) {
-					await emit({ type: "message_start", message });
-					await emit({ type: "message_end", message });
-					currentContext.messages.push(message);
-					newMessages.push(message);
-				}
-				pendingMessages = [];
-			}
-
-			// Stream assistant response
-			const message = await streamAssistantResponse(currentContext, config, signal, emit, streamFn);
-			newMessages.push(message);
-
-			if (message.stopReason === "error" || message.stopReason === "aborted") {
-				await emit({ type: "turn_end", message, toolResults: [] });
-				await emit({ type: "agent_end", messages: newMessages });
-				return;
-			}
-
-			// Check for tool calls
-			const toolCalls = message.content.filter((c) => c.type === "toolCall");
-
-			const toolResults: ToolResultMessage[] = [];
-			hasMoreToolCalls = false;
-			if (toolCalls.length > 0) {
-				const executedToolBatch = await executeToolCalls(currentContext, message, config, signal, emit);
-				toolResults.push(...executedToolBatch.messages);
-				hasMoreToolCalls = !executedToolBatch.terminate;
-
-				for (const result of toolResults) {
-					currentContext.messages.push(result);
-					newMessages.push(result);
-				}
-			}
-
-			await emit({ type: "turn_end", message, toolResults });
-
-			const nextTurnContext = {
-				message,
-				toolResults,
-				context: currentContext,
-				newMessages,
-			};
-			const nextTurnSnapshot = await config.prepareNextTurn?.(nextTurnContext);
-			if (nextTurnSnapshot) {
-				if (nextTurnSnapshot.context) {
-					currentContext = {
-						...nextTurnSnapshot.context,
-						messages: [...nextTurnSnapshot.context.messages],
-					};
-				}
-				config = {
-					...config,
-					model: nextTurnSnapshot.model ?? config.model,
-					reasoning:
-						nextTurnSnapshot.thinkingLevel === undefined
-							? config.reasoning
-							: nextTurnSnapshot.thinkingLevel === "off"
-								? undefined
-								: nextTurnSnapshot.thinkingLevel,
-				};
-			}
-
-			if (
-				await config.shouldStopAfterTurn?.({
-					message,
-					toolResults,
-					context: currentContext,
-					newMessages,
-				})
-			) {
-				await emit({ type: "agent_end", messages: newMessages });
-				return;
-			}
-
-			pendingMessages = (await config.getSteeringMessages?.()) || [];
-		}
-
-		// Agent would stop here. Check for follow-up messages.
-		const followUpMessages = (await config.getFollowUpMessages?.()) || [];
-		if (followUpMessages.length > 0) {
-			// Set as pending so inner loop processes them
-			pendingMessages = followUpMessages;
-			continue;
-		}
-
-		// No more messages, exit
-		break;
+		const followUpMessages = (await state.config.getFollowUpMessages?.()) || [];
+		if (followUpMessages.length === 0) break;
+		pendingMessages = followUpMessages;
 	}
-
 	await emit({ type: "agent_end", messages: newMessages });
+}
+
+async function finalizeAssistantResponse(
+	response: AssistantMessageEventStream,
+	context: AgentContext,
+	addedPartial: boolean,
+	emit: AgentEventSink,
+): Promise<AssistantMessage> {
+	const finalMessage = await response.result();
+	if (addedPartial) {
+		context.messages[context.messages.length - 1] = finalMessage;
+	} else {
+		context.messages.push(finalMessage);
+		await emit({ type: "message_start", message: { ...finalMessage } });
+	}
+	await emit({ type: "message_end", message: finalMessage });
+	return finalMessage;
+}
+
+async function consumeAssistantResponse(
+	response: AssistantMessageEventStream,
+	context: AgentContext,
+	emit: AgentEventSink,
+): Promise<AssistantMessage> {
+	let partialMessage: AssistantMessage | null = null;
+	let addedPartial = false;
+	for await (const event of response) {
+		switch (event.type) {
+			case "start":
+				partialMessage = event.partial;
+				context.messages.push(partialMessage);
+				addedPartial = true;
+				await emit({ type: "message_start", message: { ...partialMessage } });
+				break;
+			case "text_start":
+			case "text_delta":
+			case "text_end":
+			case "thinking_start":
+			case "thinking_delta":
+			case "thinking_end":
+			case "toolcall_start":
+			case "toolcall_delta":
+			case "toolcall_end":
+				if (partialMessage) {
+					partialMessage = event.partial;
+					context.messages[context.messages.length - 1] = partialMessage;
+					await emit({
+						type: "message_update",
+						assistantMessageEvent: event,
+						message: { ...partialMessage },
+					});
+				}
+				break;
+			case "done":
+			case "error":
+				return await finalizeAssistantResponse(response, context, addedPartial, emit);
+		}
+	}
+	return await finalizeAssistantResponse(response, context, addedPartial, emit);
 }
 
 /**
@@ -364,65 +490,7 @@ async function streamAssistantResponse(
 		apiKey: resolvedApiKey,
 		signal,
 	});
-
-	let partialMessage: AssistantMessage | null = null;
-	let addedPartial = false;
-
-	for await (const event of response) {
-		switch (event.type) {
-			case "start":
-				partialMessage = event.partial;
-				context.messages.push(partialMessage);
-				addedPartial = true;
-				await emit({ type: "message_start", message: { ...partialMessage } });
-				break;
-
-			case "text_start":
-			case "text_delta":
-			case "text_end":
-			case "thinking_start":
-			case "thinking_delta":
-			case "thinking_end":
-			case "toolcall_start":
-			case "toolcall_delta":
-			case "toolcall_end":
-				if (partialMessage) {
-					partialMessage = event.partial;
-					context.messages[context.messages.length - 1] = partialMessage;
-					await emit({
-						type: "message_update",
-						assistantMessageEvent: event,
-						message: { ...partialMessage },
-					});
-				}
-				break;
-
-			case "done":
-			case "error": {
-				const finalMessage = await response.result();
-				if (addedPartial) {
-					context.messages[context.messages.length - 1] = finalMessage;
-				} else {
-					context.messages.push(finalMessage);
-				}
-				if (!addedPartial) {
-					await emit({ type: "message_start", message: { ...finalMessage } });
-				}
-				await emit({ type: "message_end", message: finalMessage });
-				return finalMessage;
-			}
-		}
-	}
-
-	const finalMessage = await response.result();
-	if (addedPartial) {
-		context.messages[context.messages.length - 1] = finalMessage;
-	} else {
-		context.messages.push(finalMessage);
-		await emit({ type: "message_start", message: { ...finalMessage } });
-	}
-	await emit({ type: "message_end", message: finalMessage });
-	return finalMessage;
+	return await consumeAssistantResponse(response, context, emit);
 }
 
 /**
@@ -436,8 +504,12 @@ async function executeToolCalls(
 	emit: AgentEventSink,
 ): Promise<ExecutedToolCallBatch> {
 	const toolCalls = assistantMessage.content.filter((c) => c.type === "toolCall");
+	const toolsByName = new Map<string, AgentTool<any>>();
+	for (const tool of currentContext.tools ?? []) {
+		if (!toolsByName.has(tool.name)) toolsByName.set(tool.name, tool);
+	}
 	const hasSequentialToolCall = toolCalls.some(
-		(tc) => currentContext.tools?.find((t) => t.name === tc.name)?.executionMode === "sequential",
+		(toolCall) => toolsByName.get(toolCall.name)?.executionMode === "sequential",
 	);
 	if (config.toolExecution === "sequential" || hasSequentialToolCall) {
 		return executeToolCallsSequential(currentContext, assistantMessage, toolCalls, config, signal, emit);

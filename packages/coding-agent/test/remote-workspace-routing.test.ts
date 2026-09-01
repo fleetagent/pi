@@ -3,7 +3,14 @@ import { createServer as createHttpServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { fauxAssistantMessage, fauxToolCall, type ProviderHeaders, registerFauxProvider } from "@fleetagent/pi-ai";
+import type { AgentToolResult } from "@fleetagent/pi-agent-core";
+import {
+	fauxAssistantMessage,
+	fauxToolCall,
+	type ProviderHeaders,
+	registerFauxProvider,
+	type TextContent,
+} from "@fleetagent/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
@@ -70,7 +77,7 @@ async function createServer(
 	return { server, address };
 }
 
-function text(result: { content: Array<{ type: string; text?: string }> }): string {
+function text(result: AgentToolResult<unknown>): string {
 	return result.content
 		.filter((entry) => entry.type === "text")
 		.map((entry) => entry.text ?? "")
@@ -267,7 +274,7 @@ describe("remote canonical workspace tool routing", () => {
 					pi.on("tool_result", async (event) => {
 						if (event.isError) {
 							originalToolError = event.content
-								.filter((entry): entry is { type: "text"; text: string } => entry.type === "text")
+								.filter((entry): entry is TextContent => entry.type === "text")
 								.map((entry) => entry.text)
 								.join("\n");
 						}

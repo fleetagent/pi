@@ -18,6 +18,7 @@ import { spawn } from "node:child_process";
 import { dirname, join } from "node:path";
 import * as readline from "node:readline";
 import { fileURLToPath } from "node:url";
+import type { ExtensionNotificationType } from "@fleetagent/pi-coding-agent";
 import {
 	type Component,
 	Container,
@@ -57,7 +58,7 @@ interface ExtensionUIRequest {
 	message?: string;
 	placeholder?: string;
 	prefill?: string;
-	notifyType?: "info" | "warning" | "error";
+	notifyType?: ExtensionNotificationType;
 	statusKey?: string;
 	statusText?: string;
 	widgetKey?: string;
@@ -383,82 +384,81 @@ async function main() {
 		tui.setFocus(dialog.inputComponent);
 	}
 
+	function sendOptionalExtensionValue(id: string, value: string | undefined): void {
+		if (value !== undefined) {
+			send({ type: "extension_ui_response", id, value });
+		} else {
+			send({ type: "extension_ui_response", id, cancelled: true });
+		}
+	}
+
+	function handleSelectRequest(req: ExtensionUIRequest): void {
+		showSelectDialog(req.title ?? "Select", req.options ?? [], (value) => sendOptionalExtensionValue(req.id, value));
+	}
+
+	function handleConfirmRequest(req: ExtensionUIRequest): void {
+		const title = req.message ? `${req.title}: ${req.message}` : (req.title ?? "Confirm");
+		showSelectDialog(title, ["Yes", "No"], (value) => {
+			send({ type: "extension_ui_response", id: req.id, confirmed: value === "Yes" });
+		});
+	}
+
+	function handleInputRequest(req: ExtensionUIRequest): void {
+		const title = req.placeholder ? `${req.title} (${req.placeholder})` : (req.title ?? "Input");
+		showInputDialog(title, undefined, (value) => sendOptionalExtensionValue(req.id, value));
+	}
+
+	function handleEditorRequest(req: ExtensionUIRequest): void {
+		showInputDialog(req.title ?? "Editor", req.prefill?.replace(/\n/g, " "), (value) => {
+			sendOptionalExtensionValue(req.id, value);
+		});
+	}
+
+	function handleNotificationRequest(req: ExtensionUIRequest): void {
+		const notifyType = (req.notifyType as string) ?? "info";
+		const color = notifyType === "error" ? RED : notifyType === "warning" ? YELLOW : MAGENTA;
+		outputLog.append(`${color}${BOLD}Notification:${RESET} ${req.message}`);
+		tui.requestRender();
+	}
+
+	function handleStatusRequest(req: ExtensionUIRequest): void {
+		outputLog.append(
+			`${MAGENTA}${BOLD}Notification:${RESET} ${DIM}[status: ${req.statusKey}]${RESET} ${req.statusText ?? "(cleared)"}`,
+		);
+		tui.requestRender();
+	}
+
+	function handleWidgetRequest(req: ExtensionUIRequest): void {
+		const lines = req.widgetLines;
+		if (!lines || lines.length === 0) return;
+		outputLog.append(`${MAGENTA}${BOLD}Notification:${RESET} ${DIM}[widget: ${req.widgetKey}]${RESET}`);
+		for (const line of lines) outputLog.append(`  ${DIM}${line}${RESET}`);
+		tui.requestRender();
+	}
+
 	function handleExtensionUI(req: ExtensionUIRequest): void {
-		const { id, method } = req;
-
-		switch (method) {
-			// Dialog methods: replace prompt with interactive component
-			case "select": {
-				showSelectDialog(req.title ?? "Select", req.options ?? [], (value) => {
-					if (value !== undefined) {
-						send({ type: "extension_ui_response", id, value });
-					} else {
-						send({ type: "extension_ui_response", id, cancelled: true });
-					}
-				});
+		switch (req.method) {
+			case "select":
+				handleSelectRequest(req);
 				break;
-			}
-
-			case "confirm": {
-				const title = req.message ? `${req.title}: ${req.message}` : (req.title ?? "Confirm");
-				showSelectDialog(title, ["Yes", "No"], (value) => {
-					send({ type: "extension_ui_response", id, confirmed: value === "Yes" });
-				});
+			case "confirm":
+				handleConfirmRequest(req);
 				break;
-			}
-
-			case "input": {
-				const title = req.placeholder ? `${req.title} (${req.placeholder})` : (req.title ?? "Input");
-				showInputDialog(title, undefined, (value) => {
-					if (value !== undefined) {
-						send({ type: "extension_ui_response", id, value });
-					} else {
-						send({ type: "extension_ui_response", id, cancelled: true });
-					}
-				});
+			case "input":
+				handleInputRequest(req);
 				break;
-			}
-
-			case "editor": {
-				const prefill = req.prefill?.replace(/\n/g, " ");
-				showInputDialog(req.title ?? "Editor", prefill, (value) => {
-					if (value !== undefined) {
-						send({ type: "extension_ui_response", id, value });
-					} else {
-						send({ type: "extension_ui_response", id, cancelled: true });
-					}
-				});
+			case "editor":
+				handleEditorRequest(req);
 				break;
-			}
-
-			// Fire-and-forget methods: display as notification
-			case "notify": {
-				const notifyType = (req.notifyType as string) ?? "info";
-				const color = notifyType === "error" ? RED : notifyType === "warning" ? YELLOW : MAGENTA;
-				outputLog.append(`${color}${BOLD}Notification:${RESET} ${req.message}`);
-				tui.requestRender();
+			case "notify":
+				handleNotificationRequest(req);
 				break;
-			}
-
 			case "setStatus":
-				outputLog.append(
-					`${MAGENTA}${BOLD}Notification:${RESET} ${DIM}[status: ${req.statusKey}]${RESET} ${req.statusText ?? "(cleared)"}`,
-				);
-				tui.requestRender();
+				handleStatusRequest(req);
 				break;
-
-			case "setWidget": {
-				const lines = req.widgetLines;
-				if (lines && lines.length > 0) {
-					outputLog.append(`${MAGENTA}${BOLD}Notification:${RESET} ${DIM}[widget: ${req.widgetKey}]${RESET}`);
-					for (const wl of lines) {
-						outputLog.append(`  ${DIM}${wl}${RESET}`);
-					}
-					tui.requestRender();
-				}
+			case "setWidget":
+				handleWidgetRequest(req);
 				break;
-			}
-
 			case "set_editor_text":
 				promptInput.input.setValue((req.text as string) ?? "");
 				tui.requestRender();
@@ -518,6 +518,62 @@ async function main() {
 
 	// -- Process agent stdout --
 
+	function appendAssistantTextDelta(delta: string): void {
+		if (!hasTextOutput) {
+			hasTextOutput = true;
+			outputLog.append("");
+			outputLog.append(`${BLUE}${BOLD}Agent:${RESET}`);
+		}
+		const parts = delta.split("\n");
+		for (let index = 0; index < parts.length; index++) {
+			if (index > 0) outputLog.append("");
+			if (parts[index]) outputLog.appendRaw(parts[index]);
+		}
+		tui.requestRender();
+	}
+
+	function handleAssistantMessageUpdate(data: Record<string, unknown>): void {
+		const event = data.assistantMessageEvent as Record<string, unknown> | undefined;
+		if (event?.type !== "text_delta") return;
+		appendAssistantTextDelta(event.delta as string);
+	}
+
+	function handleAgentOutput(data: Record<string, unknown>): void {
+		switch (data.type) {
+			case "response":
+				if (!data.success) {
+					outputLog.append(`${RED}[error]${RESET} ${data.command}: ${data.error}`);
+					tui.requestRender();
+				}
+				break;
+			case "agent_start":
+				showLoading();
+				break;
+			case "extension_ui_request":
+				handleExtensionUI(data as unknown as ExtensionUIRequest);
+				break;
+			case "message_update":
+				handleAssistantMessageUpdate(data);
+				break;
+			case "tool_execution_start":
+				outputLog.append(`${DIM}[tool: ${data.toolName}]${RESET}`);
+				tui.requestRender();
+				break;
+			case "tool_execution_end": {
+				const result = JSON.stringify(data.result).slice(0, 120);
+				outputLog.append(`${DIM}[result: ${result}...]${RESET}`);
+				tui.requestRender();
+				break;
+			}
+			case "agent_end":
+				isStreaming = false;
+				hideLoading();
+				outputLog.append("");
+				tui.requestRender();
+				break;
+		}
+	}
+
 	const stdoutRl = readline.createInterface({ input: agent.stdout!, terminal: false });
 
 	stdoutRl.on("line", (line) => {
@@ -527,62 +583,7 @@ async function main() {
 		} catch {
 			return;
 		}
-
-		if (data.type === "response" && !data.success) {
-			outputLog.append(`${RED}[error]${RESET} ${data.command}: ${data.error}`);
-			tui.requestRender();
-			return;
-		}
-
-		if (data.type === "agent_start") {
-			showLoading();
-			return;
-		}
-
-		if (data.type === "extension_ui_request") {
-			handleExtensionUI(data as unknown as ExtensionUIRequest);
-			return;
-		}
-
-		if (data.type === "message_update") {
-			const evt = data.assistantMessageEvent as Record<string, unknown> | undefined;
-			if (evt?.type === "text_delta") {
-				if (!hasTextOutput) {
-					hasTextOutput = true;
-					outputLog.append("");
-					outputLog.append(`${BLUE}${BOLD}Agent:${RESET}`);
-				}
-				const delta = evt.delta as string;
-				const parts = delta.split("\n");
-				for (let i = 0; i < parts.length; i++) {
-					if (i > 0) outputLog.append("");
-					if (parts[i]) outputLog.appendRaw(parts[i]);
-				}
-				tui.requestRender();
-			}
-			return;
-		}
-
-		if (data.type === "tool_execution_start") {
-			outputLog.append(`${DIM}[tool: ${data.toolName}]${RESET}`);
-			tui.requestRender();
-			return;
-		}
-
-		if (data.type === "tool_execution_end") {
-			const result = JSON.stringify(data.result).slice(0, 120);
-			outputLog.append(`${DIM}[result: ${result}...]${RESET}`);
-			tui.requestRender();
-			return;
-		}
-
-		if (data.type === "agent_end") {
-			isStreaming = false;
-			hideLoading();
-			outputLog.append("");
-			tui.requestRender();
-			return;
-		}
+		handleAgentOutput(data);
 	});
 
 	// -- User input --

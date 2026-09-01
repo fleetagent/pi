@@ -1,12 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { streamSimple } from "../src/stream.ts";
 import type { AssistantMessage, Context, Model } from "../src/types.ts";
+import type { AnthropicPayloadContentBlock } from "./anthropic-utils.ts";
+
+interface AnthropicPayloadMessage {
+	role: string;
+	content: AnthropicPayloadContentBlock[];
+}
 
 interface AnthropicPayload {
-	messages?: Array<{
-		role: string;
-		content: Array<{ type: string; text?: string; thinking?: string; signature?: string }>;
-	}>;
+	messages?: AnthropicPayloadMessage[];
 }
 
 class PayloadCaptured extends Error {

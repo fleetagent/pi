@@ -6,9 +6,16 @@ import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { PiAgent, type PiAgentSessionOptions } from "../src/core/pi-agent.ts";
 import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
+import type { InMemorySession } from "../src/core/session/in-memory-session.ts";
 import { InMemorySessionManager } from "../src/core/session/in-memory-session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 
+interface DynamicToolSessionFixtureOptions {
+	settingsManager: SettingsManager;
+	resourceLoader: DefaultResourceLoader;
+	sessionManager: InMemorySession;
+	sessionOptions?: PiAgentSessionOptions;
+}
 describe("AgentSession dynamic tool registration", () => {
 	let tempDir: string;
 	let agentDir: string;
@@ -25,12 +32,7 @@ describe("AgentSession dynamic tool registration", () => {
 		}
 	});
 
-	async function createSession(options: {
-		settingsManager: SettingsManager;
-		resourceLoader: DefaultResourceLoader;
-		sessionManager: ReturnType<InMemorySessionManager["create"]>;
-		sessionOptions?: PiAgentSessionOptions;
-	}) {
+	async function createSession(options: DynamicToolSessionFixtureOptions) {
 		const pi = await PiAgent.create({
 			cwd: tempDir,
 			agentDir,

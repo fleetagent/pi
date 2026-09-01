@@ -14,6 +14,7 @@ export interface CellDimensions {
 	heightPx: number;
 }
 
+// pi-ignore noNearIdenticalDataStructures: Bitmap dimensions and terminal-cell pixel metrics come from separate measurement sources and serve distinct rendering APIs.
 export interface ImageDimensions {
 	widthPx: number;
 	heightPx: number;
@@ -29,6 +30,21 @@ export interface ImageRenderOptions {
 	moveCursor?: boolean;
 }
 
+export interface KittyImageEncodeOptions {
+	columns?: number;
+	rows?: number;
+	imageId?: number;
+	/** Whether Kitty should apply its default cursor movement after placement. Default: true. */
+	moveCursor?: boolean;
+}
+
+export interface ITerm2ImageEncodeOptions {
+	width?: number | string;
+	height?: number | string;
+	name?: string;
+	preserveAspectRatio?: boolean;
+	inline?: boolean;
+}
 let cachedCapabilities: TerminalCapabilities | null = null;
 
 // Default cell dimensions - updated by TUI when terminal responds to query
@@ -63,16 +79,70 @@ function probeTmuxHyperlinks(): boolean {
 	}
 }
 
+interface TerminalCapabilityDetection {
+	matches: () => boolean;
+	capabilities: TerminalCapabilities;
+}
+
+function detectKnownTerminalCapabilities(
+	env: NodeJS.ProcessEnv,
+	termProgram: string,
+	terminalEmulator: string,
+	term: string,
+): TerminalCapabilities | undefined {
+	const detections: TerminalCapabilityDetection[] = [
+		{
+			matches: () => Boolean(env.KITTY_WINDOW_ID) || termProgram === "kitty",
+			capabilities: { images: "kitty", trueColor: true, hyperlinks: true },
+		},
+		{
+			matches: () => termProgram === "ghostty" || term.includes("ghostty") || Boolean(env.GHOSTTY_RESOURCES_DIR),
+			capabilities: { images: "kitty", trueColor: true, hyperlinks: true },
+		},
+		{
+			matches: () =>
+				termProgram === "warpterminal" || Boolean(env.WARP_SESSION_ID) || Boolean(env.WARP_TERMINAL_SESSION_UUID),
+			capabilities: { images: "kitty", trueColor: true, hyperlinks: true },
+		},
+		{
+			matches: () => Boolean(env.WEZTERM_PANE) || termProgram === "wezterm",
+			capabilities: { images: "kitty", trueColor: true, hyperlinks: true },
+		},
+		{
+			matches: () => Boolean(env.ITERM_SESSION_ID) || termProgram === "iterm.app",
+			capabilities: { images: "iterm2", trueColor: true, hyperlinks: true },
+		},
+		{
+			matches: () => Boolean(env.WT_SESSION),
+			capabilities: { images: null, trueColor: true, hyperlinks: true },
+		},
+		{
+			matches: () => termProgram === "vscode",
+			capabilities: { images: null, trueColor: true, hyperlinks: true },
+		},
+		{
+			matches: () => termProgram === "alacritty",
+			capabilities: { images: null, trueColor: true, hyperlinks: true },
+		},
+		{
+			matches: () => terminalEmulator === "jetbrains-jediterm",
+			capabilities: { images: null, trueColor: true, hyperlinks: false },
+		},
+	];
+	return detections.find((detection) => detection.matches())?.capabilities;
+}
+
 export function detectCapabilities(tmuxForwardsHyperlink: () => boolean = probeTmuxHyperlinks): TerminalCapabilities {
-	const termProgram = process.env.TERM_PROGRAM?.toLowerCase() || "";
-	const terminalEmulator = process.env.TERMINAL_EMULATOR?.toLowerCase() || "";
-	const term = process.env.TERM?.toLowerCase() || "";
-	const colorTerm = process.env.COLORTERM?.toLowerCase() || "";
+	const env = process.env;
+	const termProgram = env.TERM_PROGRAM?.toLowerCase() || "";
+	const terminalEmulator = env.TERMINAL_EMULATOR?.toLowerCase() || "";
+	const term = env.TERM?.toLowerCase() || "";
+	const colorTerm = env.COLORTERM?.toLowerCase() || "";
 	const hasTrueColorHint = colorTerm === "truecolor" || colorTerm === "24bit";
 
 	// Emit OSC 8 hyperlinks only when tmux confirms it forwards.
 	// Image protocols are unreliable under tmux, so leave `images: null`.
-	if (process.env.TMUX || term.startsWith("tmux")) {
+	if (env.TMUX || term.startsWith("tmux")) {
 		return { images: null, trueColor: hasTrueColorHint, hyperlinks: tmuxForwardsHyperlink() };
 	}
 
@@ -81,42 +151,8 @@ export function detectCapabilities(tmuxForwardsHyperlink: () => boolean = probeT
 		return { images: null, trueColor: hasTrueColorHint, hyperlinks: false };
 	}
 
-	if (process.env.KITTY_WINDOW_ID || termProgram === "kitty") {
-		return { images: "kitty", trueColor: true, hyperlinks: true };
-	}
-
-	if (termProgram === "ghostty" || term.includes("ghostty") || process.env.GHOSTTY_RESOURCES_DIR) {
-		return { images: "kitty", trueColor: true, hyperlinks: true };
-	}
-
-	// Warp supports the Kitty graphics protocol and OSC 8 hyperlinks.
-	if (termProgram === "warpterminal" || process.env.WARP_SESSION_ID || process.env.WARP_TERMINAL_SESSION_UUID) {
-		return { images: "kitty", trueColor: true, hyperlinks: true };
-	}
-
-	if (process.env.WEZTERM_PANE || termProgram === "wezterm") {
-		return { images: "kitty", trueColor: true, hyperlinks: true };
-	}
-
-	if (process.env.ITERM_SESSION_ID || termProgram === "iterm.app") {
-		return { images: "iterm2", trueColor: true, hyperlinks: true };
-	}
-
-	if (process.env.WT_SESSION) {
-		return { images: null, trueColor: true, hyperlinks: true };
-	}
-
-	if (termProgram === "vscode") {
-		return { images: null, trueColor: true, hyperlinks: true };
-	}
-
-	if (termProgram === "alacritty") {
-		return { images: null, trueColor: true, hyperlinks: true };
-	}
-
-	if (terminalEmulator === "jetbrains-jediterm") {
-		return { images: null, trueColor: true, hyperlinks: false };
-	}
+	const knownCapabilities = detectKnownTerminalCapabilities(env, termProgram, terminalEmulator, term);
+	if (knownCapabilities) return knownCapabilities;
 
 	// Unknown terminal: be conservative. OSC 8 is rendered invisibly as "just
 	// text" on terminals that swallow it, which means the URL disappears from
@@ -163,16 +199,7 @@ export function allocateImageId(): number {
 	return Math.floor(Math.random() * 0xfffffffe) + 1;
 }
 
-export function encodeKitty(
-	base64Data: string,
-	options: {
-		columns?: number;
-		rows?: number;
-		imageId?: number;
-		/** Whether Kitty should apply its default cursor movement after placement. Default: true. */
-		moveCursor?: boolean;
-	} = {},
-): string {
+export function encodeKitty(base64Data: string, options: KittyImageEncodeOptions = {}): string {
 	const sanitizedData = sanitizeTerminalControlPayload(base64Data);
 	const CHUNK_SIZE = 4096;
 
@@ -231,16 +258,7 @@ export function deleteAllKittyPlacements(): string {
 	return "\x1b_Ga=d,d=a,q=2\x1b\\";
 }
 
-export function encodeITerm2(
-	base64Data: string,
-	options: {
-		width?: number | string;
-		height?: number | string;
-		name?: string;
-		preserveAspectRatio?: boolean;
-		inline?: boolean;
-	} = {},
-): string {
+export function encodeITerm2(base64Data: string, options: ITerm2ImageEncodeOptions = {}): string {
 	const sanitizedData = sanitizeTerminalControlPayload(base64Data);
 	const params: string[] = [
 		`inline=${options.inline !== false ? 1 : 0}`,
@@ -263,6 +281,11 @@ export function encodeITerm2(
 export interface ImageCellSize {
 	columns: number;
 	rows: number;
+}
+
+export interface ImageRenderResult extends ImageCellSize {
+	sequence: string;
+	imageId?: number;
 }
 
 export interface KittyImageMetadata extends ImageCellSize {
@@ -563,7 +586,7 @@ export function renderImage(
 	base64Data: string,
 	imageDimensions: ImageDimensions,
 	options: ImageRenderOptions = {},
-): { sequence: string; columns: number; rows: number; imageId?: number } | null {
+): ImageRenderResult | null {
 	const caps = getCapabilities();
 
 	if (!caps.images) {

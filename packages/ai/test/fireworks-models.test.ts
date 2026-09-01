@@ -5,7 +5,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { findEnvKeys, getEnvApiKey } from "../src/env-api-keys.ts";
 import { getModel, getModels } from "../src/models.ts";
 import { streamAnthropic } from "../src/providers/anthropic.ts";
-import type { Context, Model, Tool } from "../src/types.ts";
+import type { AnthropicMessagesCompat, Context, Model, Tool } from "../src/types.ts";
+import type { CapturedAnthropicRequest } from "./anthropic-utils.ts";
 
 const originalFireworksApiKey = process.env.FIREWORKS_API_KEY;
 
@@ -69,18 +70,13 @@ describe("Fireworks models", () => {
 
 // --- Integration tests for Fireworks Anthropic session affinity and tool compat ---
 
-interface CapturedRequest {
-	headers: IncomingMessage["headers"];
-	body: Record<string, unknown>;
-}
-
 const tool: Tool = {
 	name: "lookup",
 	description: "Look up a value",
 	parameters: Type.Object({ value: Type.String() }),
 };
 
-function createFireworksModel(compat?: Model<"anthropic-messages">["compat"]): Model<"anthropic-messages"> {
+function createFireworksModel(compat?: AnthropicMessagesCompat): Model<"anthropic-messages"> {
 	return {
 		id: "accounts/fireworks/models/kimi-k2p6",
 		name: "Kimi K2.6",
@@ -126,6 +122,11 @@ async function readRequestBody(request: IncomingMessage): Promise<Record<string,
 	return JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
 }
 
+interface AnthropicRequestCaptureOptions {
+	sessionId?: string;
+	cacheRetention?: string;
+}
+
 function writeEmptySseResponse(response: ServerResponse): void {
 	response.writeHead(200, { "content-type": "text/event-stream" });
 	response.end();
@@ -134,9 +135,9 @@ function writeEmptySseResponse(response: ServerResponse): void {
 async function captureAnthropicRequest(
 	model: Model<"anthropic-messages">,
 	context: Context,
-	options?: { sessionId?: string; cacheRetention?: string },
-): Promise<CapturedRequest> {
-	let capturedRequest: CapturedRequest | undefined;
+	options?: AnthropicRequestCaptureOptions,
+): Promise<CapturedAnthropicRequest> {
+	let capturedRequest: CapturedAnthropicRequest | undefined;
 
 	const server = createServer(async (request, response) => {
 		capturedRequest = {

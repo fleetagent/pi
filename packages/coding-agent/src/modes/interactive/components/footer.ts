@@ -26,6 +26,13 @@ function formatTokens(count: number): string {
 	if (count < 10000000) return `${(count / 1000000).toFixed(1)}M`;
 	return `${Math.round(count / 1000000)}M`;
 }
+interface FooterUsageTotals {
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+	cost: number;
+}
 
 export function formatCwdForFooter(cwd: string, home: string | undefined): string {
 	if (!home) return cwd;
@@ -79,155 +86,118 @@ export class FooterComponent implements Component {
 		// Git watcher cleanup handled by provider
 	}
 
+	private collectUsageTotals(): FooterUsageTotals {
+		const totals: FooterUsageTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+		for (const entry of this.session.session.getEntries()) {
+			if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+			totals.input += entry.message.usage.input;
+			totals.output += entry.message.usage.output;
+			totals.cacheRead += entry.message.usage.cacheRead;
+			totals.cacheWrite += entry.message.usage.cacheWrite;
+			totals.cost += entry.message.usage.cost.total;
+		}
+		return totals;
+	}
+
+	private formatLocation(): string {
+		let location = formatCwdForFooter(this.session.session.getCwd(), process.env.HOME || process.env.USERPROFILE);
+		const branch = this.footerData.getGitBranch();
+		if (branch) location = `${location} (${branch})`;
+		const sessionName = this.session.session.getSessionName();
+		if (sessionName) location = `${location} • ${sessionName}`;
+		return location;
+	}
+
+	private formatContextUsage(contextWindow: number, contextPercentValue: number, contextPercent: string): string {
+		const autoIndicator = this.autoCompactEnabled ? " (auto)" : "";
+		const display =
+			contextPercent === "?"
+				? `?/${formatTokens(contextWindow)}${autoIndicator}`
+				: `${contextPercent}%/${formatTokens(contextWindow)}${autoIndicator}`;
+		if (contextPercentValue > 90) return theme.fg("error", display);
+		if (contextPercentValue > 70) return theme.fg("warning", display);
+		return display;
+	}
+
+	private formatUsageSummary(
+		totals: FooterUsageTotals,
+		contextWindow: number,
+		contextPercentValue: number,
+		contextPercent: string,
+	): string {
+		const parts: string[] = [];
+		if (totals.input) parts.push(`↑${formatTokens(totals.input)}`);
+		if (totals.output) parts.push(`↓${formatTokens(totals.output)}`);
+		if (totals.cacheRead) parts.push(`R${formatTokens(totals.cacheRead)}`);
+		if (totals.cacheWrite) parts.push(`W${formatTokens(totals.cacheWrite)}`);
+		const state = this.session.state;
+		const usingSubscription = state.model ? this.session.modelRegistry.isUsingOAuth(state.model) : false;
+		if (totals.cost || usingSubscription) {
+			parts.push(`$${totals.cost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`);
+		}
+		parts.push(this.formatContextUsage(contextWindow, contextPercentValue, contextPercent));
+		return parts.join(" ");
+	}
+
+	private formatModelSummary(statsWidth: number, width: number): string {
+		const state = this.session.state;
+		const modelName = state.model?.id || "no-model";
+		let summary = modelName;
+		if (state.model?.reasoning) {
+			const thinkingLevel = state.thinkingLevel || "off";
+			summary = thinkingLevel === "off" ? `${modelName} • thinking off` : `${modelName} • ${thinkingLevel}`;
+		}
+		if (this.footerData.getAvailableProviderCount() <= 1 || !state.model) return summary;
+		const providerSummary = `(${state.model.provider}) ${summary}`;
+		return statsWidth + 2 + visibleWidth(providerSummary) <= width ? providerSummary : summary;
+	}
+
+	private layoutStatsLine(stats: string, modelSummary: string, width: number): string {
+		const statsWidth = visibleWidth(stats);
+		const modelWidth = visibleWidth(modelSummary);
+		const minPadding = 2;
+		if (statsWidth + minPadding + modelWidth <= width) {
+			return stats + " ".repeat(width - statsWidth - modelWidth) + modelSummary;
+		}
+		const availableForModel = width - statsWidth - minPadding;
+		if (availableForModel <= 0) return stats;
+		const truncatedModel = truncateToWidth(modelSummary, availableForModel, "");
+		const padding = " ".repeat(Math.max(0, width - statsWidth - visibleWidth(truncatedModel)));
+		return stats + padding + truncatedModel;
+	}
+
+	private formatExtensionStatuses(width: number): string | undefined {
+		const extensionStatuses = this.footerData.getExtensionStatuses();
+		if (extensionStatuses.size === 0) return undefined;
+		const statusLine = Array.from(extensionStatuses.entries())
+			.sort(([a], [b]) => a.localeCompare(b))
+			.map(([, text]) => sanitizeStatusText(text))
+			.join(" ");
+		return truncateToWidth(statusLine, width, theme.fg("dim", "..."));
+	}
+
 	render(width: number): string[] {
 		const state = this.session.state;
-
-		// Calculate cumulative usage from ALL session entries (not just post-compaction messages)
-		let totalInput = 0;
-		let totalOutput = 0;
-		let totalCacheRead = 0;
-		let totalCacheWrite = 0;
-		let totalCost = 0;
-
-		for (const entry of this.session.session.getEntries()) {
-			if (entry.type === "message" && entry.message.role === "assistant") {
-				totalInput += entry.message.usage.input;
-				totalOutput += entry.message.usage.output;
-				totalCacheRead += entry.message.usage.cacheRead;
-				totalCacheWrite += entry.message.usage.cacheWrite;
-				totalCost += entry.message.usage.cost.total;
-			}
-		}
-
-		// Calculate context usage from session (handles compaction correctly).
-		// After compaction, tokens are unknown until the next LLM response.
+		const totals = this.collectUsageTotals();
 		const contextUsage = this.session.getContextUsage();
 		const contextWindow = contextUsage?.contextWindow ?? state.model?.contextWindow ?? 0;
 		const contextPercentValue = contextUsage?.percent ?? 0;
 		const contextPercent = contextUsage?.percent !== null ? contextPercentValue.toFixed(1) : "?";
+		const locationText = this.formatLocation();
 
-		// Replace home directory with ~
-		let pwd = formatCwdForFooter(this.session.session.getCwd(), process.env.HOME || process.env.USERPROFILE);
+		let stats = this.formatUsageSummary(totals, contextWindow, contextPercentValue, contextPercent);
+		if (visibleWidth(stats) > width) stats = truncateToWidth(stats, width, "...");
+		const modelSummary = this.formatModelSummary(visibleWidth(stats), width);
+		const statsLine = this.layoutStatsLine(stats, modelSummary, width);
 
-		// Add git branch if available
-		const branch = this.footerData.getGitBranch();
-		if (branch) {
-			pwd = `${pwd} (${branch})`;
-		}
+		// Dim the stats and the remaining padding/model separately because a colored context value resets styling.
+		const dimmedStats = theme.fg("dim", stats);
+		const dimmedRemainder = theme.fg("dim", statsLine.slice(stats.length));
+		const location = truncateToWidth(theme.fg("dim", locationText), width, theme.fg("dim", "..."));
+		const lines = [location, dimmedStats + dimmedRemainder];
 
-		// Add session name if set
-		const sessionName = this.session.session.getSessionName();
-		if (sessionName) {
-			pwd = `${pwd} • ${sessionName}`;
-		}
-
-		// Build stats line
-		const statsParts = [];
-		if (totalInput) statsParts.push(`↑${formatTokens(totalInput)}`);
-		if (totalOutput) statsParts.push(`↓${formatTokens(totalOutput)}`);
-		if (totalCacheRead) statsParts.push(`R${formatTokens(totalCacheRead)}`);
-		if (totalCacheWrite) statsParts.push(`W${formatTokens(totalCacheWrite)}`);
-
-		// Show cost with "(sub)" indicator if using OAuth subscription
-		const usingSubscription = state.model ? this.session.modelRegistry.isUsingOAuth(state.model) : false;
-		if (totalCost || usingSubscription) {
-			const costStr = `$${totalCost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`;
-			statsParts.push(costStr);
-		}
-
-		// Colorize context percentage based on usage
-		let contextPercentStr: string;
-		const autoIndicator = this.autoCompactEnabled ? " (auto)" : "";
-		const contextPercentDisplay =
-			contextPercent === "?"
-				? `?/${formatTokens(contextWindow)}${autoIndicator}`
-				: `${contextPercent}%/${formatTokens(contextWindow)}${autoIndicator}`;
-		if (contextPercentValue > 90) {
-			contextPercentStr = theme.fg("error", contextPercentDisplay);
-		} else if (contextPercentValue > 70) {
-			contextPercentStr = theme.fg("warning", contextPercentDisplay);
-		} else {
-			contextPercentStr = contextPercentDisplay;
-		}
-		statsParts.push(contextPercentStr);
-
-		let statsLeft = statsParts.join(" ");
-
-		// Add model name on the right side, plus thinking level if model supports it
-		const modelName = state.model?.id || "no-model";
-
-		let statsLeftWidth = visibleWidth(statsLeft);
-
-		// If statsLeft is too wide, truncate it
-		if (statsLeftWidth > width) {
-			statsLeft = truncateToWidth(statsLeft, width, "...");
-			statsLeftWidth = visibleWidth(statsLeft);
-		}
-
-		// Calculate available space for padding (minimum 2 spaces between stats and model)
-		const minPadding = 2;
-
-		// Add thinking level indicator if model supports reasoning
-		let rightSideWithoutProvider = modelName;
-		if (state.model?.reasoning) {
-			const thinkingLevel = state.thinkingLevel || "off";
-			rightSideWithoutProvider =
-				thinkingLevel === "off" ? `${modelName} • thinking off` : `${modelName} • ${thinkingLevel}`;
-		}
-
-		// Prepend the provider in parentheses if there are multiple providers and there's enough room
-		let rightSide = rightSideWithoutProvider;
-		if (this.footerData.getAvailableProviderCount() > 1 && state.model) {
-			rightSide = `(${state.model!.provider}) ${rightSideWithoutProvider}`;
-			if (statsLeftWidth + minPadding + visibleWidth(rightSide) > width) {
-				// Too wide, fall back
-				rightSide = rightSideWithoutProvider;
-			}
-		}
-
-		const rightSideWidth = visibleWidth(rightSide);
-		const totalNeeded = statsLeftWidth + minPadding + rightSideWidth;
-
-		let statsLine: string;
-		if (totalNeeded <= width) {
-			// Both fit - add padding to right-align model
-			const padding = " ".repeat(width - statsLeftWidth - rightSideWidth);
-			statsLine = statsLeft + padding + rightSide;
-		} else {
-			// Need to truncate right side
-			const availableForRight = width - statsLeftWidth - minPadding;
-			if (availableForRight > 0) {
-				const truncatedRight = truncateToWidth(rightSide, availableForRight, "");
-				const truncatedRightWidth = visibleWidth(truncatedRight);
-				const padding = " ".repeat(Math.max(0, width - statsLeftWidth - truncatedRightWidth));
-				statsLine = statsLeft + padding + truncatedRight;
-			} else {
-				// Not enough space for right side at all
-				statsLine = statsLeft;
-			}
-		}
-
-		// Apply dim to each part separately. statsLeft may contain color codes (for context %)
-		// that end with a reset, which would clear an outer dim wrapper. So we dim the parts
-		// before and after the colored section independently.
-		const dimStatsLeft = theme.fg("dim", statsLeft);
-		const remainder = statsLine.slice(statsLeft.length); // padding + rightSide
-		const dimRemainder = theme.fg("dim", remainder);
-
-		const pwdLine = truncateToWidth(theme.fg("dim", pwd), width, theme.fg("dim", "..."));
-		const lines = [pwdLine, dimStatsLeft + dimRemainder];
-
-		// Add extension statuses on a single line, sorted by key alphabetically
-		const extensionStatuses = this.footerData.getExtensionStatuses();
-		if (extensionStatuses.size > 0) {
-			const sortedStatuses = Array.from(extensionStatuses.entries())
-				.sort(([a], [b]) => a.localeCompare(b))
-				.map(([, text]) => sanitizeStatusText(text));
-			const statusLine = sortedStatuses.join(" ");
-			// Truncate to terminal width with dim ellipsis for consistency with footer style
-			lines.push(truncateToWidth(statusLine, width, theme.fg("dim", "...")));
-		}
-
+		const extensionStatuses = this.formatExtensionStatuses(width);
+		if (extensionStatuses !== undefined) lines.push(extensionStatuses);
 		return lines;
 	}
 }

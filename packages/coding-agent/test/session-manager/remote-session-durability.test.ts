@@ -8,6 +8,12 @@ import {
 	RemoteSessionProtocolError,
 } from "../../src/index.ts";
 
+interface RemoteSessionSnapshotFixtureOptions {
+	id?: string;
+	entries?: unknown[];
+	etag?: string;
+}
+
 function header(id = "session-1"): SessionHeader {
 	return {
 		type: "session",
@@ -26,7 +32,7 @@ function response(body: unknown, init: ResponseInit = {}): Response {
 	});
 }
 
-function snapshot(options: { id?: string; entries?: unknown[]; etag?: string } = {}): Record<string, unknown> {
+function snapshot(options: RemoteSessionSnapshotFixtureOptions = {}): Record<string, unknown> {
 	const id = options.id ?? "session-1";
 	return {
 		reference: `remote:${id}`,

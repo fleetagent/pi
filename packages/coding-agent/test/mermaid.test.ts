@@ -18,6 +18,12 @@ interface TransformOptions {
 	renderMermaid?: MermaidTransformerOptions["renderMermaid"];
 }
 
+interface MockArtOptions {
+	styled?: Span[][];
+	warnings?: string[];
+	width?: number;
+}
+
 function transformMermaid(markdown: string, options: TransformOptions = {}): string {
 	const transformer = createMermaidMarkdownTransformer({
 		getMode: () => options.mode ?? "streaming",
@@ -31,10 +37,7 @@ function transformMermaid(markdown: string, options: TransformOptions = {}): str
 	});
 }
 
-function mockArt(
-	plain: string[],
-	options: { styled?: Span[][]; warnings?: string[]; width?: number } = {},
-): MermaidArt {
+function mockArt(plain: string[], options: MockArtOptions = {}): MermaidArt {
 	return {
 		plain,
 		styled: options.styled ?? plain.map((line) => [{ text: line, cls: "none" }]),

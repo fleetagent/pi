@@ -95,6 +95,12 @@ export function _lineHashesPure(content: string): string[] {
 	return hashes;
 }
 
+interface PreviousLineHashSnapshot {
+	content: string;
+	hashes: string[];
+	removedHashes?: Set<string>;
+}
+
 /**
  * Stable, persistent-aware hash computation.
  *
@@ -116,7 +122,7 @@ export function _lineHashesPure(content: string): string[] {
 export async function lineHashes(
 	content: string,
 	path?: string,
-	previous?: { content: string; hashes: string[]; removedHashes?: Set<string> },
+	previous?: PreviousLineHashSnapshot,
 ): Promise<string[]> {
 	if (!path) {
 		return _lineHashesPure(content);
@@ -145,6 +151,80 @@ export async function lineHashes(
 	return newHashes;
 }
 
+interface PreviousLineHashCandidate {
+	index: number;
+	hash: string;
+}
+
+interface ReusedLineHashes {
+	hashes: string[];
+	used: Set<string>;
+}
+
+function buildPreviousLineHashCandidates(
+	oldContent: string,
+	oldHashes: string[],
+): Map<string, PreviousLineHashCandidate[]> {
+	const candidatesByContent = new Map<string, PreviousLineHashCandidate[]>();
+	const oldLines = oldContent.split("\n");
+	for (let index = 0; index < oldLines.length; index++) {
+		const line = oldLines[index]!;
+		const candidate = { index, hash: oldHashes[index]! };
+		const candidates = candidatesByContent.get(line);
+		if (candidates) candidates.push(candidate);
+		else candidatesByContent.set(line, [candidate]);
+	}
+	return candidatesByContent;
+}
+
+function takePreferredPreviousLineHash(
+	candidates: PreviousLineHashCandidate[],
+	removedHashes: Set<string> | undefined,
+): string {
+	let preferredIndex = 0;
+	if (removedHashes && removedHashes.size > 0) {
+		for (let index = 0; index < candidates.length; index++) {
+			if (!removedHashes.has(candidates[index]!.hash)) {
+				preferredIndex = index;
+				break;
+			}
+		}
+	}
+	return candidates.splice(preferredIndex, 1)[0]!.hash;
+}
+
+function reusePreviousLineHashes(
+	newLines: string[],
+	candidatesByContent: Map<string, PreviousLineHashCandidate[]>,
+	removedHashes: Set<string> | undefined,
+): ReusedLineHashes {
+	const hashes = new Array<string>(newLines.length);
+	const used = new Set<string>();
+	for (let index = 0; index < newLines.length; index++) {
+		const candidates = candidatesByContent.get(newLines[index]!);
+		if (!candidates || candidates.length === 0) continue;
+		const hash = takePreferredPreviousLineHash(candidates, removedHashes);
+		hashes[index] = hash;
+		used.add(hash);
+	}
+	return { hashes, used };
+}
+
+function fillFreshLineHashes(newLines: string[], hashes: string[], used: Set<string>): void {
+	for (let index = 0; index < newLines.length; index++) {
+		if (hashes[index]) continue;
+		const canonicalLine = canon(newLines[index]!);
+		let retry = 0;
+		let hash = h2s(xxh32(canonicalLine));
+		while (used.has(hash)) {
+			retry++;
+			hash = h2s(xxh32(`${canonicalLine}:R${retry}`));
+		}
+		used.add(hash);
+		hashes[index] = hash;
+	}
+}
+
 /**
  * Maps old hashes to new positions using hash-aware content matching.
  * Unlike Diff.diffLines (which is content-only and cannot distinguish
@@ -161,65 +241,10 @@ function mapStableHashes(
 	removedHashes?: Set<string>,
 ): string[] {
 	const newLines = newContent.split("\n");
-	const newHashes = new Array<string>(newLines.length);
-	const used = new Set<string>();
-
-	// Build a map from line content to list of (index, hash) for the old content.
-	// We process occurrences left-to-right so that matching preserves order.
-	const contentMap = new Map<string, { index: number; hash: string }[]>();
-	const oldLines = oldContent.split("\n");
-	for (let i = 0; i < oldLines.length; i++) {
-		const line = oldLines[i]!;
-		const entry = { index: i, hash: oldHashes[i]! };
-		const list = contentMap.get(line);
-		if (list) {
-			list.push(entry);
-		} else {
-			contentMap.set(line, [entry]);
-		}
-	}
-
-	// Match each new line to an old occurrence by content.
-	// For lines with duplicate content, prefer occurrences whose hash
-	// was NOT targeted by the edit (those are the survivors).
-	for (let i = 0; i < newLines.length; i++) {
-		const line = newLines[i]!;
-		const candidates = contentMap.get(line);
-		if (!candidates || candidates.length === 0) continue;
-
-		// Find the best match: prefer a non-removed occurrence.
-		// If all remaining occurrences are removed, use the first one anyway
-		// (it will get a fresh hash in the fill step since its hash is in used+removed).
-		let bestIdx = 0;
-		if (removedHashes && removedHashes.size > 0) {
-			for (let j = 0; j < candidates.length; j++) {
-				if (!removedHashes.has(candidates[j]!.hash)) {
-					bestIdx = j;
-					break;
-				}
-			}
-		}
-
-		const match = candidates.splice(bestIdx, 1)[0]!;
-		newHashes[i] = match.hash;
-		used.add(match.hash);
-	}
-
-	// Fill remaining (new/changed) lines with fresh hashes
-	for (let i = 0; i < newLines.length; i++) {
-		if (newHashes[i]) continue;
-		const c = canon(newLines[i]!);
-		let retry = 0;
-		let hash = h2s(xxh32(c));
-		while (used.has(hash)) {
-			retry++;
-			hash = h2s(xxh32(`${c}:R${retry}`));
-		}
-		used.add(hash);
-		newHashes[i] = hash;
-	}
-
-	return newHashes;
+	const candidatesByContent = buildPreviousLineHashCandidates(oldContent, oldHashes);
+	const { hashes, used } = reusePreviousLineHashes(newLines, candidatesByContent, removedHashes);
+	fillFreshLineHashes(newLines, hashes, used);
+	return hashes;
 }
 
 export { ALPH_RE };

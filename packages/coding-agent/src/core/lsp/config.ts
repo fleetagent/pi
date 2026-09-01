@@ -191,6 +191,14 @@ export function parseLspConfiguration(value: unknown): ParseLspConfigurationResu
 	};
 }
 
+function applyLspServerLayer(servers: Map<string, LspConfiguredServer>, layer: LspConfigurationLayer): void {
+	if (layer.mode === "replace") servers.clear();
+	for (const server of layer.servers ?? []) {
+		if (server.enabled === false) servers.delete(server.id);
+		else servers.set(server.id, server);
+	}
+}
+
 /** Resolve already validated layers from lowest to highest precedence. */
 export function resolveLspConfiguration(
 	layers: readonly (LspConfigurationLayer | undefined)[],
@@ -204,11 +212,7 @@ export function resolveLspConfiguration(
 		if (!hasLayer) enabled = layer.enabled ?? true;
 		hasLayer = true;
 		if (layer.enabled !== undefined) enabled = layer.enabled;
-		if (layer.mode === "replace") servers.clear();
-		for (const server of layer.servers ?? []) {
-			if (server.enabled === false) servers.delete(server.id);
-			else servers.set(server.id, server);
-		}
+		applyLspServerLayer(servers, layer);
 	}
 
 	return { enabled: hasLayer && enabled, servers: [...servers.values()] };
@@ -232,6 +236,41 @@ function parseServers(value: unknown, diagnostics: LspConfigurationDiagnostic[])
 	}
 	return servers;
 }
+function validateTransportLifecycle(
+	transport: LspTransport | undefined,
+	lifecycle: LspServerLifecycle | undefined,
+	path: string,
+	diagnostics: LspConfigurationDiagnostic[],
+): void {
+	if (!transport || transport.type === "connection") return;
+	const expectedLifecycle = transport.type === "spawn" ? "managed" : "attached";
+	if (lifecycle?.type === expectedLifecycle) return;
+	addError(
+		diagnostics,
+		`${path}.lifecycle.type`,
+		`must be '${expectedLifecycle}' when transport.type is '${transport.type}'`,
+	);
+}
+function parseServerId(value: unknown, path: string, diagnostics: LspConfigurationDiagnostic[]): string | undefined {
+	const id = parseRequiredString(value, `${path}.id`, diagnostics);
+	if (!id || /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id)) return id;
+	addError(
+		diagnostics,
+		`${path}.id`,
+		"must start with an alphanumeric character and contain only letters, numbers, '.', '_' or '-'",
+	);
+	return id;
+}
+function createDisabledServerEntry(
+	object: Record<string, unknown>,
+	id: string | undefined,
+	path: string,
+	diagnostics: LspConfigurationDiagnostic[],
+): LspDisabledServer | undefined {
+	rejectUnknownKeys(object, new Set(["id", "enabled"]), path, diagnostics);
+	if (!id) return undefined;
+	return { id, enabled: false };
+}
 
 function parseServer(
 	value: unknown,
@@ -240,19 +279,9 @@ function parseServer(
 ): LspServerEntry | undefined {
 	const object = parseObject(value, path, diagnostics);
 	if (!object) return undefined;
-	const id = parseRequiredString(object.id, `${path}.id`, diagnostics);
-	if (id && !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id)) {
-		addError(
-			diagnostics,
-			`${path}.id`,
-			"must start with an alphanumeric character and contain only letters, numbers, '.', '_' or '-'",
-		);
-	}
+	const id = parseServerId(object.id, path, diagnostics);
 	const enabled = parseOptionalBoolean(object.enabled, `${path}.enabled`, diagnostics);
-	if (enabled === false) {
-		rejectUnknownKeys(object, new Set(["id", "enabled"]), path, diagnostics);
-		return id ? { id, enabled: false } : undefined;
-	}
+	if (enabled === false) return createDisabledServerEntry(object, id, path, diagnostics);
 	rejectUnknownKeys(object, SERVER_KEYS, path, diagnostics);
 
 	const selectors = parseSelectors(object.selectors, `${path}.selectors`, diagnostics);
@@ -273,12 +302,7 @@ function parseServer(
 	const priority = parseOptionalInteger(object.priority, `${path}.priority`, diagnostics);
 	const timeouts = parseTimeouts(object.timeouts, `${path}.timeouts`, diagnostics);
 
-	if (transport?.type === "spawn" && lifecycle?.type !== "managed") {
-		addError(diagnostics, `${path}.lifecycle.type`, "must be 'managed' when transport.type is 'spawn'");
-	}
-	if (transport && transport.type !== "spawn" && transport.type !== "connection" && lifecycle?.type !== "attached") {
-		addError(diagnostics, `${path}.lifecycle.type`, `must be 'attached' when transport.type is '${transport.type}'`);
-	}
+	validateTransportLifecycle(transport, lifecycle, path, diagnostics);
 	if (!id || !selectors || !transport || !lifecycle || !workspace) return undefined;
 
 	return {
@@ -298,6 +322,18 @@ function parseServer(
 		...(priority === undefined ? {} : { priority }),
 		...(timeouts === undefined ? {} : { timeouts }),
 	};
+}
+
+function registerSelectorSignature(
+	signatures: Set<string>,
+	signature: string,
+	path: string,
+	diagnostics: LspConfigurationDiagnostic[],
+): void {
+	if (signatures.has(signature)) {
+		addError(diagnostics, path, "is ambiguous because another selector has the same scheme and pattern");
+	}
+	signatures.add(signature);
 }
 
 function parseSelectors(
@@ -324,11 +360,7 @@ function parseSelectors(
 		}
 		if (!languageId || !pattern) continue;
 		const signature = `${scheme ?? "file"}\u0000${pattern}`;
-		if (signatures.has(signature)) {
-			addError(diagnostics, itemPath, "is ambiguous because another selector has the same scheme and pattern");
-		} else {
-			signatures.add(signature);
-		}
+		registerSelectorSignature(signatures, signature, itemPath, diagnostics);
 		selectors.push({ languageId, pattern, ...(scheme === undefined ? {} : { scheme }) });
 	}
 	return selectors;
@@ -343,49 +375,16 @@ function parseTransport(
 	if (!object) return undefined;
 	const type = parseRequiredString(object.type, `${path}.type`, diagnostics);
 	switch (type) {
-		case "spawn": {
-			rejectUnknownKeys(object, new Set(["type", "command", "args", "env", "cwd"]), path, diagnostics);
-			const command = parseRequiredString(object.command, `${path}.command`, diagnostics);
-			const args = parseOptionalStringArray(object.args, `${path}.args`, diagnostics);
-			const env = parseOptionalStringRecord(object.env, `${path}.env`, diagnostics);
-			const cwd = parseOptionalString(object.cwd, `${path}.cwd`, diagnostics);
-			return command
-				? { type, command, ...(args ? { args } : {}), ...(env ? { env } : {}), ...(cwd ? { cwd } : {}) }
-				: undefined;
-		}
-		case "tcp": {
-			rejectUnknownKeys(object, new Set(["type", "host", "port"]), path, diagnostics);
-			const host = parseRequiredString(object.host, `${path}.host`, diagnostics);
-			const port = parseOptionalInteger(object.port, `${path}.port`, diagnostics);
-			if (port === undefined) addError(diagnostics, `${path}.port`, "is required and must be an integer");
-			else if (port < 1 || port > 65535) addError(diagnostics, `${path}.port`, "must be between 1 and 65535");
-			return host && port !== undefined ? { type, host, port } : undefined;
-		}
-		case "unix": {
-			rejectUnknownKeys(object, new Set(["type", "path"]), path, diagnostics);
-			const endpointPath = parseRequiredString(object.path, `${path}.path`, diagnostics);
-			if (endpointPath && !posix.isAbsolute(endpointPath) && !isSafeRelativePath(endpointPath)) {
-				addError(diagnostics, `${path}.path`, "must be absolute or a safe source-relative Unix socket path");
-			}
-			return endpointPath ? { type, path: endpointPath } : undefined;
-		}
-		case "pipe": {
-			rejectUnknownKeys(object, new Set(["type", "path"]), path, diagnostics);
-			const endpointPath = parseRequiredString(object.path, `${path}.path`, diagnostics);
-			if (endpointPath && !isAbsoluteNamedPipe(endpointPath)) {
-				addError(
-					diagnostics,
-					`${path}.path`,
-					"must be an absolute Windows named-pipe path such as \\\\.\\pipe\\server",
-				);
-			}
-			return endpointPath ? { type, path: endpointPath } : undefined;
-		}
-		case "connection": {
-			rejectUnknownKeys(object, new Set(["type", "id"]), path, diagnostics);
-			const id = parseRequiredString(object.id, `${path}.id`, diagnostics);
-			return id ? { type, id } : undefined;
-		}
+		case "spawn":
+			return parseSpawnTransport(object, path, diagnostics);
+		case "tcp":
+			return parseTcpTransport(object, path, diagnostics);
+		case "unix":
+			return parseUnixSocketTransport(object, path, diagnostics);
+		case "pipe":
+			return parseNamedPipeTransport(object, path, diagnostics);
+		case "connection":
+			return parseProgrammaticTransport(object, path, diagnostics);
 		default:
 			if (type)
 				addError(diagnostics, `${path}.type`, "must be one of 'spawn', 'tcp', 'unix', 'pipe', or 'connection'");
@@ -393,6 +392,69 @@ function parseTransport(
 	}
 }
 
+function parseSpawnTransport(
+	object: Record<string, unknown>,
+	path: string,
+	diagnostics: LspConfigurationDiagnostic[],
+): LspSpawnTransport | undefined {
+	rejectUnknownKeys(object, new Set(["type", "command", "args", "env", "cwd"]), path, diagnostics);
+	const command = parseRequiredString(object.command, `${path}.command`, diagnostics);
+	const args = parseOptionalStringArray(object.args, `${path}.args`, diagnostics);
+	const env = parseOptionalStringRecord(object.env, `${path}.env`, diagnostics);
+	const cwd = parseOptionalString(object.cwd, `${path}.cwd`, diagnostics);
+	return command
+		? { type: "spawn", command, ...(args ? { args } : {}), ...(env ? { env } : {}), ...(cwd ? { cwd } : {}) }
+		: undefined;
+}
+
+function parseTcpTransport(
+	object: Record<string, unknown>,
+	path: string,
+	diagnostics: LspConfigurationDiagnostic[],
+): LspTcpTransport | undefined {
+	rejectUnknownKeys(object, new Set(["type", "host", "port"]), path, diagnostics);
+	const host = parseRequiredString(object.host, `${path}.host`, diagnostics);
+	const port = parseOptionalInteger(object.port, `${path}.port`, diagnostics);
+	if (port === undefined) addError(diagnostics, `${path}.port`, "is required and must be an integer");
+	else if (port < 1 || port > 65535) addError(diagnostics, `${path}.port`, "must be between 1 and 65535");
+	return host && port !== undefined ? { type: "tcp", host, port } : undefined;
+}
+
+function parseUnixSocketTransport(
+	object: Record<string, unknown>,
+	path: string,
+	diagnostics: LspConfigurationDiagnostic[],
+): LspUnixSocketTransport | undefined {
+	rejectUnknownKeys(object, new Set(["type", "path"]), path, diagnostics);
+	const endpointPath = parseRequiredString(object.path, `${path}.path`, diagnostics);
+	if (endpointPath && !posix.isAbsolute(endpointPath) && !isSafeRelativePath(endpointPath)) {
+		addError(diagnostics, `${path}.path`, "must be absolute or a safe source-relative Unix socket path");
+	}
+	return endpointPath ? { type: "unix", path: endpointPath } : undefined;
+}
+
+function parseNamedPipeTransport(
+	object: Record<string, unknown>,
+	path: string,
+	diagnostics: LspConfigurationDiagnostic[],
+): LspNamedPipeTransport | undefined {
+	rejectUnknownKeys(object, new Set(["type", "path"]), path, diagnostics);
+	const endpointPath = parseRequiredString(object.path, `${path}.path`, diagnostics);
+	if (endpointPath && !isAbsoluteNamedPipe(endpointPath)) {
+		addError(diagnostics, `${path}.path`, "must be an absolute Windows named-pipe path such as \\\\.\\pipe\\server");
+	}
+	return endpointPath ? { type: "pipe", path: endpointPath } : undefined;
+}
+
+function parseProgrammaticTransport(
+	object: Record<string, unknown>,
+	path: string,
+	diagnostics: LspConfigurationDiagnostic[],
+): LspProgrammaticTransport | undefined {
+	rejectUnknownKeys(object, new Set(["type", "id"]), path, diagnostics);
+	const id = parseRequiredString(object.id, `${path}.id`, diagnostics);
+	return id ? { type: "connection", id } : undefined;
+}
 function parseLifecycle(
 	value: unknown,
 	path: string,
@@ -449,6 +511,68 @@ function parseWorkspace(
 	return undefined;
 }
 
+interface PathMappingParseState {
+	mappings: LspPathMapping[];
+	agentRoots: Set<string>;
+	serverRoots: Set<string>;
+}
+
+function parsePathMappingEntry(
+	entry: unknown,
+	index: number,
+	path: string,
+	diagnostics: LspConfigurationDiagnostic[],
+	state: PathMappingParseState,
+): void {
+	const itemPath = `${path}[${index}]`;
+	const object = parseObject(entry, itemPath, diagnostics);
+	if (!object) return;
+	rejectUnknownKeys(object, new Set(["agentRoot", "serverRootUri"]), itemPath, diagnostics);
+	const agentRoot = parseRequiredString(object.agentRoot, `${itemPath}.agentRoot`, diagnostics);
+	const serverRootUri = parseRequiredString(object.serverRootUri, `${itemPath}.serverRootUri`, diagnostics);
+	if (serverRootUri && !isAbsoluteFileUri(serverRootUri)) {
+		addError(
+			diagnostics,
+			`${itemPath}.serverRootUri`,
+			"must be an absolute file URI without query or fragment components",
+		);
+	}
+	if (!agentRoot || !serverRootUri) return;
+
+	const normalizedAgentRoot = normalizeAgentRoot(agentRoot);
+	const normalizedServerRoot = canonicalFileUri(serverRootUri);
+	if (state.agentRoots.has(normalizedAgentRoot))
+		addError(diagnostics, `${itemPath}.agentRoot`, "duplicates another mapping root");
+	if (normalizedServerRoot && state.serverRoots.has(normalizedServerRoot)) {
+		addError(diagnostics, `${itemPath}.serverRootUri`, "duplicates another mapping root");
+	}
+	state.agentRoots.add(normalizedAgentRoot);
+	if (normalizedServerRoot) state.serverRoots.add(normalizedServerRoot);
+	state.mappings.push({ agentRoot, serverRootUri });
+}
+
+function validatePathMappingReversibility(
+	mappings: LspPathMapping[],
+	path: string,
+	diagnostics: LspConfigurationDiagnostic[],
+): void {
+	for (let index = 0; index < mappings.length; index++) {
+		for (let previous = 0; previous < index; previous++) {
+			if (pathMappingsAreReversible(mappings[previous], mappings[index])) continue;
+			addError(
+				diagnostics,
+				`${path}[${index}].agentRoot`,
+				`overlaps mapping ${previous} without an equivalent server URI relationship`,
+			);
+			addError(
+				diagnostics,
+				`${path}[${index}].serverRootUri`,
+				`overlaps mapping ${previous} without an equivalent agent path relationship`,
+			);
+		}
+	}
+}
+
 function parsePathMappings(
 	value: unknown,
 	path: string,
@@ -459,52 +583,16 @@ function parsePathMappings(
 		addError(diagnostics, path, "must be an array");
 		return undefined;
 	}
-	const mappings: LspPathMapping[] = [];
-	const agentRoots = new Set<string>();
-	const serverRoots = new Set<string>();
+	const state: PathMappingParseState = {
+		mappings: [],
+		agentRoots: new Set<string>(),
+		serverRoots: new Set<string>(),
+	};
 	for (const [index, entry] of value.entries()) {
-		const itemPath = `${path}[${index}]`;
-		const object = parseObject(entry, itemPath, diagnostics);
-		if (!object) continue;
-		rejectUnknownKeys(object, new Set(["agentRoot", "serverRootUri"]), itemPath, diagnostics);
-		const agentRoot = parseRequiredString(object.agentRoot, `${itemPath}.agentRoot`, diagnostics);
-		const serverRootUri = parseRequiredString(object.serverRootUri, `${itemPath}.serverRootUri`, diagnostics);
-		if (serverRootUri && !isAbsoluteFileUri(serverRootUri)) {
-			addError(
-				diagnostics,
-				`${itemPath}.serverRootUri`,
-				"must be an absolute file URI without query or fragment components",
-			);
-		}
-		if (!agentRoot || !serverRootUri) continue;
-		const normalizedAgentRoot = normalizeAgentRoot(agentRoot);
-		const normalizedServerRoot = canonicalFileUri(serverRootUri);
-		if (agentRoots.has(normalizedAgentRoot))
-			addError(diagnostics, `${itemPath}.agentRoot`, "duplicates another mapping root");
-		if (normalizedServerRoot && serverRoots.has(normalizedServerRoot)) {
-			addError(diagnostics, `${itemPath}.serverRootUri`, "duplicates another mapping root");
-		}
-		agentRoots.add(normalizedAgentRoot);
-		if (normalizedServerRoot) serverRoots.add(normalizedServerRoot);
-		mappings.push({ agentRoot, serverRootUri });
+		parsePathMappingEntry(entry, index, path, diagnostics, state);
 	}
-	for (let index = 0; index < mappings.length; index++) {
-		for (let previous = 0; previous < index; previous++) {
-			if (!pathMappingsAreReversible(mappings[previous], mappings[index])) {
-				addError(
-					diagnostics,
-					`${path}[${index}].agentRoot`,
-					`overlaps mapping ${previous} without an equivalent server URI relationship`,
-				);
-				addError(
-					diagnostics,
-					`${path}[${index}].serverRootUri`,
-					`overlaps mapping ${previous} without an equivalent agent path relationship`,
-				);
-			}
-		}
-	}
-	return mappings;
+	validatePathMappingReversibility(state.mappings, path, diagnostics);
+	return state.mappings;
 }
 
 function parseClientInfo(
@@ -558,6 +646,8 @@ function parseTimeouts(
 	return timeouts;
 }
 
+type LspJsonParseResult = { ok: true; value: LspJsonValue } | { ok: false };
+
 function parseOptionalJson(
 	value: unknown,
 	path: string,
@@ -568,12 +658,48 @@ function parseOptionalJson(
 	return result.ok ? result.value : undefined;
 }
 
+function parseJsonArray(
+	value: unknown[],
+	path: string,
+	diagnostics: LspConfigurationDiagnostic[],
+	ancestors: Set<object>,
+): LspJsonParseResult {
+	ancestors.add(value);
+	const output: LspJsonValue[] = [];
+	let valid = true;
+	for (const [index, item] of value.entries()) {
+		const parsed = parseJson(item, `${path}[${index}]`, diagnostics, ancestors);
+		if (parsed.ok) output.push(parsed.value);
+		else valid = false;
+	}
+	ancestors.delete(value);
+	return valid ? { ok: true, value: output } : { ok: false };
+}
+
+function parseJsonObject(
+	value: object,
+	path: string,
+	diagnostics: LspConfigurationDiagnostic[],
+	ancestors: Set<object>,
+): LspJsonParseResult {
+	ancestors.add(value);
+	const output: { [key: string]: LspJsonValue } = {};
+	let valid = true;
+	for (const [key, item] of Object.entries(value)) {
+		const parsed = parseJson(item, `${path}.${key}`, diagnostics, ancestors);
+		if (parsed.ok) output[key] = parsed.value;
+		else valid = false;
+	}
+	ancestors.delete(value);
+	return valid ? { ok: true, value: output } : { ok: false };
+}
+
 function parseJson(
 	value: unknown,
 	path: string,
 	diagnostics: LspConfigurationDiagnostic[],
 	ancestors: Set<object>,
-): { ok: true; value: LspJsonValue } | { ok: false } {
+): LspJsonParseResult {
 	if (value === null || typeof value === "string" || typeof value === "boolean") return { ok: true, value };
 	if (typeof value === "number") {
 		if (Number.isFinite(value)) return { ok: true, value };
@@ -588,27 +714,9 @@ function parseJson(
 		addError(diagnostics, path, "must not contain circular references");
 		return { ok: false };
 	}
-	ancestors.add(value);
-	if (Array.isArray(value)) {
-		const output: LspJsonValue[] = [];
-		let valid = true;
-		for (const [index, item] of value.entries()) {
-			const parsed = parseJson(item, `${path}[${index}]`, diagnostics, ancestors);
-			if (parsed.ok) output.push(parsed.value);
-			else valid = false;
-		}
-		ancestors.delete(value);
-		return valid ? { ok: true, value: output } : { ok: false };
-	}
-	const output: { [key: string]: LspJsonValue } = {};
-	let valid = true;
-	for (const [key, item] of Object.entries(value)) {
-		const parsed = parseJson(item, `${path}.${key}`, diagnostics, ancestors);
-		if (parsed.ok) output[key] = parsed.value;
-		else valid = false;
-	}
-	ancestors.delete(value);
-	return valid ? { ok: true, value: output } : { ok: false };
+	return Array.isArray(value)
+		? parseJsonArray(value, path, diagnostics, ancestors)
+		: parseJsonObject(value, path, diagnostics, ancestors);
 }
 
 function parseObject(
@@ -753,8 +861,10 @@ function isSafeRelativePath(value: string): boolean {
 	return !value.split(/[\\/]/).includes("..");
 }
 
+type MappingRootDirection = "left-parent" | "right-parent" | "equal";
+
 interface MappingRootRelation {
-	direction: "left-parent" | "right-parent" | "equal";
+	direction: MappingRootDirection;
 	relative: string;
 	caseInsensitive: boolean;
 }

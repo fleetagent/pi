@@ -8,7 +8,14 @@
  *   npx tsx test.ts claude-sonnet-4-5-20250929 --thinking
  */
 
-import { type Api, type Context, type Model, registerApiProvider, streamSimple } from "@fleetagent/pi-ai";
+import {
+	type Api,
+	type AssistantMessageEvent,
+	type Context,
+	type Model,
+	registerApiProvider,
+	streamSimple,
+} from "@fleetagent/pi-ai";
 import { readFileSync } from "fs";
 import { getAgentDir } from "packages/coding-agent/src/config.js";
 import { join } from "path";
@@ -16,6 +23,28 @@ import { MODELS, streamGitLabDuo } from "./index.ts";
 
 const MODEL_MAP = new Map(MODELS.map((m) => [m.id, m]));
 
+function reportStreamEvent(event: AssistantMessageEvent): void {
+	switch (event.type) {
+		case "thinking_start":
+			console.log("[Thinking]");
+			break;
+		case "thinking_delta":
+			process.stdout.write(event.delta);
+			break;
+		case "thinking_end":
+			console.log("\n[/Thinking]\n");
+			break;
+		case "text_delta":
+			process.stdout.write(event.delta);
+			break;
+		case "error":
+			console.error("\nError:", event.error.errorMessage);
+			break;
+		case "done":
+			console.log("\n\nDone!", event.reason, event.message.usage);
+			break;
+	}
+}
 async function main() {
 	const modelId = process.argv[2] || "claude-sonnet-4-5-20250929";
 	const useThinking = process.argv.includes("--thinking");
@@ -69,14 +98,7 @@ async function main() {
 		reasoning: useThinking ? "low" : undefined,
 	});
 
-	for await (const event of stream) {
-		if (event.type === "thinking_start") console.log("[Thinking]");
-		else if (event.type === "thinking_delta") process.stdout.write(event.delta);
-		else if (event.type === "thinking_end") console.log("\n[/Thinking]\n");
-		else if (event.type === "text_delta") process.stdout.write(event.delta);
-		else if (event.type === "error") console.error("\nError:", event.error.errorMessage);
-		else if (event.type === "done") console.log("\n\nDone!", event.reason, event.message.usage);
-	}
+	for await (const event of stream) reportStreamEvent(event);
 }
 
 main().catch(console.error);

@@ -20,16 +20,22 @@ import { InMemorySessionManager } from "../src/core/session/in-memory-session-ma
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import type { Skill } from "../src/core/skills.ts";
 import { createSyntheticSourceInfo } from "../src/core/source-info.ts";
-import type { ToolAccessMode, ToolBackendInfo, ToolExecOptions, ToolOperations } from "../src/core/tools/operations.ts";
+import type {
+	ToolAccessMode,
+	ToolBackendInfo,
+	ToolExecOptions,
+	ToolExecResult,
+	ToolOperations,
+} from "../src/core/tools/operations.ts";
 
-class FakeSshToolOperations implements ToolOperations {
+class FakeRemoteToolOperations implements ToolOperations {
 	cwd: string;
 
 	constructor(cwd: string) {
 		this.cwd = cwd;
 	}
 
-	async exec(_command: string, _options: ToolExecOptions): Promise<{ exitCode: number | null }> {
+	async exec(_command: string, _options: ToolExecOptions): Promise<ToolExecResult> {
 		return { exitCode: 0 };
 	}
 
@@ -56,11 +62,18 @@ class FakeSshToolOperations implements ToolOperations {
 	}
 
 	getBackendInfo(): ToolBackendInfo {
-		return { type: "ssh", cwd: this.cwd, remote: "test@example", configured: true };
+		return {
+			type: "remote",
+			cwd: this.cwd,
+			url: "ws://remote.test/pi/workspace",
+			protocol: "ws",
+			configured: true,
+			workspace: { id: "remote-workspace", root: this.cwd, pathFlavor: "posix" },
+		};
 	}
 }
 
-class FakeDaemonToolOperations extends FakeSshToolOperations {
+class FakeDaemonToolOperations extends FakeRemoteToolOperations {
 	async readResource(path: string): Promise<Buffer> {
 		if (path !== "SANDBOX.md") throw new Error(`missing resource: ${path}`);
 		return Buffer.from("Sandbox instructions from daemon.", "utf8");
@@ -250,7 +263,7 @@ Prompt content.`,
 			expect(prompt?.sourceInfo.source).toBe("extension");
 		});
 
-		it("should load project instruction resources from the tool backend when SSH is configured", async () => {
+		it("should load project instruction resources from the tool backend when a remote daemon is configured", async () => {
 			const remoteCwd = join(tempDir, "remote-project");
 			mkdirSync(join(cwd, ".pi", "skills", "local-only"), { recursive: true });
 			writeFileSync(
@@ -286,7 +299,7 @@ Remote rule.`,
 			const loader = new DefaultResourceLoader({
 				cwd,
 				agentDir,
-				toolOperations: new FakeSshToolOperations(remoteCwd),
+				toolOperations: new FakeRemoteToolOperations(remoteCwd),
 			});
 			await loader.reload();
 

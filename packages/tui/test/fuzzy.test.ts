@@ -2,6 +2,10 @@ import assert from "node:assert";
 import { describe, it } from "node:test";
 import { fuzzyFilter, fuzzyMatch } from "../src/fuzzy.ts";
 
+interface FuzzyFilterItemFixture {
+	name: string;
+	id: number;
+}
 describe("fuzzyMatch", () => {
 	it("empty query matches everything with score 0", () => {
 		const result = fuzzyMatch("", "anything");
@@ -91,12 +95,12 @@ describe("fuzzyFilter", () => {
 	});
 
 	it("works with custom getText function", () => {
-		const items = [
+		const items: FuzzyFilterItemFixture[] = [
 			{ name: "foo", id: 1 },
 			{ name: "bar", id: 2 },
 			{ name: "foobar", id: 3 },
 		];
-		const result = fuzzyFilter(items, "foo", (item: { name: string; id: number }) => item.name);
+		const result = fuzzyFilter(items, "foo", (item) => item.name);
 
 		assert.strictEqual(result.length, 2);
 		assert.ok(result.map((r) => r.name).includes("foo"));

@@ -36,6 +36,13 @@ export interface LocalSessionManagerOptions {
 	sessionDir?: string;
 }
 
+type SessionPublicationPhase = "create" | "fork" | "import";
+
+interface SessionPublicationClaimOptions {
+	allowExistingEmptyFile: boolean;
+	phase: SessionPublicationPhase;
+}
+
 export class LocalSessionManager implements SessionManager {
 	private readonly cwd: string;
 	private readonly sessionDir?: string;
@@ -137,7 +144,7 @@ export class LocalSessionManager implements SessionManager {
 		filePath: string,
 		entries: FileEntry[],
 		operation: () => void,
-		options: { allowExistingEmptyFile: boolean; phase: "create" | "fork" | "import" },
+		options: SessionPublicationClaimOptions,
 	): void {
 		this.claimFirstPublication(filePath, entries, operation, options);
 	}
@@ -146,7 +153,7 @@ export class LocalSessionManager implements SessionManager {
 		filePath: string,
 		entries: FileEntry[],
 		operation: () => T,
-		options: { allowExistingEmptyFile: boolean; phase: "create" | "fork" | "import" } = {
+		options: SessionPublicationClaimOptions = {
 			allowExistingEmptyFile: false,
 			phase: "create",
 		},
@@ -166,35 +173,42 @@ export class LocalSessionManager implements SessionManager {
 		}
 	}
 
+	private rejectConflictingPublicationCandidate(
+		candidate: string,
+		resolvedTarget: string,
+		header: SessionHeader,
+		options: SessionPublicationClaimOptions,
+	): void {
+		if (candidate === resolvedTarget) {
+			if (options.allowExistingEmptyFile && lstatSync(candidate).isFile() && lstatSync(candidate).size === 0) return;
+			throw new SessionAlreadyExistsError(candidate, header.id, options.phase);
+		}
+		try {
+			const existing = readSessionHeader(candidate);
+			if (
+				existing?.id === header.id &&
+				typeof existing.cwd === "string" &&
+				this.canonicalCwd(existing.cwd) === this.canonicalCwd(header.cwd)
+			) {
+				throw new SessionAlreadyExistsError(candidate, header.id, options.phase);
+			}
+		} catch (error) {
+			if (error instanceof SessionAlreadyExistsError) throw error;
+			if (error instanceof SessionHeaderScanLimitError) return;
+			throw error;
+		}
+	}
+
 	private rejectExistingSession(
 		filePath: string,
 		header: SessionHeader,
-		options: { allowExistingEmptyFile: boolean; phase: "create" | "fork" | "import" },
+		options: SessionPublicationClaimOptions,
 	): void {
 		const resolvedTarget = resolve(filePath);
 		for (const name of readdirSync(dirname(resolvedTarget))) {
 			if (!name.endsWith(".jsonl")) continue;
 			const candidate = resolve(dirname(resolvedTarget), name);
-			if (candidate === resolvedTarget) {
-				if (options.allowExistingEmptyFile && lstatSync(candidate).isFile() && lstatSync(candidate).size === 0) {
-					continue;
-				}
-				throw new SessionAlreadyExistsError(candidate, header.id, options.phase);
-			}
-			try {
-				const existing = readSessionHeader(candidate);
-				if (
-					existing?.id === header.id &&
-					typeof existing.cwd === "string" &&
-					this.canonicalCwd(existing.cwd) === this.canonicalCwd(header.cwd)
-				) {
-					throw new SessionAlreadyExistsError(candidate, header.id, options.phase);
-				}
-			} catch (error) {
-				if (error instanceof SessionAlreadyExistsError) throw error;
-				if (error instanceof SessionHeaderScanLimitError) continue;
-				throw error;
-			}
+			this.rejectConflictingPublicationCandidate(candidate, resolvedTarget, header, options);
 		}
 	}
 

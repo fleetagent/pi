@@ -2,7 +2,7 @@ import type { AgentTool } from "@fleetagent/pi-agent-core";
 import { Text } from "@fleetagent/pi-tui";
 import { type Static, Type } from "typebox";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
-import { getTextOutput, invalidArgText, str } from "./render-utils.ts";
+import { getTextOutput, invalidArgText, str, type ToolTextOutputContent } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 interface RenderTheme {
@@ -37,6 +37,8 @@ const websearchSchema = Type.Object({
 
 export type WebsearchToolInput = Static<typeof websearchSchema>;
 
+export type WebsearchSource = "duckduckgo-instant-answer" | "brave-search" | "firecrawl-search";
+
 export interface WebsearchResultItem {
 	title: string;
 	url: string;
@@ -46,7 +48,17 @@ export interface WebsearchResultItem {
 export interface WebsearchToolDetails {
 	query: string;
 	results: WebsearchResultItem[];
-	source: "duckduckgo-instant-answer" | "brave-search" | "firecrawl-search";
+	source: WebsearchSource;
+}
+
+interface WebsearchCallArguments {
+	query?: string;
+	limit?: number;
+}
+
+interface WebsearchRenderResult {
+	content: ToolTextOutputContent[];
+	details?: WebsearchToolDetails;
 }
 
 interface DuckDuckGoTopic {
@@ -220,7 +232,7 @@ export function parseFirecrawlSearchResponse(data: unknown, limit: number): Webs
 	return results;
 }
 
-function formatSourceName(source: WebsearchToolDetails["source"]): string {
+function formatSourceName(source: WebsearchSource): string {
 	switch (source) {
 		case "brave-search":
 			return "Brave Search";
@@ -231,7 +243,7 @@ function formatSourceName(source: WebsearchToolDetails["source"]): string {
 	}
 }
 
-function formatResults(query: string, results: WebsearchResultItem[], source: WebsearchToolDetails["source"]): string {
+function formatResults(query: string, results: WebsearchResultItem[], source: WebsearchSource): string {
 	if (results.length === 0) {
 		return `No ${formatSourceName(source)} links found for: ${query}`;
 	}
@@ -250,7 +262,7 @@ function resolveLimit(limit: number | undefined): number {
 	return Math.min(MAX_LIMIT, Math.floor(limit));
 }
 
-function formatWebsearchCall(args: { query?: string; limit?: number } | undefined, theme: RenderTheme): string {
+function formatWebsearchCall(args: WebsearchCallArguments | undefined, theme: RenderTheme): string {
 	const query = str(args?.query);
 	const invalidArg = invalidArgText(theme);
 	let text = `${theme.fg("toolTitle", theme.bold("websearch"))} ${query === null ? invalidArg : theme.fg("accent", query)}`;
@@ -259,10 +271,7 @@ function formatWebsearchCall(args: { query?: string; limit?: number } | undefine
 }
 
 function formatWebsearchResult(
-	result: {
-		content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
-		details?: WebsearchToolDetails;
-	},
+	result: WebsearchRenderResult,
 	options: ToolRenderResultOptions,
 	theme: RenderTheme,
 	showImages: boolean,
@@ -277,7 +286,7 @@ function formatWebsearchResult(
 		? `${displayed.join("\n")}\n${theme.fg("muted", `... (${remaining} more lines)`)}`
 		: displayed.join("\n");
 }
-function resolveWebsearchProvider(options?: WebsearchToolOptions): WebsearchToolDetails["source"] {
+function resolveWebsearchProvider(options?: WebsearchToolOptions): WebsearchSource {
 	const configured =
 		options?.provider?.trim().toLowerCase() ?? process.env.PI_WEBSEARCH_PROVIDER?.trim().toLowerCase();
 	if (!configured) {
@@ -427,19 +436,12 @@ export function createWebsearchToolDefinition(
 		},
 		renderCall(args, theme, context) {
 			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-			text.setText(formatWebsearchCall(args as { query?: string; limit?: number } | undefined, theme));
+			text.setText(formatWebsearchCall(args as WebsearchCallArguments | undefined, theme));
 			return text;
 		},
 		renderResult(result, options, theme, context) {
 			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-			text.setText(
-				formatWebsearchResult(
-					result as { content: Array<{ type: string; text?: string }>; details?: WebsearchToolDetails },
-					options,
-					theme,
-					context.showImages,
-				),
-			);
+			text.setText(formatWebsearchResult(result as WebsearchRenderResult, options, theme, context.showImages));
 			return text;
 		},
 	};

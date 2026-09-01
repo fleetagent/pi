@@ -1,5 +1,5 @@
 import { fuzzyFilter } from "../fuzzy.ts";
-import { getKeybindings } from "../keybindings.ts";
+import { getKeybindings, type KeybindingsManager } from "../keybindings.ts";
 import type { Component } from "../tui.ts";
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "../utils.ts";
 import { Input } from "./input.ts";
@@ -149,20 +149,29 @@ export class SettingsList implements Component {
 			lines.push(this.theme.hint(truncateToWidth(scrollText, width - 2, "")));
 		}
 
-		// Add description for selected item
-		const selectedItem = displayItems[this.selectedIndex];
-		if (selectedItem?.description) {
-			lines.push("");
-			const wrappedDesc = wrapTextWithAnsi(selectedItem.description, width - 4);
-			for (const line of wrappedDesc) {
-				lines.push(this.theme.description(`  ${line}`));
-			}
-		}
+		this.appendSelectedDescription(lines, displayItems[this.selectedIndex], width);
 
 		// Add hint
 		this.addHintLine(lines, width);
 
 		return lines;
+	}
+	private appendSelectedDescription(lines: string[], selectedItem: SettingItem | undefined, width: number): void {
+		if (!selectedItem?.description) return;
+		lines.push("");
+		for (const line of wrapTextWithAnsi(selectedItem.description, width - 4)) {
+			lines.push(this.theme.description(`  ${line}`));
+		}
+	}
+
+	private handleSelectionMovement(data: string, keybindings: KeybindingsManager, itemCount: number): boolean {
+		if (keybindings.matches(data, "tui.select.up")) {
+			if (itemCount > 0) this.selectedIndex = this.selectedIndex === 0 ? itemCount - 1 : this.selectedIndex - 1;
+			return true;
+		}
+		if (!keybindings.matches(data, "tui.select.down")) return false;
+		if (itemCount > 0) this.selectedIndex = this.selectedIndex === itemCount - 1 ? 0 : this.selectedIndex + 1;
+		return true;
 	}
 
 	handleInput(data: string): void {
@@ -173,23 +182,21 @@ export class SettingsList implements Component {
 			return;
 		}
 
-		// Main list input handling
-		const kb = getKeybindings();
+		const keybindings = getKeybindings();
 		const displayItems = this.searchEnabled ? this.filteredItems : this.items;
-		if (kb.matches(data, "tui.select.up")) {
-			if (displayItems.length === 0) return;
-			this.selectedIndex = this.selectedIndex === 0 ? displayItems.length - 1 : this.selectedIndex - 1;
-		} else if (kb.matches(data, "tui.select.down")) {
-			if (displayItems.length === 0) return;
-			this.selectedIndex = this.selectedIndex === displayItems.length - 1 ? 0 : this.selectedIndex + 1;
-		} else if (
-			kb.matches(data, "tui.select.confirm") ||
+		if (this.handleSelectionMovement(data, keybindings, displayItems.length)) return;
+		if (
+			keybindings.matches(data, "tui.select.confirm") ||
 			(data === " " && (!this.searchEnabled || this.searchInput?.getValue().length === 0))
 		) {
 			this.activateItem();
-		} else if (kb.matches(data, "tui.select.cancel")) {
+			return;
+		}
+		if (keybindings.matches(data, "tui.select.cancel")) {
 			this.onCancel();
-		} else if (this.searchEnabled && this.searchInput) {
+			return;
+		}
+		if (this.searchEnabled && this.searchInput) {
 			this.searchInput.handleInput(data);
 			this.applyFilter(this.searchInput.getValue());
 		}

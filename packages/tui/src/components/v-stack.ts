@@ -7,6 +7,7 @@ export class VStack extends Stack {
 		super(children, options);
 	}
 
+	// pi-ignore noExcessiveCollectionIterations: Each child contributes its rendered, gap, and padding rows exactly once, so the nested writes are linear in the final output lines.
 	override render(width: number): string[] {
 		const viewport = { width: Math.max(1, width), height: Number.MAX_SAFE_INTEGER };
 		const entries = visibleStackEntries(this.entries, viewport);

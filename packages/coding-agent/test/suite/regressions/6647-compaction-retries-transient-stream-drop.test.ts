@@ -1,5 +1,12 @@
 import type { StreamFn } from "@fleetagent/pi-agent-core";
-import { type AssistantMessage, createAssistantMessageEventStream, fauxAssistantMessage } from "@fleetagent/pi-ai";
+import {
+	type Api,
+	type AssistantMessage,
+	type AssistantMessageEventStream,
+	createAssistantMessageEventStream,
+	fauxAssistantMessage,
+	type Model,
+} from "@fleetagent/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHarness, type Harness } from "../harness.ts";
 
@@ -50,28 +57,30 @@ describe("#6647 retries transient compaction and branch-summary failures", () =>
 		};
 	}
 
+	function pushScriptedMessageEvent(
+		stream: AssistantMessageEventStream,
+		model: Model<Api>,
+		message: AssistantMessage,
+	): void {
+		const resolvedMessage = { ...message, api: model.api, provider: model.provider, model: model.id };
+		if (message.stopReason === "error" || message.stopReason === "aborted") {
+			stream.push({ type: "error", reason: message.stopReason, error: resolvedMessage });
+			return;
+		}
+		stream.push({
+			type: "done",
+			reason: message.stopReason === "length" ? "length" : message.stopReason === "toolUse" ? "toolUse" : "stop",
+			message: resolvedMessage,
+		});
+	}
+
 	function useScriptedStreamFn(harness: Harness, script: AssistantMessage[]): () => number {
 		let callCount = 0;
 		const streamFunction: StreamFn = (model) => {
 			const message = script[callCount] ?? script[script.length - 1]!;
 			callCount++;
 			const stream = createAssistantMessageEventStream();
-			queueMicrotask(() => {
-				if (message.stopReason === "error" || message.stopReason === "aborted") {
-					stream.push({
-						type: "error",
-						reason: message.stopReason,
-						error: { ...message, api: model.api, provider: model.provider, model: model.id },
-					});
-				} else {
-					stream.push({
-						type: "done",
-						reason:
-							message.stopReason === "length" ? "length" : message.stopReason === "toolUse" ? "toolUse" : "stop",
-						message: { ...message, api: model.api, provider: model.provider, model: model.id },
-					});
-				}
-			});
+			queueMicrotask(() => pushScriptedMessageEvent(stream, model, message));
 			return stream;
 		};
 		harness.session.agent.streamFn = streamFunction;

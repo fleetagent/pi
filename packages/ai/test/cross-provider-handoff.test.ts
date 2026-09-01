@@ -144,6 +144,46 @@ interface CachedContext {
 	generatedAt: string;
 }
 
+// pi-ignore noNearIdenticalDataStructures: Test-only flattened message offsets and terminal selection columns have independent ownership and evolution.
+interface ContextMessageRange {
+	start: number;
+	end: number;
+}
+
+interface ContextMessageIndex {
+	messages: Message[];
+	ranges: Map<string, ContextMessageRange>;
+}
+
+function indexContextMessages(contexts: Record<string, CachedContext>): ContextMessageIndex {
+	const messages: Message[] = [];
+	const ranges = new Map<string, ContextMessageRange>();
+	for (const [label, context] of Object.entries(contexts)) {
+		const start = messages.length;
+		messages.push(...context.messages);
+		ranges.set(label, { start, end: messages.length });
+	}
+	return { messages, ranges };
+}
+
+function getOtherContextMessages(index: ContextMessageIndex, targetLabel: string): Message[] {
+	const targetRange = index.ranges.get(targetLabel);
+	if (!targetRange) return [...index.messages];
+	return index.messages.slice(0, targetRange.start).concat(index.messages.slice(targetRange.end));
+}
+
+interface HandoffFailureDetails {
+	label: string;
+	error: string;
+	payload?: unknown;
+	messages: Message[];
+}
+
+interface GeneratedHandoffContext {
+	messages: Message[];
+	api: Api;
+}
+
 /**
  * Get API key for provider - checks OAuth storage first, then env vars
  */
@@ -183,7 +223,7 @@ function hasAnyApiKey(): boolean {
 	return PROVIDER_MODEL_PAIRS.some((pair) => hasApiKey(pair));
 }
 
-function dumpFailurePayload(params: { label: string; error: string; payload?: unknown; messages: Message[] }): void {
+function dumpFailurePayload(params: HandoffFailureDetails): void {
 	const filename = `/tmp/pi-handoff-${params.label}-${Date.now()}.json`;
 	const body = {
 		label: params.label,
@@ -199,10 +239,7 @@ function dumpFailurePayload(params: { label: string; error: string; payload?: un
  * Generate a context from a provider/model pair.
  * Makes a real API call to get authentic tool call IDs and thinking blocks.
  */
-async function generateContext(
-	pair: ProviderModelPair,
-	apiKey: string,
-): Promise<{ messages: Message[]; api: Api } | null> {
+async function generateContext(pair: ProviderModelPair, apiKey: string): Promise<GeneratedHandoffContext | null> {
 	const baseModel = (getModel as (p: string, m: string) => Model<Api> | undefined)(pair.provider, pair.model);
 	if (!baseModel) {
 		console.log(`  Model not found: ${pair.provider}/${pair.model}`);
@@ -329,6 +366,107 @@ async function generateContext(
 	};
 }
 
+interface HandoffResult {
+	target: string;
+	success: boolean;
+	error?: string;
+}
+
+async function runTargetHandoff(
+	targetPair: ProviderModelPair,
+	contextMessageIndex: ContextMessageIndex,
+): Promise<HandoffResult | undefined> {
+	const apiKey = await getApiKey(targetPair.provider);
+	if (!apiKey || !hasApiKey(targetPair)) {
+		console.log(`[Target: ${targetPair.label}] Skipping - no auth`);
+		return undefined;
+	}
+
+	const otherMessages = getOtherContextMessages(contextMessageIndex, targetPair.label);
+	if (otherMessages.length === 0) {
+		console.log(`[Target: ${targetPair.label}] Skipping - no other contexts`);
+		return undefined;
+	}
+
+	const allMessages: Message[] = [
+		...otherMessages,
+		{
+			role: "user",
+			content:
+				"Great, thanks for all that help! Now just say 'Hello, handoff successful!' to confirm you received everything.",
+			timestamp: Date.now(),
+		},
+	];
+	const baseModel = (getModel as (provider: string, model: string) => Model<Api> | undefined)(
+		targetPair.provider,
+		targetPair.model,
+	);
+	if (!baseModel) {
+		console.log(`[Target: ${targetPair.label}] Model not found`);
+		return undefined;
+	}
+
+	const model: Model<Api> = targetPair.apiOverride ? { ...baseModel, api: targetPair.apiOverride } : baseModel;
+	const headers = getHeaders(targetPair);
+	console.log(`[Target: ${targetPair.label}] Testing with ${otherMessages.length} messages from other providers...`);
+
+	let lastPayload: unknown;
+	try {
+		const response = await completeSimple(
+			model,
+			{ systemPrompt: "You are a helpful assistant.", messages: allMessages, tools: [testTool] },
+			{
+				apiKey,
+				reasoning: model.reasoning ? "high" : undefined,
+				headers,
+				onPayload: (payload) => {
+					lastPayload = payload;
+				},
+			},
+		);
+		if (response.stopReason === "error") {
+			console.log(`[Target: ${targetPair.label}] FAILED: ${response.errorMessage}`);
+			dumpFailurePayload({
+				label: targetPair.label,
+				error: response.errorMessage || "Unknown error",
+				payload: lastPayload,
+				messages: allMessages,
+			});
+			return { target: targetPair.label, success: false, error: response.errorMessage };
+		}
+
+		const text = response.content
+			.filter((content) => content.type === "text")
+			.map((content) => content.text)
+			.join(" ");
+		const preview = text.slice(0, 100).replace(/\n/g, " ");
+		console.log(`[Target: ${targetPair.label}] SUCCESS: ${preview}...`);
+		return { target: targetPair.label, success: true };
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		console.log(`[Target: ${targetPair.label}] EXCEPTION: ${message}`);
+		dumpFailurePayload({
+			label: targetPair.label,
+			error: message,
+			payload: lastPayload,
+			messages: allMessages,
+		});
+		return { target: targetPair.label, success: false, error: message };
+	}
+}
+
+function reportHandoffResults(results: HandoffResult[]): HandoffResult[] {
+	console.log("\n=== Results Summary ===\n");
+	const successes = results.filter((result) => result.success);
+	const failures = results.filter((result) => !result.success);
+	console.log(`Passed: ${successes.length}/${results.length}`);
+	if (failures.length > 0) {
+		console.log("\nFailures:");
+		for (const failure of failures) console.log(`  - ${failure.target}: ${failure.error}`);
+	}
+	return failures;
+}
+
 describe.skipIf(!hasAnyApiKey())("Cross-Provider Handoff", () => {
 	let contexts: Record<string, CachedContext>;
 	let availablePairs: ProviderModelPair[];
@@ -377,126 +515,19 @@ describe.skipIf(!hasAnyApiKey())("Cross-Provider Handoff", () => {
 		"should handle cross-provider handoffs for each target",
 		async () => {
 			const contextLabels = Object.keys(contexts);
-
 			if (contextLabels.length < 2) {
 				console.log("Not enough fixtures for handoff test, skipping");
 				return;
 			}
 
 			console.log("\n=== Testing Cross-Provider Handoffs ===\n");
-
-			const results: { target: string; success: boolean; error?: string }[] = [];
-
+			const results: HandoffResult[] = [];
+			const contextMessageIndex = indexContextMessages(contexts);
 			for (const targetPair of availablePairs) {
-				const apiKey = await getApiKey(targetPair.provider);
-				if (!apiKey || !hasApiKey(targetPair)) {
-					console.log(`[Target: ${targetPair.label}] Skipping - no auth`);
-					continue;
-				}
-
-				// Collect messages from ALL OTHER contexts
-				const otherMessages: Message[] = [];
-				for (const [label, ctx] of Object.entries(contexts)) {
-					if (label === targetPair.label) continue;
-					otherMessages.push(...ctx.messages);
-				}
-
-				if (otherMessages.length === 0) {
-					console.log(`[Target: ${targetPair.label}] Skipping - no other contexts`);
-					continue;
-				}
-
-				const allMessages: Message[] = [
-					...otherMessages,
-					{
-						role: "user",
-						content:
-							"Great, thanks for all that help! Now just say 'Hello, handoff successful!' to confirm you received everything.",
-						timestamp: Date.now(),
-					},
-				];
-
-				const baseModel = (getModel as (p: string, m: string) => Model<Api> | undefined)(
-					targetPair.provider,
-					targetPair.model,
-				);
-				if (!baseModel) {
-					console.log(`[Target: ${targetPair.label}] Model not found`);
-					continue;
-				}
-
-				const model: Model<Api> = targetPair.apiOverride
-					? { ...baseModel, api: targetPair.apiOverride }
-					: baseModel;
-				const supportsReasoning = model.reasoning === true;
-				const headers = getHeaders(targetPair);
-
-				console.log(
-					`[Target: ${targetPair.label}] Testing with ${otherMessages.length} messages from other providers...`,
-				);
-
-				let lastPayload: unknown;
-				try {
-					const response = await completeSimple(
-						model,
-						{
-							systemPrompt: "You are a helpful assistant.",
-							messages: allMessages,
-							tools: [testTool],
-						},
-						{
-							apiKey,
-							reasoning: supportsReasoning ? "high" : undefined,
-							headers,
-							onPayload: (payload) => {
-								lastPayload = payload;
-							},
-						},
-					);
-
-					if (response.stopReason === "error") {
-						console.log(`[Target: ${targetPair.label}] FAILED: ${response.errorMessage}`);
-						dumpFailurePayload({
-							label: targetPair.label,
-							error: response.errorMessage || "Unknown error",
-							payload: lastPayload,
-							messages: allMessages,
-						});
-						results.push({ target: targetPair.label, success: false, error: response.errorMessage });
-					} else {
-						const text = response.content
-							.filter((c) => c.type === "text")
-							.map((c) => c.text)
-							.join(" ");
-						const preview = text.slice(0, 100).replace(/\n/g, " ");
-						console.log(`[Target: ${targetPair.label}] SUCCESS: ${preview}...`);
-						results.push({ target: targetPair.label, success: true });
-					}
-				} catch (error) {
-					const msg = error instanceof Error ? error.message : String(error);
-					console.log(`[Target: ${targetPair.label}] EXCEPTION: ${msg}`);
-					dumpFailurePayload({
-						label: targetPair.label,
-						error: msg,
-						payload: lastPayload,
-						messages: allMessages,
-					});
-					results.push({ target: targetPair.label, success: false, error: msg });
-				}
+				const result = await runTargetHandoff(targetPair, contextMessageIndex);
+				if (result) results.push(result);
 			}
-
-			console.log("\n=== Results Summary ===\n");
-			const successes = results.filter((r) => r.success);
-			const failures = results.filter((r) => !r.success);
-
-			console.log(`Passed: ${successes.length}/${results.length}`);
-			if (failures.length > 0) {
-				console.log("\nFailures:");
-				for (const f of failures) {
-					console.log(`  - ${f.target}: ${f.error}`);
-				}
-			}
-
+			const failures = reportHandoffResults(results);
 			expect(failures.length).toBe(0);
 		},
 		600000,

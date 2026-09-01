@@ -1,5 +1,20 @@
-import { LAYOUT_NODE, type LayoutViewport, type StackLayoutEntry, type StackLayoutNode } from "../layout-node.ts";
+import {
+	LAYOUT_NODE,
+	type LayoutViewport,
+	type StackAlignment,
+	type StackLayoutEntry,
+	type StackLayoutNode,
+	type StackLayoutType,
+} from "../layout-node.ts";
 import { type Component, Container } from "../tui.ts";
+
+type StackDistributionMode = "grow" | "shrink";
+
+interface StackDistributionCandidate {
+	index: number;
+	weight: number;
+	capacity: number;
+}
 
 export interface StackEntryOptions {
 	basis?: number | "auto";
@@ -18,7 +33,7 @@ export type StackChild = Component | StackEntry;
 
 export interface StackOptions {
 	gap?: number;
-	align?: "stretch" | "start" | "center" | "end";
+	align?: StackAlignment;
 }
 
 function isStackEntry(child: StackChild): child is StackEntry {
@@ -32,8 +47,8 @@ function normalizeSize(value: number | undefined, fallback: number): number {
 export abstract class Stack extends Container {
 	protected readonly entries: StackLayoutEntry[] = [];
 	protected readonly gap: number;
-	protected readonly align: "stretch" | "start" | "center" | "end";
-	protected abstract readonly layoutType: "vstack" | "hstack";
+	protected readonly align: StackAlignment;
+	protected abstract readonly layoutType: StackLayoutType;
 
 	constructor(children: StackChild[] = [], options: StackOptions = {}) {
 		super();
@@ -92,43 +107,64 @@ function clampSize(size: number, entry: StackLayoutEntry): number {
 	return Math.max(min, Math.min(max, Math.max(0, Math.floor(size))));
 }
 
+function getDistributionWeight(entry: StackLayoutEntry, size: number, mode: StackDistributionMode): number {
+	return mode === "grow" ? (entry.grow ?? 0) : (entry.shrink ?? 1) * Math.max(1, size);
+}
+
+function getDistributionCapacity(entry: StackLayoutEntry, size: number, mode: StackDistributionMode): number {
+	return mode === "grow" ? (entry.maxSize ?? Number.MAX_SAFE_INTEGER) - size : size - (entry.minSize ?? 0);
+}
+
+function collectDistributionCandidates(
+	sizes: number[],
+	entries: readonly StackLayoutEntry[],
+	mode: StackDistributionMode,
+): StackDistributionCandidate[] {
+	const candidates: StackDistributionCandidate[] = [];
+	for (let index = 0; index < entries.length; index++) {
+		const entry = entries[index]!;
+		const size = sizes[index]!;
+		const weight = getDistributionWeight(entry, size, mode);
+		const capacity = getDistributionCapacity(entry, size, mode);
+		if (weight > 0 && capacity > 0) candidates.push({ index, weight, capacity });
+	}
+	return candidates;
+}
+
+function distributeStackSizeRound(
+	sizes: number[],
+	candidates: StackDistributionCandidate[],
+	amount: number,
+	mode: StackDistributionMode,
+): number {
+	const totalWeight = candidates.reduce((sum, candidate) => sum + candidate.weight, 0);
+	let remaining = amount;
+	let distributed = 0;
+	for (const candidate of candidates) {
+		if (remaining <= 0) break;
+		const proposed = Math.max(1, Math.floor((remaining * candidate.weight) / totalWeight));
+		const delta = Math.min(remaining, proposed, candidate.capacity);
+		if (delta <= 0) continue;
+		sizes[candidate.index] = sizes[candidate.index]! + (mode === "grow" ? delta : -delta);
+		remaining -= delta;
+		distributed += delta;
+	}
+	return distributed;
+}
+
 function distribute(
 	sizes: number[],
 	entries: readonly StackLayoutEntry[],
 	amount: number,
-	mode: "grow" | "shrink",
+	mode: StackDistributionMode,
 ): void {
 	let remaining = amount;
 	while (remaining > 0) {
-		const candidates = entries
-			.map((entry, index) => ({ entry, index }))
-			.filter(({ entry, index }) => {
-				if (mode === "grow") {
-					return (entry.grow ?? 0) > 0 && sizes[index]! < (entry.maxSize ?? Number.MAX_SAFE_INTEGER);
-				}
-				return (entry.shrink ?? 1) > 0 && sizes[index]! > (entry.minSize ?? 0);
-			});
+		const candidates = collectDistributionCandidates(sizes, entries, mode);
 		if (candidates.length === 0) return;
-
-		const totalWeight = candidates.reduce((sum, { entry, index }) => {
-			return sum + (mode === "grow" ? (entry.grow ?? 0) : (entry.shrink ?? 1) * Math.max(1, sizes[index]!));
-		}, 0);
-		let distributed = 0;
-		for (const { entry, index } of candidates) {
-			if (remaining <= 0) break;
-			const weight = mode === "grow" ? (entry.grow ?? 0) : (entry.shrink ?? 1) * Math.max(1, sizes[index]!);
-			const proposed = Math.max(1, Math.floor((remaining * weight) / totalWeight));
-			const capacity =
-				mode === "grow"
-					? (entry.maxSize ?? Number.MAX_SAFE_INTEGER) - sizes[index]!
-					: sizes[index]! - (entry.minSize ?? 0);
-			const delta = Math.min(remaining, proposed, capacity);
-			if (delta <= 0) continue;
-			sizes[index] = sizes[index]! + (mode === "grow" ? delta : -delta);
-			remaining -= delta;
-			distributed += delta;
-		}
+		const distributed = distributeStackSizeRound(sizes, candidates, remaining, mode);
 		if (distributed === 0) return;
+		remaining -= distributed;
 	}
 }
 

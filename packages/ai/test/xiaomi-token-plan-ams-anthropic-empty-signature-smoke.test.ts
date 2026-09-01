@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { getEnvApiKey } from "../src/env-api-keys.ts";
 import { completeSimple, streamSimple } from "../src/stream.ts";
 import type { AssistantMessage, Context, Model } from "../src/types.ts";
+import type { AnthropicPayloadContentBlock } from "./anthropic-utils.ts";
 
 const provider = "xiaomi-token-plan-ams";
 const apiKey = getEnvApiKey(provider);
@@ -20,11 +21,13 @@ const model: Model<"anthropic-messages"> = {
 	compat: { allowEmptySignature: true },
 };
 
+interface AnthropicPayloadMessage {
+	role: string;
+	content: string | AnthropicPayloadContentBlock[];
+}
+
 interface AnthropicPayload {
-	messages?: Array<{
-		role: string;
-		content: string | Array<{ type: string; text?: string; thinking?: string; signature?: string }>;
-	}>;
+	messages?: AnthropicPayloadMessage[];
 }
 
 class PayloadCaptured extends Error {
@@ -103,10 +106,10 @@ describe.skipIf(!apiKey)("Xiaomi Token Plan AMS Anthropic empty thinking signatu
 		const assistantPayload = replayPayload.messages?.find((message) => message.role === "assistant");
 		expect(assistantPayload).toBeDefined();
 		expect(Array.isArray(assistantPayload!.content)).toBe(true);
-		const replayedThinking = (assistantPayload!.content as Array<{ type: string; text?: string }>).filter(
+		const replayedThinking = (assistantPayload!.content as AnthropicPayloadContentBlock[]).filter(
 			(block) => block.type === "thinking",
 		);
-		const replayedText = (assistantPayload!.content as Array<{ type: string; text?: string }>).filter(
+		const replayedText = (assistantPayload!.content as AnthropicPayloadContentBlock[]).filter(
 			(block) => block.type === "text",
 		);
 		expect(replayedThinking).toEqual([{ type: "thinking", thinking: thinkingBlocks[0].thinking, signature: "" }]);

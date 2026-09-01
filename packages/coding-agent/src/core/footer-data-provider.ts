@@ -9,6 +9,35 @@ type GitPaths = {
 	headPath: string;
 };
 
+function resolveWorktreeGitPaths(repoDir: string, gitFilePath: string): GitPaths | null | undefined {
+	const content = readFileSync(gitFilePath, "utf8").trim();
+	if (!content.startsWith("gitdir: ")) return undefined;
+
+	const gitDir = resolve(repoDir, content.slice(8).trim());
+	const headPath = join(gitDir, "HEAD");
+	if (!existsSync(headPath)) return null;
+	const commonDirPath = join(gitDir, "commondir");
+	const commonGitDir = existsSync(commonDirPath)
+		? resolve(gitDir, readFileSync(commonDirPath, "utf8").trim())
+		: gitDir;
+	return { repoDir, commonGitDir, headPath };
+}
+
+function resolveGitDirectoryPaths(repoDir: string, gitDir: string): GitPaths | null {
+	const headPath = join(gitDir, "HEAD");
+	return existsSync(headPath) ? { repoDir, commonGitDir: gitDir, headPath } : null;
+}
+
+function inspectGitMarker(repoDir: string, gitPath: string): GitPaths | null | undefined {
+	try {
+		const stat = statSync(gitPath);
+		if (stat.isFile()) return resolveWorktreeGitPaths(repoDir, gitPath);
+		if (stat.isDirectory()) return resolveGitDirectoryPaths(repoDir, gitPath);
+		return undefined;
+	} catch {
+		return null;
+	}
+}
 /**
  * Find git metadata paths by walking up from cwd.
  * Handles both regular git repos (.git is a directory) and worktrees (.git is a file).
@@ -18,28 +47,8 @@ function findGitPaths(cwd: string): GitPaths | null {
 	while (true) {
 		const gitPath = join(dir, ".git");
 		if (existsSync(gitPath)) {
-			try {
-				const stat = statSync(gitPath);
-				if (stat.isFile()) {
-					const content = readFileSync(gitPath, "utf8").trim();
-					if (content.startsWith("gitdir: ")) {
-						const gitDir = resolve(dir, content.slice(8).trim());
-						const headPath = join(gitDir, "HEAD");
-						if (!existsSync(headPath)) return null;
-						const commonDirPath = join(gitDir, "commondir");
-						const commonGitDir = existsSync(commonDirPath)
-							? resolve(gitDir, readFileSync(commonDirPath, "utf8").trim())
-							: gitDir;
-						return { repoDir: dir, commonGitDir, headPath };
-					}
-				} else if (stat.isDirectory()) {
-					const headPath = join(gitPath, "HEAD");
-					if (!existsSync(headPath)) return null;
-					return { repoDir: dir, commonGitDir: gitPath, headPath };
-				}
-			} catch {
-				return null;
-			}
+			const gitPaths = inspectGitMarker(dir, gitPath);
+			if (gitPaths !== undefined) return gitPaths;
 		}
 		const parent = dirname(dir);
 		if (parent === dir) return null;

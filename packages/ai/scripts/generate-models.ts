@@ -697,6 +697,36 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 			}
 		}
 
+		// Cloudflare Gateway's /compat endpoint can route Workers AI models even when
+		// models.dev omits them from the gateway-specific catalog.
+		const gatewayWorkersKimiId = "workers-ai/@cf/moonshotai/kimi-k2.6";
+		const gatewayWorkersKimi = data["cloudflare-workers-ai"]?.models?.[
+			"@cf/moonshotai/kimi-k2.6"
+		] as ModelsDevModel | undefined;
+		if (
+			gatewayWorkersKimi?.tool_call === true &&
+			!models.some((model) => model.provider === "cloudflare-ai-gateway" && model.id === gatewayWorkersKimiId)
+		) {
+			models.push({
+				id: gatewayWorkersKimiId,
+				name: gatewayWorkersKimi.name || gatewayWorkersKimiId,
+				api: "openai-completions",
+				provider: "cloudflare-ai-gateway",
+				baseUrl: CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL,
+				reasoning: gatewayWorkersKimi.reasoning === true,
+				input: gatewayWorkersKimi.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
+				cost: {
+					input: gatewayWorkersKimi.cost?.input || 0,
+					output: gatewayWorkersKimi.cost?.output || 0,
+					cacheRead: gatewayWorkersKimi.cost?.cache_read || 0,
+					cacheWrite: gatewayWorkersKimi.cost?.cache_write || 0,
+				},
+				contextWindow: gatewayWorkersKimi.limit?.context || 4096,
+				maxTokens: gatewayWorkersKimi.limit?.output || 4096,
+				compat: { sendSessionAffinityHeaders: true },
+			});
+		}
+
 		// Process xAi models
 		if (data.xai?.models) {
 			for (const [modelId, model] of Object.entries(data.xai.models)) {

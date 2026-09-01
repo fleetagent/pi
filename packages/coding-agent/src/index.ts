@@ -4,15 +4,28 @@ export type { TuiMode } from "@fleetagent/pi-tui";
 // Config paths
 export { getAgentDir, VERSION } from "./config.ts";
 export {
+	type ActivateSandboxDaemonOptions,
 	AgentSession,
 	type AgentSessionConfig,
 	type AgentSessionEvent,
 	type AgentSessionEventListener,
 	type AgentSessionReloadResult,
+	type ConfigureRemoteSandboxOptions,
+	type ExecuteBashOptions,
+	type ForkableUserMessage,
 	type ModelCycleResult,
+	type NavigateTreeOptions,
+	type NavigateTreeResult,
 	type ParsedSkillBlock,
 	type PromptOptions,
 	parseSkillBlock,
+	type QueuedMessages,
+	type RecordBashResultOptions,
+	type RegisterSessionToolOptions,
+	type SendCustomMessageOptions,
+	type SendUserMessageOptions,
+	type SessionRuleRegistration,
+	type SessionSkillRegistration,
 	type SessionStats,
 	type StructuredResponse,
 	type StructuredResponseOptions,
@@ -20,6 +33,7 @@ export {
 // Auth and model registry
 export {
 	type ApiKeyCredential,
+	type AuthApiKeyLookupOptions,
 	type AuthCredential,
 	type AuthStatus,
 	AuthStorage,
@@ -91,6 +105,7 @@ export type {
 	ExtensionFactory,
 	ExtensionFlag,
 	ExtensionHandler,
+	ExtensionNotificationType,
 	ExtensionRuntime,
 	ExtensionShortcut,
 	ExtensionToolBackendExecOptions,
@@ -122,6 +137,7 @@ export type {
 	SessionCompactEvent,
 	SessionInfoChangedEvent,
 	SessionShutdownEvent,
+	SessionShutdownReason,
 	SessionStartEvent,
 	SessionTreeEvent,
 	SubagentToolCallEvent,
@@ -208,6 +224,7 @@ export {
 	type LspConfigurationInput,
 	type LspConfigurationInputScope,
 	type LspConfigurationSourceDiagnostic,
+	type LspConfigurationSourceDiagnosticSeverity,
 	loadLspConfiguration,
 	resolveLspConfigurationLayerPaths,
 } from "./core/lsp/config-loader.ts";
@@ -227,6 +244,7 @@ export {
 	createLspToolDefinitions,
 	LSP_TOOL_NAMES,
 	type LspLifecycleOptions,
+	type LspRuntimeOwner,
 	type LspRuntimeState,
 	type LspSessionStatus,
 	type LspToolName,
@@ -248,6 +266,7 @@ export {
 	type LspClientRouteFailure,
 	type LspClientStartedListener,
 	type LspClientsWillShutdownListener,
+	type LspConnectionFactoryResolver,
 	LspManager,
 	type LspManagerOptions,
 	type LspServerStatus,
@@ -277,10 +296,12 @@ export {
 	type LspConnectionFactoryContext,
 	type LspConnectionFactoryRegistry,
 	type LspConnectionHandle,
+	type ManagedStdioConnectionOptions,
 	resolveLspConnectionFactory,
 } from "./core/lsp/transport.ts";
 export { convertToLlm } from "./core/messages.ts";
 export { ModelRegistry } from "./core/model-registry.ts";
+export type { ScopedModel } from "./core/model-resolver.ts";
 export type {
 	PackageManager,
 	PathMetadata,
@@ -294,6 +315,7 @@ export {
 	type CreatePiAgentOptions,
 	PiAgent,
 	type PiAgentDiagnostic,
+	type PiAgentHooksOptions,
 	type PiAgentRuntimeHost,
 	type PiAgentServices,
 	type PiAgentSessionOptions,
@@ -335,11 +357,17 @@ export {
 export { LocalSessionManager } from "./core/session/local-session-manager.ts";
 export { migrateSessionEntries, parseSessionEntries } from "./core/session/migrations.ts";
 export {
+	type AppendRemoteSessionEntriesRequest,
+	type CreateRemoteSessionRequest,
+	type ForkRemoteSessionRequest,
+	type ImportRemoteSessionJsonlRequest,
 	RemoteSessionClient,
 	RemoteSessionClientError,
 	type RemoteSessionClientOptions,
 	type RemoteSessionOperation,
 	RemoteSessionProtocolError,
+	type RemoteSessionSnapshot,
+	type ReplaceRemoteSessionSnapshotRequest,
 } from "./core/session/remote-session-client.ts";
 export { RemoteSessionManager } from "./core/session/remote-session-manager.ts";
 export type { SessionManager } from "./core/session/session-manager.ts";
@@ -387,7 +415,7 @@ export {
 	SkillLoader,
 } from "./core/skills.ts";
 export type { SlashCommandInfo, SlashCommandSource } from "./core/slash-commands.ts";
-export type { SourceInfo } from "./core/source-info.ts";
+export type { SourceInfo, SyntheticSourceInfoOptions } from "./core/source-info.ts";
 export { createSyntheticSourceInfo } from "./core/source-info.ts";
 // Tools
 export {
@@ -399,6 +427,7 @@ export {
 	createBashTool,
 	createBashToolDefinition,
 	createLocalBashOperations,
+	type LocalBashOperationsOptions,
 } from "./core/tools/bash.ts";
 export {
 	createEditTool,
@@ -432,23 +461,22 @@ export {
 } from "./core/tools/ls.ts";
 export {
 	createRemoteToolOperations,
-	createSshToolOperations,
 	DeferredRemoteToolOperations,
-	type DeferredRemoteToolOperationsConfigureSshOptions,
+	type DeferredRemoteToolOperationsConnectOptions,
 	LocalToolOperations,
 	type LocalToolOperationsOptions,
-	type ParsedSshTarget,
 	RemoteToolOperations,
-	SshToolOperations,
-	type SshToolOperationsOptions,
+	type RemoteToolOperationsConnectOptions,
 	type ToolAccessMode,
 	type ToolBackendInfo,
 	type ToolExecOptions,
+	type ToolExecResult,
 	type ToolFileStat,
 	type ToolGlobOptions,
 	type ToolGrepMatch,
 	type ToolGrepOptions,
 	type ToolGrepResult,
+	type ToolMkdirOptions,
 	type ToolOperations,
 } from "./core/tools/operations.ts";
 export {
@@ -488,6 +516,7 @@ export {
 	type SubagentToolOptions,
 	type SubagentUsageStats,
 } from "./core/tools/subagent.ts";
+export type { AgentListFormatResult } from "./core/tools/subagent-agents.ts";
 export {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
@@ -507,6 +536,7 @@ export {
 	parseWebsearchToolOptions,
 	type WebsearchProvider,
 	type WebsearchResultItem,
+	type WebsearchSource,
 	type WebsearchToolDetails,
 	type WebsearchToolInput,
 	type WebsearchToolOptions,
@@ -558,7 +588,11 @@ export { ShowImagesSelectorComponent } from "./modes/interactive/components/show
 export { SkillInvocationMessageComponent } from "./modes/interactive/components/skill-invocation-message.ts";
 export { ThemeSelectorComponent } from "./modes/interactive/components/theme-selector.ts";
 export { ThinkingSelectorComponent } from "./modes/interactive/components/thinking-selector.ts";
-export { ToolExecutionComponent, type ToolExecutionOptions } from "./modes/interactive/components/tool-execution.ts";
+export {
+	ToolExecutionComponent,
+	type ToolExecutionDisplayResult,
+	type ToolExecutionOptions,
+} from "./modes/interactive/components/tool-execution.ts";
 export { TreeSelectorComponent } from "./modes/interactive/components/tree-selector.ts";
 export { UserMessageComponent } from "./modes/interactive/components/user-message.ts";
 export { UserMessageSelectorComponent } from "./modes/interactive/components/user-message-selector.ts";
@@ -577,11 +611,12 @@ export {
 	type ThemeColor,
 } from "./modes/interactive/theme/theme.ts";
 export type { JsonAgentSessionEvent } from "./modes/json-event.ts";
-export { type PrintModeOptions, runPrintMode } from "./modes/print-mode.ts";
+export { type PrintModeOptions, type PrintOutputMode, runPrintMode } from "./modes/print-mode.ts";
 export {
 	type ModelInfo,
 	RpcClient,
 	type RpcClientOptions,
+	type RpcDaemonSandboxOptions,
 	type RpcEventListener,
 	type RpcToolHandler,
 } from "./modes/rpc/rpc-client.ts";

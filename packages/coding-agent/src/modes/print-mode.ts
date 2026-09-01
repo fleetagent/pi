@@ -6,24 +6,40 @@
  * - `pi --mode json "prompt"` - JSON event stream
  */
 
+import type { AgentMessage } from "@fleetagent/pi-agent-core";
 import type { AssistantMessage, ImageContent } from "@fleetagent/pi-ai";
 import { flushRawStdout, waitForRawStdoutBackpressure, writeRawStdout } from "../core/output-guard.ts";
 import type { PiAgentRuntimeHost } from "../core/pi-agent.ts";
 import { killTrackedDetachedChildren } from "../utils/shell.ts";
 import { toJsonEvent } from "./json-event.ts";
 
+export type PrintOutputMode = "text" | "json";
+
 /**
  * Options for print mode.
  */
 export interface PrintModeOptions {
 	/** Output mode: "text" for final response only, "json" for all events */
-	mode: "text" | "json";
+	mode: PrintOutputMode;
 	/** Array of additional prompts to send after initialMessage */
 	messages?: string[];
 	/** First message to send (may contain @file content) */
 	initialMessage?: string;
 	/** Images to attach to the initial message */
 	initialImages?: ImageContent[];
+}
+
+function writeFinalTextOutput(lastMessage: AgentMessage | undefined): number {
+	if (lastMessage?.role !== "assistant") return 0;
+	const assistantMessage = lastMessage as AssistantMessage;
+	if (assistantMessage.stopReason === "error" || assistantMessage.stopReason === "aborted") {
+		console.error(assistantMessage.errorMessage || `Request ${assistantMessage.stopReason}`);
+		return 1;
+	}
+	for (const content of assistantMessage.content) {
+		if (content.type === "text") writeRawStdout(`${content.text}\n`);
+	}
+	return 0;
 }
 
 /**
@@ -137,22 +153,8 @@ export async function runPrintMode(runtimeHost: PiAgentRuntimeHost, options: Pri
 		await session.waitForIdle();
 
 		if (mode === "text") {
-			const state = session.state;
-			const lastMessage = state.messages[state.messages.length - 1];
-
-			if (lastMessage?.role === "assistant") {
-				const assistantMsg = lastMessage as AssistantMessage;
-				if (assistantMsg.stopReason === "error" || assistantMsg.stopReason === "aborted") {
-					console.error(assistantMsg.errorMessage || `Request ${assistantMsg.stopReason}`);
-					exitCode = 1;
-				} else {
-					for (const content of assistantMsg.content) {
-						if (content.type === "text") {
-							writeRawStdout(`${content.text}\n`);
-						}
-					}
-				}
-			}
+			const messages = session.state.messages;
+			exitCode = writeFinalTextOutput(messages[messages.length - 1]);
 		}
 
 		return exitCode;

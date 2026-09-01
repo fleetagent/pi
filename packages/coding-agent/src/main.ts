@@ -6,12 +6,12 @@
  */
 
 import { createInterface } from "node:readline";
-import { type ImageContent, modelsAreEqual } from "@fleetagent/pi-ai";
+import { modelsAreEqual } from "@fleetagent/pi-ai";
 import { ProcessTerminal, setKeybindings, TuiMainScreen } from "@fleetagent/pi-tui";
 import chalk from "chalk";
 import { type Args, parseArgs, printHelp } from "./cli/args.ts";
 import { processFileArguments } from "./cli/file-processor.ts";
-import { buildInitialMessage } from "./cli/initial-message.ts";
+import { buildInitialMessage, type InitialMessageResult } from "./cli/initial-message.ts";
 import { listModels } from "./cli/list-models.ts";
 import { selectSession } from "./cli/session-picker.ts";
 import {
@@ -27,6 +27,12 @@ import {
 import { AuthStorage } from "./core/auth-storage.ts";
 import { exportFromFile } from "./core/export-html/index.ts";
 import type { ExtensionFactory } from "./core/extensions/types.ts";
+import {
+	canonicalProjectHookIdentity,
+	hasProjectHookConfiguration,
+	type ProjectHookTrustResult,
+	ProjectHookTrustStore,
+} from "./core/hooks/trust-store.ts";
 import { configureHttpDispatcher } from "./core/http-dispatcher.ts";
 import { KeybindingsManager } from "./core/keybindings.ts";
 import type { LspConfigurationInput } from "./core/lsp/config-loader.ts";
@@ -49,7 +55,6 @@ import { SettingsManager } from "./core/settings-manager.ts";
 import { resetTimings, time } from "./core/timings.ts";
 import {
 	createRemoteToolOperations,
-	createSshToolOperations,
 	DeferredRemoteToolOperations,
 	type ToolOperations,
 } from "./core/tools/operations.ts";
@@ -99,10 +104,7 @@ async function prepareInitialMessage(
 	parsed: Args,
 	autoResizeImages: boolean,
 	stdinContent?: string,
-): Promise<{
-	initialMessage?: string;
-	initialImages?: ImageContent[];
-}> {
+): Promise<InitialMessageResult> {
 	if (parsed.fileArgs.length === 0) {
 		return buildInitialMessage({ parsed, stdinContent });
 	}
@@ -210,6 +212,12 @@ interface RemoteSessionCliOptions {
 	projectId?: string;
 }
 
+interface LifecycleSessionManagerOptions {
+	cwd: string;
+	sessionDir?: string;
+	remote?: RemoteSessionCliOptions;
+}
+
 function resolveRemoteSessionCliOptions(parsed: Args): RemoteSessionCliOptions | undefined {
 	const baseUrl = parsed.remoteSessionBaseUrl ?? process.env[ENV_REMOTE_SESSION_BASE_URL];
 	const token = parsed.remoteSessionToken ?? process.env[ENV_REMOTE_SESSION_TOKEN];
@@ -230,11 +238,7 @@ function resolveRemoteSessionCliOptions(parsed: Args): RemoteSessionCliOptions |
 	return { baseUrl, token, projectId };
 }
 
-function createLifecycleSessionManager(options: {
-	cwd: string;
-	sessionDir?: string;
-	remote?: RemoteSessionCliOptions;
-}): SessionManager {
+function createLifecycleSessionManager(options: LifecycleSessionManagerOptions): SessionManager {
 	if (options.remote) {
 		return new RemoteSessionManager({
 			baseUrl: options.remote.baseUrl,
@@ -268,6 +272,27 @@ async function resolveRemoteInitialSession(parsed: Args, manager: SessionManager
 		return await manager.continueRecent();
 	}
 	return await manager.create();
+}
+
+async function resolveLocalRequestedSession(sessionArg: string, cwd: string, sessionDir?: string): Promise<Session> {
+	const resolved = await resolveSessionPath(sessionArg, cwd, sessionDir);
+	switch (resolved.type) {
+		case "path":
+		case "local":
+			return openSessionOrExit(resolved.path, process.cwd(), sessionDir);
+		case "global": {
+			console.log(chalk.yellow(`Session found in different project: ${resolved.cwd}`));
+			const shouldFork = await promptConfirm("Fork this session into current directory?");
+			if (!shouldFork) {
+				console.log(chalk.dim("Aborted."));
+				process.exit(0);
+			}
+			return forkSessionOrExit(resolved.path, cwd, sessionDir);
+		}
+		case "not_found":
+			console.error(chalk.red(`No session found matching '${resolved.arg}'`));
+			process.exit(1);
+	}
 }
 
 async function resolveInitialSession(
@@ -308,29 +333,7 @@ async function resolveInitialSession(
 		}
 	}
 
-	if (parsed.session) {
-		const resolved = await resolveSessionPath(parsed.session, cwd, sessionDir);
-
-		switch (resolved.type) {
-			case "path":
-			case "local":
-				return openSessionOrExit(resolved.path, process.cwd(), sessionDir);
-
-			case "global": {
-				console.log(chalk.yellow(`Session found in different project: ${resolved.cwd}`));
-				const shouldFork = await promptConfirm("Fork this session into current directory?");
-				if (!shouldFork) {
-					console.log(chalk.dim("Aborted."));
-					process.exit(0);
-				}
-				return forkSessionOrExit(resolved.path, cwd, sessionDir);
-			}
-
-			case "not_found":
-				console.error(chalk.red(`No session found matching '${resolved.arg}'`));
-				process.exit(1);
-		}
-	}
+	if (parsed.session) return resolveLocalRequestedSession(parsed.session, cwd, sessionDir);
 
 	if (parsed.resume) {
 		initTheme(settingsManager.getTheme(), true);
@@ -356,98 +359,83 @@ async function resolveInitialSession(
 	return new LocalSessionManager({ cwd: cwd, sessionDir: sessionDir }).create();
 }
 
+interface SessionOptionsResolution {
+	options: PiAgentSessionOptions;
+	cliThinkingFromModel: boolean;
+	diagnostics: PiAgentDiagnostic[];
+}
+
+function applyCliModelSelection(
+	parsed: Args,
+	modelRegistry: ModelRegistry,
+	resolution: SessionOptionsResolution,
+): void {
+	if (!parsed.model) return;
+	const resolved = resolveCliModel({
+		cliProvider: parsed.provider,
+		cliModel: parsed.model,
+		modelRegistry,
+	});
+	if (resolved.warning) resolution.diagnostics.push({ type: "warning", message: resolved.warning });
+	if (resolved.error) resolution.diagnostics.push({ type: "error", message: resolved.error });
+	if (!resolved.model) return;
+	resolution.options.model = resolved.model;
+	if (!parsed.thinking && resolved.thinkingLevel) {
+		resolution.options.thinkingLevel = resolved.thinkingLevel;
+		resolution.cliThinkingFromModel = true;
+	}
+}
+
+function selectDefaultScopedModel(
+	scopedModels: ScopedModel[],
+	modelRegistry: ModelRegistry,
+	settingsManager: SettingsManager,
+): ScopedModel {
+	const savedProvider = settingsManager.getDefaultProvider();
+	const savedModelId = settingsManager.getDefaultModel();
+	const savedModel = savedProvider && savedModelId ? modelRegistry.find(savedProvider, savedModelId) : undefined;
+	return (
+		(savedModel ? scopedModels.find((scoped) => modelsAreEqual(scoped.model, savedModel)) : undefined) ??
+		scopedModels[0]
+	);
+}
+
+function applyCliToolSelection(parsed: Args, options: PiAgentSessionOptions): void {
+	if (parsed.noTools) options.noTools = "all";
+	else if (parsed.noBuiltinTools) options.noTools = "builtin";
+	if (parsed.tools) options.tools = [...parsed.tools];
+}
+
 function buildSessionOptions(
 	parsed: Args,
 	scopedModels: ScopedModel[],
 	hasExistingSession: boolean,
 	modelRegistry: ModelRegistry,
 	settingsManager: SettingsManager,
-): {
-	options: PiAgentSessionOptions;
-	cliThinkingFromModel: boolean;
-	diagnostics: PiAgentDiagnostic[];
-} {
-	const options: PiAgentSessionOptions = {};
-	const diagnostics: PiAgentDiagnostic[] = [];
-	let cliThinkingFromModel = false;
-
-	// Model from CLI
-	// - supports --provider <name> --model <pattern>
-	// - supports --model <provider>/<pattern>
-	if (parsed.model) {
-		const resolved = resolveCliModel({
-			cliProvider: parsed.provider,
-			cliModel: parsed.model,
-			modelRegistry,
-		});
-		if (resolved.warning) {
-			diagnostics.push({ type: "warning", message: resolved.warning });
-		}
-		if (resolved.error) {
-			diagnostics.push({ type: "error", message: resolved.error });
-		}
-		if (resolved.model) {
-			options.model = resolved.model;
-			// Allow "--model <pattern>:<thinking>" as a shorthand.
-			// Explicit --thinking still takes precedence (applied later).
-			if (!parsed.thinking && resolved.thinkingLevel) {
-				options.thinkingLevel = resolved.thinkingLevel;
-				cliThinkingFromModel = true;
-			}
-		}
-	}
+): SessionOptionsResolution {
+	const resolution: SessionOptionsResolution = {
+		options: {},
+		cliThinkingFromModel: false,
+		diagnostics: [],
+	};
+	applyCliModelSelection(parsed, modelRegistry, resolution);
+	const { options } = resolution;
 
 	if (!options.model && scopedModels.length > 0 && !hasExistingSession) {
-		// Check if saved default is in scoped models - use it if so, otherwise first scoped model
-		const savedProvider = settingsManager.getDefaultProvider();
-		const savedModelId = settingsManager.getDefaultModel();
-		const savedModel = savedProvider && savedModelId ? modelRegistry.find(savedProvider, savedModelId) : undefined;
-		const savedInScope = savedModel ? scopedModels.find((sm) => modelsAreEqual(sm.model, savedModel)) : undefined;
-
-		if (savedInScope) {
-			options.model = savedInScope.model;
-			// Use thinking level from scoped model config if explicitly set
-			if (!parsed.thinking && savedInScope.thinkingLevel) {
-				options.thinkingLevel = savedInScope.thinkingLevel;
-			}
-		} else {
-			options.model = scopedModels[0].model;
-			// Use thinking level from first scoped model if explicitly set
-			if (!parsed.thinking && scopedModels[0].thinkingLevel) {
-				options.thinkingLevel = scopedModels[0].thinkingLevel;
-			}
-		}
+		const selected = selectDefaultScopedModel(scopedModels, modelRegistry, settingsManager);
+		options.model = selected.model;
+		if (!parsed.thinking && selected.thinkingLevel) options.thinkingLevel = selected.thinkingLevel;
 	}
 
-	// Thinking level from CLI (takes precedence over scoped model thinking levels set above)
-	if (parsed.thinking) {
-		options.thinkingLevel = parsed.thinking;
-	}
-
-	// Scoped models for Ctrl+P cycling
-	// Keep thinking level undefined when not explicitly set in the model pattern.
-	// Undefined means "inherit current session thinking level" during cycling.
+	if (parsed.thinking) options.thinkingLevel = parsed.thinking;
 	if (scopedModels.length > 0) {
-		options.scopedModels = scopedModels.map((sm) => ({
-			model: sm.model,
-			thinkingLevel: sm.thinkingLevel,
+		options.scopedModels = scopedModels.map((scoped) => ({
+			model: scoped.model,
+			thinkingLevel: scoped.thinkingLevel,
 		}));
 	}
-
-	// API key from CLI - set in authStorage
-	// (handled by caller before createAgentSession)
-
-	// Tools
-	if (parsed.noTools) {
-		options.noTools = "all";
-	} else if (parsed.noBuiltinTools) {
-		options.noTools = "builtin";
-	}
-	if (parsed.tools) {
-		options.tools = [...parsed.tools];
-	}
-
-	return { options, cliThinkingFromModel, diagnostics };
+	applyCliToolSelection(parsed, options);
+	return resolution;
 }
 
 function resolveCliPaths(cwd: string, paths: string[] | undefined): string[] | undefined {
@@ -488,15 +476,205 @@ async function promptForMissingSessionCwd(
 	});
 }
 
+export type ProjectHookTrustChoice = "deny" | "once" | "always";
+
+export async function promptForProjectHookTrust(
+	cwd: string,
+	identity: string,
+	settingsManager: SettingsManager,
+): Promise<ProjectHookTrustChoice> {
+	initTheme(settingsManager.getTheme());
+	setKeybindings(KeybindingsManager.create());
+	const title = [
+		`Project hooks were found in ${cwd}.`,
+		"Project hooks execute in the active workspace: as your host user locally, or inside an active sandbox/remote backend.",
+		`Trust always authorizes all current and future hook changes in ${identity}.`,
+	].join("\n");
+
+	return new Promise((resolve) => {
+		const ui = new TuiMainScreen(new ProcessTerminal(), settingsManager.getShowHardwareCursor());
+		ui.setClearOnShrink(settingsManager.getClearOnShrink());
+		let settled = false;
+		const finish = (choice: ProjectHookTrustChoice) => {
+			if (settled) return;
+			settled = true;
+			ui.stop();
+			resolve(choice);
+		};
+		const selector = new ExtensionSelectorComponent(
+			title,
+			["Don't trust", "Trust once", "Trust always"],
+			(option) => {
+				if (option === "Trust once") finish("once");
+				else if (option === "Trust always") finish("always");
+				else finish("deny");
+			},
+			() => finish("deny"),
+			{ tui: ui },
+		);
+		ui.addChild(selector);
+		ui.setFocus(selector);
+		ui.start();
+	});
+}
+export interface ProjectHookTrustPolicyOptions {
+	initialCwd: string;
+	initialSessionId: string;
+	explicitTrust: boolean;
+	interactive: boolean;
+	skipInitialPrompt: boolean;
+	store: ProjectHookTrustStore;
+	prompt: (cwd: string, identity: string) => Promise<ProjectHookTrustChoice>;
+	reportError?: (error: string | undefined) => void;
+}
+
+export interface ProjectHookTrustPolicy {
+	resolveInitial(backendAllowsProjectHooks: boolean): Promise<boolean>;
+	getInitialTrustedIdentity(): string | undefined;
+	resolveFor(sessionCwd: string, sessionId: string): ProjectHookTrustResult;
+	isTrustedFor(sessionCwd: string, sessionId: string): boolean;
+}
+interface ProjectHookTrustPolicyState {
+	initialTrusted: boolean;
+	initialTrustedIdentity: string | undefined;
+	trustOnceIdentity: string | undefined;
+	trustOnceSessionId: string | undefined;
+	trustOnceConsumed: boolean;
+}
+
+type ProjectHookTrustErrorReporter = (error: string | undefined) => void;
+
+function identifyInitialProjectHooks(cwd: string, reportError: ProjectHookTrustErrorReporter): string | undefined {
+	try {
+		return canonicalProjectHookIdentity(cwd);
+	} catch (error) {
+		reportError(
+			`Unable to identify project hooks repository: ${error instanceof Error ? error.message : String(error)}`,
+		);
+		return undefined;
+	}
+}
+
+function applyInitialProjectHookTrustChoice(
+	choice: ProjectHookTrustChoice,
+	identity: string,
+	options: ProjectHookTrustPolicyOptions,
+	state: ProjectHookTrustPolicyState,
+	reportError: ProjectHookTrustErrorReporter,
+): void {
+	if (choice === "once" || choice === "always") {
+		state.initialTrusted = true;
+		state.initialTrustedIdentity = identity;
+	}
+	if (choice === "once") {
+		state.trustOnceIdentity = identity;
+		state.trustOnceSessionId = options.initialSessionId;
+	}
+	if (choice === "always") {
+		const saved = options.store.trustAlwaysIdentity(identity);
+		reportError(saved.error);
+	}
+}
+
+async function resolveInitialProjectHookTrust(
+	backendAllowsProjectHooks: boolean,
+	options: ProjectHookTrustPolicyOptions,
+	state: ProjectHookTrustPolicyState,
+	reportError: ProjectHookTrustErrorReporter,
+): Promise<boolean> {
+	if (!backendAllowsProjectHooks) return state.initialTrusted;
+	if (state.initialTrusted) return true;
+	if (options.skipInitialPrompt) return false;
+	if (!hasProjectHookConfiguration(options.initialCwd)) return false;
+
+	const persisted = options.store.isTrusted(options.initialCwd);
+	reportError(persisted.error);
+	state.initialTrusted = persisted.trusted;
+	state.initialTrustedIdentity = persisted.trusted ? persisted.identity : undefined;
+	if (state.initialTrusted || !options.interactive) return state.initialTrusted;
+
+	const identity = identifyInitialProjectHooks(options.initialCwd, reportError);
+	if (!identity) return false;
+	const choice = await options.prompt(options.initialCwd, identity);
+	applyInitialProjectHookTrustChoice(choice, identity, options, state, reportError);
+	return state.initialTrusted;
+}
+
+/** Orchestrates the CLI's startup and per-session project-hook trust decisions. */
+export function createProjectHookTrustPolicy(options: ProjectHookTrustPolicyOptions): ProjectHookTrustPolicy {
+	const state: ProjectHookTrustPolicyState = {
+		initialTrusted: options.explicitTrust,
+		initialTrustedIdentity: undefined,
+		trustOnceIdentity: undefined,
+		trustOnceSessionId: undefined,
+		trustOnceConsumed: false,
+	};
+	const reportError = options.reportError ?? (() => {});
+
+	return {
+		resolveInitial(backendAllowsProjectHooks: boolean): Promise<boolean> {
+			return resolveInitialProjectHookTrust(backendAllowsProjectHooks, options, state, reportError);
+		},
+
+		getInitialTrustedIdentity(): string | undefined {
+			return state.initialTrustedIdentity;
+		},
+
+		resolveFor(sessionCwd: string, sessionId: string): ProjectHookTrustResult {
+			if (options.explicitTrust) return { trusted: true };
+			if (!hasProjectHookConfiguration(sessionCwd)) return { trusted: false };
+			try {
+				if (
+					!state.trustOnceConsumed &&
+					state.trustOnceIdentity &&
+					state.trustOnceSessionId === sessionId &&
+					canonicalProjectHookIdentity(sessionCwd) === state.trustOnceIdentity
+				) {
+					state.trustOnceConsumed = true;
+					return { trusted: true, identity: state.trustOnceIdentity };
+				}
+			} catch (error) {
+				const message = `Unable to identify project hooks repository: ${error instanceof Error ? error.message : String(error)}`;
+				reportError(message);
+				return { trusted: false, error: message };
+			}
+			const persisted = options.store.isTrusted(sessionCwd);
+			reportError(persisted.error);
+			return persisted;
+		},
+
+		isTrustedFor(sessionCwd: string, sessionId: string): boolean {
+			return this.resolveFor(sessionCwd, sessionId).trusted;
+		},
+	};
+}
+
 export interface MainOptions {
 	extensionFactories?: ExtensionFactory[];
 	daemonRunner?: (args: readonly string[]) => Promise<void>;
+	/** Test/embedding override for the interactive project-hook trust prompt. */
+	projectHookTrustPrompt?: (cwd: string, identity: string) => Promise<ProjectHookTrustChoice>;
+	/** Test/embedding override for persistent project-hook trust storage. */
+	projectHookTrustStore?: ProjectHookTrustStore;
+}
+interface ParsedMainInvocation {
+	parsed: Args;
+	appMode: PiAgentAppMode;
 }
 
-export async function main(args: string[], options?: MainOptions) {
+interface StartupSessionResolution {
+	cwd: string;
+	agentDir: string;
+	startupSettingsManager: SettingsManager;
+	sessionDir: string | undefined;
+	remoteSessionOptions: RemoteSessionCliOptions | undefined;
+	initialSession: Session;
+}
+
+async function runCliPreflight(args: string[], options: MainOptions | undefined): Promise<boolean> {
 	if (isDaemonCommand(args)) {
 		await (options?.daemonRunner ?? runDaemonCommand)(args);
-		return;
+		return true;
 	}
 	configureHttpDispatcher();
 	resetTimings();
@@ -505,73 +683,59 @@ export async function main(args: string[], options?: MainOptions) {
 		process.env.PI_OFFLINE = "1";
 		process.env.PI_SKIP_VERSION_CHECK = "1";
 	}
+	if (process.platform === "win32") cleanupWindowsSelfUpdateQuarantine(getPackageDir());
+	if (await handlePackageCommand(args)) return true;
+	return handleConfigCommand(args);
+}
 
-	if (process.platform === "win32") {
-		cleanupWindowsSelfUpdateQuarantine(getPackageDir());
+function reportArgumentDiagnostics(parsed: Args): void {
+	if (parsed.diagnostics.length === 0) return;
+	for (const diagnostic of parsed.diagnostics) {
+		const color = diagnostic.type === "error" ? chalk.red : chalk.yellow;
+		console.error(color(`${diagnostic.type === "error" ? "Error" : "Warning"}: ${diagnostic.message}`));
 	}
+	if (parsed.diagnostics.some((diagnostic) => diagnostic.type === "error")) process.exit(1);
+}
 
-	if (await handlePackageCommand(args)) {
-		return;
-	}
-
-	if (await handleConfigCommand(args)) {
-		return;
-	}
-
-	const parsed = parseArgs(args);
-	if (parsed.diagnostics.length > 0) {
-		for (const d of parsed.diagnostics) {
-			const color = d.type === "error" ? chalk.red : chalk.yellow;
-			console.error(color(`${d.type === "error" ? "Error" : "Warning"}: ${d.message}`));
-		}
-		if (parsed.diagnostics.some((d) => d.type === "error")) {
-			process.exit(1);
-		}
-	}
-	time("parseArgs");
-	const appMode = resolveAppMode(parsed, process.stdin.isTTY);
-	PiAgent.setupStdio({ mode: appMode });
-
+async function handleCliMetadataCommands(parsed: Args): Promise<void> {
 	if (parsed.version) {
 		console.log(VERSION);
 		process.exit(0);
 	}
-
-	if (parsed.export) {
-		let result: string;
-		try {
-			const outputPath = parsed.messages.length > 0 ? parsed.messages[0] : undefined;
-			result = await exportFromFile(parsed.export, outputPath);
-		} catch (error: unknown) {
-			const message = error instanceof Error ? error.message : "Failed to export session";
-			console.error(chalk.red(`Error: ${message}`));
-			process.exit(1);
-		}
-		console.log(`Exported to: ${result}`);
-		process.exit(0);
+	if (!parsed.export) return;
+	let result: string;
+	try {
+		const outputPath = parsed.messages.length > 0 ? parsed.messages[0] : undefined;
+		result = await exportFromFile(parsed.export, outputPath);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : "Failed to export session";
+		console.error(chalk.red(`Error: ${message}`));
+		process.exit(1);
 	}
+	console.log(`Exported to: ${result}`);
+	process.exit(0);
+}
 
+async function parseMainInvocation(args: string[]): Promise<ParsedMainInvocation> {
+	const parsed = parseArgs(args);
+	reportArgumentDiagnostics(parsed);
+	time("parseArgs");
+	const appMode = resolveAppMode(parsed, process.stdin.isTTY);
+	PiAgent.setupStdio({ mode: appMode });
+	await handleCliMetadataCommands(parsed);
 	if (parsed.mode === "rpc" && parsed.fileArgs.length > 0) {
 		console.error(chalk.red("Error: @file arguments are not supported in RPC mode"));
 		process.exit(1);
 	}
-
 	validateForkFlags(parsed);
+	return { parsed, appMode };
+}
 
-	// Run migrations (pass cwd for project-local migrations)
-	const { migratedAuthProviders: migratedProviders, deprecationWarnings } = runMigrations(process.cwd());
-	time("runMigrations");
-
+async function resolveStartupSession(parsed: Args, appMode: PiAgentAppMode): Promise<StartupSessionResolution> {
 	const cwd = process.cwd();
 	const agentDir = getAgentDir();
 	const startupSettingsManager = SettingsManager.create(cwd, agentDir);
 	reportDiagnostics(collectSettingsDiagnostics(startupSettingsManager, "startup session lookup"));
-
-	// Decide the final runtime cwd before creating cwd-bound runtime services.
-	// --session and --resume may select a session from another project, so project-local
-	// settings, resources, provider registrations, and models must be resolved only after
-	// the target session cwd is known. The startup-cwd settings manager is used only for
-	// sessionDir lookup during session selection.
 	const envSessionDir = process.env[ENV_SESSION_DIR];
 	const sessionDir =
 		(parsed.sessionDir ? normalizePath(parsed.sessionDir) : undefined) ??
@@ -587,72 +751,130 @@ export async function main(args: string[], options?: MainOptions) {
 	);
 	const missingSessionCwdIssue = getMissingSessionCwdIssue(initialSession, cwd);
 	if (missingSessionCwdIssue) {
-		if (appMode === "interactive") {
-			const selectedCwd = await promptForMissingSessionCwd(missingSessionCwdIssue, startupSettingsManager);
-			if (!selectedCwd) {
-				process.exit(0);
-			}
-			initialSession = await createLifecycleSessionManager({
-				cwd,
-				sessionDir,
-				remote: remoteSessionOptions,
-			}).openReference(missingSessionCwdIssue.sessionReference!, { cwdOverride: selectedCwd });
-		} else {
+		if (appMode !== "interactive") {
 			console.error(chalk.red(new MissingSessionCwdError(missingSessionCwdIssue).message));
 			process.exit(1);
 		}
+		const selectedCwd = await promptForMissingSessionCwd(missingSessionCwdIssue, startupSettingsManager);
+		if (!selectedCwd) process.exit(0);
+		initialSession = await createLifecycleSessionManager({
+			cwd,
+			sessionDir,
+			remote: remoteSessionOptions,
+		}).openReference(missingSessionCwdIssue.sessionReference!, { cwdOverride: selectedCwd });
 	}
 	time("resolveInitialSession");
+	return { cwd, agentDir, startupSettingsManager, sessionDir, remoteSessionOptions, initialSession };
+}
 
-	const authStorage = AuthStorage.create();
-	const runtimeSessionManager = parsed.noSession
-		? new InMemorySessionManager(initialSession.getCwd())
-		: createLifecycleSessionManager({ cwd: initialSession.getCwd(), sessionDir, remote: remoteSessionOptions });
-	let toolOperations: ToolOperations | undefined;
+async function resolveStartupToolOperations(parsed: Args): Promise<ToolOperations | undefined> {
 	const remoteDeferred = parsed.remoteDeferred;
-	const remoteDeferredCwd = parsed.remoteCwd;
-	if ([parsed.ssh, remoteDeferred, parsed.remote].filter(Boolean).length > 1 && !parsed.help) {
-		console.error(chalk.red("Error: --ssh, --remote-deferred, and --remote cannot be used together"));
+	if (remoteDeferred && parsed.remote && !parsed.help) {
+		console.error(chalk.red("Error: --remote-deferred and --remote cannot be used together"));
 		process.exit(1);
 	}
 	if (parsed.remote && !parsed.help) {
 		try {
-			toolOperations = await createRemoteToolOperations(parsed.remote);
-		} catch (error: unknown) {
+			return await createRemoteToolOperations(parsed.remote);
+		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			console.error(chalk.red(`Error: failed to initialize remote tool operations: ${message}`));
 			process.exit(1);
 		}
-	} else if (parsed.ssh && !parsed.help) {
-		try {
-			toolOperations = await createSshToolOperations(parsed.ssh);
-		} catch (error: unknown) {
-			const message = error instanceof Error ? error.message : String(error);
-			console.error(chalk.red(`Error: failed to initialize SSH tool operations: ${message}`));
-			process.exit(1);
-		}
-	} else if (remoteDeferred && !parsed.help) {
-		if (!remoteDeferredCwd) {
-			console.error(chalk.red("Error: --remote-deferred requires --remote-cwd <path>"));
-			process.exit(1);
-		}
-		toolOperations = new DeferredRemoteToolOperations(remoteDeferredCwd);
 	}
+	if (!remoteDeferred || parsed.help) return undefined;
+	if (!parsed.remoteCwd) {
+		console.error(chalk.red("Error: --remote-deferred requires --remote-cwd <path>"));
+		process.exit(1);
+	}
+	return new DeferredRemoteToolOperations(parsed.remoteCwd);
+}
+
+function createCliLspInputs(parsed: Args, cwd: string): LspConfigurationInput[] {
+	const inputs: LspConfigurationInput[] = [];
+	if (parsed.lspConfig) inputs.push({ type: "file", path: resolvePath(parsed.lspConfig, cwd), scope: "cli" });
+	if (parsed.noLsp) inputs.push({ type: "disabled", source: "--no-lsp", scope: "cli" });
+	return inputs;
+}
+async function handleRuntimeInformationCommands(parsed: Args, piAgent: PiAgent): Promise<void> {
+	const { modelRegistry, resourceLoader } = piAgent.services;
+	if (parsed.help) {
+		const extensionFlags = resourceLoader
+			.getExtensions()
+			.extensions.flatMap((extension) => Array.from(extension.flags.values()));
+		printHelp(extensionFlags);
+		process.exit(0);
+	}
+	if (parsed.listModels === undefined) return;
+	const searchPattern = typeof parsed.listModels === "string" ? parsed.listModels : undefined;
+	await listModels(modelRegistry, searchPattern);
+	process.exit(0);
+}
+
+async function reportRuntimeStartupDiagnostics(piAgent: PiAgent, deprecationWarnings: string[]): Promise<void> {
+	if (piAgent.mode === "interactive" && deprecationWarnings.length > 0) {
+		await showDeprecationWarnings(deprecationWarnings);
+	}
+	time("resolveModelScope");
+	const hasFatalDiagnostics = piAgent.diagnostics.some(isFatalPiAgentDiagnostic);
+	if (piAgent.mode !== "interactive" || hasFatalDiagnostics) reportDiagnostics(piAgent.diagnostics);
+	if (hasFatalDiagnostics) process.exit(1);
+	time("createAgentSession");
+}
+
+export async function main(args: string[], options?: MainOptions) {
+	if (await runCliPreflight(args, options)) return;
+	const { parsed, appMode } = await parseMainInvocation(args);
+
+	// Run migrations (pass cwd for project-local migrations)
+	const { migratedAuthProviders: migratedProviders, deprecationWarnings } = runMigrations(process.cwd());
+	time("runMigrations");
+
+	// Decide the final runtime cwd before creating cwd-bound runtime services.
+	// --session and --resume may select a session from another project, so project-local
+	// settings, resources, provider registrations, and models must be resolved only after
+	// the target session cwd is known. The startup-cwd settings manager is used only for
+	// sessionDir lookup during session selection.
+	const { cwd, agentDir, startupSettingsManager, sessionDir, remoteSessionOptions, initialSession } =
+		await resolveStartupSession(parsed, appMode);
+	const projectHookTrustStore = options?.projectHookTrustStore ?? new ProjectHookTrustStore(agentDir);
+	const reportedProjectHookTrustErrors = new Set<string>();
+	const reportProjectHookTrustError = (error: string | undefined) => {
+		if (!error || reportedProjectHookTrustErrors.has(error)) return;
+		reportedProjectHookTrustErrors.add(error);
+		console.error(chalk.yellow(`Warning: ${error}`));
+	};
+	const initialHookCwd = initialSession.getCwd();
+	const projectHookTrustPolicy = createProjectHookTrustPolicy({
+		initialCwd: initialHookCwd,
+		initialSessionId: initialSession.getSessionId(),
+		explicitTrust: parsed.trustProjectHooks === true,
+		interactive: appMode === "interactive",
+		skipInitialPrompt: parsed.help || parsed.listModels !== undefined,
+		store: projectHookTrustStore,
+		prompt:
+			options?.projectHookTrustPrompt ??
+			((promptCwd, promptIdentity) => promptForProjectHookTrust(promptCwd, promptIdentity, startupSettingsManager)),
+		reportError: reportProjectHookTrustError,
+	});
+	const authStorage = AuthStorage.create();
+	const runtimeSessionManager = parsed.noSession
+		? new InMemorySessionManager(initialSession.getCwd())
+		: createLifecycleSessionManager({ cwd: initialSession.getCwd(), sessionDir, remote: remoteSessionOptions });
+	const toolOperations = await resolveStartupToolOperations(parsed);
+	const initialHookBackend = toolOperations?.getBackendInfo?.();
+	const initialProjectHooksTrusted = await projectHookTrustPolicy.resolveInitial(
+		toolOperations === undefined || initialHookBackend?.type === "local",
+	);
+	const initialTrustedProjectHooksIdentity = projectHookTrustPolicy.getInitialTrustedIdentity();
 	const backendType = toolOperations?.getBackendInfo?.()?.type;
-	const instructionPathCwd =
-		toolOperations && (backendType === "ssh" || backendType === "remote") ? toolOperations.cwd : cwd;
+	const instructionPathCwd = toolOperations && backendType === "remote" ? toolOperations.cwd : cwd;
 	const resolvedExtensionPaths = resolveCliPaths(cwd, parsed.extensions);
 	const resolvedSkillPaths = resolveCliPaths(instructionPathCwd, parsed.skills);
 	const resolvedRulePaths = resolveCliPaths(instructionPathCwd, parsed.rules);
 	const resolvedPromptTemplatePaths = resolveCliPaths(instructionPathCwd, parsed.promptTemplates);
 	const resolvedThemePaths = resolveCliPaths(cwd, parsed.themes);
-	const cliLspInputs: LspConfigurationInput[] = [];
-	if (parsed.lspConfig) {
-		cliLspInputs.push({ type: "file", path: resolvePath(parsed.lspConfig, cwd), scope: "cli" });
-	}
-	if (parsed.noLsp) {
-		cliLspInputs.push({ type: "disabled", source: "--no-lsp", scope: "cli" });
-	}
+	const cliLspInputs = createCliLspInputs(parsed, cwd);
 	const piAgent = await PiAgent.create({
 		toolOperations,
 		ownsToolOperations: toolOperations !== undefined,
@@ -661,6 +883,8 @@ export async function main(args: string[], options?: MainOptions) {
 		agentDir,
 		sessionManager: runtimeSessionManager,
 		authStorage,
+		trustProjectHooks: initialProjectHooksTrusted,
+		trustedProjectHooksIdentity: initialTrustedProjectHooksIdentity,
 		extensionFlagValues: parsed.unknownFlags,
 		resourceLoaderOptions: {
 			toolOperations,
@@ -708,13 +932,12 @@ export async function main(args: string[], options?: MainOptions) {
 			if (toolOperations) {
 				const backend = toolOperations.getBackendInfo?.();
 				let message = `Deferred remote backend mode enabled (cwd: ${toolOperations.cwd})`;
-				if (backend?.type === "ssh" && backend.configured) {
-					message = `SSH tool operations enabled: ${backend.remote}:${backend.cwd}`;
-				} else if (backend?.type === "remote" && backend.configured) {
+				if (backend?.type === "remote" && backend.configured) {
 					message = `Remote tool operations enabled: ${backend.url} (cwd: ${backend.cwd})`;
 				}
 				diagnostics.push({ type: "info", message });
 			}
+			const projectHookTrust = projectHookTrustPolicy.resolveFor(services.cwd, session.getSessionId());
 
 			return {
 				model: sessionOptions.model,
@@ -724,6 +947,8 @@ export async function main(args: string[], options?: MainOptions) {
 				noTools: sessionOptions.noTools,
 				customTools: sessionOptions.customTools,
 				toolOperations,
+				trustProjectHooks: projectHookTrust.trusted,
+				trustedProjectHooksIdentity: projectHookTrust.identity,
 				lsp: cliLspInputs,
 				diagnostics,
 			};
@@ -731,23 +956,8 @@ export async function main(args: string[], options?: MainOptions) {
 	});
 	await piAgent.createAgentSession({ session: initialSession });
 	time("createAgentSessionRuntime");
-	const runtime = piAgent;
-	const { services } = runtime;
-	const { settingsManager, modelRegistry, resourceLoader } = services;
-
-	if (parsed.help) {
-		const extensionFlags = resourceLoader
-			.getExtensions()
-			.extensions.flatMap((extension) => Array.from(extension.flags.values()));
-		printHelp(extensionFlags);
-		process.exit(0);
-	}
-
-	if (parsed.listModels !== undefined) {
-		const searchPattern = typeof parsed.listModels === "string" ? parsed.listModels : undefined;
-		await listModels(modelRegistry, searchPattern);
-		process.exit(0);
-	}
+	const { settingsManager } = piAgent.services;
+	await handleRuntimeInformationCommands(parsed, piAgent);
 
 	const stdinContent = await piAgent.readPipedStdin();
 	time("readPipedStdin");
@@ -761,20 +971,7 @@ export async function main(args: string[], options?: MainOptions) {
 	initTheme(settingsManager.getTheme(), piAgent.mode === "interactive");
 	time("initTheme");
 
-	// Show deprecation warnings in interactive mode
-	if (piAgent.mode === "interactive" && deprecationWarnings.length > 0) {
-		await showDeprecationWarnings(deprecationWarnings);
-	}
-
-	time("resolveModelScope");
-	const hasFatalDiagnostics = runtime.diagnostics.some(isFatalPiAgentDiagnostic);
-	if (piAgent.mode !== "interactive" || hasFatalDiagnostics) {
-		reportDiagnostics(runtime.diagnostics);
-	}
-	if (hasFatalDiagnostics) {
-		process.exit(1);
-	}
-	time("createAgentSession");
+	await reportRuntimeStartupDiagnostics(piAgent, deprecationWarnings);
 
 	await piAgent.runMode({
 		migratedProviders,

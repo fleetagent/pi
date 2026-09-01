@@ -11,8 +11,12 @@ import { createWriteTool } from "../src/core/tools/write.ts";
 function delay(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
+interface DeferredSignal {
+	promise: Promise<void>;
+	resolve: () => void;
+}
 
-function createDeferred(): { promise: Promise<void>; resolve: () => void } {
+function createDeferred(): DeferredSignal {
 	let resolve!: () => void;
 	const promise = new Promise<void>((promiseResolve) => {
 		resolve = promiseResolve;

@@ -42,56 +42,80 @@ function abortableSleep(ms: number, signal: AbortSignal | undefined, cancelMessa
 	});
 }
 
+interface DeviceCodePollingState {
+	deadline: number;
+	intervalMs: number;
+	slowDownResponses: number;
+}
+
+function createDeviceCodePollingState(options: OAuthDeviceCodePollOptions): DeviceCodePollingState {
+	return {
+		deadline:
+			typeof options.expiresInSeconds === "number"
+				? Date.now() + options.expiresInSeconds * 1000
+				: Number.POSITIVE_INFINITY,
+		intervalMs: Math.max(
+			MINIMUM_INTERVAL_MS,
+			Math.floor((options.intervalSeconds ?? DEFAULT_POLL_INTERVAL_SECONDS) * 1000),
+		),
+		slowDownResponses: 0,
+	};
+}
+
+function resolveSlowDownInterval(intervalMs: number, serverIntervalSeconds: number | undefined): number {
+	if (
+		typeof serverIntervalSeconds === "number" &&
+		Number.isFinite(serverIntervalSeconds) &&
+		serverIntervalSeconds > 0
+	) {
+		return Math.max(MINIMUM_INTERVAL_MS, Math.floor(serverIntervalSeconds * 1000));
+	}
+	return Math.max(MINIMUM_INTERVAL_MS, intervalMs + SLOW_DOWN_INTERVAL_INCREMENT_MS);
+}
+
+function applyDeviceCodePollResult(
+	state: DeviceCodePollingState,
+	result: OAuthDeviceCodePollResult,
+): string | undefined {
+	if (result.status === "complete") return result.accessToken;
+	if (result.status === "failed") throw new Error(result.message);
+	if (result.status === "slow_down") {
+		state.slowDownResponses += 1;
+		// GitHub can report a new required minimum in `interval`; using it avoids
+		// polling early forever under WSL/VM clock drift. Without it, apply RFC 8628.
+		state.intervalMs = resolveSlowDownInterval(state.intervalMs, result.intervalSeconds);
+	}
+	return undefined;
+}
+
+async function waitForNextDeviceCodePoll(
+	state: DeviceCodePollingState,
+	signal: AbortSignal | undefined,
+): Promise<boolean> {
+	const remainingMs = state.deadline - Date.now();
+	if (remainingMs <= 0) return false;
+	await abortableSleep(Math.min(state.intervalMs, remainingMs), signal, CANCEL_MESSAGE);
+	return true;
+}
+
+async function waitBeforeInitialDeviceCodePoll(
+	state: DeviceCodePollingState,
+	options: OAuthDeviceCodePollOptions,
+): Promise<void> {
+	if (!options.waitBeforeFirstPoll) return;
+	await waitForNextDeviceCodePoll(state, options.signal);
+}
+
 export async function pollOAuthDeviceCodeFlow(options: OAuthDeviceCodePollOptions): Promise<string> {
-	const deadline =
-		typeof options.expiresInSeconds === "number"
-			? Date.now() + options.expiresInSeconds * 1000
-			: Number.POSITIVE_INFINITY;
-	let intervalMs = Math.max(
-		MINIMUM_INTERVAL_MS,
-		Math.floor((options.intervalSeconds ?? DEFAULT_POLL_INTERVAL_SECONDS) * 1000),
-	);
+	const state = createDeviceCodePollingState(options);
+	await waitBeforeInitialDeviceCodePoll(state, options);
 
-	let slowDownResponses = 0;
-	if (options.waitBeforeFirstPoll) {
-		const remainingMs = deadline - Date.now();
-		if (remainingMs > 0) {
-			await abortableSleep(Math.min(intervalMs, remainingMs), options.signal, CANCEL_MESSAGE);
-		}
+	while (Date.now() < state.deadline) {
+		if (options.signal?.aborted) throw new Error(CANCEL_MESSAGE);
+		const accessToken = applyDeviceCodePollResult(state, await options.poll());
+		if (accessToken !== undefined) return accessToken;
+		if (!(await waitForNextDeviceCodePoll(state, options.signal))) break;
 	}
 
-	while (Date.now() < deadline) {
-		if (options.signal?.aborted) {
-			throw new Error(CANCEL_MESSAGE);
-		}
-
-		const result = await options.poll();
-		if (result.status === "complete") {
-			return result.accessToken;
-		}
-		if (result.status === "failed") {
-			throw new Error(result.message);
-		}
-		if (result.status === "slow_down") {
-			slowDownResponses += 1;
-			// Use the server-provided interval when given (GitHub reports the new required minimum
-			// in `interval`); trusting only a client-tracked value risks polling early forever under
-			// WSL/VM clock drift. Otherwise apply RFC 8628 section 3.5: increase by 5 seconds.
-			intervalMs =
-				typeof result.intervalSeconds === "number" &&
-				Number.isFinite(result.intervalSeconds) &&
-				result.intervalSeconds > 0
-					? Math.max(MINIMUM_INTERVAL_MS, Math.floor(result.intervalSeconds * 1000))
-					: Math.max(MINIMUM_INTERVAL_MS, intervalMs + SLOW_DOWN_INTERVAL_INCREMENT_MS);
-		}
-
-		const remainingMs = deadline - Date.now();
-		if (remainingMs <= 0) {
-			break;
-		}
-
-		await abortableSleep(Math.min(intervalMs, remainingMs), options.signal, CANCEL_MESSAGE);
-	}
-
-	throw new Error(slowDownResponses > 0 ? SLOW_DOWN_TIMEOUT_MESSAGE : TIMEOUT_MESSAGE);
+	throw new Error(state.slowDownResponses > 0 ? SLOW_DOWN_TIMEOUT_MESSAGE : TIMEOUT_MESSAGE);
 }

@@ -3,16 +3,10 @@ import { getEnvApiKey } from "../src/env-api-keys.ts";
 import { getModels, getProviders } from "../src/models.ts";
 import { complete } from "../src/stream.ts";
 import type { Api, KnownProvider, Model, ProviderStreamOptions } from "../src/types.ts";
+import type { AnthropicMessagesE2ECase } from "./anthropic-utils.ts";
 import { resolveApiKey } from "./oauth.ts";
 
 const githubCopilotToken = await resolveApiKey("github-copilot");
-
-interface AnthropicLongCacheRetentionE2ECase {
-	name: string;
-	provider: KnownProvider;
-	model: Model<"anthropic-messages">;
-	apiKey: string | undefined;
-}
 
 function getE2EApiKey(provider: KnownProvider): string | undefined {
 	if (provider === "github-copilot") {
@@ -26,7 +20,7 @@ function getAnthropicMessagesModels(provider: KnownProvider): Model<"anthropic-m
 	return models.filter((model) => model.api === "anthropic-messages") as Model<"anthropic-messages">[];
 }
 
-const anthropicMessagesCases: AnthropicLongCacheRetentionE2ECase[] = getProviders().flatMap((provider) =>
+const anthropicMessagesCases: AnthropicMessagesE2ECase[] = getProviders().flatMap((provider) =>
 	getAnthropicMessagesModels(provider).map((model) => ({
 		name: `${provider}/${model.id}`,
 		provider,
@@ -51,8 +45,8 @@ function getProbePriority(model: Model<"anthropic-messages">): number {
 	return priority;
 }
 
-function selectOneCasePerProvider(cases: AnthropicLongCacheRetentionE2ECase[]): AnthropicLongCacheRetentionE2ECase[] {
-	const byProvider = new Map<KnownProvider, AnthropicLongCacheRetentionE2ECase[]>();
+function selectOneCasePerProvider(cases: AnthropicMessagesE2ECase[]): AnthropicMessagesE2ECase[] {
+	const byProvider = new Map<KnownProvider, AnthropicMessagesE2ECase[]>();
 	for (const testCase of cases) {
 		const providerCases = byProvider.get(testCase.provider) ?? [];
 		providerCases.push(testCase);

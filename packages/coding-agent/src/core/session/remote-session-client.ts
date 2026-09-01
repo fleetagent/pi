@@ -39,6 +39,7 @@ export interface AppendRemoteSessionEntriesResponse {
 	accepted: number;
 }
 
+// pi-ignore noNearIdenticalDataStructures: Snapshot replacement atomically rewrites complete state, while append applies incremental entries; their endpoint validation and concurrency contracts evolve independently.
 export interface ReplaceRemoteSessionSnapshotRequest {
 	baseEtag?: string;
 	entries: FileEntry[];

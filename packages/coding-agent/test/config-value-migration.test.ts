@@ -5,6 +5,20 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.ts";
 import { runMigrations } from "../src/migrations.ts";
 
+interface MigratedModelHeaderConfig {
+	headers?: Record<string, string>;
+}
+
+interface MigratedProviderConfig {
+	apiKey?: string;
+	headers?: Record<string, string>;
+	models?: MigratedModelHeaderConfig[];
+	modelOverrides?: Record<string, MigratedModelHeaderConfig>;
+}
+
+interface MigratedModelsConfig {
+	providers: Record<string, MigratedProviderConfig>;
+}
 describe("config value env var syntax migration", () => {
 	const tempDirs: string[] = [];
 
@@ -105,17 +119,7 @@ describe("config value env var syntax migration", () => {
 
 		withAgentDir(agentDir, () => runMigrations(agentDir));
 
-		const migrated = JSON.parse(fs.readFileSync(path.join(agentDir, "models.json"), "utf-8")) as {
-			providers: Record<
-				string,
-				{
-					apiKey?: string;
-					headers?: Record<string, string>;
-					models?: Array<{ headers?: Record<string, string> }>;
-					modelOverrides?: Record<string, { headers?: Record<string, string> }>;
-				}
-			>;
-		};
+		const migrated = JSON.parse(fs.readFileSync(path.join(agentDir, "models.json"), "utf-8")) as MigratedModelsConfig;
 		const provider = migrated.providers["custom-provider"]!;
 		expect(provider.apiKey).toBe("$CUSTOM_API_KEY");
 		expect(provider.headers?.["x-api-key"]).toBe("$HEADER_API_KEY");

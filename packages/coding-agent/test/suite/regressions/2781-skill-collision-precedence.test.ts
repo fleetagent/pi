@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DefaultResourceLoader } from "../../../src/core/resource-loader.ts";
 
+type PackageSettingsScope = "user" | "project";
+
 describe("issue #2781 skill collision precedence: user skills should override package skills", () => {
 	let tempDir: string;
 	let agentDir: string;
@@ -52,7 +54,7 @@ describe("issue #2781 skill collision precedence: user skills should override pa
 		return skillPath;
 	}
 
-	function createSettingsWithPackage(pkgDir: string, scope: "user" | "project"): void {
+	function createSettingsWithPackage(pkgDir: string, scope: PackageSettingsScope): void {
 		const settingsDir = scope === "user" ? agentDir : join(cwd, ".pi");
 		mkdirSync(settingsDir, { recursive: true });
 		writeFileSync(join(settingsDir, "settings.json"), JSON.stringify({ packages: [pkgDir] }, null, 2));

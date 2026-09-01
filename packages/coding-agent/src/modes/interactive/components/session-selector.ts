@@ -22,6 +22,43 @@ import { keyHint, keyText } from "./keybinding-hints.ts";
 import { filterAndSortSessions, hasSessionName, type NameFilter, type SortMode } from "./session-selector-search.ts";
 
 type SessionScope = "current" | "all";
+type SessionSelectorMessageType = "info" | "error";
+type SessionDeletionMethod = "trash" | "unlink";
+type SessionSelectorMode = "list" | "rename";
+type SessionLoadReason = "initial" | "refresh" | "toggle";
+
+interface SessionSelectorStatusMessage {
+	type: SessionSelectorMessageType;
+	message: string;
+}
+
+interface SessionSelectorHintLines {
+	primary: string;
+	secondary: string;
+}
+
+interface DeleteSessionResult {
+	ok: boolean;
+	method: SessionDeletionMethod;
+	error?: string;
+}
+
+interface SessionScopeLoadContext {
+	scope: SessionScope;
+	reason: SessionLoadReason;
+	showCwd: boolean;
+	sequence?: number;
+}
+
+interface SessionSelectorLayoutOptions {
+	showHeader?: boolean;
+}
+
+interface SessionSelectorOptions {
+	renameSession?: (sessionPath: string, currentName: string | undefined) => Promise<void>;
+	showRenameHint?: boolean;
+	keybindings?: KeybindingsManager;
+}
 
 function shortenPath(path: string): string {
 	const home = os.homedir();
@@ -62,7 +99,7 @@ class SessionSelectorHeader implements Component {
 	private loadProgress: { loaded: number; total: number } | null = null;
 	private showPath = false;
 	private confirmingDeletePath: string | null = null;
-	private statusMessage: { type: "info" | "error"; message: string } | null = null;
+	private statusMessage: SessionSelectorStatusMessage | null = null;
 	private statusTimeout: ReturnType<typeof setTimeout> | null = null;
 	private showRenameHint = false;
 
@@ -113,7 +150,7 @@ class SessionSelectorHeader implements Component {
 		this.statusTimeout = null;
 	}
 
-	setStatusMessage(msg: { type: "info" | "error"; message: string } | null, autoHideMs?: number): void {
+	setStatusMessage(msg: SessionSelectorStatusMessage | null, autoHideMs?: number): void {
 		this.clearStatusTimeout();
 		this.statusMessage = msg;
 		if (!msg || !autoHideMs) return;
@@ -123,6 +160,36 @@ class SessionSelectorHeader implements Component {
 			this.statusTimeout = null;
 			this.requestRender();
 		}, autoHideMs);
+	}
+
+	private renderHintLines(width: number): SessionSelectorHintLines {
+		if (this.confirmingDeletePath !== null) {
+			const confirmHint = `Delete session? ${keyHint("tui.select.confirm", "confirm")} · ${keyHint("tui.select.cancel", "cancel")}`;
+			return { primary: theme.fg("error", truncateToWidth(confirmHint, width, "…")), secondary: "" };
+		}
+		if (this.statusMessage) {
+			const color = this.statusMessage.type === "error" ? "error" : "accent";
+			return {
+				primary: theme.fg(color, truncateToWidth(this.statusMessage.message, width, "…")),
+				secondary: "",
+			};
+		}
+
+		const pathState = this.showPath ? "(on)" : "(off)";
+		const separator = theme.fg("muted", " · ");
+		const primary =
+			keyHint("tui.input.tab", "scope") + separator + theme.fg("muted", 're:<pattern> regex · "phrase" exact');
+		const secondaryParts = [
+			keyHint("app.session.toggleSort", "sort"),
+			keyHint("app.session.toggleNamedFilter", "named"),
+			keyHint("app.session.delete", "delete"),
+			keyHint("app.session.togglePath", `path ${pathState}`),
+		];
+		if (this.showRenameHint) secondaryParts.push(keyHint("app.session.rename", "rename"));
+		return {
+			primary: truncateToWidth(primary, width, "…"),
+			secondary: truncateToWidth(secondaryParts.join(separator), width, "…"),
+		};
 	}
 
 	invalidate(): void {}
@@ -152,37 +219,9 @@ class SessionSelectorHeader implements Component {
 		const left = truncateToWidth(leftText, availableLeft, "");
 		const spacing = Math.max(0, width - visibleWidth(left) - visibleWidth(rightText));
 
-		// Build hint lines - changes based on state (all branches truncate to width)
-		let hintLine1: string;
-		let hintLine2: string;
-		if (this.confirmingDeletePath !== null) {
-			const confirmHint = `Delete session? ${keyHint("tui.select.confirm", "confirm")} · ${keyHint("tui.select.cancel", "cancel")}`;
-			hintLine1 = theme.fg("error", truncateToWidth(confirmHint, width, "…"));
-			hintLine2 = "";
-		} else if (this.statusMessage) {
-			const color = this.statusMessage.type === "error" ? "error" : "accent";
-			hintLine1 = theme.fg(color, truncateToWidth(this.statusMessage.message, width, "…"));
-			hintLine2 = "";
-		} else {
-			const pathState = this.showPath ? "(on)" : "(off)";
-			const sep = theme.fg("muted", " · ");
-			const hint1 =
-				keyHint("tui.input.tab", "scope") + sep + theme.fg("muted", 're:<pattern> regex · "phrase" exact');
-			const hint2Parts = [
-				keyHint("app.session.toggleSort", "sort"),
-				keyHint("app.session.toggleNamedFilter", "named"),
-				keyHint("app.session.delete", "delete"),
-				keyHint("app.session.togglePath", `path ${pathState}`),
-			];
-			if (this.showRenameHint) {
-				hint2Parts.push(keyHint("app.session.rename", "rename"));
-			}
-			const hint2 = hint2Parts.join(sep);
-			hintLine1 = truncateToWidth(hint1, width, "…");
-			hintLine2 = truncateToWidth(hint2, width, "…");
-		}
+		const hints = this.renderHintLines(width);
 
-		return [`${left}${" ".repeat(spacing)}${rightText}`, hintLine1, hintLine2];
+		return [`${left}${" ".repeat(spacing)}${rightText}`, hints.primary, hints.secondary];
 	}
 }
 
@@ -199,6 +238,52 @@ interface FlatSessionNode {
 	isLast: boolean;
 	/** For each ancestor level, whether there are more siblings after it */
 	ancestorContinues: boolean[];
+}
+
+interface SessionRowRenderOptions {
+	width: number;
+	prefix: string;
+	isSelected: boolean;
+	isConfirmingDelete: boolean;
+	isCurrent: boolean;
+	showCwd: boolean;
+	showPath: boolean;
+}
+
+function getEmptySessionListMessage(nameFilter: NameFilter, showCwd: boolean): string {
+	if (nameFilter === "named") {
+		const toggleKey = keyText("app.session.toggleNamedFilter");
+		return showCwd
+			? `  No named sessions found. Press ${toggleKey} to show all.`
+			: `  No named sessions in current folder. Press ${toggleKey} to show all, or Tab to view all.`;
+	}
+	return showCwd ? "  No sessions found" : "  No sessions in current folder. Press Tab to view all.";
+}
+
+function renderSessionRow(node: FlatSessionNode, options: SessionRowRenderOptions): string {
+	const session = node.session;
+	const displayText = session.name ?? session.firstMessage;
+	const normalizedMessage = displayText.replace(/[\x00-\x1f\x7f]/g, " ").trim();
+	const age = formatSessionDate(session.modified);
+	let rightPart = `${session.messageCount} ${age}`;
+	if (options.showCwd && session.cwd) rightPart = `${shortenPath(session.cwd)} ${rightPart}`;
+	if (options.showPath) rightPart = `${shortenPath(session.path)} ${rightPart}`;
+	const cursor = options.isSelected ? theme.fg("accent", "› ") : "  ";
+	const rightWidth = visibleWidth(rightPart) + 2;
+	const availableForMessage = options.width - 2 - visibleWidth(options.prefix) - rightWidth;
+	const truncatedMessage = truncateToWidth(normalizedMessage, Math.max(10, availableForMessage), "…");
+	let messageColor: "error" | "warning" | "accent" | null = null;
+	if (options.isConfirmingDelete) messageColor = "error";
+	else if (options.isCurrent) messageColor = "accent";
+	else if (session.name) messageColor = "warning";
+	let styledMessage = messageColor ? theme.fg(messageColor, truncatedMessage) : truncatedMessage;
+	if (options.isSelected) styledMessage = theme.bold(styledMessage);
+	const leftPart = cursor + theme.fg("dim", options.prefix) + styledMessage;
+	const spacing = Math.max(1, options.width - visibleWidth(leftPart) - visibleWidth(rightPart));
+	const styledRight = theme.fg(options.isConfirmingDelete ? "error" : "dim", rightPart);
+	let line = leftPart + " ".repeat(spacing) + styledRight;
+	if (options.isSelected) line = theme.bg("selectedBg", line);
+	return truncateToWidth(line, options.width);
 }
 
 /**
@@ -398,110 +483,35 @@ class SessionList implements Component, Focusable {
 	invalidate(): void {}
 
 	render(width: number): string[] {
-		const lines: string[] = [];
-
-		// Render search input
-		lines.push(...this.searchInput.render(width));
-		lines.push(""); // Blank line after search
-
+		const lines = [...this.searchInput.render(width), ""];
 		if (this.filteredSessions.length === 0) {
-			let emptyMessage: string;
-			if (this.nameFilter === "named") {
-				const toggleKey = keyText("app.session.toggleNamedFilter");
-				if (this.showCwd) {
-					emptyMessage = `  No named sessions found. Press ${toggleKey} to show all.`;
-				} else {
-					emptyMessage = `  No named sessions in current folder. Press ${toggleKey} to show all, or Tab to view all.`;
-				}
-			} else if (this.showCwd) {
-				// "All" scope - no sessions anywhere that match filter
-				emptyMessage = "  No sessions found";
-			} else {
-				// "Current folder" scope - hint to try "all"
-				emptyMessage = "  No sessions in current folder. Press Tab to view all.";
-			}
+			const emptyMessage = getEmptySessionListMessage(this.nameFilter, this.showCwd);
 			lines.push(theme.fg("muted", truncateToWidth(emptyMessage, width, "…")));
 			return lines;
 		}
-
-		// Calculate visible range with scrolling
 		const startIndex = Math.max(
 			0,
 			Math.min(this.selectedIndex - Math.floor(this.maxVisible / 2), this.filteredSessions.length - this.maxVisible),
 		);
 		const endIndex = Math.min(startIndex + this.maxVisible, this.filteredSessions.length);
-
-		// Render visible sessions (one line each with tree structure)
-		for (let i = startIndex; i < endIndex; i++) {
-			const node = this.filteredSessions[i]!;
-			const session = node.session;
-			const isSelected = i === this.selectedIndex;
-			const isConfirmingDelete = session.path === this.confirmingDeletePath;
-			const isCurrent = this.isCurrentSessionPath(session.path);
-
-			// Build tree prefix
-			const prefix = this.buildTreePrefix(node);
-
-			// Session display text (name or first message)
-			const hasName = !!session.name;
-			const displayText = session.name ?? session.firstMessage;
-			const normalizedMessage = displayText.replace(/[\x00-\x1f\x7f]/g, " ").trim();
-
-			// Right side: message count and age
-			const age = formatSessionDate(session.modified);
-			const msgCount = String(session.messageCount);
-			let rightPart = `${msgCount} ${age}`;
-			if (this.showCwd && session.cwd) {
-				rightPart = `${shortenPath(session.cwd)} ${rightPart}`;
-			}
-			if (this.showPath) {
-				rightPart = `${shortenPath(session.path)} ${rightPart}`;
-			}
-
-			// Cursor
-			const cursor = isSelected ? theme.fg("accent", "› ") : "  ";
-
-			// Calculate available width for message
-			const prefixWidth = visibleWidth(prefix);
-			const rightWidth = visibleWidth(rightPart) + 2; // +2 for spacing
-			const availableForMsg = width - 2 - prefixWidth - rightWidth; // -2 for cursor
-
-			const truncatedMsg = truncateToWidth(normalizedMessage, Math.max(10, availableForMsg), "…");
-
-			// Style message
-			let messageColor: "error" | "warning" | "accent" | null = null;
-			if (isConfirmingDelete) {
-				messageColor = "error";
-			} else if (isCurrent) {
-				messageColor = "accent";
-			} else if (hasName) {
-				messageColor = "warning";
-			}
-			let styledMsg = messageColor ? theme.fg(messageColor, truncatedMsg) : truncatedMsg;
-			if (isSelected) {
-				styledMsg = theme.bold(styledMsg);
-			}
-
-			// Build line
-			const leftPart = cursor + theme.fg("dim", prefix) + styledMsg;
-			const leftWidth = visibleWidth(leftPart);
-			const spacing = Math.max(1, width - leftWidth - visibleWidth(rightPart));
-			const styledRight = theme.fg(isConfirmingDelete ? "error" : "dim", rightPart);
-
-			let line = leftPart + " ".repeat(spacing) + styledRight;
-			if (isSelected) {
-				line = theme.bg("selectedBg", line);
-			}
-			lines.push(truncateToWidth(line, width));
+		for (let index = startIndex; index < endIndex; index++) {
+			const node = this.filteredSessions[index]!;
+			lines.push(
+				renderSessionRow(node, {
+					width,
+					prefix: this.buildTreePrefix(node),
+					isSelected: index === this.selectedIndex,
+					isConfirmingDelete: node.session.path === this.confirmingDeletePath,
+					isCurrent: this.isCurrentSessionPath(node.session.path),
+					showCwd: this.showCwd,
+					showPath: this.showPath,
+				}),
+			);
 		}
-
-		// Add scroll indicator if needed
 		if (startIndex > 0 || endIndex < this.filteredSessions.length) {
 			const scrollText = `  (${this.selectedIndex + 1}/${this.filteredSessions.length})`;
-			const scrollInfo = theme.fg("muted", truncateToWidth(scrollText, width, ""));
-			lines.push(scrollInfo);
+			lines.push(theme.fg("muted", truncateToWidth(scrollText, width, "")));
 		}
-
 		return lines;
 	}
 
@@ -515,111 +525,82 @@ class SessionList implements Component, Focusable {
 		return parts.join("") + branch;
 	}
 
-	handleInput(keyData: string): void {
+	private handleDeleteConfirmationInput(keyData: string): boolean {
+		if (this.confirmingDeletePath === null) return false;
 		const kb = getKeybindings();
-
-		// Handle delete confirmation state first - intercept all keys
-		if (this.confirmingDeletePath !== null) {
-			if (kb.matches(keyData, "tui.select.confirm")) {
-				const pathToDelete = this.confirmingDeletePath;
-				this.setConfirmingDeletePath(null);
-				void this.onDeleteSession?.(pathToDelete);
-				return;
-			}
-			if (kb.matches(keyData, "tui.select.cancel")) {
-				this.setConfirmingDeletePath(null);
-				return;
-			}
-			// Ignore all other keys while confirming
-			return;
+		if (kb.matches(keyData, "tui.select.confirm")) {
+			const pathToDelete = this.confirmingDeletePath;
+			this.setConfirmingDeletePath(null);
+			void this.onDeleteSession?.(pathToDelete);
+		} else if (kb.matches(keyData, "tui.select.cancel")) {
+			this.setConfirmingDeletePath(null);
 		}
+		return true;
+	}
 
+	private handleSessionActionInput(keyData: string): boolean {
+		const kb = getKeybindings();
 		if (kb.matches(keyData, "tui.input.tab")) {
-			if (this.onToggleScope) {
-				this.onToggleScope();
-			}
-			return;
+			this.onToggleScope?.();
+			return true;
 		}
-
 		if (kb.matches(keyData, "app.session.toggleSort")) {
 			this.onToggleSort?.();
-			return;
+			return true;
 		}
-
 		if (this.keybindings.matches(keyData, "app.session.toggleNamedFilter")) {
 			this.onToggleNameFilter?.();
-			return;
+			return true;
 		}
-
-		// Ctrl+P: toggle path display
 		if (kb.matches(keyData, "app.session.togglePath")) {
 			this.showPath = !this.showPath;
 			this.onTogglePath?.(this.showPath);
-			return;
+			return true;
 		}
-
-		// Ctrl+D: initiate delete confirmation (useful on terminals that don't distinguish Ctrl+Backspace from Backspace)
 		if (kb.matches(keyData, "app.session.delete")) {
 			this.startDeleteConfirmationForSelectedSession();
-			return;
+			return true;
 		}
-
-		// Rename selected session
 		if (kb.matches(keyData, "app.session.rename")) {
 			const selected = this.filteredSessions[this.selectedIndex];
-			if (selected) {
-				this.onRenameSession?.(selected.session.path);
-			}
-			return;
+			if (selected) this.onRenameSession?.(selected.session.path);
+			return true;
 		}
-
-		// Ctrl+Backspace: non-invasive convenience alias for delete
-		// Only triggers deletion when the query is empty; otherwise it is forwarded to the input
-		if (kb.matches(keyData, "app.session.deleteNoninvasive")) {
-			if (this.searchInput.getValue().length > 0) {
-				this.searchInput.handleInput(keyData);
-				this.filterSessions(this.searchInput.getValue());
-				return;
-			}
-
+		if (!kb.matches(keyData, "app.session.deleteNoninvasive")) return false;
+		if (this.searchInput.getValue().length > 0) {
+			this.searchInput.handleInput(keyData);
+			this.filterSessions(this.searchInput.getValue());
+		} else {
 			this.startDeleteConfirmationForSelectedSession();
-			return;
 		}
+		return true;
+	}
 
-		// Up arrow
+	private handleListNavigationInput(keyData: string): void {
+		const kb = getKeybindings();
 		if (kb.matches(keyData, "tui.select.up")) {
 			this.selectedIndex = Math.max(0, this.selectedIndex - 1);
-		}
-		// Down arrow
-		else if (kb.matches(keyData, "tui.select.down")) {
+		} else if (kb.matches(keyData, "tui.select.down")) {
 			this.selectedIndex = Math.min(this.filteredSessions.length - 1, this.selectedIndex + 1);
-		}
-		// Page up - jump up by maxVisible items
-		else if (kb.matches(keyData, "tui.select.pageUp")) {
+		} else if (kb.matches(keyData, "tui.select.pageUp")) {
 			this.selectedIndex = Math.max(0, this.selectedIndex - this.maxVisible);
-		}
-		// Page down - jump down by maxVisible items
-		else if (kb.matches(keyData, "tui.select.pageDown")) {
+		} else if (kb.matches(keyData, "tui.select.pageDown")) {
 			this.selectedIndex = Math.min(this.filteredSessions.length - 1, this.selectedIndex + this.maxVisible);
-		}
-		// Enter
-		else if (kb.matches(keyData, "tui.select.confirm")) {
+		} else if (kb.matches(keyData, "tui.select.confirm")) {
 			const selected = this.filteredSessions[this.selectedIndex];
-			if (selected && this.onSelect) {
-				this.onSelect(selected.session.path);
-			}
-		}
-		// Escape - cancel
-		else if (kb.matches(keyData, "tui.select.cancel")) {
-			if (this.onCancel) {
-				this.onCancel();
-			}
-		}
-		// Pass everything else to search input
-		else {
+			if (selected && this.onSelect) this.onSelect(selected.session.path);
+		} else if (kb.matches(keyData, "tui.select.cancel")) {
+			this.onCancel?.();
+		} else {
 			this.searchInput.handleInput(keyData);
 			this.filterSessions(this.searchInput.getValue());
 		}
+	}
+
+	handleInput(keyData: string): void {
+		if (this.handleDeleteConfirmationInput(keyData)) return;
+		if (this.handleSessionActionInput(keyData)) return;
+		this.handleListNavigationInput(keyData);
 	}
 }
 
@@ -628,9 +609,7 @@ type SessionsLoader = (onProgress?: SessionListProgress) => Promise<SessionInfo[
 /**
  * Delete a session file, trying the `trash` CLI first, then falling back to unlink
  */
-async function deleteSessionFile(
-	sessionPath: string,
-): Promise<{ ok: boolean; method: "trash" | "unlink"; error?: string }> {
+async function deleteSessionFile(sessionPath: string): Promise<DeleteSessionResult> {
 	// Try `trash` first (if installed)
 	const trashArgs = sessionPath.startsWith("-") ? ["--", sessionPath] : [sessionPath];
 	const trashResult = spawnSync("trash", trashArgs, { encoding: "utf-8" });
@@ -701,7 +680,7 @@ export class SessionSelectorComponent extends Container implements Focusable {
 	private allLoading = false;
 	private allLoadSeq = 0;
 
-	private mode: "list" | "rename" = "list";
+	private mode: SessionSelectorMode = "list";
 	private renameInput = new Input();
 	private renameTargetPath: string | null = null;
 
@@ -719,7 +698,7 @@ export class SessionSelectorComponent extends Container implements Focusable {
 		}
 	}
 
-	private buildBaseLayout(content: Component, options?: { showHeader?: boolean }): void {
+	private buildBaseLayout(content: Component, options?: SessionSelectorLayoutOptions): void {
 		this.clear();
 		this.addChild(new Spacer(1));
 		this.addChild(new DynamicBorder((s) => theme.fg("accent", s)));
@@ -740,11 +719,7 @@ export class SessionSelectorComponent extends Container implements Focusable {
 		onCancel: () => void,
 		onExit: () => void,
 		requestRender: () => void,
-		options?: {
-			renameSession?: (sessionPath: string, currentName: string | undefined) => Promise<void>;
-			showRenameHint?: boolean;
-			keybindings?: KeybindingsManager;
-		},
+		options?: SessionSelectorOptions,
 		currentSessionFilePath?: string,
 	) {
 		super();
@@ -817,34 +792,37 @@ export class SessionSelectorComponent extends Container implements Focusable {
 		};
 
 		// Handle session deletion
-		this.sessionList.onDeleteSession = async (sessionPath: string) => {
-			const result = await deleteSessionFile(sessionPath);
-
-			if (result.ok) {
-				if (this.currentSessions) {
-					this.currentSessions = this.currentSessions.filter((s) => s.path !== sessionPath);
-				}
-				if (this.allSessions) {
-					this.allSessions = this.allSessions.filter((s) => s.path !== sessionPath);
-				}
-
-				const sessions = this.scope === "all" ? (this.allSessions ?? []) : (this.currentSessions ?? []);
-				const showCwd = this.scope === "all";
-				this.sessionList.setSessions(sessions, showCwd);
-
-				const msg = result.method === "trash" ? "Session moved to trash" : "Session deleted";
-				this.header.setStatusMessage({ type: "info", message: msg }, 2000);
-				await this.refreshSessionsAfterMutation();
-			} else {
-				const errorMessage = result.error ?? "Unknown error";
-				this.header.setStatusMessage({ type: "error", message: `Failed to delete: ${errorMessage}` }, 3000);
-			}
-
-			this.requestRender();
-		};
+		this.sessionList.onDeleteSession = (sessionPath) => this.deleteSession(sessionPath);
 
 		// Start loading current sessions immediately
 		this.loadCurrentSessions();
+	}
+
+	private removeDeletedSessionFromCaches(sessionPath: string): void {
+		if (this.currentSessions) {
+			this.currentSessions = this.currentSessions.filter((session) => session.path !== sessionPath);
+		}
+		if (this.allSessions) {
+			this.allSessions = this.allSessions.filter((session) => session.path !== sessionPath);
+		}
+		const sessions = this.scope === "all" ? (this.allSessions ?? []) : (this.currentSessions ?? []);
+		this.sessionList.setSessions(sessions, this.scope === "all");
+	}
+
+	private async deleteSession(sessionPath: string): Promise<void> {
+		const result = await deleteSessionFile(sessionPath);
+		if (!result.ok) {
+			const errorMessage = result.error ?? "Unknown error";
+			this.header.setStatusMessage({ type: "error", message: `Failed to delete: ${errorMessage}` }, 3000);
+			this.requestRender();
+			return;
+		}
+
+		this.removeDeletedSessionFromCaches(sessionPath);
+		const message = result.method === "trash" ? "Session moved to trash" : "Session deleted";
+		this.header.setStatusMessage({ type: "info", message }, 2000);
+		await this.refreshSessionsAfterMutation();
+		this.requestRender();
 	}
 
 	private loadCurrentSessions(): void {
@@ -907,69 +885,72 @@ export class SessionSelectorComponent extends Container implements Focusable {
 		}
 	}
 
-	private async loadScope(scope: SessionScope, reason: "initial" | "refresh" | "toggle"): Promise<void> {
-		const showCwd = scope === "all";
-
-		// Mark loading
+	private setScopeLoading(scope: SessionScope, loading: boolean): void {
 		if (scope === "current") {
-			this.currentLoading = true;
+			this.currentLoading = loading;
 		} else {
-			this.allLoading = true;
+			this.allLoading = loading;
 		}
+	}
 
-		const seq = scope === "all" ? ++this.allLoadSeq : undefined;
+	private beginScopeLoad(scope: SessionScope, reason: SessionLoadReason): SessionScopeLoadContext {
+		this.setScopeLoading(scope, true);
+		const sequence = scope === "all" ? ++this.allLoadSeq : undefined;
 		this.header.setScope(scope);
 		this.header.setLoading(true);
 		this.requestRender();
+		return { scope, reason, showCwd: scope === "all", sequence };
+	}
 
-		const onProgress = (loaded: number, total: number) => {
-			if (scope !== this.scope) return;
-			if (seq !== undefined && seq !== this.allLoadSeq) return;
+	private isActiveScopeLoad(context: SessionScopeLoadContext): boolean {
+		if (context.scope !== this.scope) return false;
+		return context.sequence === undefined || context.sequence === this.allLoadSeq;
+	}
+
+	private createScopeLoadProgress(context: SessionScopeLoadContext): SessionListProgress {
+		return (loaded, total) => {
+			if (!this.isActiveScopeLoad(context)) return;
 			this.header.setProgress(loaded, total);
 			this.requestRender();
 		};
+	}
 
+	private finishScopeLoad(context: SessionScopeLoadContext, sessions: SessionInfo[]): void {
+		if (context.scope === "current") {
+			this.currentSessions = sessions;
+		} else {
+			this.allSessions = sessions;
+		}
+		this.setScopeLoading(context.scope, false);
+		if (!this.isActiveScopeLoad(context)) return;
+		this.header.setLoading(false);
+		this.sessionList.setSessions(sessions, context.showCwd);
+		this.requestRender();
+		if (context.scope === "all" && sessions.length === 0 && (this.currentSessions?.length ?? 0) === 0) {
+			this.onCancel();
+		}
+	}
+
+	private failScopeLoad(context: SessionScopeLoadContext, error: unknown): void {
+		this.setScopeLoading(context.scope, false);
+		if (!this.isActiveScopeLoad(context)) return;
+		const message = error instanceof Error ? error.message : String(error);
+		this.header.setLoading(false);
+		this.header.setStatusMessage({ type: "error", message: `Failed to load sessions: ${message}` }, 4000);
+		if (context.reason === "initial") this.sessionList.setSessions([], context.showCwd);
+		this.requestRender();
+	}
+
+	private async loadScope(scope: SessionScope, reason: SessionLoadReason): Promise<void> {
+		const context = this.beginScopeLoad(scope, reason);
+		const onProgress = this.createScopeLoadProgress(context);
 		try {
 			const sessions = await (scope === "current"
 				? this.currentSessionsLoader(onProgress)
 				: this.allSessionsLoader(onProgress));
-
-			if (scope === "current") {
-				this.currentSessions = sessions;
-				this.currentLoading = false;
-			} else {
-				this.allSessions = sessions;
-				this.allLoading = false;
-			}
-
-			if (scope !== this.scope) return;
-			if (seq !== undefined && seq !== this.allLoadSeq) return;
-
-			this.header.setLoading(false);
-			this.sessionList.setSessions(sessions, showCwd);
-			this.requestRender();
-
-			if (scope === "all" && sessions.length === 0 && (this.currentSessions?.length ?? 0) === 0) {
-				this.onCancel();
-			}
-		} catch (err) {
-			if (scope === "current") {
-				this.currentLoading = false;
-			} else {
-				this.allLoading = false;
-			}
-
-			if (scope !== this.scope) return;
-			if (seq !== undefined && seq !== this.allLoadSeq) return;
-
-			const message = err instanceof Error ? err.message : String(err);
-			this.header.setLoading(false);
-			this.header.setStatusMessage({ type: "error", message: `Failed to load sessions: ${message}` }, 4000);
-
-			if (reason === "initial") {
-				this.sessionList.setSessions([], showCwd);
-			}
-			this.requestRender();
+			this.finishScopeLoad(context, sessions);
+		} catch (error) {
+			this.failScopeLoad(context, error);
 		}
 	}
 

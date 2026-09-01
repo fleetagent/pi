@@ -399,9 +399,11 @@ describe("TUI differential rendering", () => {
 			await terminal.waitForRender();
 
 			const viewport = terminal.getViewport();
-			assert.ok(viewport[0]?.includes("Header"), `Header preserved: ${viewport[0]}`);
-			assert.ok(viewport[1]?.includes(`Working ${frame}`), `Spinner updated: ${viewport[1]}`);
-			assert.ok(viewport[2]?.includes("Footer"), `Footer preserved: ${viewport[2]}`);
+			assert.deepStrictEqual(
+				viewport.slice(0, 3),
+				["Header", `Working ${frame}`, "Footer"],
+				`Expected spinner frame ${frame} without changing surrounding lines`,
+			);
 		}
 
 		tui.stop();

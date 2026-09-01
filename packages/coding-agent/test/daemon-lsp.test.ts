@@ -13,11 +13,13 @@ async function temporaryDirectory(): Promise<string> {
 	temporaryDirectories.push(path);
 	return path;
 }
+interface DaemonLspConfigurationOptions {
+	allowProcessExec?: boolean;
+	trustProjectLsp?: boolean;
+	lspConfigPath?: string;
+}
 
-async function daemonConfiguration(
-	workspaceRoot: string,
-	options: { allowProcessExec?: boolean; trustProjectLsp?: boolean; lspConfigPath?: string } = {},
-) {
+async function daemonConfiguration(workspaceRoot: string, options: DaemonLspConfigurationOptions = {}) {
 	const command = await parseDaemonCommand(
 		[
 			"--daemon",

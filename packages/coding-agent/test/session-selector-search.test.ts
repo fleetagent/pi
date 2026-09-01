@@ -2,9 +2,13 @@ import { describe, expect, it } from "vitest";
 import type { SessionInfo } from "../src/core/session/types.ts";
 import { filterAndSortSessions } from "../src/modes/interactive/components/session-selector-search.ts";
 
-function makeSession(
-	overrides: Partial<SessionInfo> & { id: string; modified: Date; allMessagesText: string },
-): SessionInfo {
+type SessionSearchFixtureOverrides = Partial<SessionInfo> & {
+	id: string;
+	modified: Date;
+	allMessagesText: string;
+};
+
+function makeSession(overrides: SessionSearchFixtureOverrides): SessionInfo {
 	return {
 		path: `/tmp/${overrides.id}.jsonl`,
 		id: overrides.id,

@@ -1,9 +1,13 @@
 {
 	"$schema": "https://biomejs.dev/schemas/2.5.10/schema.json",
+	"plugins": ["./.pi/biome/noInlineFunctionObjectTypes.grit"],
 	"linter": {
 		"enabled": true,
 		"rules": {
 			"preset": "recommended",
+			"complexity": {
+				"noExcessiveCognitiveComplexity": "error"
+			},
 			"style": {
 				"noNonNullAssertion": "off",
 				"useConst": "error",

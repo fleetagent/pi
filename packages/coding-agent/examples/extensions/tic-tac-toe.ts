@@ -208,6 +208,11 @@ function centerPad(content: string, width: number): string {
 	return " ".repeat(left) + content + " ".repeat(pad - left);
 }
 
+interface CellBorderState {
+	cell: Cell;
+	isWin: boolean;
+}
+
 // Fg color for a played cell's glyph and its surrounding borders. Undefined
 // for empty cells.
 function cellFgCode(cell: Cell, isWin: boolean): string | undefined {
@@ -234,11 +239,19 @@ function buildCellContent(mark: Cell, lineIdx: number, isWin: boolean): string {
 // Fg color for a border char based on its adjacent cells. Undefined when no
 // adjacent cell is played or when adjacent plays disagree (border stays dim
 // to show the separation).
-function borderFgCode(adjacent: ReadonlyArray<{ cell: Cell; isWin: boolean }>): string | undefined {
+function borderFgCode(adjacent: ReadonlyArray<CellBorderState>): string | undefined {
 	const fgs = adjacent.map((a) => cellFgCode(a.cell, a.isWin)).filter((f): f is string => !!f);
 	if (fgs.length === 0) return undefined;
 	const first = fgs[0];
 	return fgs.every((f) => f === first) ? first : undefined;
+}
+
+type BoardCursorOwner = "user" | "agent";
+
+interface BoardCursor {
+	row: number;
+	col: number;
+	owner: BoardCursorOwner;
 }
 
 interface BoardRenderOpts {
@@ -246,98 +259,161 @@ interface BoardRenderOpts {
 	maxWidth: number;
 	// Optional cursor overlay. Omit to render a static snapshot (used in tool
 	// results, move messages, and the game-over banner).
-	cursor?: { row: number; col: number; owner: "user" | "agent" };
+	cursor?: BoardCursor;
 }
 
-function renderBoard(opts: BoardRenderOpts): string[] {
-	const { board, maxWidth, cursor } = opts;
-	const showCursor = !!cursor;
-	const cr = cursor?.row ?? -1;
-	const cc = cursor?.col ?? -1;
+interface BoardRenderContext {
+	board: Cell[][];
+	maxWidth: number;
+	showCursor: boolean;
+	cursorRow: number;
+	cursorCol: number;
+	cursorSgr: string;
+	winCells: Set<string>;
+}
 
-	// Green for user cursor, yellow for agent cursor.
-	const cursorSgr = cursor?.owner === "agent" ? "\x1b[33;1m" : "\x1b[32;1m";
-
-	const winLine = getWinLine(board);
-	const winCells = new Set((winLine ?? []).map(([r, c]) => `${r},${c}`));
-	const cellAt = (r: number, c: number) => ({ cell: board[r][c], isWin: winCells.has(`${r},${c}`) });
-
-	const isCursorCorner = (gridR: number, gridC: number): boolean =>
-		showCursor && (gridR === cr || gridR === cr + 1) && (gridC === cc || gridC === cc + 1);
-	const isCursorHSegment = (gridR: number, c: number): boolean =>
-		showCursor && c === cc && (gridR === cr || gridR === cr + 1);
-	const isCursorVBorder = (r: number, gridC: number): boolean =>
-		showCursor && r === cr && (gridC === cc || gridC === cc + 1);
-
-	const paintBorder = (ch: string, highlighted: boolean, fgCode: string | undefined): string => {
-		if (highlighted) return `${cursorSgr}${ch}${RESET}`;
-		if (fgCode) return `\x1b[${fgCode};1m${ch}${RESET}`;
-		return DIM(ch);
+function createBoardRenderContext(opts: BoardRenderOpts): BoardRenderContext {
+	const winLine = getWinLine(opts.board);
+	return {
+		board: opts.board,
+		maxWidth: opts.maxWidth,
+		showCursor: !!opts.cursor,
+		cursorRow: opts.cursor?.row ?? -1,
+		cursorCol: opts.cursor?.col ?? -1,
+		cursorSgr: opts.cursor?.owner === "agent" ? "\x1b[33;1m" : "\x1b[32;1m",
+		winCells: new Set((winLine ?? []).map(([row, col]) => `${row},${col}`)),
 	};
+}
 
-	const cornerChar = (gridR: number, gridC: number): string => {
-		if (gridR === 0 && gridC === 0) return "\u250c";
-		if (gridR === 0 && gridC === 3) return "\u2510";
-		if (gridR === 3 && gridC === 0) return "\u2514";
-		if (gridR === 3 && gridC === 3) return "\u2518";
-		if (gridR === 0) return "\u252c";
-		if (gridR === 3) return "\u2534";
-		if (gridC === 0) return "\u251c";
-		if (gridC === 3) return "\u2524";
-		return "\u253c";
+function boardCellAt(context: BoardRenderContext, row: number, col: number): CellBorderState {
+	return {
+		cell: context.board[row][col],
+		isWin: context.winCells.has(`${row},${col}`),
 	};
+}
 
-	const cornerAdjacent = (gridR: number, gridC: number) => {
-		const out: { cell: Cell; isWin: boolean }[] = [];
-		for (const [dr, dc] of [
-			[-1, -1],
-			[-1, 0],
-			[0, -1],
-			[0, 0],
-		]) {
-			const r = gridR + dr;
-			const c = gridC + dc;
-			if (r >= 0 && r < 3 && c >= 0 && c < 3) out.push(cellAt(r, c));
-		}
-		return out;
-	};
+function isCursorCorner(context: BoardRenderContext, gridRow: number, gridCol: number): boolean {
+	return (
+		context.showCursor &&
+		(gridRow === context.cursorRow || gridRow === context.cursorRow + 1) &&
+		(gridCol === context.cursorCol || gridCol === context.cursorCol + 1)
+	);
+}
 
-	const lines: string[] = [];
+function isCursorHorizontalSegment(context: BoardRenderContext, gridRow: number, col: number): boolean {
+	return (
+		context.showCursor &&
+		col === context.cursorCol &&
+		(gridRow === context.cursorRow || gridRow === context.cursorRow + 1)
+	);
+}
 
-	for (let gridR = 0; gridR <= 3; gridR++) {
-		// Horizontal border row.
-		let row = "";
-		for (let gridC = 0; gridC <= 3; gridC++) {
-			const cornerColor = borderFgCode(cornerAdjacent(gridR, gridC));
-			row += paintBorder(cornerChar(gridR, gridC), isCursorCorner(gridR, gridC), cornerColor);
-			if (gridC < 3) {
-				const adj: { cell: Cell; isWin: boolean }[] = [];
-				if (gridR > 0) adj.push(cellAt(gridR - 1, gridC));
-				if (gridR < 3) adj.push(cellAt(gridR, gridC));
-				const segColor = borderFgCode(adj);
-				row += paintBorder("\u2500".repeat(CELL_WIDTH), isCursorHSegment(gridR, gridC), segColor);
-			}
-		}
-		lines.push(centerPad(row, maxWidth));
+function isCursorVerticalBorder(context: BoardRenderContext, row: number, gridCol: number): boolean {
+	return (
+		context.showCursor &&
+		row === context.cursorRow &&
+		(gridCol === context.cursorCol || gridCol === context.cursorCol + 1)
+	);
+}
 
-		if (gridR === 3) break;
+function paintBoardBorder(
+	context: BoardRenderContext,
+	character: string,
+	highlighted: boolean,
+	foregroundCode: string | undefined,
+): string {
+	if (highlighted) return `${context.cursorSgr}${character}${RESET}`;
+	if (foregroundCode) return `\x1b[${foregroundCode};1m${character}${RESET}`;
+	return DIM(character);
+}
 
-		for (let lineIdx = 0; lineIdx < CELL_HEIGHT; lineIdx++) {
-			let contentRow = "";
-			for (let gridC = 0; gridC <= 3; gridC++) {
-				const adj: { cell: Cell; isWin: boolean }[] = [];
-				if (gridC > 0) adj.push(cellAt(gridR, gridC - 1));
-				if (gridC < 3) adj.push(cellAt(gridR, gridC));
-				const vColor = borderFgCode(adj);
-				contentRow += paintBorder("\u2502", isCursorVBorder(gridR, gridC), vColor);
-				if (gridC < 3) {
-					contentRow += buildCellContent(board[gridR][gridC], lineIdx, winCells.has(`${gridR},${gridC}`));
-				}
-			}
-			lines.push(centerPad(contentRow, maxWidth));
+function boardCornerCharacter(gridRow: number, gridCol: number): string {
+	if (gridRow === 0 && gridCol === 0) return "\u250c";
+	if (gridRow === 0 && gridCol === 3) return "\u2510";
+	if (gridRow === 3 && gridCol === 0) return "\u2514";
+	if (gridRow === 3 && gridCol === 3) return "\u2518";
+	if (gridRow === 0) return "\u252c";
+	if (gridRow === 3) return "\u2534";
+	if (gridCol === 0) return "\u251c";
+	if (gridCol === 3) return "\u2524";
+	return "\u253c";
+}
+
+const CORNER_NEIGHBOR_OFFSETS = [
+	[-1, -1],
+	[-1, 0],
+	[0, -1],
+	[0, 0],
+] as const;
+
+function getCornerAdjacentCells(context: BoardRenderContext, gridRow: number, gridCol: number): CellBorderState[] {
+	const adjacent: CellBorderState[] = [];
+	for (const [rowOffset, colOffset] of CORNER_NEIGHBOR_OFFSETS) {
+		const row = gridRow + rowOffset;
+		const col = gridCol + colOffset;
+		if (row >= 0 && row < 3 && col >= 0 && col < 3) adjacent.push(boardCellAt(context, row, col));
+	}
+	return adjacent;
+}
+
+function renderHorizontalBoardBorder(context: BoardRenderContext, gridRow: number): string {
+	let row = "";
+	for (let gridCol = 0; gridCol <= 3; gridCol++) {
+		const cornerColor = borderFgCode(getCornerAdjacentCells(context, gridRow, gridCol));
+		row += paintBoardBorder(
+			context,
+			boardCornerCharacter(gridRow, gridCol),
+			isCursorCorner(context, gridRow, gridCol),
+			cornerColor,
+		);
+		if (gridCol === 3) continue;
+		const adjacent: CellBorderState[] = [];
+		if (gridRow > 0) adjacent.push(boardCellAt(context, gridRow - 1, gridCol));
+		if (gridRow < 3) adjacent.push(boardCellAt(context, gridRow, gridCol));
+		row += paintBoardBorder(
+			context,
+			"\u2500".repeat(CELL_WIDTH),
+			isCursorHorizontalSegment(context, gridRow, gridCol),
+			borderFgCode(adjacent),
+		);
+	}
+	return centerPad(row, context.maxWidth);
+}
+
+function renderBoardContentRow(context: BoardRenderContext, gridRow: number, lineIndex: number): string {
+	let contentRow = "";
+	for (let gridCol = 0; gridCol <= 3; gridCol++) {
+		const adjacent: CellBorderState[] = [];
+		if (gridCol > 0) adjacent.push(boardCellAt(context, gridRow, gridCol - 1));
+		if (gridCol < 3) adjacent.push(boardCellAt(context, gridRow, gridCol));
+		contentRow += paintBoardBorder(
+			context,
+			"\u2502",
+			isCursorVerticalBorder(context, gridRow, gridCol),
+			borderFgCode(adjacent),
+		);
+		if (gridCol < 3) {
+			contentRow += buildCellContent(
+				context.board[gridRow][gridCol],
+				lineIndex,
+				context.winCells.has(`${gridRow},${gridCol}`),
+			);
 		}
 	}
+	return centerPad(contentRow, context.maxWidth);
+}
 
+// pi-ignore noExcessiveCollectionIterations: The board is fixed at 3x3; each of its three rows renders exactly three content lines plus four borders.
+function renderBoard(opts: BoardRenderOpts): string[] {
+	const context = createBoardRenderContext(opts);
+	const lines: string[] = [];
+	for (let gridRow = 0; gridRow <= 3; gridRow++) {
+		lines.push(renderHorizontalBoardBorder(context, gridRow));
+		if (gridRow === 3) break;
+		for (let lineIndex = 0; lineIndex < CELL_HEIGHT; lineIndex++) {
+			lines.push(renderBoardContentRow(context, gridRow, lineIndex));
+		}
+	}
 	return lines;
 }
 
@@ -364,18 +440,22 @@ function renderBoardSnapshot(board: Cell[][], maxWidth: number): string[] {
 // TUI component
 // ---------------------------------------------------------------------------
 
+interface TicTacToeRenderHost {
+	requestRender(): void;
+}
+
 class TicTacToeComponent implements Component {
 	private state: GameState;
 	private onClose: () => void;
 	private onUserPlay: (row: number, col: number) => void;
-	private tui: { requestRender: () => void };
+	private tui: TicTacToeRenderHost;
 	private cachedLines: string[] = [];
 	private cachedWidth = 0;
 	private version = 0;
 	private cachedVersion = -1;
 
 	constructor(
-		tui: { requestRender: () => void },
+		tui: TicTacToeRenderHost,
 		onClose: () => void,
 		onUserPlay: (row: number, col: number) => void,
 		state: GameState,
@@ -392,42 +472,49 @@ class TicTacToeComponent implements Component {
 		this.tui.requestRender();
 	}
 
-	handleInput(data: string): boolean {
+	private handleCloseInput(data: string): boolean {
 		if (matchesKey(data, "escape") || data === "q" || data === "Q") {
 			this.onClose();
 			return true;
 		}
-		if (this.state.status !== "playing") {
-			if (data === "r" || data === "R") {
-				this.onClose();
-				return true;
-			}
-			return true;
-		}
-		if (this.state.currentTurn !== this.state.userMark) return true;
+		if (this.state.status === "playing") return false;
+		if (data === "r" || data === "R") this.onClose();
+		return true;
+	}
 
-		if (matchesKey(data, "up") && this.state.userCursorRow > 0) {
-			this.state.userCursorRow--;
-			this.version++;
-			this.tui.requestRender();
-		} else if (matchesKey(data, "down") && this.state.userCursorRow < 2) {
-			this.state.userCursorRow++;
-			this.version++;
-			this.tui.requestRender();
-		} else if (matchesKey(data, "left") && this.state.userCursorCol > 0) {
-			this.state.userCursorCol--;
-			this.version++;
-			this.tui.requestRender();
-		} else if (matchesKey(data, "right") && this.state.userCursorCol < 2) {
-			this.state.userCursorCol++;
-			this.version++;
-			this.tui.requestRender();
-		} else if (matchesKey(data, "return") || data === " ") {
-			const { userCursorRow, userCursorCol } = this.state;
-			if (this.state.board[userCursorRow][userCursorCol] === " ") {
-				this.onUserPlay(userCursorRow, userCursorCol);
-			}
+	private getCursorMovement(data: string): [number, number] | undefined {
+		if (matchesKey(data, "up")) return [-1, 0];
+		if (matchesKey(data, "down")) return [1, 0];
+		if (matchesKey(data, "left")) return [0, -1];
+		if (matchesKey(data, "right")) return [0, 1];
+		return undefined;
+	}
+
+	private moveUserCursor(data: string): boolean {
+		const movement = this.getCursorMovement(data);
+		if (!movement) return false;
+		const nextRow = this.state.userCursorRow + movement[0];
+		const nextCol = this.state.userCursorCol + movement[1];
+		if (nextRow < 0 || nextRow > 2 || nextCol < 0 || nextCol > 2) return true;
+		this.state.userCursorRow = nextRow;
+		this.state.userCursorCol = nextCol;
+		this.version++;
+		this.tui.requestRender();
+		return true;
+	}
+
+	private playSelectedCell(data: string): void {
+		if (!matchesKey(data, "return") && data !== " ") return;
+		const { userCursorRow, userCursorCol } = this.state;
+		if (this.state.board[userCursorRow][userCursorCol] === " ") {
+			this.onUserPlay(userCursorRow, userCursorCol);
 		}
+	}
+
+	handleInput(data: string): boolean {
+		if (this.handleCloseInput(data)) return true;
+		if (this.state.currentTurn !== this.state.userMark) return true;
+		if (!this.moveUserCursor(data)) this.playSelectedCell(data);
 		return true;
 	}
 
@@ -856,6 +943,64 @@ Decide the target cell first, then dump every action for the turn in one go.
 		play: 0,
 	};
 
+	type MovementAction = Exclude<Action, "play">;
+
+	const recordCurrentGameState = (): void => {
+		component?.updateState(gameState);
+		pi.appendEntry(SAVE_TYPE, getBoardDetails());
+	};
+
+	const moveAgentCursor = (action: MovementAction): string => {
+		switch (action) {
+			case "move_up":
+				if (gameState.agentCursorRow > 0) gameState.agentCursorRow--;
+				return `Moved up. Cursor: (${gameState.agentCursorRow}, ${gameState.agentCursorCol})`;
+			case "move_down":
+				if (gameState.agentCursorRow < 2) gameState.agentCursorRow++;
+				return `Moved down. Cursor: (${gameState.agentCursorRow}, ${gameState.agentCursorCol})`;
+			case "move_left":
+				if (gameState.agentCursorCol > 0) gameState.agentCursorCol--;
+				return `Moved left. Cursor: (${gameState.agentCursorRow}, ${gameState.agentCursorCol})`;
+			case "move_right":
+				if (gameState.agentCursorCol < 2) gameState.agentCursorCol++;
+				return `Moved right. Cursor: (${gameState.agentCursorRow}, ${gameState.agentCursorCol})`;
+		}
+	};
+
+	const playAgentMove = (): string => {
+		if (gameState.status !== "playing") throw new TicTacToeError(`Game is over (${gameState.status}).`);
+		if (gameState.currentTurn !== gameState.agentMark) throw new TicTacToeError("It is not your turn.");
+		const row = gameState.agentCursorRow;
+		const col = gameState.agentCursorCol;
+		if (gameState.board[row][col] !== " ") {
+			// Do not reset the cursor on failure, so the agent can move and retry.
+			recordCurrentGameState();
+			throw new TicTacToeError(
+				`Cell (${row},${col}) is already ${gameState.board[row][col]}. Your cursor is still at (${row},${col}). Move to an empty cell and retry play.`,
+			);
+		}
+
+		gameState.board[row][col] = gameState.agentMark;
+		gameState.status = checkWin(gameState.board);
+		// Reset the agent cursor to home only after a successful play.
+		gameState.agentCursorRow = AGENT_CURSOR_HOME_ROW;
+		gameState.agentCursorCol = AGENT_CURSOR_HOME_COL;
+		if (gameState.status === "playing") {
+			gameState.currentTurn = gameState.userMark;
+			return `Placed O at (${row},${col}). Cursor reset to (${AGENT_CURSOR_HOME_ROW},${AGENT_CURSOR_HOME_COL}). Your turn, X!`;
+		}
+		if (gameState.status === "win_O") {
+			gameActive = false;
+			emitGameOverMessage();
+			return `Placed O at (${row},${col}). Player O wins!`;
+		}
+		if (gameState.status === "draw") {
+			gameActive = false;
+			emitGameOverMessage();
+			return `Placed O at (${row},${col}). It's a draw!`;
+		}
+		return `Placed O at (${row},${col}).`;
+	};
 	pi.registerTool({
 		name: "tic_tac_toe",
 		label: "Tic-Tac-Toe",
@@ -877,70 +1022,8 @@ Decide the target cell first, then dump every action for the turn in one go.
 		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
 			const actionDelay = ACTION_DELAYS[params.action];
 			if (actionDelay > 0) await delay(actionDelay);
-
-			let result: string;
-
-			switch (params.action) {
-				case "move_up":
-					if (gameState.agentCursorRow > 0) gameState.agentCursorRow--;
-					result = `Moved up. Cursor: (${gameState.agentCursorRow}, ${gameState.agentCursorCol})`;
-					break;
-				case "move_down":
-					if (gameState.agentCursorRow < 2) gameState.agentCursorRow++;
-					result = `Moved down. Cursor: (${gameState.agentCursorRow}, ${gameState.agentCursorCol})`;
-					break;
-				case "move_left":
-					if (gameState.agentCursorCol > 0) gameState.agentCursorCol--;
-					result = `Moved left. Cursor: (${gameState.agentCursorRow}, ${gameState.agentCursorCol})`;
-					break;
-				case "move_right":
-					if (gameState.agentCursorCol < 2) gameState.agentCursorCol++;
-					result = `Moved right. Cursor: (${gameState.agentCursorRow}, ${gameState.agentCursorCol})`;
-					break;
-				case "play": {
-					if (gameState.status !== "playing") {
-						throw new TicTacToeError(`Game is over (${gameState.status}).`);
-					}
-					if (gameState.currentTurn !== gameState.agentMark) {
-						throw new TicTacToeError("It is not your turn.");
-					}
-					const r = gameState.agentCursorRow;
-					const c = gameState.agentCursorCol;
-					if (gameState.board[r][c] !== " ") {
-						// Do NOT reset the cursor on failure. The agent can retry
-						// from the cursor's current position.
-						component?.updateState(gameState);
-						pi.appendEntry(SAVE_TYPE, getBoardDetails());
-						throw new TicTacToeError(
-							`Cell (${r},${c}) is already ${gameState.board[r][c]}. Your cursor is still at (${r},${c}). Move to an empty cell and retry play.`,
-						);
-					}
-					gameState.board[r][c] = gameState.agentMark;
-					gameState.status = checkWin(gameState.board);
-					// Reset agent cursor to home ONLY on successful play.
-					gameState.agentCursorRow = AGENT_CURSOR_HOME_ROW;
-					gameState.agentCursorCol = AGENT_CURSOR_HOME_COL;
-					if (gameState.status === "playing") {
-						gameState.currentTurn = gameState.userMark;
-						result = `Placed O at (${r},${c}). Cursor reset to (${AGENT_CURSOR_HOME_ROW},${AGENT_CURSOR_HOME_COL}). Your turn, X!`;
-					} else if (gameState.status === "win_O") {
-						result = `Placed O at (${r},${c}). Player O wins!`;
-						gameActive = false;
-						emitGameOverMessage();
-					} else if (gameState.status === "draw") {
-						result = `Placed O at (${r},${c}). It's a draw!`;
-						gameActive = false;
-						emitGameOverMessage();
-					} else {
-						result = `Placed O at (${r},${c}).`;
-					}
-					break;
-				}
-			}
-
-			component?.updateState(gameState);
-			pi.appendEntry(SAVE_TYPE, getBoardDetails());
-
+			const result = params.action === "play" ? playAgentMove() : moveAgentCursor(params.action);
+			recordCurrentGameState();
 			return {
 				content: [{ type: "text", text: result }],
 				details: getBoardDetails(),

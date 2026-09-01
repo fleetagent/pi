@@ -52,50 +52,69 @@ export function isLoopbackBind(host: string): boolean {
 	const lower = normalized.toLowerCase();
 	return lower === "::1" || /^::ffff:127(?:\.[0-9]{1,3}){3}$/.test(lower);
 }
-
-export function validateDaemonNetworkPolicy(configuration: DaemonConfiguration): void {
-	if (!Number.isSafeInteger(configuration.port) || configuration.port < 0 || configuration.port > 65535)
+function validateDaemonRuntimeLimits(configuration: DaemonConfiguration): void {
+	if (!Number.isSafeInteger(configuration.port) || configuration.port < 0 || configuration.port > 65535) {
 		throw new DaemonConfigurationError("Daemon server port must be an integer from 0 to 65535");
-	if (!Number.isSafeInteger(configuration.maxConnections) || configuration.maxConnections < 1)
+	}
+	if (!Number.isSafeInteger(configuration.maxConnections) || configuration.maxConnections < 1) {
 		throw new DaemonConfigurationError("Daemon maxConnections must be a positive integer");
-	if (!Number.isSafeInteger(configuration.maxPendingConnections) || configuration.maxPendingConnections < 1)
+	}
+	if (!Number.isSafeInteger(configuration.maxPendingConnections) || configuration.maxPendingConnections < 1) {
 		throw new DaemonConfigurationError("Daemon maxPendingConnections must be a positive integer");
+	}
 	if (
 		!Number.isSafeInteger(configuration.handshakeTimeoutMs) ||
 		configuration.handshakeTimeoutMs < 100 ||
 		configuration.handshakeTimeoutMs > 5 * 60_000
-	)
+	) {
 		throw new DaemonConfigurationError("Daemon handshakeTimeoutMs must be an integer from 100 to 300000");
+	}
 	if (
 		!Number.isSafeInteger(configuration.shutdownTimeoutMs) ||
 		configuration.shutdownTimeoutMs < 100 ||
 		configuration.shutdownTimeoutMs > 5 * 60_000
-	)
+	) {
 		throw new DaemonConfigurationError("Daemon shutdownTimeoutMs must be an integer from 100 to 300000");
-	if (process.platform !== "win32" && process.getuid?.() === 0 && !configuration.allowRoot)
-		throw new DaemonConfigurationError("Refusing to run the workspace daemon as root without allowRoot");
-	if (configuration.token !== undefined) {
-		const tokenBytes = Buffer.byteLength(configuration.token, "utf8");
-		if (
-			tokenBytes < 32 ||
-			tokenBytes > 1024 ||
-			!/\S/u.test(configuration.token) ||
-			/[\r\n]/u.test(configuration.token)
-		)
-			throw new DaemonConfigurationError("Daemon token must contain 32 to 1024 UTF-8 bytes and no line breaks");
 	}
-	for (const origin of configuration.allowedOrigins) {
+}
+
+function validateDaemonCredentials(configuration: DaemonConfiguration): void {
+	if (process.platform !== "win32" && process.getuid?.() === 0 && !configuration.allowRoot) {
+		throw new DaemonConfigurationError("Refusing to run the workspace daemon as root without allowRoot");
+	}
+	if (configuration.token === undefined) return;
+	const tokenBytes = Buffer.byteLength(configuration.token, "utf8");
+	if (
+		tokenBytes < 32 ||
+		tokenBytes > 1024 ||
+		!/\S/u.test(configuration.token) ||
+		/[\r\n]/u.test(configuration.token)
+	) {
+		throw new DaemonConfigurationError("Daemon token must contain 32 to 1024 UTF-8 bytes and no line breaks");
+	}
+}
+
+function validateDaemonOrigins(origins: readonly string[]): void {
+	for (const origin of origins) {
 		let parsed: URL;
 		try {
 			parsed = new URL(origin);
 		} catch {
 			throw new DaemonConfigurationError(`Invalid daemon Origin: ${origin}`);
 		}
-		if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || origin !== parsed.origin)
+		if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || origin !== parsed.origin) {
 			throw new DaemonConfigurationError(`Invalid daemon Origin: ${origin}`);
+		}
 	}
-	if (configuration.tls && (configuration.tls.cert.byteLength === 0 || configuration.tls.key.byteLength === 0))
+}
+
+function validateDaemonTls(configuration: DaemonConfiguration): void {
+	if (configuration.tls && (configuration.tls.cert.byteLength === 0 || configuration.tls.key.byteLength === 0)) {
 		throw new DaemonConfigurationError("Daemon TLS certificate and private key must not be empty");
+	}
+}
+
+function validateDaemonBindExposure(configuration: DaemonConfiguration): void {
 	if (isIP(configuration.host.replace(/^\[|\]$/g, "")) === 0) {
 		throw new DaemonConfigurationError("Daemon host must be a literal IPv4 or IPv6 address");
 	}
@@ -106,6 +125,14 @@ export function validateDaemonNetworkPolicy(configuration: DaemonConfiguration):
 			"A non-loopback daemon bind requires TLS or explicit --daemon-allow-insecure-transport acknowledgement",
 		);
 	}
+}
+
+export function validateDaemonNetworkPolicy(configuration: DaemonConfiguration): void {
+	validateDaemonRuntimeLimits(configuration);
+	validateDaemonCredentials(configuration);
+	validateDaemonOrigins(configuration.allowedOrigins);
+	validateDaemonTls(configuration);
+	validateDaemonBindExposure(configuration);
 }
 
 export function createDaemonAuthorization(token: string | undefined): DaemonAuthorization | undefined {

@@ -1,7 +1,11 @@
-import type { MarkdownTransformContext, MarkdownTransformer } from "../../../core/extensions/types.ts";
+import type {
+	MarkdownMessageType,
+	MarkdownTransformContext,
+	MarkdownTransformer,
+} from "../../../core/extensions/types.ts";
 
 export function createMarkdownTransform(
-	messageType: MarkdownTransformContext["messageType"],
+	messageType: MarkdownMessageType,
 	isStreaming: boolean,
 	transformers: readonly MarkdownTransformer[],
 ): (markdown: string, availableWidth: number) => string {

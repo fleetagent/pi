@@ -2,6 +2,7 @@ import {
 	type FileError,
 	type Result,
 	SessionError,
+	type SessionForkOptions,
 	type SessionMetadata,
 	type SessionStorage,
 	type SessionTreeEntry,
@@ -31,7 +32,7 @@ export function getFileSystemResultOrThrow<TValue>(result: Result<TValue, FileEr
 
 export async function getEntriesToFork(
 	storage: SessionStorage,
-	options: { entryId?: string; position?: "before" | "at" },
+	options: SessionForkOptions,
 ): Promise<SessionTreeEntry[]> {
 	if (!options.entryId) return storage.getEntries();
 	const target = await storage.getEntry(options.entryId);

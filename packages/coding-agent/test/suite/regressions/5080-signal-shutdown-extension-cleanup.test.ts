@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import type { FullscreenExitOutput } from "../../../src/core/settings-manager.ts";
-import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
+import { InteractiveMode, type ShutdownOptions } from "../../../src/modes/interactive/interactive-mode.ts";
 
 // Regression for https://github.com/fleetagent/pi/issues/5080
 //
@@ -11,30 +11,46 @@ import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode
 // interactive quit path (Ctrl+D, /quit) keeps the opposite order to preserve
 // the final TUI frame.
 
-type ShutdownThis = {
+interface ShutdownRuntimeHost {
+	dispose: () => Promise<void>;
+}
+
+interface ShutdownSettingsManager {
+	getFullscreenExitOutput: () => FullscreenExitOutput;
+}
+
+interface ShutdownTerminal {
+	drainInput: (ms: number) => Promise<void>;
+}
+
+interface ShutdownUI {
+	terminal: ShutdownTerminal;
+}
+
+interface ShutdownThis {
 	isShuttingDown: boolean;
 	unregisterSignalHandlers: () => void;
-	runtimeHost: { dispose: () => Promise<void> };
-	settingsManager: { getFullscreenExitOutput: () => FullscreenExitOutput };
-	ui: { terminal: { drainInput: (ms: number) => Promise<void> } };
+	runtimeHost: ShutdownRuntimeHost;
+	settingsManager: ShutdownSettingsManager;
+	ui: ShutdownUI;
 	stop: (fullscreenExitOutput?: FullscreenExitOutput) => void;
-};
+}
+
+interface UncaughtCrashContext {
+	isShuttingDown: boolean;
+	unregisterSignalHandlers: () => void;
+	stopInteractiveTui: (output: FullscreenExitOutput) => void;
+}
+
+interface FatalRuntimeErrorContext {
+	showError: (message: string) => void;
+	stop: (output?: FullscreenExitOutput) => void;
+}
 
 type InteractiveModePrototypeWithShutdown = {
-	uncaughtCrash(
-		this: {
-			isShuttingDown: boolean;
-			unregisterSignalHandlers: () => void;
-			stopInteractiveTui: (output: FullscreenExitOutput) => void;
-		},
-		error: Error,
-	): never;
-	handleFatalRuntimeError(
-		this: { showError: (message: string) => void; stop: (output?: FullscreenExitOutput) => void },
-		prefix: string,
-		error: unknown,
-	): Promise<never>;
-	shutdown(this: ShutdownThis, options?: { fromSignal?: boolean }): Promise<void>;
+	uncaughtCrash(this: UncaughtCrashContext, error: Error): never;
+	handleFatalRuntimeError(this: FatalRuntimeErrorContext, prefix: string, error: unknown): Promise<never>;
+	shutdown(this: ShutdownThis, options?: ShutdownOptions): Promise<void>;
 };
 
 const interactiveModePrototype = InteractiveMode.prototype as unknown;
@@ -64,7 +80,7 @@ function createContext(order: string[], fullscreenExitOutput: FullscreenExitOutp
 	};
 }
 
-async function callShutdown(context: ShutdownThis, options?: { fromSignal?: boolean }): Promise<void> {
+async function callShutdown(context: ShutdownThis, options?: ShutdownOptions): Promise<void> {
 	try {
 		await (interactiveModePrototype as InteractiveModePrototypeWithShutdown).shutdown.call(context, options);
 	} catch (error) {

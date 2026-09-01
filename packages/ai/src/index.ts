@@ -27,8 +27,10 @@ export * from "./session-resources.ts";
 export * from "./stream.ts";
 export * from "./types.ts";
 export * from "./utils/diagnostics.ts";
+export type { AssistantUsageInfo, ContextUsageEstimate } from "./utils/estimate.ts";
 export * from "./utils/event-stream.ts";
 export * from "./utils/json-parse.ts";
+export type { PKCEPair } from "./utils/oauth/pkce.ts";
 export type {
 	OAuthAuthInfo,
 	OAuthCredentials,

@@ -1,3 +1,5 @@
+import type { AgentMessage } from "@fleetagent/pi-agent-core";
+import type { AssistantMessage } from "@fleetagent/pi-ai";
 import {
 	type Component,
 	Container,
@@ -35,8 +37,48 @@ interface FlatNode {
 	isVirtualRootChild: boolean;
 }
 
+interface TreeTraversalItem {
+	node: SessionTreeNode;
+	indent: number;
+	justBranched: boolean;
+	showConnector: boolean;
+	isLast: boolean;
+	gutters: GutterInfo[];
+	isVirtualRootChild: boolean;
+}
+
+interface VisibleTreeStructure {
+	parentMap: Map<string, string | null>;
+	childrenMap: Map<string | null, string[]>;
+	nodesById: Map<string, FlatNode>;
+	rootIds: string[];
+}
+
+interface VisibleChildLayout {
+	indent: number;
+	gutters: GutterInfo[];
+	branched: boolean;
+}
+// pi-ignore noNearIdenticalDataStructures: Viewport slice indices and terminal selection cell columns evolve independently.
+interface VisibleNodeRange {
+	start: number;
+	end: number;
+}
+
+type BranchSegmentTraversalDirection = "up" | "down";
+
 /** Filter mode for tree display */
 export type FilterMode = "default" | "no-tools" | "user-only" | "labeled-only" | "all";
+
+const FILTER_MODES: readonly FilterMode[] = ["default", "no-tools", "user-only", "labeled-only", "all"];
+
+function hasTreeSearchControlCharacters(value: string): boolean {
+	for (const character of value) {
+		const code = character.charCodeAt(0);
+		if (code < 32 || code === 0x7f || (code >= 0x80 && code <= 0x9f)) return true;
+	}
+	return false;
+}
 
 /**
  * Tree list component with selection and ASCII art visualization
@@ -45,6 +87,51 @@ export type FilterMode = "default" | "no-tools" | "user-only" | "labeled-only" |
 interface ToolCallInfo {
 	name: string;
 	arguments: Record<string, unknown>;
+}
+
+type TreeFileMutationToolName = "write" | "edit";
+type TreeSearchToolName = "grep" | "find";
+
+function shortenTreeToolPath(path: string): string {
+	const home = process.env.HOME || process.env.USERPROFILE || "";
+	return home && path.startsWith(home) ? `~${path.slice(home.length)}` : path;
+}
+
+function formatTreeReadToolCall(args: Record<string, unknown>): string {
+	const path = shortenTreeToolPath(String(args.path || args.file_path || ""));
+	const offset = args.offset as number | undefined;
+	const limit = args.limit as number | undefined;
+	let display = path;
+	if (offset !== undefined || limit !== undefined) {
+		const start = offset ?? 1;
+		const end = limit !== undefined ? start + limit - 1 : "";
+		display += `:${start}${end ? `-${end}` : ""}`;
+	}
+	return `[read: ${display}]`;
+}
+
+function formatTreeFileMutationToolCall(name: TreeFileMutationToolName, args: Record<string, unknown>): string {
+	return `[${name}: ${shortenTreeToolPath(String(args.path || args.file_path || ""))}]`;
+}
+
+function formatTreeBashToolCall(args: Record<string, unknown>): string {
+	const rawCommand = String(args.command || "");
+	const command = rawCommand
+		.replace(/[\n\t]/g, " ")
+		.trim()
+		.slice(0, 50);
+	return `[bash: ${command}${rawCommand.length > 50 ? "..." : ""}]`;
+}
+
+function formatTreeSearchToolCall(name: TreeSearchToolName, args: Record<string, unknown>): string {
+	const pattern = String(args.pattern || "");
+	const path = shortenTreeToolPath(String(args.path || "."));
+	return name === "grep" ? `[grep: /${pattern}/ in ${path}]` : `[find: ${pattern} in ${path}]`;
+}
+
+function formatCustomTreeToolCall(name: string, args: Record<string, unknown>): string {
+	const argsString = JSON.stringify(args).slice(0, 40);
+	return `[${name}: ${argsString}${JSON.stringify(args).length > 40 ? "..." : ""}]`;
 }
 
 class TreeList implements Component {
@@ -141,136 +228,172 @@ class TreeList implements Component {
 		}
 	}
 
-	private flattenTree(roots: SessionTreeNode[]): FlatNode[] {
-		const result: FlatNode[] = [];
-		this.toolCallMap.clear();
+	private findActiveSubtrees(roots: SessionTreeNode[]): Map<SessionTreeNode, boolean> {
+		const allNodes: SessionTreeNode[] = [];
+		const preOrderStack = [...roots];
+		while (preOrderStack.length > 0) {
+			const node = preOrderStack.pop()!;
+			allNodes.push(node);
+			for (let i = node.children.length - 1; i >= 0; i--) preOrderStack.push(node.children[i]);
+		}
 
-		// Indentation rules:
-		// - At indent 0: stay at 0 unless parent has >1 children (then +1)
-		// - At indent 1: children always go to indent 2 (visual grouping of subtree)
-		// - At indent 2+: stay flat for single-child chains, +1 only if parent branches
-
-		// Stack items: [node, indent, justBranched, showConnector, isLast, gutters, isVirtualRootChild]
-		type StackItem = [SessionTreeNode, number, boolean, boolean, boolean, GutterInfo[], boolean];
-		const stack: StackItem[] = [];
-
-		// Determine which subtrees contain the active leaf (to sort current branch first)
-		// Use iterative post-order traversal to avoid stack overflow
 		const containsActive = new Map<SessionTreeNode, boolean>();
-		const leafId = this.currentLeafId;
-		{
-			// Build list in pre-order, then process in reverse for post-order effect
-			const allNodes: SessionTreeNode[] = [];
-			const preOrderStack: SessionTreeNode[] = [...roots];
-			while (preOrderStack.length > 0) {
-				const node = preOrderStack.pop()!;
-				allNodes.push(node);
-				// Push children in reverse so they're processed left-to-right
-				for (let i = node.children.length - 1; i >= 0; i--) {
-					preOrderStack.push(node.children[i]);
-				}
+		for (let i = allNodes.length - 1; i >= 0; i--) {
+			const node = allNodes[i];
+			let hasActiveEntry = this.currentLeafId !== null && node.entry.id === this.currentLeafId;
+			for (const child of node.children) {
+				if (containsActive.get(child)) hasActiveEntry = true;
 			}
-			// Process in reverse (post-order): children before parents
-			for (let i = allNodes.length - 1; i >= 0; i--) {
-				const node = allNodes[i];
-				let has = leafId !== null && node.entry.id === leafId;
-				for (const child of node.children) {
-					if (containsActive.get(child)) {
-						has = true;
-					}
-				}
-				containsActive.set(node, has);
-			}
+			containsActive.set(node, hasActiveEntry);
 		}
+		return containsActive;
+	}
 
-		// Add roots in reverse order, prioritizing the one containing the active leaf
-		// If multiple roots, treat them as children of a virtual root that branches
-		const multipleRoots = roots.length > 1;
+	private createTreeTraversalStack(
+		roots: SessionTreeNode[],
+		containsActive: Map<SessionTreeNode, boolean>,
+	): TreeTraversalItem[] {
 		const orderedRoots = [...roots].sort((a, b) => Number(containsActive.get(b)) - Number(containsActive.get(a)));
+		const stack: TreeTraversalItem[] = [];
 		for (let i = orderedRoots.length - 1; i >= 0; i--) {
-			const isLast = i === orderedRoots.length - 1;
-			stack.push([orderedRoots[i], multipleRoots ? 1 : 0, multipleRoots, multipleRoots, isLast, [], multipleRoots]);
+			stack.push({
+				node: orderedRoots[i],
+				indent: this.multipleRoots ? 1 : 0,
+				justBranched: this.multipleRoots,
+				showConnector: this.multipleRoots,
+				isLast: i === orderedRoots.length - 1,
+				gutters: [],
+				isVirtualRootChild: this.multipleRoots,
+			});
 		}
+		return stack;
+	}
+
+	private recordAssistantToolCalls(node: SessionTreeNode): void {
+		const entry = node.entry;
+		if (entry.type !== "message" || entry.message.role !== "assistant") return;
+		const content = (entry.message as { content?: unknown }).content;
+		if (!Array.isArray(content)) return;
+		for (const block of content) {
+			if (typeof block !== "object" || block === null || !("type" in block) || block.type !== "toolCall") continue;
+			const toolCall = block as { id: string; name: string; arguments: Record<string, unknown> };
+			this.toolCallMap.set(toolCall.id, { name: toolCall.name, arguments: toolCall.arguments });
+		}
+	}
+
+	private prioritizeActiveChildren(
+		children: SessionTreeNode[],
+		containsActive: Map<SessionTreeNode, boolean>,
+	): SessionTreeNode[] {
+		const prioritized: SessionTreeNode[] = [];
+		const rest: SessionTreeNode[] = [];
+		for (const child of children) {
+			if (containsActive.get(child)) prioritized.push(child);
+			else rest.push(child);
+		}
+		return [...prioritized, ...rest];
+	}
+
+	private getTraversalChildIndent(item: TreeTraversalItem, multipleChildren: boolean): number {
+		if (multipleChildren || (item.justBranched && item.indent > 0)) return item.indent + 1;
+		return item.indent;
+	}
+
+	private getTraversalChildGutters(item: TreeTraversalItem): GutterInfo[] {
+		if (!item.showConnector || item.isVirtualRootChild) return item.gutters;
+		const currentDisplayIndent = this.multipleRoots ? Math.max(0, item.indent - 1) : item.indent;
+		return [...item.gutters, { position: Math.max(0, currentDisplayIndent - 1), show: !item.isLast }];
+	}
+
+	private pushTraversalChildren(
+		stack: TreeTraversalItem[],
+		item: TreeTraversalItem,
+		containsActive: Map<SessionTreeNode, boolean>,
+	): void {
+		const orderedChildren = this.prioritizeActiveChildren(item.node.children, containsActive);
+		const multipleChildren = orderedChildren.length > 1;
+		const childIndent = this.getTraversalChildIndent(item, multipleChildren);
+		const childGutters = this.getTraversalChildGutters(item);
+		for (let i = orderedChildren.length - 1; i >= 0; i--) {
+			stack.push({
+				node: orderedChildren[i],
+				indent: childIndent,
+				justBranched: multipleChildren,
+				showConnector: multipleChildren,
+				isLast: i === orderedChildren.length - 1,
+				gutters: childGutters,
+				isVirtualRootChild: false,
+			});
+		}
+	}
+
+	private flattenTree(roots: SessionTreeNode[]): FlatNode[] {
+		this.toolCallMap.clear();
+		const result: FlatNode[] = [];
+		const containsActive = this.findActiveSubtrees(roots);
+		const stack = this.createTreeTraversalStack(roots, containsActive);
 
 		while (stack.length > 0) {
-			const [node, indent, justBranched, showConnector, isLast, gutters, isVirtualRootChild] = stack.pop()!;
-
-			// Extract tool calls from assistant messages for later lookup
-			const entry = node.entry;
-			if (entry.type === "message" && entry.message.role === "assistant") {
-				const content = (entry.message as { content?: unknown }).content;
-				if (Array.isArray(content)) {
-					for (const block of content) {
-						if (typeof block === "object" && block !== null && "type" in block && block.type === "toolCall") {
-							const tc = block as { id: string; name: string; arguments: Record<string, unknown> };
-							this.toolCallMap.set(tc.id, { name: tc.name, arguments: tc.arguments });
-						}
-					}
-				}
-			}
-
-			result.push({ node, indent, showConnector, isLast, gutters, isVirtualRootChild });
-
-			const children = node.children;
-			const multipleChildren = children.length > 1;
-
-			// Order children so the branch containing the active leaf comes first
-			const orderedChildren = (() => {
-				const prioritized: SessionTreeNode[] = [];
-				const rest: SessionTreeNode[] = [];
-				for (const child of children) {
-					if (containsActive.get(child)) {
-						prioritized.push(child);
-					} else {
-						rest.push(child);
-					}
-				}
-				return [...prioritized, ...rest];
-			})();
-
-			// Calculate child indent
-			let childIndent: number;
-			if (multipleChildren) {
-				// Parent branches: children get +1
-				childIndent = indent + 1;
-			} else if (justBranched && indent > 0) {
-				// First generation after a branch: +1 for visual grouping
-				childIndent = indent + 1;
-			} else {
-				// Single-child chain: stay flat
-				childIndent = indent;
-			}
-
-			// Build gutters for children
-			// If this node showed a connector, add a gutter entry for descendants
-			// Only add gutter if connector is actually displayed (not suppressed for virtual root children)
-			const connectorDisplayed = showConnector && !isVirtualRootChild;
-			// When connector is displayed, add a gutter entry at the connector's position
-			// Connector is at position (displayIndent - 1), so gutter should be there too
-			const currentDisplayIndent = this.multipleRoots ? Math.max(0, indent - 1) : indent;
-			const connectorPosition = Math.max(0, currentDisplayIndent - 1);
-			const childGutters: GutterInfo[] = connectorDisplayed
-				? [...gutters, { position: connectorPosition, show: !isLast }]
-				: gutters;
-
-			// Add children in reverse order
-			for (let i = orderedChildren.length - 1; i >= 0; i--) {
-				const childIsLast = i === orderedChildren.length - 1;
-				stack.push([
-					orderedChildren[i],
-					childIndent,
-					multipleChildren,
-					multipleChildren,
-					childIsLast,
-					childGutters,
-					false,
-				]);
-			}
+			const item = stack.pop()!;
+			this.recordAssistantToolCalls(item.node);
+			result.push({
+				node: item.node,
+				indent: item.indent,
+				showConnector: item.showConnector,
+				isLast: item.isLast,
+				gutters: item.gutters,
+				isVirtualRootChild: item.isVirtualRootChild,
+			});
+			this.pushTraversalChildren(stack, item, containsActive);
 		}
-
 		return result;
 	}
 
+	private shouldDisplayAssistantNode(flatNode: FlatNode): boolean {
+		const entry = flatNode.node.entry;
+		if (entry.type !== "message" || entry.message.role !== "assistant" || entry.id === this.currentLeafId) {
+			return true;
+		}
+		const message = entry.message as { stopReason?: string; content?: unknown };
+		const hasText = this.hasTextContent(message.content);
+		const isErrorOrAborted =
+			message.stopReason !== undefined && message.stopReason !== "stop" && message.stopReason !== "toolUse";
+		return hasText || isErrorOrAborted;
+	}
+
+	private passesNodeFilterMode(flatNode: FlatNode): boolean {
+		const entry = flatNode.node.entry;
+		const isSettingsEntry =
+			entry.type === "label" ||
+			entry.type === "custom" ||
+			entry.type === "model_change" ||
+			entry.type === "thinking_level_change" ||
+			entry.type === "session_info";
+		switch (this.filterMode) {
+			case "user-only":
+				return entry.type === "message" && entry.message.role === "user";
+			case "no-tools":
+				return !isSettingsEntry && !(entry.type === "message" && entry.message.role === "toolResult");
+			case "labeled-only":
+				return flatNode.node.label !== undefined;
+			case "all":
+				return true;
+			default:
+				return !isSettingsEntry;
+		}
+	}
+
+	private matchesNodeSearch(flatNode: FlatNode, searchTokens: string[]): boolean {
+		if (searchTokens.length === 0) return true;
+		const nodeText: string = this.getSearchableText(flatNode.node).toLowerCase();
+		return searchTokens.every((token) => nodeText.includes(token));
+	}
+
+	private shouldIncludeFilteredNode(flatNode: FlatNode, searchTokens: string[]): boolean {
+		if (!this.shouldDisplayAssistantNode(flatNode)) return false;
+		if (!this.passesNodeFilterMode(flatNode)) return false;
+		return this.matchesNodeSearch(flatNode, searchTokens);
+	}
 	private applyFilter(): void {
 		// Update lastSelectedId only when we have a valid selection (non-empty list)
 		// This preserves the selection when switching through empty filter results
@@ -280,65 +403,7 @@ class TreeList implements Component {
 
 		const searchTokens = this.searchQuery.toLowerCase().split(/\s+/).filter(Boolean);
 
-		this.filteredNodes = this.flatNodes.filter((flatNode) => {
-			const entry = flatNode.node.entry;
-			const isCurrentLeaf = entry.id === this.currentLeafId;
-
-			// Skip assistant messages with only tool calls (no text) unless error/aborted
-			// Always show current leaf so active position is visible
-			if (entry.type === "message" && entry.message.role === "assistant" && !isCurrentLeaf) {
-				const msg = entry.message as { stopReason?: string; content?: unknown };
-				const hasText = this.hasTextContent(msg.content);
-				const isErrorOrAborted = msg.stopReason && msg.stopReason !== "stop" && msg.stopReason !== "toolUse";
-				// Only hide if no text AND not an error/aborted message
-				if (!hasText && !isErrorOrAborted) {
-					return false;
-				}
-			}
-
-			// Apply filter mode
-			let passesFilter = true;
-			// Entry types hidden in default view (settings/bookkeeping)
-			const isSettingsEntry =
-				entry.type === "label" ||
-				entry.type === "custom" ||
-				entry.type === "model_change" ||
-				entry.type === "thinking_level_change" ||
-				entry.type === "session_info";
-
-			switch (this.filterMode) {
-				case "user-only":
-					// Just user messages
-					passesFilter = entry.type === "message" && entry.message.role === "user";
-					break;
-				case "no-tools":
-					// Default minus tool results
-					passesFilter = !isSettingsEntry && !(entry.type === "message" && entry.message.role === "toolResult");
-					break;
-				case "labeled-only":
-					// Just labeled entries
-					passesFilter = flatNode.node.label !== undefined;
-					break;
-				case "all":
-					// Show everything
-					passesFilter = true;
-					break;
-				default:
-					// Default mode: hide settings/bookkeeping entries
-					passesFilter = !isSettingsEntry;
-					break;
-			}
-
-			if (!passesFilter) return false;
-
-			// Apply search filter
-			if (searchTokens.length > 0) {
-				const nodeText = this.getSearchableText(flatNode.node).toLowerCase();
-				return searchTokens.every((token) => nodeText.includes(token));
-			}
-
-			return true;
-		});
+		this.filteredNodes = this.flatNodes.filter((flatNode) => this.shouldIncludeFilteredNode(flatNode, searchTokens));
 
 		// Filter out descendants of folded nodes.
 		if (this.foldedNodes.size > 0) {
@@ -369,135 +434,107 @@ class TreeList implements Component {
 		}
 	}
 
+	private findNearestVisibleAncestor(
+		nodeId: string,
+		visibleIds: ReadonlySet<string>,
+		nodesById: ReadonlyMap<string, FlatNode>,
+	): string | null {
+		let currentId = nodesById.get(nodeId)?.node.entry.parentId ?? null;
+		while (currentId !== null) {
+			if (visibleIds.has(currentId)) return currentId;
+			currentId = nodesById.get(currentId)?.node.entry.parentId ?? null;
+		}
+		return null;
+	}
+
+	private buildVisibleTreeStructure(): VisibleTreeStructure {
+		const visibleIds = new Set(this.filteredNodes.map((flatNode) => flatNode.node.entry.id));
+		const allNodesById = new Map<string, FlatNode>();
+		for (const flatNode of this.flatNodes) allNodesById.set(flatNode.node.entry.id, flatNode);
+		const parentMap = new Map<string, string | null>();
+		const childrenMap = new Map<string | null, string[]>([[null, []]]);
+		const nodesById = new Map<string, FlatNode>();
+		for (const flatNode of this.filteredNodes) {
+			const nodeId = flatNode.node.entry.id;
+			const ancestorId = this.findNearestVisibleAncestor(nodeId, visibleIds, allNodesById);
+			parentMap.set(nodeId, ancestorId);
+			nodesById.set(nodeId, flatNode);
+			let children = childrenMap.get(ancestorId);
+			if (!children) {
+				children = [];
+				childrenMap.set(ancestorId, children);
+			}
+			children.push(nodeId);
+		}
+		return { parentMap, childrenMap, nodesById, rootIds: childrenMap.get(null) ?? [] };
+	}
+
+	private resolveVisibleChildLayout(item: TreeTraversalItem, multipleChildren: boolean): VisibleChildLayout {
+		let indent = item.indent;
+		if (multipleChildren || (item.justBranched && item.indent > 0)) indent++;
+		const connectorDisplayed = item.showConnector && !item.isVirtualRootChild;
+		const currentDisplayIndent = this.multipleRoots ? Math.max(0, item.indent - 1) : item.indent;
+		const connectorPosition = Math.max(0, currentDisplayIndent - 1);
+		const gutters = connectorDisplayed
+			? [...item.gutters, { position: connectorPosition, show: !item.isLast }]
+			: item.gutters;
+		return { indent, gutters, branched: multipleChildren };
+	}
+
+	private layoutVisibleTree(structure: VisibleTreeStructure): void {
+		const stack: TreeTraversalItem[] = [];
+		for (let index = structure.rootIds.length - 1; index >= 0; index--) {
+			const flatNode = structure.nodesById.get(structure.rootIds[index]);
+			if (!flatNode) continue;
+			stack.push({
+				node: flatNode.node,
+				indent: this.multipleRoots ? 1 : 0,
+				justBranched: this.multipleRoots,
+				showConnector: this.multipleRoots,
+				isLast: index === structure.rootIds.length - 1,
+				gutters: [],
+				isVirtualRootChild: this.multipleRoots,
+			});
+		}
+		while (stack.length > 0) {
+			const item = stack.pop()!;
+			const nodeId = item.node.entry.id;
+			const flatNode = structure.nodesById.get(nodeId);
+			if (!flatNode) continue;
+			flatNode.indent = item.indent;
+			flatNode.showConnector = item.showConnector;
+			flatNode.isLast = item.isLast;
+			flatNode.gutters = item.gutters;
+			flatNode.isVirtualRootChild = item.isVirtualRootChild;
+			const children = structure.childrenMap.get(nodeId) ?? [];
+			const childLayout = this.resolveVisibleChildLayout(item, children.length > 1);
+			for (let index = children.length - 1; index >= 0; index--) {
+				const child = structure.nodesById.get(children[index]);
+				if (!child) continue;
+				stack.push({
+					node: child.node,
+					indent: childLayout.indent,
+					justBranched: childLayout.branched,
+					showConnector: childLayout.branched,
+					isLast: index === children.length - 1,
+					gutters: childLayout.gutters,
+					isVirtualRootChild: false,
+				});
+			}
+		}
+	}
+
 	/**
-	 * Recompute indentation/connectors for the filtered view
-	 *
-	 * Filtering can hide intermediate entries; descendants attach to the nearest visible ancestor.
-	 * Keep indentation semantics aligned with flattenTree() so single-child chains don't drift right.
+	 * Recompute indentation/connectors for the filtered view.
+	 * Filtering can hide intermediate entries, so descendants attach to the nearest visible ancestor.
 	 */
 	private recalculateVisualStructure(): void {
 		if (this.filteredNodes.length === 0) return;
-
-		const visibleIds = new Set(this.filteredNodes.map((n) => n.node.entry.id));
-
-		// Build entry map for efficient parent lookup (using full tree)
-		const entryMap = new Map<string, FlatNode>();
-		for (const flatNode of this.flatNodes) {
-			entryMap.set(flatNode.node.entry.id, flatNode);
-		}
-
-		// Find nearest visible ancestor for a node
-		const findVisibleAncestor = (nodeId: string): string | null => {
-			let currentId = entryMap.get(nodeId)?.node.entry.parentId ?? null;
-			while (currentId !== null) {
-				if (visibleIds.has(currentId)) {
-					return currentId;
-				}
-				currentId = entryMap.get(currentId)?.node.entry.parentId ?? null;
-			}
-			return null;
-		};
-
-		// Build visible tree structure:
-		// - visibleParent: nodeId → nearest visible ancestor (or null for roots)
-		// - visibleChildren: parentId → list of visible children (in filteredNodes order)
-		const visibleParent = new Map<string, string | null>();
-		const visibleChildren = new Map<string | null, string[]>();
-		visibleChildren.set(null, []); // root-level nodes
-
-		for (const flatNode of this.filteredNodes) {
-			const nodeId = flatNode.node.entry.id;
-			const ancestorId = findVisibleAncestor(nodeId);
-			visibleParent.set(nodeId, ancestorId);
-
-			if (!visibleChildren.has(ancestorId)) {
-				visibleChildren.set(ancestorId, []);
-			}
-			visibleChildren.get(ancestorId)!.push(nodeId);
-		}
-
-		// Update multipleRoots based on visible roots
-		const visibleRootIds = visibleChildren.get(null)!;
-		this.multipleRoots = visibleRootIds.length > 1;
-
-		// Build a map for quick lookup: nodeId → FlatNode
-		const filteredNodeMap = new Map<string, FlatNode>();
-		for (const flatNode of this.filteredNodes) {
-			filteredNodeMap.set(flatNode.node.entry.id, flatNode);
-		}
-
-		// DFS over the visible tree using flattenTree() indentation semantics
-		// Stack items: [nodeId, indent, justBranched, showConnector, isLast, gutters, isVirtualRootChild]
-		type StackItem = [string, number, boolean, boolean, boolean, GutterInfo[], boolean];
-		const stack: StackItem[] = [];
-
-		// Add visible roots in reverse order (to process in forward order via stack)
-		for (let i = visibleRootIds.length - 1; i >= 0; i--) {
-			const isLast = i === visibleRootIds.length - 1;
-			stack.push([
-				visibleRootIds[i],
-				this.multipleRoots ? 1 : 0,
-				this.multipleRoots,
-				this.multipleRoots,
-				isLast,
-				[],
-				this.multipleRoots,
-			]);
-		}
-
-		while (stack.length > 0) {
-			const [nodeId, indent, justBranched, showConnector, isLast, gutters, isVirtualRootChild] = stack.pop()!;
-
-			const flatNode = filteredNodeMap.get(nodeId);
-			if (!flatNode) continue;
-
-			// Update this node's visual properties
-			flatNode.indent = indent;
-			flatNode.showConnector = showConnector;
-			flatNode.isLast = isLast;
-			flatNode.gutters = gutters;
-			flatNode.isVirtualRootChild = isVirtualRootChild;
-
-			// Get visible children of this node
-			const children = visibleChildren.get(nodeId) || [];
-			const multipleChildren = children.length > 1;
-
-			// Child indent follows flattenTree(): branch points (and first generation after a branch) shift +1
-			let childIndent: number;
-			if (multipleChildren) {
-				childIndent = indent + 1;
-			} else if (justBranched && indent > 0) {
-				childIndent = indent + 1;
-			} else {
-				childIndent = indent;
-			}
-
-			// Child gutters follow flattenTree() connector/gutter rules
-			const connectorDisplayed = showConnector && !isVirtualRootChild;
-			const currentDisplayIndent = this.multipleRoots ? Math.max(0, indent - 1) : indent;
-			const connectorPosition = Math.max(0, currentDisplayIndent - 1);
-			const childGutters: GutterInfo[] = connectorDisplayed
-				? [...gutters, { position: connectorPosition, show: !isLast }]
-				: gutters;
-
-			// Add children in reverse order (to process in forward order via stack)
-			for (let i = children.length - 1; i >= 0; i--) {
-				const childIsLast = i === children.length - 1;
-				stack.push([
-					children[i],
-					childIndent,
-					multipleChildren,
-					multipleChildren,
-					childIsLast,
-					childGutters,
-					false,
-				]);
-			}
-		}
-
-		// Store visible tree maps for ancestor/descendant lookups in navigation
-		this.visibleParentMap = visibleParent;
-		this.visibleChildrenMap = visibleChildren;
+		const structure = this.buildVisibleTreeStructure();
+		this.multipleRoots = structure.rootIds.length > 1;
+		this.layoutVisibleTree(structure);
+		this.visibleParentMap = structure.parentMap;
+		this.visibleChildrenMap = structure.childrenMap;
 	}
 
 	/** Get searchable text content from a node */
@@ -605,166 +642,147 @@ class TreeList implements Component {
 		return labels;
 	}
 
-	render(width: number): string[] {
-		const lines: string[] = [];
-
-		if (this.filteredNodes.length === 0) {
-			lines.push(truncateToWidth(theme.fg("muted", "  No entries found"), width));
-			lines.push(truncateToWidth(theme.fg("muted", `  (0/0)${this.getStatusLabels()}`), width));
-			return lines;
-		}
-
-		const startIndex = Math.max(
+	private getVisibleNodeRange(): VisibleNodeRange {
+		const start = Math.max(
 			0,
 			Math.min(
 				this.selectedIndex - Math.floor(this.maxVisibleLines / 2),
 				this.filteredNodes.length - this.maxVisibleLines,
 			),
 		);
-		const endIndex = Math.min(startIndex + this.maxVisibleLines, this.filteredNodes.length);
+		return { start, end: Math.min(start + this.maxVisibleLines, this.filteredNodes.length) };
+	}
 
-		for (let i = startIndex; i < endIndex; i++) {
-			const flatNode = this.filteredNodes[i];
-			const entry = flatNode.node.entry;
-			const isSelected = i === this.selectedIndex;
+	private renderPrefixCharacter(
+		flatNode: FlatNode,
+		entryId: string,
+		level: number,
+		position: number,
+		connectorPosition: number,
+		isFolded: boolean,
+	): string {
+		const gutter = flatNode.gutters.find((candidate) => candidate.position === level);
+		if (gutter) return position === 0 && gutter.show ? "│" : " ";
+		if (level !== connectorPosition) return " ";
+		if (position === 0) return flatNode.isLast ? "└" : "├";
+		if (position !== 1) return " ";
+		if (isFolded) return "⊞";
+		return this.isFoldable(entryId) ? "⊟" : "─";
+	}
 
-			// Build line: cursor + prefix + path marker + label + content
-			const cursor = isSelected ? theme.fg("accent", "› ") : "  ";
-
-			// If multiple roots, shift display (roots at 0, not 1)
-			const displayIndent = this.multipleRoots ? Math.max(0, flatNode.indent - 1) : flatNode.indent;
-
-			// Build prefix with gutters at their correct positions
-			// Each gutter has a position (displayIndent where its connector was shown)
-			const connector =
-				flatNode.showConnector && !flatNode.isVirtualRootChild ? (flatNode.isLast ? "└─ " : "├─ ") : "";
-			const connectorPosition = connector ? displayIndent - 1 : -1;
-
-			// Build prefix char by char, placing gutters and connector at their positions
-			const totalChars = displayIndent * 3;
-			const prefixChars: string[] = [];
-			const isFolded = this.foldedNodes.has(entry.id);
-			for (let i = 0; i < totalChars; i++) {
-				const level = Math.floor(i / 3);
-				const posInLevel = i % 3;
-
-				// Check if there's a gutter at this level
-				const gutter = flatNode.gutters.find((g) => g.position === level);
-				if (gutter) {
-					if (posInLevel === 0) {
-						prefixChars.push(gutter.show ? "│" : " ");
-					} else {
-						prefixChars.push(" ");
-					}
-				} else if (connector && level === connectorPosition) {
-					// Connector at this level, with fold indicator
-					if (posInLevel === 0) {
-						prefixChars.push(flatNode.isLast ? "└" : "├");
-					} else if (posInLevel === 1) {
-						const foldable = this.isFoldable(entry.id);
-						prefixChars.push(isFolded ? "⊞" : foldable ? "⊟" : "─");
-					} else {
-						prefixChars.push(" ");
-					}
-				} else {
-					prefixChars.push(" ");
-				}
-			}
-			const prefix = prefixChars.join("");
-
-			// Fold marker for nodes without connectors (roots)
-			const showsFoldInConnector = flatNode.showConnector && !flatNode.isVirtualRootChild;
-			const foldMarker = isFolded && !showsFoldInConnector ? theme.fg("accent", "⊞ ") : "";
-
-			// Active path marker - shown right before the entry text
-			const isOnActivePath = this.activePathIds.has(entry.id);
-			const pathMarker = isOnActivePath ? theme.fg("accent", "• ") : "";
-
-			const label = flatNode.node.label ? theme.fg("warning", `[${flatNode.node.label}] `) : "";
-			const labelTimestamp =
-				this.showLabelTimestamps && flatNode.node.label && flatNode.node.labelTimestamp
-					? theme.fg("muted", `${this.formatLabelTimestamp(flatNode.node.labelTimestamp)} `)
-					: "";
-			const content = this.getEntryDisplayText(flatNode.node, isSelected);
-
-			let line = cursor + theme.fg("dim", prefix) + foldMarker + pathMarker + label + labelTimestamp + content;
-			if (isSelected) {
-				line = theme.bg("selectedBg", line);
-			}
-			lines.push(truncateToWidth(line, width));
+	private renderNodePrefix(flatNode: FlatNode): string {
+		const displayIndent = this.multipleRoots ? Math.max(0, flatNode.indent - 1) : flatNode.indent;
+		const showsConnector = flatNode.showConnector && !flatNode.isVirtualRootChild;
+		const connectorPosition = showsConnector ? displayIndent - 1 : -1;
+		const isFolded = this.foldedNodes.has(flatNode.node.entry.id);
+		const characters: string[] = [];
+		for (let index = 0; index < displayIndent * 3; index++) {
+			characters.push(
+				this.renderPrefixCharacter(
+					flatNode,
+					flatNode.node.entry.id,
+					Math.floor(index / 3),
+					index % 3,
+					connectorPosition,
+					isFolded,
+				),
+			);
 		}
+		const foldMarker = isFolded && !showsConnector ? theme.fg("accent", "⊞ ") : "";
+		return theme.fg("dim", characters.join("")) + foldMarker;
+	}
 
+	private renderNodeLine(flatNode: FlatNode, index: number, width: number): string {
+		const entry = flatNode.node.entry;
+		const isSelected = index === this.selectedIndex;
+		const cursor = isSelected ? theme.fg("accent", "› ") : "  ";
+		const pathMarker = this.activePathIds.has(entry.id) ? theme.fg("accent", "• ") : "";
+		const label = flatNode.node.label ? theme.fg("warning", `[${flatNode.node.label}] `) : "";
+		const labelTimestamp =
+			this.showLabelTimestamps && flatNode.node.label && flatNode.node.labelTimestamp
+				? theme.fg("muted", `${this.formatLabelTimestamp(flatNode.node.labelTimestamp)} `)
+				: "";
+		const content = this.getEntryDisplayText(flatNode.node, isSelected);
+		const line = cursor + this.renderNodePrefix(flatNode) + pathMarker + label + labelTimestamp + content;
+		return truncateToWidth(isSelected ? theme.bg("selectedBg", line) : line, width);
+	}
+
+	render(width: number): string[] {
+		if (this.filteredNodes.length === 0) {
+			return [
+				truncateToWidth(theme.fg("muted", "  No entries found"), width),
+				truncateToWidth(theme.fg("muted", `  (0/0)${this.getStatusLabels()}`), width),
+			];
+		}
+		const lines: string[] = [];
+		const range = this.getVisibleNodeRange();
+		for (let index = range.start; index < range.end; index++) {
+			lines.push(this.renderNodeLine(this.filteredNodes[index], index, width));
+		}
 		lines.push(
 			truncateToWidth(
 				theme.fg("muted", `  (${this.selectedIndex + 1}/${this.filteredNodes.length})${this.getStatusLabels()}`),
 				width,
 			),
 		);
-
 		return lines;
+	}
+	private normalizeDisplayText(value: string): string {
+		return value.replace(/[\n\t]/g, " ").trim();
+	}
+
+	private getAssistantDisplayText(message: AssistantMessage): string {
+		const textContent = this.normalizeDisplayText(this.extractContent(message.content));
+		if (textContent) return theme.fg("success", "assistant: ") + textContent;
+		if (message.stopReason === "aborted") {
+			return theme.fg("success", "assistant: ") + theme.fg("muted", "(aborted)");
+		}
+		if (message.errorMessage) {
+			const errorMessage = this.normalizeDisplayText(message.errorMessage).slice(0, 80);
+			return theme.fg("success", "assistant: ") + theme.fg("error", errorMessage);
+		}
+		return theme.fg("success", "assistant: ") + theme.fg("muted", "(no content)");
+	}
+
+	private getMessageDisplayText(message: AgentMessage): string {
+		switch (message.role) {
+			case "user":
+				return theme.fg("accent", "user: ") + this.normalizeDisplayText(this.extractContent(message.content));
+			case "assistant":
+				return this.getAssistantDisplayText(message);
+			case "toolResult": {
+				const toolCall = this.toolCallMap.get(message.toolCallId);
+				return toolCall
+					? theme.fg("muted", this.formatToolCall(toolCall.name, toolCall.arguments))
+					: theme.fg("muted", `[${message.toolName ?? "tool"}]`);
+			}
+			case "bashExecution":
+				return theme.fg("dim", `[bash]: ${this.normalizeDisplayText(message.command ?? "")}`);
+			default:
+				return theme.fg("dim", `[${message.role}]`);
+		}
 	}
 
 	private getEntryDisplayText(node: SessionTreeNode, isSelected: boolean): string {
 		const entry = node.entry;
 		let result: string;
 
-		const normalize = (s: string) => s.replace(/[\n\t]/g, " ").trim();
-
 		switch (entry.type) {
-			case "message": {
-				const msg = entry.message;
-				const role = msg.role;
-				if (role === "user") {
-					const msgWithContent = msg as { content?: unknown };
-					const content = normalize(this.extractContent(msgWithContent.content));
-					result = theme.fg("accent", "user: ") + content;
-				} else if (role === "assistant") {
-					const msgWithContent = msg as { content?: unknown; stopReason?: string; errorMessage?: string };
-					const textContent = normalize(this.extractContent(msgWithContent.content));
-					if (textContent) {
-						result = theme.fg("success", "assistant: ") + textContent;
-					} else if (msgWithContent.stopReason === "aborted") {
-						result = theme.fg("success", "assistant: ") + theme.fg("muted", "(aborted)");
-					} else if (msgWithContent.errorMessage) {
-						const errMsg = normalize(msgWithContent.errorMessage).slice(0, 80);
-						result = theme.fg("success", "assistant: ") + theme.fg("error", errMsg);
-					} else {
-						result = theme.fg("success", "assistant: ") + theme.fg("muted", "(no content)");
-					}
-				} else if (role === "toolResult") {
-					const toolMsg = msg as { toolCallId?: string; toolName?: string };
-					const toolCall = toolMsg.toolCallId ? this.toolCallMap.get(toolMsg.toolCallId) : undefined;
-					if (toolCall) {
-						result = theme.fg("muted", this.formatToolCall(toolCall.name, toolCall.arguments));
-					} else {
-						result = theme.fg("muted", `[${toolMsg.toolName ?? "tool"}]`);
-					}
-				} else if (role === "bashExecution") {
-					const bashMsg = msg as { command?: string };
-					result = theme.fg("dim", `[bash]: ${normalize(bashMsg.command ?? "")}`);
-				} else {
-					result = theme.fg("dim", `[${role}]`);
-				}
+			case "message":
+				result = this.getMessageDisplayText(entry.message);
 				break;
-			}
-			case "custom_message": {
-				const content =
-					typeof entry.content === "string"
-						? entry.content
-						: entry.content
-								.filter((c): c is { type: "text"; text: string } => c.type === "text")
-								.map((c) => c.text)
-								.join("");
-				result = theme.fg("customMessageLabel", `[${entry.customType}]: `) + normalize(content);
+			case "custom_message":
+				result =
+					theme.fg("customMessageLabel", `[${entry.customType}]: `) +
+					this.normalizeDisplayText(this.extractFullContent(entry.content));
 				break;
-			}
 			case "compaction": {
 				const tokens = Math.round(entry.tokensBefore / 1000);
 				result = theme.fg("borderAccent", `[compaction: ${tokens}k tokens]`);
 				break;
 			}
 			case "branch_summary":
-				result = theme.fg("warning", `[branch summary]: `) + normalize(entry.summary);
+				result = theme.fg("warning", `[branch summary]: `) + this.normalizeDisplayText(entry.summary);
 				break;
 			case "model_change":
 				result = theme.fg("dim", `[model: ${entry.modelId}]`);
@@ -875,169 +893,163 @@ class TreeList implements Component {
 	}
 
 	private formatToolCall(name: string, args: Record<string, unknown>): string {
-		const shortenPath = (p: string): string => {
-			const home = process.env.HOME || process.env.USERPROFILE || "";
-			if (home && p.startsWith(home)) return `~${p.slice(home.length)}`;
-			return p;
-		};
-
 		switch (name) {
-			case "read": {
-				const path = shortenPath(String(args.path || args.file_path || ""));
-				const offset = args.offset as number | undefined;
-				const limit = args.limit as number | undefined;
-				let display = path;
-				if (offset !== undefined || limit !== undefined) {
-					const start = offset ?? 1;
-					const end = limit !== undefined ? start + limit - 1 : "";
-					display += `:${start}${end ? `-${end}` : ""}`;
-				}
-				return `[read: ${display}]`;
-			}
-			case "write": {
-				const path = shortenPath(String(args.path || args.file_path || ""));
-				return `[write: ${path}]`;
-			}
-			case "edit": {
-				const path = shortenPath(String(args.path || args.file_path || ""));
-				return `[edit: ${path}]`;
-			}
-			case "bash": {
-				const rawCmd = String(args.command || "");
-				const cmd = rawCmd
-					.replace(/[\n\t]/g, " ")
-					.trim()
-					.slice(0, 50);
-				return `[bash: ${cmd}${rawCmd.length > 50 ? "..." : ""}]`;
-			}
-			case "grep": {
-				const pattern = String(args.pattern || "");
-				const path = shortenPath(String(args.path || "."));
-				return `[grep: /${pattern}/ in ${path}]`;
-			}
-			case "find": {
-				const pattern = String(args.pattern || "");
-				const path = shortenPath(String(args.path || "."));
-				return `[find: ${pattern} in ${path}]`;
-			}
-			case "ls": {
-				const path = shortenPath(String(args.path || "."));
-				return `[ls: ${path}]`;
-			}
-			default: {
-				// Custom tool - show name and truncated JSON args
-				const argsStr = JSON.stringify(args).slice(0, 40);
-				return `[${name}: ${argsStr}${JSON.stringify(args).length > 40 ? "..." : ""}]`;
-			}
+			case "read":
+				return formatTreeReadToolCall(args);
+			case "write":
+			case "edit":
+				return formatTreeFileMutationToolCall(name, args);
+			case "bash":
+				return formatTreeBashToolCall(args);
+			case "grep":
+			case "find":
+				return formatTreeSearchToolCall(name, args);
+			case "ls":
+				return `[ls: ${shortenTreeToolPath(String(args.path || "."))}]`;
+			default:
+				return formatCustomTreeToolCall(name, args);
 		}
 	}
 
-	handleInput(keyData: string): void {
+	private foldSelectedNodeOrMoveToPreviousBranch(): void {
+		const currentId = this.filteredNodes[this.selectedIndex]?.node.entry.id;
+		if (currentId && this.isFoldable(currentId) && !this.foldedNodes.has(currentId)) {
+			this.foldedNodes.add(currentId);
+			this.applyFilter();
+			return;
+		}
+		this.selectedIndex = this.findBranchSegmentStart("up");
+	}
+
+	private unfoldSelectedNodeOrMoveToNextBranch(): void {
+		const currentId = this.filteredNodes[this.selectedIndex]?.node.entry.id;
+		if (currentId && this.foldedNodes.has(currentId)) {
+			this.foldedNodes.delete(currentId);
+			this.applyFilter();
+			return;
+		}
+		this.selectedIndex = this.findBranchSegmentStart("down");
+	}
+
+	private handleTreeMovementInput(keyData: string): boolean {
 		const kb = getKeybindings();
 		if (kb.matches(keyData, "tui.select.up")) {
 			this.selectedIndex = this.selectedIndex === 0 ? this.filteredNodes.length - 1 : this.selectedIndex - 1;
-		} else if (kb.matches(keyData, "tui.select.down")) {
+			return true;
+		}
+		if (kb.matches(keyData, "tui.select.down")) {
 			this.selectedIndex = this.selectedIndex === this.filteredNodes.length - 1 ? 0 : this.selectedIndex + 1;
-		} else if (kb.matches(keyData, "app.tree.foldOrUp")) {
-			const currentId = this.filteredNodes[this.selectedIndex]?.node.entry.id;
-			if (currentId && this.isFoldable(currentId) && !this.foldedNodes.has(currentId)) {
-				this.foldedNodes.add(currentId);
-				this.applyFilter();
-			} else {
-				this.selectedIndex = this.findBranchSegmentStart("up");
-			}
-		} else if (kb.matches(keyData, "app.tree.unfoldOrDown")) {
-			const currentId = this.filteredNodes[this.selectedIndex]?.node.entry.id;
-			if (currentId && this.foldedNodes.has(currentId)) {
-				this.foldedNodes.delete(currentId);
-				this.applyFilter();
-			} else {
-				this.selectedIndex = this.findBranchSegmentStart("down");
-			}
-		} else if (kb.matches(keyData, "tui.editor.cursorLeft") || kb.matches(keyData, "tui.select.pageUp")) {
-			// Page up
+			return true;
+		}
+		if (kb.matches(keyData, "app.tree.foldOrUp")) {
+			this.foldSelectedNodeOrMoveToPreviousBranch();
+			return true;
+		}
+		if (kb.matches(keyData, "app.tree.unfoldOrDown")) {
+			this.unfoldSelectedNodeOrMoveToNextBranch();
+			return true;
+		}
+		if (kb.matches(keyData, "tui.editor.cursorLeft") || kb.matches(keyData, "tui.select.pageUp")) {
 			this.selectedIndex = Math.max(0, this.selectedIndex - this.maxVisibleLines);
-		} else if (kb.matches(keyData, "tui.editor.cursorRight") || kb.matches(keyData, "tui.select.pageDown")) {
-			// Page down
+			return true;
+		}
+		if (kb.matches(keyData, "tui.editor.cursorRight") || kb.matches(keyData, "tui.select.pageDown")) {
 			this.selectedIndex = Math.min(this.filteredNodes.length - 1, this.selectedIndex + this.maxVisibleLines);
-		} else if (kb.matches(keyData, "tui.select.confirm")) {
+			return true;
+		}
+		return false;
+	}
+
+	private cancelSearchOrSelection(): void {
+		if (!this.searchQuery) {
+			this.onCancel?.();
+			return;
+		}
+		this.searchQuery = "";
+		this.foldedNodes.clear();
+		this.applyFilter();
+	}
+
+	private handleTreeSelectionInput(keyData: string): boolean {
+		const kb = getKeybindings();
+		if (kb.matches(keyData, "tui.select.confirm")) {
 			const selected = this.filteredNodes[this.selectedIndex];
-			if (selected && this.onSelect) {
-				this.onSelect(selected.node.entry.id);
-			}
-		} else if (kb.matches(keyData, "app.message.copy")) {
+			if (selected) this.onSelect?.(selected.node.entry.id);
+			return true;
+		}
+		if (kb.matches(keyData, "app.message.copy")) {
 			this.copySelected();
-		} else if (kb.matches(keyData, "tui.select.cancel")) {
-			if (this.searchQuery) {
-				this.searchQuery = "";
-				this.foldedNodes.clear();
-				this.applyFilter();
-			} else {
-				this.onCancel?.();
-			}
-		} else if (kb.matches(keyData, "app.tree.filter.default")) {
-			// Direct filter: default
-			this.filterMode = "default";
-			this.foldedNodes.clear();
-			this.applyFilter();
-		} else if (kb.matches(keyData, "app.tree.filter.noTools")) {
-			// Toggle filter: no-tools ↔ default
-			this.filterMode = this.filterMode === "no-tools" ? "default" : "no-tools";
-			this.foldedNodes.clear();
-			this.applyFilter();
-		} else if (kb.matches(keyData, "app.tree.filter.userOnly")) {
-			// Toggle filter: user-only ↔ default
-			this.filterMode = this.filterMode === "user-only" ? "default" : "user-only";
-			this.foldedNodes.clear();
-			this.applyFilter();
-		} else if (kb.matches(keyData, "app.tree.filter.labeledOnly")) {
-			// Toggle filter: labeled-only ↔ default
-			this.filterMode = this.filterMode === "labeled-only" ? "default" : "labeled-only";
-			this.foldedNodes.clear();
-			this.applyFilter();
-		} else if (kb.matches(keyData, "app.tree.filter.all")) {
-			// Toggle filter: all ↔ default
-			this.filterMode = this.filterMode === "all" ? "default" : "all";
-			this.foldedNodes.clear();
-			this.applyFilter();
-		} else if (kb.matches(keyData, "app.tree.filter.cycleBackward")) {
-			// Cycle filter backwards
-			const modes: FilterMode[] = ["default", "no-tools", "user-only", "labeled-only", "all"];
-			const currentIndex = modes.indexOf(this.filterMode);
-			this.filterMode = modes[(currentIndex - 1 + modes.length) % modes.length];
-			this.foldedNodes.clear();
-			this.applyFilter();
-		} else if (kb.matches(keyData, "app.tree.filter.cycleForward")) {
-			// Cycle filter forwards: default → no-tools → user-only → labeled-only → all → default
-			const modes: FilterMode[] = ["default", "no-tools", "user-only", "labeled-only", "all"];
-			const currentIndex = modes.indexOf(this.filterMode);
-			this.filterMode = modes[(currentIndex + 1) % modes.length];
-			this.foldedNodes.clear();
-			this.applyFilter();
-		} else if (kb.matches(keyData, "tui.editor.deleteCharBackward")) {
+			return true;
+		}
+		if (kb.matches(keyData, "tui.select.cancel")) {
+			this.cancelSearchOrSelection();
+			return true;
+		}
+		return false;
+	}
+
+	private setFilterMode(mode: FilterMode): void {
+		this.filterMode = mode;
+		this.foldedNodes.clear();
+		this.applyFilter();
+	}
+
+	private toggleFilterMode(mode: FilterMode): void {
+		this.setFilterMode(this.filterMode === mode ? "default" : mode);
+	}
+
+	private cycleFilterMode(step: number): void {
+		const currentIndex = FILTER_MODES.indexOf(this.filterMode);
+		this.setFilterMode(FILTER_MODES[(currentIndex + step + FILTER_MODES.length) % FILTER_MODES.length]);
+	}
+
+	private handleTreeFilterInput(keyData: string): boolean {
+		const kb = getKeybindings();
+		if (kb.matches(keyData, "app.tree.filter.default")) this.setFilterMode("default");
+		else if (kb.matches(keyData, "app.tree.filter.noTools")) this.toggleFilterMode("no-tools");
+		else if (kb.matches(keyData, "app.tree.filter.userOnly")) this.toggleFilterMode("user-only");
+		else if (kb.matches(keyData, "app.tree.filter.labeledOnly")) this.toggleFilterMode("labeled-only");
+		else if (kb.matches(keyData, "app.tree.filter.all")) this.toggleFilterMode("all");
+		else if (kb.matches(keyData, "app.tree.filter.cycleBackward")) this.cycleFilterMode(-1);
+		else if (kb.matches(keyData, "app.tree.filter.cycleForward")) this.cycleFilterMode(1);
+		else return false;
+		return true;
+	}
+
+	private appendTreeSearchInput(keyData: string): void {
+		if (keyData.length === 0 || hasTreeSearchControlCharacters(keyData)) return;
+		this.searchQuery += keyData;
+		this.foldedNodes.clear();
+		this.applyFilter();
+	}
+
+	private handleTreeEditingInput(keyData: string): void {
+		const kb = getKeybindings();
+		if (kb.matches(keyData, "tui.editor.deleteCharBackward")) {
 			if (this.searchQuery.length > 0) {
 				this.searchQuery = this.searchQuery.slice(0, -1);
 				this.foldedNodes.clear();
 				this.applyFilter();
 			}
-		} else if (kb.matches(keyData, "app.tree.editLabel")) {
-			const selected = this.filteredNodes[this.selectedIndex];
-			if (selected && this.onLabelEdit) {
-				this.onLabelEdit(selected.node.entry.id, selected.node.label);
-			}
-		} else if (kb.matches(keyData, "app.tree.toggleLabelTimestamp")) {
-			this.showLabelTimestamps = !this.showLabelTimestamps;
-		} else {
-			const hasControlChars = [...keyData].some((ch) => {
-				const code = ch.charCodeAt(0);
-				return code < 32 || code === 0x7f || (code >= 0x80 && code <= 0x9f);
-			});
-			if (!hasControlChars && keyData.length > 0) {
-				this.searchQuery += keyData;
-				this.foldedNodes.clear();
-				this.applyFilter();
-			}
+			return;
 		}
+		if (kb.matches(keyData, "app.tree.editLabel")) {
+			const selected = this.filteredNodes[this.selectedIndex];
+			if (selected) this.onLabelEdit?.(selected.node.entry.id, selected.node.label);
+			return;
+		}
+		if (kb.matches(keyData, "app.tree.toggleLabelTimestamp")) {
+			this.showLabelTimestamps = !this.showLabelTimestamps;
+			return;
+		}
+		this.appendTreeSearchInput(keyData);
+	}
+
+	handleInput(keyData: string): void {
+		if (this.handleTreeMovementInput(keyData)) return;
+		if (this.handleTreeSelectionInput(keyData)) return;
+		if (this.handleTreeFilterInput(keyData)) return;
+		this.handleTreeEditingInput(keyData);
 	}
 
 	/**
@@ -1054,6 +1066,30 @@ class TreeList implements Component {
 		return siblings !== undefined && siblings.length > 1;
 	}
 
+	private findNextBranchSegmentStart(selectedId: string, indexByEntryId: ReadonlyMap<string, number>): number {
+		let currentId = selectedId;
+		while (true) {
+			const children = this.visibleChildrenMap.get(currentId) ?? [];
+			if (children.length === 0) return indexByEntryId.get(currentId)!;
+			if (children.length > 1) return indexByEntryId.get(children[0])!;
+			currentId = children[0];
+		}
+	}
+
+	private findPreviousBranchSegmentStart(selectedId: string, indexByEntryId: ReadonlyMap<string, number>): number {
+		let currentId = selectedId;
+		while (true) {
+			const parentId = this.visibleParentMap.get(currentId) ?? null;
+			if (parentId === null) return indexByEntryId.get(currentId)!;
+			const siblings = this.visibleChildrenMap.get(parentId) ?? [];
+			if (siblings.length > 1) {
+				const segmentStart = indexByEntryId.get(currentId)!;
+				if (segmentStart < this.selectedIndex) return segmentStart;
+			}
+			currentId = parentId;
+		}
+	}
+
 	/**
 	 * Find the index of the next branch segment start in the given direction.
 	 * A segment start is the first child of a branch point.
@@ -1061,34 +1097,14 @@ class TreeList implements Component {
 	 * "up" walks the visible parent chain; "down" walks visible children
 	 * (always following the first child).
 	 */
-	private findBranchSegmentStart(direction: "up" | "down"): number {
+	private findBranchSegmentStart(direction: BranchSegmentTraversalDirection): number {
 		const selectedId = this.filteredNodes[this.selectedIndex]?.node.entry.id;
 		if (!selectedId) return this.selectedIndex;
 
-		const indexByEntryId = new Map(this.filteredNodes.map((node, i) => [node.node.entry.id, i]));
-		let currentId: string = selectedId;
-		if (direction === "down") {
-			while (true) {
-				const children: string[] = this.visibleChildrenMap.get(currentId) ?? [];
-				if (children.length === 0) return indexByEntryId.get(currentId)!;
-				if (children.length > 1) return indexByEntryId.get(children[0])!;
-				currentId = children[0];
-			}
-		}
-
-		// direction === "up"
-		while (true) {
-			const parentId: string | null = this.visibleParentMap.get(currentId) ?? null;
-			if (parentId === null) return indexByEntryId.get(currentId)!;
-			const children = this.visibleChildrenMap.get(parentId) ?? [];
-			if (children.length > 1) {
-				const segmentStart = indexByEntryId.get(currentId)!;
-				if (segmentStart < this.selectedIndex) {
-					return segmentStart;
-				}
-			}
-			currentId = parentId;
-		}
+		const indexByEntryId = new Map(this.filteredNodes.map((node, index) => [node.node.entry.id, index]));
+		return direction === "down"
+			? this.findNextBranchSegmentStart(selectedId, indexByEntryId)
+			: this.findPreviousBranchSegmentStart(selectedId, indexByEntryId);
 	}
 }
 

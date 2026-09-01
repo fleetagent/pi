@@ -11,6 +11,7 @@ import {
 import { dirnamePortablePath, joinPortablePath, resolvePortablePath } from "./portable-path.ts";
 
 export type LspConfigurationInputScope = "cli" | "host";
+export type LspConfigurationSourceDiagnosticSeverity = "warning" | "error";
 
 export type LspConfigurationInput =
 	| {
@@ -24,7 +25,7 @@ export type LspConfigurationInput =
 	| { type: "disabled"; source?: string; scope?: LspConfigurationInputScope };
 
 export interface LspConfigurationSourceDiagnostic {
-	severity: "warning" | "error";
+	severity: LspConfigurationSourceDiagnosticSeverity;
 	source: string;
 	path: string;
 	message: string;
@@ -61,27 +62,51 @@ const SCOPE_PRECEDENCE: Record<SourceScope, number> = {
 	host: 3,
 };
 
-/**
- * Load and resolve LSP configuration in deterministic order:
- * global settings < project settings < CLI inputs < SDK/host inputs.
- */
-export async function loadLspConfiguration(options: LoadLspConfigurationOptions): Promise<LoadLspConfigurationResult> {
-	const diagnostics: LspConfigurationSourceDiagnostic[] = [];
-	const sources: ConfigurationSource[] = [];
-	let order = 0;
+interface PendingConfigurationSource {
+	scope: SourceScope;
+	source: string;
+	baseDir: string;
+	value: unknown;
+}
+
+interface ConfigurationSourceCollection {
+	sources: ConfigurationSource[];
+	diagnostics: LspConfigurationSourceDiagnostic[];
+	nextOrder: number;
+	settingsLoadFailed: boolean;
+}
+
+interface ConfigurationFileLoadResult {
+	loaded: boolean;
+	value?: unknown;
+}
+
+function appendConfigurationSource(
+	collection: ConfigurationSourceCollection,
+	source: PendingConfigurationSource,
+): void {
+	collection.sources.push({ ...source, order: collection.nextOrder++ });
+}
+
+function collectSettingsConfigurationSources(options: LoadLspConfigurationOptions): ConfigurationSourceCollection {
+	const collection: ConfigurationSourceCollection = {
+		sources: [],
+		diagnostics: [],
+		nextOrder: 0,
+		settingsLoadFailed: false,
+	};
 	const globalSettingsPath = joinPortablePath(options.agentDir, "settings.json");
 	const projectSettingsPath = joinPortablePath(options.cwd, CONFIG_DIR_NAME, "settings.json");
 	const globalConfiguration = options.settingsManager.getGlobalLspConfiguration();
 	const projectConfiguration = options.settingsManager.getProjectLspConfiguration();
-	let settingsLoadFailed = false;
 	for (const [scope, source] of [
 		["global", globalSettingsPath],
 		["project", projectSettingsPath],
 	] as const) {
 		const error = options.settingsManager.getLoadError(scope);
 		if (!error) continue;
-		settingsLoadFailed = true;
-		diagnostics.push({
+		collection.settingsLoadFailed = true;
+		collection.diagnostics.push({
 			severity: "warning",
 			source,
 			path: "$",
@@ -90,101 +115,125 @@ export async function loadLspConfiguration(options: LoadLspConfigurationOptions)
 	}
 
 	if (globalConfiguration !== undefined) {
-		sources.push({
+		appendConfigurationSource(collection, {
 			scope: "global",
 			source: globalSettingsPath,
 			baseDir: dirnamePortablePath(globalSettingsPath),
 			value: globalConfiguration,
-			order: order++,
 		});
 	}
 	if (projectConfiguration !== undefined) {
-		sources.push({
+		appendConfigurationSource(collection, {
 			scope: "project",
 			source: projectSettingsPath,
 			baseDir: dirnamePortablePath(projectSettingsPath),
 			value: projectConfiguration,
-			order: order++,
 		});
 	}
+	return collection;
+}
 
-	for (const input of options.inputs ?? []) {
-		const scope = input.scope ?? "host";
-		if (input.type === "disabled") {
-			sources.push({
-				scope,
-				source: input.source ?? (scope === "cli" ? "--no-lsp" : "host LSP override"),
-				baseDir: options.cwd,
-				value: { enabled: false },
-				order: order++,
-			});
-			continue;
-		}
-		if (input.type === "configuration") {
-			sources.push({
-				scope,
-				source: input.source ?? (scope === "cli" ? "CLI LSP configuration" : "host LSP configuration"),
-				baseDir: resolvePortablePath(options.cwd, input.baseDir ?? "."),
-				value: input.configuration,
-				order: order++,
-			});
-			continue;
-		}
+async function loadConfigurationFile(
+	filePath: string,
+	diagnostics: LspConfigurationSourceDiagnostic[],
+): Promise<ConfigurationFileLoadResult> {
+	let content: string;
+	try {
+		content = await readFile(filePath, "utf8");
+	} catch (error) {
+		diagnostics.push({
+			severity: "error",
+			source: filePath,
+			path: "$",
+			message: `failed to read file: ${error instanceof Error ? error.message : String(error)}`,
+		});
+		return { loaded: false };
+	}
+	try {
+		return { loaded: true, value: JSON.parse(content) as unknown };
+	} catch (error) {
+		diagnostics.push({
+			severity: "error",
+			source: filePath,
+			path: "$",
+			message: `invalid JSON: ${error instanceof Error ? error.message : String(error)}`,
+		});
+		return { loaded: false };
+	}
+}
 
-		const filePath = resolvePortablePath(options.cwd, input.path);
-		try {
-			const content = await readFile(filePath, "utf8");
-			let value: unknown;
-			try {
-				value = JSON.parse(content) as unknown;
-			} catch (error) {
-				diagnostics.push({
-					severity: "error",
-					source: filePath,
-					path: "$",
-					message: `invalid JSON: ${error instanceof Error ? error.message : String(error)}`,
-				});
-				continue;
-			}
-			sources.push({ scope, source: filePath, baseDir: dirnamePortablePath(filePath), value, order: order++ });
-		} catch (error) {
-			diagnostics.push({
-				severity: "error",
-				source: filePath,
-				path: "$",
-				message: `failed to read file: ${error instanceof Error ? error.message : String(error)}`,
-			});
-		}
+async function appendConfigurationInput(
+	input: LspConfigurationInput,
+	options: LoadLspConfigurationOptions,
+	collection: ConfigurationSourceCollection,
+): Promise<void> {
+	const scope = input.scope ?? "host";
+	if (input.type === "disabled") {
+		appendConfigurationSource(collection, {
+			scope,
+			source: input.source ?? (scope === "cli" ? "--no-lsp" : "host LSP override"),
+			baseDir: options.cwd,
+			value: { enabled: false },
+		});
+		return;
+	}
+	if (input.type === "configuration") {
+		appendConfigurationSource(collection, {
+			scope,
+			source: input.source ?? (scope === "cli" ? "CLI LSP configuration" : "host LSP configuration"),
+			baseDir: resolvePortablePath(options.cwd, input.baseDir ?? "."),
+			value: input.configuration,
+		});
+		return;
 	}
 
-	sources.sort(
+	const filePath = resolvePortablePath(options.cwd, input.path);
+	const loaded = await loadConfigurationFile(filePath, collection.diagnostics);
+	if (!loaded.loaded) return;
+	appendConfigurationSource(collection, {
+		scope,
+		source: filePath,
+		baseDir: dirnamePortablePath(filePath),
+		value: loaded.value,
+	});
+}
+
+function resolveConfigurationSource(
+	source: ConfigurationSource,
+	trustProjectLspTransports: boolean | undefined,
+	diagnostics: LspConfigurationSourceDiagnostic[],
+): LspConfigurationLayer | undefined {
+	const parsed = parseLspConfiguration(source.value);
+	for (const diagnostic of parsed.diagnostics) diagnostics.push({ ...diagnostic, source: source.source });
+	if (!parsed.configuration) return undefined;
+	const resolvedLayer = resolveLspConfigurationLayerPaths(parsed.configuration, source.baseDir);
+	const resolved = parseLspConfiguration(resolvedLayer);
+	for (const diagnostic of resolved.diagnostics) diagnostics.push({ ...diagnostic, source: source.source });
+	if (!resolved.configuration) return undefined;
+	return source.scope === "project" && !trustProjectLspTransports
+		? blockUntrustedProjectTransports(resolved.configuration, source.source, diagnostics)
+		: resolved.configuration;
+}
+/**
+ * Load and resolve LSP configuration in deterministic order:
+ * global settings < project settings < CLI inputs < SDK/host inputs.
+ */
+export async function loadLspConfiguration(options: LoadLspConfigurationOptions): Promise<LoadLspConfigurationResult> {
+	const collection = collectSettingsConfigurationSources(options);
+	for (const input of options.inputs ?? []) await appendConfigurationInput(input, options, collection);
+	collection.sources.sort(
 		(left, right) => SCOPE_PRECEDENCE[left.scope] - SCOPE_PRECEDENCE[right.scope] || left.order - right.order,
 	);
-	const layers: LspConfigurationLayer[] = [];
-	for (const source of sources) {
-		const parsed = parseLspConfiguration(source.value);
-		for (const diagnostic of parsed.diagnostics) {
-			diagnostics.push({ ...diagnostic, source: source.source });
-		}
-		if (!parsed.configuration) continue;
-		const resolvedLayer = resolveLspConfigurationLayerPaths(parsed.configuration, source.baseDir);
-		const resolved = parseLspConfiguration(resolvedLayer);
-		for (const diagnostic of resolved.diagnostics) {
-			diagnostics.push({ ...diagnostic, source: source.source });
-		}
-		if (!resolved.configuration) continue;
-		layers.push(
-			source.scope === "project" && !options.trustProjectLspTransports
-				? blockUntrustedProjectTransports(resolved.configuration, source.source, diagnostics)
-				: resolved.configuration,
-		);
-	}
 
+	const layers: LspConfigurationLayer[] = [];
+	for (const source of collection.sources) {
+		const layer = resolveConfigurationSource(source, options.trustProjectLspTransports, collection.diagnostics);
+		if (layer) layers.push(layer);
+	}
+	const hasErrors = collection.diagnostics.some((diagnostic) => diagnostic.severity === "error");
 	const configuration =
-		settingsLoadFailed || diagnostics.some((diagnostic) => diagnostic.severity === "error")
-			? { enabled: false, servers: [] }
-			: resolveLspConfiguration(layers);
-	return { configuration, diagnostics };
+		collection.settingsLoadFailed || hasErrors ? { enabled: false, servers: [] } : resolveLspConfiguration(layers);
+	return { configuration, diagnostics: collection.diagnostics };
 }
 
 export function resolveLspConfigurationLayerPaths(

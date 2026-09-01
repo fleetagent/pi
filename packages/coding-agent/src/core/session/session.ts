@@ -479,7 +479,7 @@ export abstract class Session {
 		for (const { targetId, label, timestamp: labelTimestamp } of labelsToWrite) {
 			const labelEntry: LabelEntry = {
 				type: "label",
-				id: generateId(new Set([...pathEntryIds, ...labelEntries.map((e) => e.id)])),
+				id: generateId(pathEntryIds),
 				parentId,
 				timestamp: labelTimestamp,
 				targetId,
@@ -514,7 +514,7 @@ export abstract class Session {
 		for (const { targetId, label, timestamp } of labelsToWrite) {
 			const labelEntry: LabelEntry = {
 				type: "label",
-				id: generateId(new Set([...pathEntryIds, ...labelEntries.map((entry) => entry.id)])),
+				id: generateId(pathEntryIds),
 				parentId: nextParentId,
 				timestamp,
 				targetId,

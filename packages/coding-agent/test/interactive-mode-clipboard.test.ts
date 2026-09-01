@@ -1,8 +1,9 @@
 import { readFileSync, rmSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import type { ClipboardImage } from "../src/utils/clipboard-image.ts";
 
 const mocks = vi.hoisted(() => ({
-	readClipboardImage: vi.fn<() => Promise<{ bytes: Uint8Array; mimeType: string } | null>>(),
+	readClipboardImage: vi.fn<() => Promise<ClipboardImage | null>>(),
 	readClipboardText: vi.fn<() => Promise<string | null>>(),
 }));
 
@@ -18,22 +19,36 @@ vi.mock("../src/utils/clipboard-image.ts", () => ({
 
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 
-type ClipboardPasteContext = {
-	editor: { insertTextAtCursor: (text: string) => void };
-	ui: { requestRender: () => void };
-};
+interface ClipboardPasteEditor {
+	insertTextAtCursor: (text: string) => void;
+}
 
-type SetupKeyHandlersContext = {
-	defaultEditor: {
-		onAction: (action: string, handler: () => void) => void;
-		onEscape?: () => void;
-		onCtrlD?: () => void;
-		onChange?: (text: string) => void;
-		onPasteImage?: () => void;
-	};
-	ui: { onDebug?: () => void };
+interface ClipboardPasteUI {
+	requestRender: () => void;
+}
+
+interface ClipboardPasteContext {
+	editor: ClipboardPasteEditor;
+	ui: ClipboardPasteUI;
+}
+
+interface KeyHandlerEditor {
+	onAction: (action: string, handler: () => void) => void;
+	onEscape?: () => void;
+	onCtrlD?: () => void;
+	onChange?: (text: string) => void;
+	onPasteImage?: () => void;
+}
+
+interface KeyHandlerUI {
+	onDebug?: () => void;
+}
+
+interface SetupKeyHandlersContext {
+	defaultEditor: KeyHandlerEditor;
+	ui: KeyHandlerUI;
 	handleClipboardPaste: () => Promise<void>;
-};
+}
 
 type InteractiveModePrivate = {
 	handleClipboardPaste(this: ClipboardPasteContext): Promise<void>;

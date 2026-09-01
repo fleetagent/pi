@@ -5,16 +5,12 @@
  * Multiple questions: tab bar navigation between questions
  */
 
-import type { ExtensionAPI } from "@fleetagent/pi-coding-agent";
-import { Editor, type EditorTheme, Key, matchesKey, Text, truncateToWidth } from "@fleetagent/pi-tui";
+import type { AgentToolResult, ExtensionAPI } from "@fleetagent/pi-coding-agent";
+import { Editor, type EditorTheme, Key, matchesKey, type SelectItem, Text, truncateToWidth } from "@fleetagent/pi-tui";
 import { Type } from "typebox";
 
 // Types
-interface QuestionOption {
-	value: string;
-	label: string;
-	description?: string;
-}
+type QuestionOption = SelectItem;
 
 type RenderOption = QuestionOption & { isOther?: boolean };
 
@@ -63,10 +59,7 @@ const QuestionnaireParams = Type.Object({
 	questions: Type.Array(QuestionSchema, { description: "Questions to ask the user" }),
 });
 
-function errorResult(
-	message: string,
-	questions: Question[] = [],
-): { content: { type: "text"; text: string }[]; details: QuestionnaireResult } {
+function errorResult(message: string, questions: Question[] = []): AgentToolResult<QuestionnaireResult> {
 	return {
 		content: [{ type: "text", text: message }],
 		details: { questions, answers: [], cancelled: true },
@@ -178,187 +171,222 @@ export default function questionnaire(pi: ExtensionAPI) {
 					advanceAfterAnswer();
 				};
 
-				function handleInput(data: string) {
-					// Input mode: route to editor
-					if (inputMode) {
-						if (matchesKey(data, Key.escape)) {
-							inputMode = false;
-							inputQuestionId = null;
-							editor.setText("");
-							refresh();
-							return;
-						}
-						editor.handleInput(data);
+				function handleEditorInput(data: string): boolean {
+					if (!inputMode) return false;
+					if (matchesKey(data, Key.escape)) {
+						inputMode = false;
+						inputQuestionId = null;
+						editor.setText("");
 						refresh();
-						return;
+						return true;
 					}
+					editor.handleInput(data);
+					refresh();
+					return true;
+				}
 
-					const q = currentQuestion();
-					const opts = currentOptions();
-
-					// Tab navigation (multi-question only)
-					if (isMulti) {
-						if (matchesKey(data, Key.tab) || matchesKey(data, Key.right)) {
-							currentTab = (currentTab + 1) % totalTabs;
-							optionIndex = 0;
-							refresh();
-							return;
-						}
-						if (matchesKey(data, Key.shift("tab")) || matchesKey(data, Key.left)) {
-							currentTab = (currentTab - 1 + totalTabs) % totalTabs;
-							optionIndex = 0;
-							refresh();
-							return;
-						}
+				function handleQuestionTabNavigation(data: string): boolean {
+					if (!isMulti) return false;
+					if (matchesKey(data, Key.tab) || matchesKey(data, Key.right)) {
+						currentTab = (currentTab + 1) % totalTabs;
+					} else if (matchesKey(data, Key.shift("tab")) || matchesKey(data, Key.left)) {
+						currentTab = (currentTab - 1 + totalTabs) % totalTabs;
+					} else {
+						return false;
 					}
+					optionIndex = 0;
+					refresh();
+					return true;
+				}
 
-					// Submit tab
-					if (currentTab === questions.length) {
-						if (matchesKey(data, Key.enter) && allAnswered()) {
-							submit(false);
-						} else if (matchesKey(data, Key.escape)) {
-							submit(true);
-						}
-						return;
-					}
+				function handleSubmitTabInput(data: string): boolean {
+					if (currentTab !== questions.length) return false;
+					if (matchesKey(data, Key.enter) && allAnswered()) submit(false);
+					else if (matchesKey(data, Key.escape)) submit(true);
+					return true;
+				}
 
-					// Option navigation
+				function handleOptionNavigation(data: string): boolean {
+					const options = currentOptions();
 					if (matchesKey(data, Key.up)) {
 						optionIndex = Math.max(0, optionIndex - 1);
-						refresh();
-						return;
+					} else if (matchesKey(data, Key.down)) {
+						optionIndex = Math.min(options.length - 1, optionIndex + 1);
+					} else {
+						return false;
 					}
-					if (matchesKey(data, Key.down)) {
-						optionIndex = Math.min(opts.length - 1, optionIndex + 1);
-						refresh();
-						return;
-					}
+					refresh();
+					return true;
+				}
 
-					// Select option
-					if (matchesKey(data, Key.enter) && q) {
-						const opt = opts[optionIndex];
-						if (opt.isOther) {
-							inputMode = true;
-							inputQuestionId = q.id;
-							editor.setText("");
-							refresh();
-							return;
-						}
-						saveAnswer(q.id, opt.value, opt.label, false, optionIndex + 1);
-						advanceAfterAnswer();
+				function handleOptionSelection(data: string): boolean {
+					const question = currentQuestion();
+					const options = currentOptions();
+					if (!matchesKey(data, Key.enter) || !question) return false;
+					const option = options[optionIndex];
+					if (option.isOther) {
+						inputMode = true;
+						inputQuestionId = question.id;
+						editor.setText("");
+						refresh();
+						return true;
+					}
+					saveAnswer(question.id, option.value, option.label, false, optionIndex + 1);
+					advanceAfterAnswer();
+					return true;
+				}
+
+				function handleQuestionnaireCancel(data: string): boolean {
+					if (!matchesKey(data, Key.escape)) return false;
+					submit(true);
+					return true;
+				}
+
+				const inputHandlers = [
+					handleEditorInput,
+					handleQuestionTabNavigation,
+					handleSubmitTabInput,
+					handleOptionNavigation,
+					handleOptionSelection,
+					handleQuestionnaireCancel,
+				];
+
+				function handleInput(data: string) {
+					for (const handler of inputHandlers) {
+						if (handler(data)) return;
+					}
+				}
+
+				function addLine(lines: string[], width: number, text: string): void {
+					lines.push(truncateToWidth(text, width));
+				}
+
+				function formatQuestionTab(question: Question, index: number): string {
+					const isActive = index === currentTab;
+					const isAnswered = answers.has(question.id);
+					const box = isAnswered ? "■" : "□";
+					const color = isAnswered ? "success" : "muted";
+					const text = ` ${box} ${question.label} `;
+					const styled = isActive ? theme.bg("selectedBg", theme.fg("text", text)) : theme.fg(color, text);
+					return `${styled} `;
+				}
+
+				function appendQuestionTabs(lines: string[], width: number): void {
+					if (!isMulti) return;
+					const tabs = ["← ", ...questions.map(formatQuestionTab)];
+					const submitText = " ✓ Submit ";
+					const submitStyled =
+						currentTab === questions.length
+							? theme.bg("selectedBg", theme.fg("text", submitText))
+							: theme.fg(allAnswered() ? "success" : "dim", submitText);
+					tabs.push(`${submitStyled} →`);
+					addLine(lines, width, ` ${tabs.join("")}`);
+					lines.push("");
+				}
+
+				function formatOptionLine(option: RenderOption, index: number): string {
+					const selected = index === optionIndex;
+					const prefix = selected ? theme.fg("accent", "> ") : "  ";
+					const color = selected ? "accent" : "text";
+					const label =
+						option.isOther && inputMode ? `${index + 1}. ${option.label} ✎` : `${index + 1}. ${option.label}`;
+					return prefix + theme.fg(color, label);
+				}
+
+				function appendOptions(lines: string[], width: number, options: RenderOption[]): void {
+					for (let index = 0; index < options.length; index++) {
+						const option = options[index];
+						addLine(lines, width, formatOptionLine(option, index));
+						if (option.description) addLine(lines, width, `     ${theme.fg("muted", option.description)}`);
+					}
+				}
+
+				function appendCustomAnswerInput(
+					lines: string[],
+					width: number,
+					question: Question,
+					options: RenderOption[],
+				): void {
+					addLine(lines, width, theme.fg("text", ` ${question.prompt}`));
+					lines.push("");
+					appendOptions(lines, width, options);
+					lines.push("");
+					addLine(lines, width, theme.fg("muted", " Your answer:"));
+					for (const line of editor.render(width - 2)) addLine(lines, width, ` ${line}`);
+					lines.push("");
+					addLine(lines, width, theme.fg("dim", " Enter to submit • Esc to cancel"));
+				}
+
+				function appendAnswerSummary(lines: string[], width: number): void {
+					for (const question of questions) {
+						const answer = answers.get(question.id);
+						if (!answer) continue;
+						const prefix = answer.wasCustom ? "(wrote) " : "";
+						addLine(
+							lines,
+							width,
+							`${theme.fg("muted", ` ${question.label}: `)}${theme.fg("text", prefix + answer.label)}`,
+						);
+					}
+				}
+
+				function appendSubmitPrompt(lines: string[], width: number): void {
+					if (allAnswered()) {
+						addLine(lines, width, theme.fg("success", " Press Enter to submit"));
 						return;
 					}
+					const missing = questions
+						.filter((question) => !answers.has(question.id))
+						.map((question) => question.label)
+						.join(", ");
+					addLine(lines, width, theme.fg("warning", ` Unanswered: ${missing}`));
+				}
 
-					// Cancel
-					if (matchesKey(data, Key.escape)) {
-						submit(true);
+				function appendSubmissionSummary(lines: string[], width: number): void {
+					addLine(lines, width, theme.fg("accent", theme.bold(" Ready to submit")));
+					lines.push("");
+					appendAnswerSummary(lines, width);
+					lines.push("");
+					appendSubmitPrompt(lines, width);
+				}
+
+				function appendQuestionContent(
+					lines: string[],
+					width: number,
+					question: Question | undefined,
+					options: RenderOption[],
+				): void {
+					if (inputMode && question) {
+						appendCustomAnswerInput(lines, width, question, options);
+						return;
 					}
+					if (currentTab === questions.length) {
+						appendSubmissionSummary(lines, width);
+						return;
+					}
+					if (!question) return;
+					addLine(lines, width, theme.fg("text", ` ${question.prompt}`));
+					lines.push("");
+					appendOptions(lines, width, options);
+				}
+
+				function appendQuestionnaireHelp(lines: string[], width: number): void {
+					if (inputMode) return;
+					const help = isMulti
+						? " Tab/←→ navigate • ↑↓ select • Enter confirm • Esc cancel"
+						: " ↑↓ navigate • Enter select • Esc cancel";
+					addLine(lines, width, theme.fg("dim", help));
 				}
 
 				function render(width: number): string[] {
 					if (cachedLines) return cachedLines;
-
 					const lines: string[] = [];
-					const q = currentQuestion();
-					const opts = currentOptions();
-
-					// Helper to add truncated line
-					const add = (s: string) => lines.push(truncateToWidth(s, width));
-
-					add(theme.fg("accent", "─".repeat(width)));
-
-					// Tab bar (multi-question only)
-					if (isMulti) {
-						const tabs: string[] = ["← "];
-						for (let i = 0; i < questions.length; i++) {
-							const isActive = i === currentTab;
-							const isAnswered = answers.has(questions[i].id);
-							const lbl = questions[i].label;
-							const box = isAnswered ? "■" : "□";
-							const color = isAnswered ? "success" : "muted";
-							const text = ` ${box} ${lbl} `;
-							const styled = isActive ? theme.bg("selectedBg", theme.fg("text", text)) : theme.fg(color, text);
-							tabs.push(`${styled} `);
-						}
-						const canSubmit = allAnswered();
-						const isSubmitTab = currentTab === questions.length;
-						const submitText = " ✓ Submit ";
-						const submitStyled = isSubmitTab
-							? theme.bg("selectedBg", theme.fg("text", submitText))
-							: theme.fg(canSubmit ? "success" : "dim", submitText);
-						tabs.push(`${submitStyled} →`);
-						add(` ${tabs.join("")}`);
-						lines.push("");
-					}
-
-					// Helper to render options list
-					function renderOptions() {
-						for (let i = 0; i < opts.length; i++) {
-							const opt = opts[i];
-							const selected = i === optionIndex;
-							const isOther = opt.isOther === true;
-							const prefix = selected ? theme.fg("accent", "> ") : "  ";
-							const color = selected ? "accent" : "text";
-							// Mark "Type something" differently when in input mode
-							if (isOther && inputMode) {
-								add(prefix + theme.fg("accent", `${i + 1}. ${opt.label} ✎`));
-							} else {
-								add(prefix + theme.fg(color, `${i + 1}. ${opt.label}`));
-							}
-							if (opt.description) {
-								add(`     ${theme.fg("muted", opt.description)}`);
-							}
-						}
-					}
-
-					// Content
-					if (inputMode && q) {
-						add(theme.fg("text", ` ${q.prompt}`));
-						lines.push("");
-						// Show options for reference
-						renderOptions();
-						lines.push("");
-						add(theme.fg("muted", " Your answer:"));
-						for (const line of editor.render(width - 2)) {
-							add(` ${line}`);
-						}
-						lines.push("");
-						add(theme.fg("dim", " Enter to submit • Esc to cancel"));
-					} else if (currentTab === questions.length) {
-						add(theme.fg("accent", theme.bold(" Ready to submit")));
-						lines.push("");
-						for (const question of questions) {
-							const answer = answers.get(question.id);
-							if (answer) {
-								const prefix = answer.wasCustom ? "(wrote) " : "";
-								add(`${theme.fg("muted", ` ${question.label}: `)}${theme.fg("text", prefix + answer.label)}`);
-							}
-						}
-						lines.push("");
-						if (allAnswered()) {
-							add(theme.fg("success", " Press Enter to submit"));
-						} else {
-							const missing = questions
-								.filter((q) => !answers.has(q.id))
-								.map((q) => q.label)
-								.join(", ");
-							add(theme.fg("warning", ` Unanswered: ${missing}`));
-						}
-					} else if (q) {
-						add(theme.fg("text", ` ${q.prompt}`));
-						lines.push("");
-						renderOptions();
-					}
-
+					addLine(lines, width, theme.fg("accent", "─".repeat(width)));
+					appendQuestionTabs(lines, width);
+					appendQuestionContent(lines, width, currentQuestion(), currentOptions());
 					lines.push("");
-					if (!inputMode) {
-						const help = isMulti
-							? " Tab/←→ navigate • ↑↓ select • Enter confirm • Esc cancel"
-							: " ↑↓ navigate • Enter select • Esc cancel";
-						add(theme.fg("dim", help));
-					}
-					add(theme.fg("accent", "─".repeat(width)));
-
+					appendQuestionnaireHelp(lines, width);
+					addLine(lines, width, theme.fg("accent", "─".repeat(width)));
 					cachedLines = lines;
 					return lines;
 				}
@@ -379,8 +407,12 @@ export default function questionnaire(pi: ExtensionAPI) {
 				};
 			}
 
+			const firstQuestionLabelById = new Map<string, string>();
+			for (const question of questions) {
+				if (!firstQuestionLabelById.has(question.id)) firstQuestionLabelById.set(question.id, question.label);
+			}
 			const answerLines = result.answers.map((a) => {
-				const qLabel = questions.find((q) => q.id === a.id)?.label || a.id;
+				const qLabel = firstQuestionLabelById.get(a.id) || a.id;
 				if (a.wasCustom) {
 					return `${qLabel}: user wrote: ${a.label}`;
 				}

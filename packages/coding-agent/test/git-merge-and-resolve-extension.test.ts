@@ -3,9 +3,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import mergeAndResolve from "../examples/extensions/git-merge-and-resolve.ts";
-import type { ExecResult, ExtensionAPI, ExtensionContext } from "../src/core/extensions/types.ts";
-
-type AgentEndHandler = (event: { type: "agent_end" }, ctx: ExtensionContext) => Promise<undefined>;
+import type {
+	AgentEndEvent,
+	ExecResult,
+	ExtensionAPI,
+	ExtensionContext,
+	ExtensionHandler,
+} from "../src/core/extensions/types.ts";
 
 const ok: ExecResult = { stdout: "", stderr: "", code: 0, killed: false };
 const fail: ExecResult = { stdout: "", stderr: "error", code: 1, killed: false };
@@ -21,7 +25,7 @@ function withUpstream(results: Map<string, ExecResult>): Map<string, ExecResult>
 }
 
 function setup(cwd: string, execResults: Map<string, ExecResult>) {
-	let handler: AgentEndHandler | undefined;
+	let handler: ExtensionHandler<AgentEndEvent> | undefined;
 	const sendUserMessage = vi.fn();
 
 	const exec = vi.fn<ExtensionAPI["exec"]>().mockImplementation(async (cmd, args) => {
@@ -30,7 +34,7 @@ function setup(cwd: string, execResults: Map<string, ExecResult>) {
 	});
 
 	const api = {
-		on: (event: string, h: AgentEndHandler) => {
+		on: (event: string, h: ExtensionHandler<AgentEndEvent>) => {
 			if (event === "agent_end") handler = h;
 		},
 		exec,
@@ -42,7 +46,7 @@ function setup(cwd: string, execResults: Map<string, ExecResult>) {
 	const ctx = { cwd, ui: { notify: vi.fn() } } as unknown as ExtensionContext;
 
 	async function trigger() {
-		await handler!({ type: "agent_end" }, ctx);
+		await handler!({ type: "agent_end", messages: [] }, ctx);
 	}
 
 	return { trigger, exec, sendUserMessage };

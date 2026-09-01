@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { RpcClient } from "../src/modes/rpc/rpc-client.ts";
+import { RpcClient, type RpcCommandBody } from "../src/modes/rpc/rpc-client.ts";
 
 type RpcClientPrivate = {
-	send: (command: { type: string }) => Promise<unknown>;
+	send: (command: RpcCommandBody) => Promise<unknown>;
 	getData: <T>(response: unknown) => T;
 };
 

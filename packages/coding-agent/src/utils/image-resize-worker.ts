@@ -1,15 +1,11 @@
 import { parentPort } from "node:worker_threads";
-import { type ImageResizeOptions, type ResizedImage, resizeImageInProcess } from "./image-resize-core.ts";
+import type { ResizeImageWorkerResponse } from "./image-resize.ts";
+import { type ImageResizeOptions, resizeImageInProcess } from "./image-resize-core.ts";
 
 interface ResizeImageWorkerRequest {
 	inputBytes: Uint8Array;
 	mimeType: string;
 	options?: ImageResizeOptions;
-}
-
-interface ResizeImageWorkerResponse {
-	result?: ResizedImage | null;
-	error?: string;
 }
 
 function isResizeImageWorkerRequest(value: unknown): value is ResizeImageWorkerRequest {

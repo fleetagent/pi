@@ -12,6 +12,7 @@ import { killProcessTree } from "../../utils/shell.ts";
 import type { LspTransport } from "./config.ts";
 
 export type LspConnectionDisposalMode = "terminate-process" | "disconnect";
+type LspSocketEndpointType = "tcp" | "unix" | "pipe";
 
 export interface LspConnectionEndpoint {
 	type: LspTransport["type"];
@@ -38,6 +39,14 @@ export interface LspConnectionFactoryContext {
 }
 
 export type LspConnectionFactory = (context: LspConnectionFactoryContext) => Promise<LspConnectionHandle>;
+
+export interface ManagedStdioConnectionOptions {
+	command: string;
+	args?: string[];
+	env?: Record<string, string>;
+	cwd?: string;
+	inheritEnvironment?: boolean;
+}
 export type LspConnectionFactoryRegistry = Readonly<Record<string, LspConnectionFactory>>;
 
 interface ConnectionEvents {
@@ -137,6 +146,19 @@ function processGroupIsAlive(pid: number): boolean {
 	}
 }
 
+async function waitForChildExit(exited: Promise<void>, timeoutMs: number): Promise<boolean> {
+	let timer: NodeJS.Timeout | undefined;
+	const didExit = await Promise.race([
+		exited.then(() => true),
+		new Promise<false>((resolve) => {
+			timer = setTimeout(() => resolve(false), timeoutMs);
+			timer.unref();
+		}),
+	]);
+	if (timer) clearTimeout(timer);
+	return didExit;
+}
+
 async function terminateChild(child: ChildProcessWithoutNullStreams): Promise<void> {
 	if (child.pid === undefined) return;
 	if (child.exitCode !== null || child.signalCode !== null) {
@@ -154,38 +176,16 @@ async function terminateChild(child: ChildProcessWithoutNullStreams): Promise<vo
 	} else {
 		child.kill("SIGTERM");
 	}
-	let timer: NodeJS.Timeout | undefined;
-	const exitedGracefully = await Promise.race([
-		exited.then(() => true),
-		new Promise<false>((resolve) => {
-			timer = setTimeout(() => resolve(false), 2000);
-			timer.unref();
-		}),
-	]);
-	if (timer) clearTimeout(timer);
+	const exitedGracefully = await waitForChildExit(exited, 2000);
 	if (exitedGracefully) {
 		if (processGroupIsAlive(child.pid)) killProcessTree(child.pid);
 		return;
 	}
 	if (child.exitCode === null && child.signalCode === null && child.pid !== undefined) killProcessTree(child.pid);
-	let killTimer: NodeJS.Timeout | undefined;
-	await Promise.race([
-		exited,
-		new Promise<void>((resolve) => {
-			killTimer = setTimeout(resolve, 2000);
-			killTimer.unref();
-		}),
-	]);
-	if (killTimer) clearTimeout(killTimer);
+	await waitForChildExit(exited, 2000);
 }
 
-export function createManagedStdioConnectionFactory(options: {
-	command: string;
-	args?: string[];
-	env?: Record<string, string>;
-	cwd?: string;
-	inheritEnvironment?: boolean;
-}): LspConnectionFactory {
+export function createManagedStdioConnectionFactory(options: ManagedStdioConnectionOptions): LspConnectionFactory {
 	return async (context) => {
 		const cwd = options.cwd ?? context.workspaceRoot;
 		const description = `managed LSP process ${JSON.stringify(options.command)}`;
@@ -241,7 +241,7 @@ export function createManagedStdioConnectionFactory(options: {
 
 async function connectSocket(
 	description: string,
-	endpointType: "tcp" | "unix" | "pipe",
+	endpointType: LspSocketEndpointType,
 	context: LspConnectionFactoryContext,
 	createSocket: () => Socket,
 ): Promise<LspConnectionHandle> {

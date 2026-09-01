@@ -162,6 +162,10 @@ type ActiveRun = {
 	abortController: AbortController;
 };
 
+interface AgentLoopStartOptions {
+	skipInitialSteeringPoll?: boolean;
+}
+
 /**
  * Stateful wrapper around the low-level agent loop.
  *
@@ -396,10 +400,7 @@ export class Agent {
 		return [{ role: "user", content, timestamp: Date.now() }];
 	}
 
-	private async runPromptMessages(
-		messages: AgentMessage[],
-		options: { skipInitialSteeringPoll?: boolean } = {},
-	): Promise<void> {
+	private async runPromptMessages(messages: AgentMessage[], options: AgentLoopStartOptions = {}): Promise<void> {
 		await this.runWithLifecycle(async (signal) => {
 			await runAgentLoop(
 				messages,
@@ -432,7 +433,7 @@ export class Agent {
 		};
 	}
 
-	private createLoopConfig(options: { skipInitialSteeringPoll?: boolean } = {}): AgentLoopConfig {
+	private createLoopConfig(options: AgentLoopStartOptions = {}): AgentLoopConfig {
 		let skipInitialSteeringPoll = options.skipInitialSteeringPoll === true;
 		return {
 			model: this._state.model,

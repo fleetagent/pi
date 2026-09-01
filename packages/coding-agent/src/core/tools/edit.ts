@@ -5,13 +5,13 @@ import { type Static, Type } from "typebox";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { withFileMutationQueue } from "./file-mutation-queue.ts";
-import { applyEdits, fmtBoundaryWarning } from "./hashline/apply.ts";
+import { type ApplyEditsResult, applyEdits, fmtBoundaryWarning } from "./hashline/apply.ts";
 import { initHasher, lineHashes } from "./hashline/hash.ts";
-import { type HTEdit, resEdits } from "./hashline/resolve.ts";
+import { type HEdit, type HTEdit, resEdits } from "./hashline/resolve.ts";
 import type { ToolBackendInfo, ToolOperations } from "./operations.ts";
 import { resolveToCwd } from "./path-utils.ts";
 import { formatBackendIcon, invalidArgText, shortenPath, str } from "./render-utils.ts";
-import { detectEnding, genDiff, restoreEndings, stripBOM, toLF } from "./replace-diff.ts";
+import { detectEnding, genDiff, type LineEnding, restoreEndings, stripBOM, toLF } from "./replace-diff.ts";
 import { normReq } from "./replace-normalize.ts";
 import { fmtCall, getPreviewInput, type RPreview, type RRState } from "./replace-render.ts";
 import { abortIf } from "./runtime.ts";
@@ -52,13 +52,17 @@ export type ReqParams = {
 	path: string;
 	changes: HTEdit[];
 };
+interface EditChangedLineRange {
+	first: number;
+	last: number;
+}
 
 export type RMetrics = {
 	edits_attempted: number;
 	edits_noop: number;
 	warnings: number;
 	classification: "applied" | "noop";
-	changed_lines?: { first: number; last: number };
+	changed_lines?: EditChangedLineRange;
 	added_lines?: number;
 	removed_lines?: number;
 };
@@ -76,6 +80,7 @@ export type EditToolDetails = ReplaceDetails;
 export interface EditToolOptions {}
 
 type EditRenderState = RRState;
+type DiffLineMarker = "+" | "-";
 
 type RenderableEditArgs = {
 	path?: string;
@@ -86,7 +91,7 @@ type RenderableEditArgs = {
 	content_lines?: string[];
 };
 
-function countDiffLines(diff: string, marker: "+" | "-"): number {
+function countDiffLines(diff: string, marker: DiffLineMarker): number {
 	let count = 0;
 	for (const line of diff.split("\n")) {
 		if (line.startsWith(marker) && !line.startsWith(`${marker}${marker}${marker}`)) {
@@ -99,7 +104,6 @@ function countDiffLines(diff: string, marker: "+" | "-"): number {
 function hashStoreKey(operations: ToolOperations, absolutePath: string): string {
 	const backend = operations.getBackendInfo?.();
 	if (!backend) return absolutePath;
-	if (backend.type === "ssh") return `ssh:${backend.remote}:${absolutePath}`;
 	if (backend.type === "remote" && backend.configured) return `remote:${backend.url}:${absolutePath}`;
 	return absolutePath;
 }
@@ -173,11 +177,194 @@ function assertReq(request: unknown): asserts request is ReqParams {
 		throw new Error('[E_BAD_SHAPE] Edit request requires a non-empty "changes" array.');
 	}
 }
+interface EditSourceSnapshot {
+	bom: string;
+	originalEnding: LineEnding;
+	originalContent: string;
+	originalHashes: string[];
+	storeKey: string;
+}
 
-export function createEditToolDefinition(
+interface AppliedEditResultOptions {
+	path: string;
+	editCount: number;
+	anchorResult: ApplyEditsResult;
+	warnings: string[];
+	originalContent: string;
+	resultContent: string;
+	originalHashes: string[];
+	resultHashes: string[];
+}
+
+async function readEditSource(
+	path: string,
+	absolutePath: string,
 	operations: ToolOperations,
-	_options?: EditToolOptions,
-): ToolDefinition<typeof editSchema, EditToolDetails | undefined, EditRenderState> {
+): Promise<EditSourceSnapshot> {
+	try {
+		await operations.access(absolutePath, "readwrite");
+	} catch (error) {
+		const message = error instanceof Error && "code" in error ? `Error code: ${String(error.code)}` : String(error);
+		throw new Error(`Could not edit file: ${path}. ${message}.`);
+	}
+	const rawContent = (await operations.readFile(absolutePath)).toString("utf-8");
+	const { bom, text } = stripBOM(rawContent);
+	const originalContent = toLF(text);
+	const storeKey = hashStoreKey(operations, absolutePath);
+	return {
+		bom,
+		originalEnding: detectEnding(text),
+		originalContent,
+		originalHashes: await lineHashes(originalContent, storeKey),
+		storeKey,
+	};
+}
+
+function collectRemovedHashes(edits: HEdit[], originalHashes: string[]): Set<string> {
+	const hashIndexes = new Map<string, number>();
+	for (let index = 0; index < originalHashes.length; index++) {
+		const hash = originalHashes[index];
+		if (hash !== undefined && !hashIndexes.has(hash)) hashIndexes.set(hash, index);
+	}
+	const removedHashes = new Set<string>();
+	for (const edit of edits) {
+		const startLine = hashIndexes.get(edit.hash_range_inclusive[0].hash) ?? -1;
+		const endLine = hashIndexes.get(edit.hash_range_inclusive[1].hash) ?? -1;
+		if (startLine < 0 || endLine < 0) continue;
+		for (let index = startLine; index <= endLine; index++) {
+			const hash = originalHashes[index];
+			if (hash) removedHashes.add(hash);
+		}
+	}
+	return removedHashes;
+}
+
+function indexLineOccurrences(lines: string[]): Map<string, number[]> {
+	const indexesByLine = new Map<string, number[]>();
+	for (let index = 0; index < lines.length; index++) {
+		const line = lines[index];
+		const indexes = indexesByLine.get(line);
+		if (indexes) indexes.push(index);
+		else indexesByLine.set(line, [index]);
+	}
+	return indexesByLine;
+}
+
+function collectEditWarnings(anchorResult: ApplyEditsResult, resultContent: string, resultHashes: string[]): string[] {
+	const warnings = [...(anchorResult.warnings ?? [])];
+	const resultLines = resultContent.split("\n");
+	const indexesByLine = indexLineOccurrences(resultLines);
+	for (const warning of anchorResult.boundaryWarnings ?? []) {
+		const matchIndex = indexesByLine.get(warning.survivingLineContent)?.[warning.occurrence] ?? -1;
+		if (matchIndex < 0) continue;
+		warnings.push(
+			fmtBoundaryWarning({
+				kind: warning.kind,
+				survivingContent: warning.survivingLineContent,
+				matchIndex,
+				resultLines,
+				resultHashes,
+			}),
+		);
+	}
+	return warnings;
+}
+
+function buildNoopEditResult(
+	path: string,
+	editCount: number,
+	anchorResult: ApplyEditsResult,
+	warnings: string[],
+): AgentToolResult<EditToolDetails> {
+	return {
+		content: [{ type: "text", text: `No changes made to ${path}. The edits produced identical content.` }],
+		details: {
+			diff: "",
+			patch: "",
+			classification: "noop",
+			metrics: {
+				edits_attempted: editCount,
+				edits_noop: anchorResult.noopEdits?.length ?? 0,
+				warnings: warnings.length,
+				classification: "noop",
+			},
+		},
+	};
+}
+
+function buildAppliedEditResult(options: AppliedEditResultOptions): AgentToolResult<EditToolDetails> {
+	const diffResult = genDiff(
+		options.originalContent,
+		options.resultContent,
+		2,
+		options.resultHashes,
+		options.originalHashes,
+	);
+	const warningBlock = options.warnings.length > 0 ? `\n\nWarnings:\n${options.warnings.join("\n")}` : "";
+	const changedLines =
+		options.anchorResult.firstChangedLine !== undefined && options.anchorResult.lastChangedLine !== undefined
+			? {
+					first: options.anchorResult.firstChangedLine,
+					last: options.anchorResult.lastChangedLine,
+				}
+			: undefined;
+	return {
+		content: [{ type: "text", text: `Successfully replaced in ${options.path}.${warningBlock}` }],
+		details: {
+			diff: diffResult.diff,
+			patch: createTwoFilesPatch(options.path, options.path, options.originalContent, options.resultContent),
+			firstChangedLine: options.anchorResult.firstChangedLine ?? diffResult.firstChangedLine,
+			metrics: {
+				edits_attempted: options.editCount,
+				edits_noop: options.anchorResult.noopEdits?.length ?? 0,
+				warnings: options.warnings.length,
+				classification: "applied",
+				...(changedLines ? { changed_lines: changedLines } : {}),
+				added_lines: countDiffLines(diffResult.diff, "+"),
+				removed_lines: countDiffLines(diffResult.diff, "-"),
+			},
+		},
+	};
+}
+
+async function executeEditMutation(
+	request: ReqParams,
+	absolutePath: string,
+	operations: ToolOperations,
+	signal: AbortSignal | undefined,
+): Promise<AgentToolResult<EditToolDetails>> {
+	abortIf(signal);
+	await initHasher();
+	const source = await readEditSource(request.path, absolutePath, operations);
+	const resolvedEdits = resEdits(request.changes);
+	const anchorResult = applyEdits(source.originalContent, resolvedEdits, signal, source.originalHashes, request.path);
+	const resultContent = anchorResult.content;
+	const resultHashes = await lineHashes(resultContent, source.storeKey, {
+		content: source.originalContent,
+		hashes: source.originalHashes,
+		removedHashes: collectRemovedHashes(resolvedEdits, source.originalHashes),
+	});
+	const warnings = collectEditWarnings(anchorResult, resultContent, resultHashes);
+	if (source.originalContent === resultContent) {
+		return buildNoopEditResult(request.path, request.changes.length, anchorResult, warnings);
+	}
+	abortIf(signal);
+	await operations.writeFile(absolutePath, source.bom + restoreEndings(resultContent, source.originalEnding));
+	return buildAppliedEditResult({
+		path: request.path,
+		editCount: request.changes.length,
+		anchorResult,
+		warnings,
+		originalContent: source.originalContent,
+		resultContent,
+		originalHashes: source.originalHashes,
+		resultHashes,
+	});
+}
+
+export type EditToolDefinition = ToolDefinition<typeof editSchema, EditToolDetails | undefined, EditRenderState>;
+
+export function createEditToolDefinition(operations: ToolOperations, _options?: EditToolOptions): EditToolDefinition {
 	return {
 		name: "edit",
 		label: "edit",
@@ -197,122 +384,10 @@ export function createEditToolDefinition(
 		async execute(_toolCallId, input: EditToolInput, signal?: AbortSignal) {
 			const normalized = normReq(input);
 			assertReq(normalized);
-			const path = normalized.path;
-			const absolutePath = resolveToCwd(path, operations.cwd);
-			return withFileMutationQueue(absolutePath, async () => {
-				abortIf(signal);
-				await initHasher();
-				try {
-					await operations.access(absolutePath, "readwrite");
-				} catch (error) {
-					const message =
-						error instanceof Error && "code" in error ? `Error code: ${String(error.code)}` : String(error);
-					throw new Error(`Could not edit file: ${path}. ${message}.`);
-				}
-				const rawContent = (await operations.readFile(absolutePath)).toString("utf-8");
-				const { bom, text } = stripBOM(rawContent);
-				const originalEnding = detectEnding(text);
-				const originalNormalized = toLF(text);
-				const storeKey = hashStoreKey(operations, absolutePath);
-				const originalHashes = await lineHashes(originalNormalized, storeKey);
-				const resolved = resEdits(normalized.changes);
-				const anchorResult = applyEdits(originalNormalized, resolved, signal, originalHashes, path);
-				const result = anchorResult.content;
-
-				const removedHashes = new Set<string>();
-				for (const edit of resolved) {
-					const startLine = originalHashes.indexOf(edit.hash_range_inclusive[0].hash);
-					const endLine = originalHashes.indexOf(edit.hash_range_inclusive[1].hash);
-					if (startLine >= 0 && endLine >= 0) {
-						for (let i = startLine; i <= endLine; i++) {
-							const hash = originalHashes[i];
-							if (hash) removedHashes.add(hash);
-						}
-					}
-				}
-				const resultHashes = await lineHashes(result, storeKey, {
-					content: originalNormalized,
-					hashes: originalHashes,
-					removedHashes,
-				});
-				const warnings = [...(anchorResult.warnings ?? [])];
-				const resultLines = result.split("\n");
-				for (const warning of anchorResult.boundaryWarnings ?? []) {
-					let seen = 0;
-					let matchIndex = -1;
-					for (let i = 0; i < resultLines.length; i++) {
-						if (resultLines[i] === warning.survivingLineContent) {
-							if (seen === warning.occurrence) {
-								matchIndex = i;
-								break;
-							}
-							seen++;
-						}
-					}
-					if (matchIndex >= 0) {
-						warnings.push(
-							fmtBoundaryWarning({
-								kind: warning.kind,
-								survivingContent: warning.survivingLineContent,
-								matchIndex,
-								resultLines,
-								resultHashes,
-							}),
-						);
-					}
-				}
-
-				if (originalNormalized === result) {
-					return {
-						content: [
-							{
-								type: "text" as const,
-								text: `No changes made to ${path}. The edits produced identical content.`,
-							},
-						],
-						details: {
-							diff: "",
-							patch: "",
-							classification: "noop" as const,
-							metrics: {
-								edits_attempted: normalized.changes.length,
-								edits_noop: anchorResult.noopEdits?.length ?? 0,
-								warnings: warnings.length,
-								classification: "noop" as const,
-							},
-						},
-					};
-				}
-
-				abortIf(signal);
-				await operations.writeFile(absolutePath, bom + restoreEndings(result, originalEnding));
-				const diffResult = genDiff(originalNormalized, result, 2, resultHashes, originalHashes);
-				const warningBlock = warnings.length > 0 ? `\n\nWarnings:\n${warnings.join("\n")}` : "";
-				return {
-					content: [{ type: "text" as const, text: `Successfully replaced in ${path}.${warningBlock}` }],
-					details: {
-						diff: diffResult.diff,
-						patch: createTwoFilesPatch(path, path, originalNormalized, result),
-						firstChangedLine: anchorResult.firstChangedLine ?? diffResult.firstChangedLine,
-						metrics: {
-							edits_attempted: normalized.changes.length,
-							edits_noop: anchorResult.noopEdits?.length ?? 0,
-							warnings: warnings.length,
-							classification: "applied" as const,
-							...(anchorResult.firstChangedLine !== undefined && anchorResult.lastChangedLine !== undefined
-								? {
-										changed_lines: {
-											first: anchorResult.firstChangedLine,
-											last: anchorResult.lastChangedLine,
-										},
-									}
-								: {}),
-							added_lines: countDiffLines(diffResult.diff, "+"),
-							removed_lines: countDiffLines(diffResult.diff, "-"),
-						},
-					},
-				};
-			});
+			const absolutePath = resolveToCwd(normalized.path, operations.cwd);
+			return withFileMutationQueue(absolutePath, () =>
+				executeEditMutation(normalized, absolutePath, operations, signal),
+			);
 		},
 		renderCall(args, theme, context) {
 			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);

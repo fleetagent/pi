@@ -5,10 +5,15 @@
  */
 
 import { type ChildProcess, spawn } from "node:child_process";
-import type { AgentMessage, AgentToolResult, ThinkingLevel } from "@fleetagent/pi-agent-core";
+import type { AgentMessage, AgentToolResult, QueueMode, ThinkingLevel } from "@fleetagent/pi-agent-core";
 import type { ImageContent } from "@fleetagent/pi-ai";
 import type { Static, TSchema } from "typebox";
-import type { SessionStats, StructuredResponse } from "../../core/agent-session.ts";
+import type {
+	ForkableUserMessage,
+	SessionStats,
+	StructuredResponse,
+	StructuredResponseOptions,
+} from "../../core/agent-session.ts";
 import type { BashResult } from "../../core/bash-executor.ts";
 import type { CompactionResult } from "../../core/compaction/compaction.ts";
 import type { ToolInfo } from "../../core/extensions/types.ts";
@@ -19,6 +24,8 @@ import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
 import type {
 	RpcClientListSessionsResponse,
 	RpcCommand,
+	RpcEntriesResponseData,
+	RpcForkMessagesResponseData,
 	RpcInstructionDefinition,
 	RpcListSessionsOptions,
 	RpcListSessionsResponse,
@@ -27,6 +34,7 @@ import type {
 	RpcSlashCommand,
 	RpcToolCallRequest,
 	RpcToolDefinition,
+	RpcTreeResponseData,
 } from "./rpc-types.ts";
 
 // ============================================================================
@@ -37,7 +45,7 @@ import type {
 type DistributiveOmit<T, K extends keyof T> = T extends unknown ? Omit<T, K> : never;
 
 /** RpcCommand without the id field (for internal send) */
-type RpcCommandBody = DistributiveOmit<RpcCommand, "id">;
+export type RpcCommandBody = DistributiveOmit<RpcCommand, "id">;
 
 export interface RpcClientStartCommand {
 	/** Executable to spawn. */
@@ -69,11 +77,74 @@ export interface ModelInfo {
 	contextWindow: number;
 	reasoning: boolean;
 }
-
 export type RpcEventListener = (event: JsonAgentSessionEvent) => void;
+
+export interface RpcToolHandlerContext {
+	toolName: string;
+	toolCallId: string;
+	signal: AbortSignal;
+}
+
+export interface RpcNewSessionOptions {
+	sessionId?: string;
+	parentSession?: string;
+}
+
+export interface RpcSessionActionResult {
+	cancelled: boolean;
+}
+
+// pi-ignore noNearIdenticalDataStructures: RPC wire model selection and faux-provider test response overrides evolve under separate protocol and fixture ownership.
+export interface RpcModelReference {
+	provider: string;
+	id: string;
+}
+
+export interface RpcModelCycleResult {
+	model: RpcModelReference;
+	thinkingLevel: ThinkingLevel;
+	isScoped: boolean;
+}
+
+export interface RpcThinkingLevelCycleResult {
+	level: ThinkingLevel;
+}
+
+export interface RpcBashOptions {
+	record?: boolean;
+	truncate?: boolean;
+	excludeFromContext?: boolean;
+}
+
+export interface RpcDaemonSandboxOptions {
+	backend: "daemon";
+	url: string;
+	token?: string;
+}
+
+export interface RpcFileTransferResult {
+	bytes: number;
+}
+
+export interface RpcExportHtmlResult {
+	path: string;
+}
+
+export interface RpcForkResult extends RpcSessionActionResult {
+	text: string;
+}
+
+export type RpcEntriesResult = RpcEntriesResponseData;
+
+export type RpcTreeResult = RpcTreeResponseData;
+
+export interface RpcUnregisterResult {
+	unregistered: boolean;
+}
+
 export type RpcToolHandler = (
 	args: unknown,
-	context: { toolName: string; toolCallId: string; signal: AbortSignal },
+	context: RpcToolHandlerContext,
 ) => Promise<AgentToolResult<unknown>> | AgentToolResult<unknown>;
 
 // ============================================================================
@@ -242,13 +313,9 @@ export class RpcClient {
 	/**
 	 * Extract a structured response from the latest assistant response.
 	 */
-	async getStructuredResponse<TSchemaValue extends TSchema>(options: {
-		schema: TSchemaValue;
-		name?: string;
-		description?: string;
-		maxCorrections?: number;
-		scope?: "latest" | "conversation";
-	}): Promise<StructuredResponse<Static<TSchemaValue>>> {
+	async getStructuredResponse<TSchemaValue extends TSchema>(
+		options: StructuredResponseOptions<TSchemaValue>,
+	): Promise<StructuredResponse<Static<TSchemaValue>>> {
 		const response = await this.send({ type: "get_structured_response", ...options });
 		return this.getData(response);
 	}
@@ -278,9 +345,7 @@ export class RpcClient {
 	 * Start a new session, optionally with an explicit id and parent tracking.
 	 * @returns Object with `cancelled: true` if an extension cancelled the new session
 	 */
-	async newSession(
-		options?: string | { sessionId?: string; parentSession?: string },
-	): Promise<{ cancelled: boolean }> {
+	async newSession(options?: string | RpcNewSessionOptions): Promise<RpcSessionActionResult> {
 		const sessionOptions = typeof options === "string" ? { parentSession: options } : options;
 		const response = await this.send({
 			type: "new_session",
@@ -313,7 +378,7 @@ export class RpcClient {
 	/**
 	 * Set model by provider and ID.
 	 */
-	async setModel(provider: string, modelId: string): Promise<{ provider: string; id: string }> {
+	async setModel(provider: string, modelId: string): Promise<RpcModelReference> {
 		const response = await this.send({ type: "set_model", provider, modelId });
 		return this.getData(response);
 	}
@@ -321,11 +386,7 @@ export class RpcClient {
 	/**
 	 * Cycle to next model.
 	 */
-	async cycleModel(): Promise<{
-		model: { provider: string; id: string };
-		thinkingLevel: ThinkingLevel;
-		isScoped: boolean;
-	} | null> {
+	async cycleModel(): Promise<RpcModelCycleResult | null> {
 		const response = await this.send({ type: "cycle_model" });
 		return this.getData(response);
 	}
@@ -348,7 +409,7 @@ export class RpcClient {
 	/**
 	 * Cycle thinking level.
 	 */
-	async cycleThinkingLevel(): Promise<{ level: ThinkingLevel } | null> {
+	async cycleThinkingLevel(): Promise<RpcThinkingLevelCycleResult | null> {
 		const response = await this.send({ type: "cycle_thinking_level" });
 		return this.getData(response);
 	}
@@ -356,14 +417,14 @@ export class RpcClient {
 	/**
 	 * Set steering mode.
 	 */
-	async setSteeringMode(mode: "all" | "one-at-a-time"): Promise<void> {
+	async setSteeringMode(mode: QueueMode): Promise<void> {
 		await this.send({ type: "set_steering_mode", mode });
 	}
 
 	/**
 	 * Set follow-up mode.
 	 */
-	async setFollowUpMode(mode: "all" | "one-at-a-time"): Promise<void> {
+	async setFollowUpMode(mode: QueueMode): Promise<void> {
 		await this.send({ type: "set_follow_up_mode", mode });
 	}
 
@@ -401,10 +462,7 @@ export class RpcClient {
 	 * Set options.record to false to avoid adding the result to session history.
 	 * Set options.truncate to false to return complete output.
 	 */
-	async bash(
-		command: string,
-		options: { record?: boolean; truncate?: boolean; excludeFromContext?: boolean } = {},
-	): Promise<BashResult> {
+	async bash(command: string, options: RpcBashOptions = {}): Promise<BashResult> {
 		const response = await this.send({
 			type: "bash",
 			command,
@@ -425,9 +483,7 @@ export class RpcClient {
 	/**
 	 * Configure or reconfigure the deferred remote sandbox.
 	 */
-	async setRemoteSandbox(
-		options: { backend: "ssh"; remote: string; cwd?: string } | { backend: "daemon"; url: string; token?: string },
-	): Promise<ToolBackendInfo> {
+	async setRemoteSandbox(options: RpcDaemonSandboxOptions): Promise<ToolBackendInfo> {
 		const response = await this.send({ type: "set_remote_sandbox", ...options });
 		return this.getData(response);
 	}
@@ -443,7 +499,7 @@ export class RpcClient {
 	/**
 	 * Upload a file from the RPC process filesystem to the active sandbox backend.
 	 */
-	async uploadFile(sourcePath: string, destinationPath: string): Promise<{ bytes: number }> {
+	async uploadFile(sourcePath: string, destinationPath: string): Promise<RpcFileTransferResult> {
 		const response = await this.send({ type: "upload_file", sourcePath, destinationPath });
 		return this.getData(response);
 	}
@@ -451,7 +507,7 @@ export class RpcClient {
 	/**
 	 * Download a file from the active sandbox backend to the RPC process filesystem.
 	 */
-	async downloadFile(sourcePath: string, destinationPath: string): Promise<{ bytes: number }> {
+	async downloadFile(sourcePath: string, destinationPath: string): Promise<RpcFileTransferResult> {
 		const response = await this.send({ type: "download_file", sourcePath, destinationPath });
 		return this.getData(response);
 	}
@@ -467,7 +523,7 @@ export class RpcClient {
 	/**
 	 * Export session to HTML.
 	 */
-	async exportHtml(outputPath?: string): Promise<{ path: string }> {
+	async exportHtml(outputPath?: string): Promise<RpcExportHtmlResult> {
 		const response = await this.send({ type: "export_html", outputPath });
 		return this.getData(response);
 	}
@@ -476,7 +532,7 @@ export class RpcClient {
 	 * Switch to a different session file.
 	 * @returns Object with `cancelled: true` if an extension cancelled the switch
 	 */
-	async switchSession(sessionPath: string): Promise<{ cancelled: boolean }> {
+	async switchSession(sessionPath: string): Promise<RpcSessionActionResult> {
 		const response = await this.send({ type: "switch_session", sessionPath });
 		return this.getData(response);
 	}
@@ -485,7 +541,7 @@ export class RpcClient {
 	 * Fork from a specific message.
 	 * @returns Object with `text` (the message text) and `cancelled` (if extension cancelled)
 	 */
-	async fork(entryId: string): Promise<{ text: string; cancelled: boolean }> {
+	async fork(entryId: string): Promise<RpcForkResult> {
 		const response = await this.send({ type: "fork", entryId });
 		return this.getData(response);
 	}
@@ -494,7 +550,7 @@ export class RpcClient {
 	 * Clone the current active branch into a new session.
 	 * @returns Object with `cancelled: true` if an extension cancelled the clone
 	 */
-	async clone(): Promise<{ cancelled: boolean }> {
+	async clone(): Promise<RpcSessionActionResult> {
 		const response = await this.send({ type: "clone" });
 		return this.getData(response);
 	}
@@ -502,15 +558,15 @@ export class RpcClient {
 	/**
 	 * Get messages available for forking.
 	 */
-	async getForkMessages(): Promise<Array<{ entryId: string; text: string }>> {
+	async getForkMessages(): Promise<ForkableUserMessage[]> {
 		const response = await this.send({ type: "get_fork_messages" });
-		return this.getData<{ messages: Array<{ entryId: string; text: string }> }>(response).messages;
+		return this.getData<RpcForkMessagesResponseData>(response).messages;
 	}
 
 	/**
 	 * Get session entries in append order, optionally only those after the `since` entry id.
 	 */
-	async getEntries(since?: string): Promise<{ entries: SessionEntry[]; leafId: string | null }> {
+	async getEntries(since?: string): Promise<RpcEntriesResult> {
 		const response = await this.send({ type: "get_entries", since });
 		return this.getData<{ entries: SessionEntry[]; leafId: string | null }>(response);
 	}
@@ -518,7 +574,7 @@ export class RpcClient {
 	/**
 	 * Get the session entry tree.
 	 */
-	async getTree(): Promise<{ tree: SessionTreeNode[]; leafId: string | null }> {
+	async getTree(): Promise<RpcTreeResult> {
 		const response = await this.send({ type: "get_tree" });
 		return this.getData<{ tree: SessionTreeNode[]; leafId: string | null }>(response);
 	}
@@ -560,7 +616,7 @@ export class RpcClient {
 	}
 
 	/** Remove a session-scoped skill from the active RPC agent session. */
-	async unregisterSkill(name: string): Promise<{ unregistered: boolean }> {
+	async unregisterSkill(name: string): Promise<RpcUnregisterResult> {
 		const response = await this.send({ type: "unregister_skill", name });
 		return this.getData(response);
 	}
@@ -571,7 +627,7 @@ export class RpcClient {
 	}
 
 	/** Remove a session-scoped rule from the active RPC agent session. */
-	async unregisterRule(name: string): Promise<{ unregistered: boolean }> {
+	async unregisterRule(name: string): Promise<RpcUnregisterResult> {
 		const response = await this.send({ type: "unregister_rule", name });
 		return this.getData(response);
 	}
@@ -591,7 +647,7 @@ export class RpcClient {
 	}
 
 	/** Remove a session-scoped RPC-hosted tool from the active RPC agent session. */
-	async unregisterTool(name: string): Promise<{ unregistered: boolean }> {
+	async unregisterTool(name: string): Promise<RpcUnregisterResult> {
 		this.toolHandlers.delete(name);
 		const response = await this.send({ type: "unregister_tool", name });
 		return this.getData(response);

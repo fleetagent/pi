@@ -104,88 +104,108 @@ function hasStyle(style: TextStyle): boolean {
 	return style.fg !== null || style.bg !== null || style.bold || style.dim || style.italic || style.underline;
 }
 
+interface ExtendedColorResult {
+	color: string;
+	consumedParams: number;
+}
+
+function resetStyle(style: TextStyle): void {
+	style.fg = null;
+	style.bg = null;
+	style.bold = false;
+	style.dim = false;
+	style.italic = false;
+	style.underline = false;
+}
+
+function applyTextStyleCode(code: number, style: TextStyle): boolean {
+	switch (code) {
+		case 0:
+			resetStyle(style);
+			return true;
+		case 1:
+			style.bold = true;
+			return true;
+		case 2:
+			style.dim = true;
+			return true;
+		case 3:
+			style.italic = true;
+			return true;
+		case 4:
+			style.underline = true;
+			return true;
+		case 22:
+			style.bold = false;
+			style.dim = false;
+			return true;
+		case 23:
+			style.italic = false;
+			return true;
+		case 24:
+			style.underline = false;
+			return true;
+		default:
+			return false;
+	}
+}
+
+type ColorStyleProperty = "fg" | "bg";
+
+function readExtendedColor(params: number[], codeIndex: number): ExtendedColorResult | undefined {
+	if (params[codeIndex + 1] === 5 && params.length > codeIndex + 2) {
+		return { color: color256ToHex(params[codeIndex + 2]), consumedParams: 2 };
+	}
+	if (params[codeIndex + 1] === 2 && params.length > codeIndex + 4) {
+		const [r, g, b] = params.slice(codeIndex + 2, codeIndex + 5);
+		return { color: `rgb(${r},${g},${b})`, consumedParams: 4 };
+	}
+	return undefined;
+}
+
+function applyExtendedColorCode(
+	params: number[],
+	codeIndex: number,
+	style: TextStyle,
+	property: ColorStyleProperty,
+): number {
+	const extendedColor = readExtendedColor(params, codeIndex);
+	if (!extendedColor) return 0;
+	style[property] = extendedColor.color;
+	return extendedColor.consumedParams;
+}
+
+function applyColorCode(params: number[], codeIndex: number, style: TextStyle): number {
+	const code = params[codeIndex];
+	if (code >= 30 && code <= 37) {
+		style.fg = ANSI_COLORS[code - 30];
+	} else if (code === 39) {
+		style.fg = null;
+	} else if (code >= 40 && code <= 47) {
+		style.bg = ANSI_COLORS[code - 40];
+	} else if (code === 49) {
+		style.bg = null;
+	} else if (code >= 90 && code <= 97) {
+		style.fg = ANSI_COLORS[code - 90 + 8];
+	} else if (code >= 100 && code <= 107) {
+		style.bg = ANSI_COLORS[code - 100 + 8];
+	} else if (code === 38) {
+		return applyExtendedColorCode(params, codeIndex, style, "fg");
+	} else if (code === 48) {
+		return applyExtendedColorCode(params, codeIndex, style, "bg");
+	}
+	return 0;
+}
+
 /**
  * Parse ANSI SGR (Select Graphic Rendition) codes and update style.
  */
 function applySgrCode(params: number[], style: TextStyle): void {
-	let i = 0;
-	while (i < params.length) {
-		const code = params[i];
-
-		if (code === 0) {
-			// Reset all
-			style.fg = null;
-			style.bg = null;
-			style.bold = false;
-			style.dim = false;
-			style.italic = false;
-			style.underline = false;
-		} else if (code === 1) {
-			style.bold = true;
-		} else if (code === 2) {
-			style.dim = true;
-		} else if (code === 3) {
-			style.italic = true;
-		} else if (code === 4) {
-			style.underline = true;
-		} else if (code === 22) {
-			// Reset bold/dim
-			style.bold = false;
-			style.dim = false;
-		} else if (code === 23) {
-			style.italic = false;
-		} else if (code === 24) {
-			style.underline = false;
-		} else if (code >= 30 && code <= 37) {
-			// Standard foreground colors
-			style.fg = ANSI_COLORS[code - 30];
-		} else if (code === 38) {
-			// Extended foreground color
-			if (params[i + 1] === 5 && params.length > i + 2) {
-				// 256-color: 38;5;N
-				style.fg = color256ToHex(params[i + 2]);
-				i += 2;
-			} else if (params[i + 1] === 2 && params.length > i + 4) {
-				// RGB: 38;2;R;G;B
-				const r = params[i + 2];
-				const g = params[i + 3];
-				const b = params[i + 4];
-				style.fg = `rgb(${r},${g},${b})`;
-				i += 4;
-			}
-		} else if (code === 39) {
-			// Default foreground
-			style.fg = null;
-		} else if (code >= 40 && code <= 47) {
-			// Standard background colors
-			style.bg = ANSI_COLORS[code - 40];
-		} else if (code === 48) {
-			// Extended background color
-			if (params[i + 1] === 5 && params.length > i + 2) {
-				// 256-color: 48;5;N
-				style.bg = color256ToHex(params[i + 2]);
-				i += 2;
-			} else if (params[i + 1] === 2 && params.length > i + 4) {
-				// RGB: 48;2;R;G;B
-				const r = params[i + 2];
-				const g = params[i + 3];
-				const b = params[i + 4];
-				style.bg = `rgb(${r},${g},${b})`;
-				i += 4;
-			}
-		} else if (code === 49) {
-			// Default background
-			style.bg = null;
-		} else if (code >= 90 && code <= 97) {
-			// Bright foreground colors
-			style.fg = ANSI_COLORS[code - 90 + 8];
-		} else if (code >= 100 && code <= 107) {
-			// Bright background colors
-			style.bg = ANSI_COLORS[code - 100 + 8];
-		}
-		// Ignore unrecognized codes
-
-		i++;
+	let codeIndex = 0;
+	while (codeIndex < params.length) {
+		const code = params[codeIndex];
+		const consumedParams = applyTextStyleCode(code, style) ? 0 : applyColorCode(params, codeIndex, style);
+		codeIndex += consumedParams + 1;
 	}
 }
 

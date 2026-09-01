@@ -1,9 +1,15 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import type { TextContent } from "@fleetagent/pi-ai";
 import {
+	type AppendRemoteSessionEntriesRequest,
+	type CreateRemoteSessionRequest,
 	CURRENT_SESSION_VERSION,
 	type FileEntry,
+	type ForkRemoteSessionRequest,
+	type ImportRemoteSessionJsonlRequest,
+	type ReplaceRemoteSessionSnapshotRequest,
 	type SessionEntry,
 	type SessionHeader,
 	type SessionInfo,
@@ -11,38 +17,7 @@ import {
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 
-interface CreateSessionRequest {
-	id?: string;
-	cwd: string;
-	projectId?: string;
-	parentSession?: string;
-	metadata?: Record<string, unknown>;
-}
-
-interface AppendEntriesRequest {
-	baseEtag?: string;
-	entries: FileEntry[];
-}
-
-interface ReplaceSnapshotRequest {
-	baseEtag?: string;
-	entries: FileEntry[];
-}
-
-interface ForkSessionRequest {
-	cwd: string;
-	projectId?: string;
-	leafId?: string;
-}
-
-interface ImportJsonlRequest {
-	cwd: string;
-	projectId?: string;
-	sourceName?: string;
-	entries: FileEntry[];
-	metadata?: Record<string, unknown>;
-}
-
+// pi-ignore noNearIdenticalDataStructures: The server always emits an ETag, while the client snapshot contract keeps it optional to tolerate compatible remote implementations.
 interface RemoteSessionSnapshot {
 	reference: string;
 	id: string;
@@ -170,14 +145,16 @@ function getBranch(entries: FileEntry[], leafId: string | undefined): SessionEnt
 function forkEntries(sourceEntries: FileEntry[], header: SessionHeader, leafId: string | undefined): FileEntry[] {
 	const path = getBranch(sourceEntries, leafId);
 	const pathIds = new Set(path.map((entry) => entry.id));
-	const labelEntries = sourceEntries.filter(
-		(entry): entry is SessionEntry & { type: "label"; targetId: string } =>
-			entry.type === "label" && pathIds.has(entry.targetId),
-	);
+	const labelEntries = sourceEntries.filter((entry) => entry.type === "label" && pathIds.has(entry.targetId));
 	return [header, ...structuredClone(path), ...structuredClone(labelEntries)];
 }
 
-function isMessageWithContent(value: unknown): value is { role?: string; content?: unknown } {
+interface MessageContentEnvelope {
+	role?: string;
+	content?: unknown;
+}
+
+function isMessageWithContent(value: unknown): value is MessageContentEnvelope {
 	return isRecord(value) && "content" in value;
 }
 
@@ -185,51 +162,68 @@ function extractText(value: unknown): string {
 	if (typeof value === "string") return value;
 	if (!Array.isArray(value)) return "";
 	return value
-		.filter(
-			(part): part is { type: string; text: string } =>
-				isRecord(part) && part.type === "text" && typeof part.text === "string",
-		)
+		.filter((part): part is TextContent => isRecord(part) && part.type === "text" && typeof part.text === "string")
 		.map((part) => part.text)
 		.join(" ");
 }
 
-function sessionInfo(sessionId: string, entries: FileEntry[], modified: Date): SessionInfo | null {
-	const header = entries[0];
-	if (header?.type !== "session") return null;
+type SearchableSessionMessageRole = "user" | "assistant";
 
+interface SearchableSessionMessage {
+	role: SearchableSessionMessageRole;
+	text: string;
+}
+
+interface SessionEntrySummary {
+	name: string | undefined;
+	messageCount: number;
+	firstMessage: string;
+	allMessagesText: string;
+}
+
+function extractSearchableSessionMessage(entry: FileEntry): SearchableSessionMessage | undefined {
+	if (entry.type !== "message") return undefined;
+	const message = entry.message;
+	if (!isMessageWithContent(message)) return undefined;
+	if (message.role !== "user" && message.role !== "assistant") return undefined;
+	const text = extractText(message.content);
+	return text ? { role: message.role, text } : undefined;
+}
+
+function summarizeSessionEntries(entries: FileEntry[]): SessionEntrySummary {
 	let name: string | undefined;
 	let messageCount = 0;
 	let firstMessage = "";
 	const allMessages: string[] = [];
 	for (const entry of entries) {
-		if (entry.type === "session_info") {
-			name = entry.name?.trim() || undefined;
-		}
+		if (entry.type === "session_info") name = entry.name?.trim() || undefined;
 		if (entry.type !== "message") continue;
 		messageCount++;
-		const message = entry.message;
-		if (!isMessageWithContent(message)) continue;
-		if (message.role !== "user" && message.role !== "assistant") continue;
-		const text = extractText(message.content);
-		if (!text) continue;
-		allMessages.push(text);
-		if (!firstMessage && message.role === "user") {
-			firstMessage = text;
-		}
+		const message = extractSearchableSessionMessage(entry);
+		if (!message) continue;
+		allMessages.push(message.text);
+		if (!firstMessage && message.role === "user") firstMessage = message.text;
 	}
+	return { name, messageCount, firstMessage, allMessagesText: allMessages.join(" ") };
+}
+function sessionInfo(sessionId: string, entries: FileEntry[], modified: Date): SessionInfo | null {
+	const header = entries[0];
+	if (header?.type !== "session") return null;
+
+	const summary = summarizeSessionEntries(entries);
 
 	return {
 		reference: referenceFor(sessionId),
 		path: referenceFor(sessionId),
 		id: sessionId,
 		cwd: header.cwd,
-		name,
+		name: summary.name,
 		parentSessionPath: header.parentSession,
 		created: new Date(header.timestamp),
 		modified,
-		messageCount,
-		firstMessage: firstMessage || "(no messages)",
-		allMessagesText: allMessages.join(" "),
+		messageCount: summary.messageCount,
+		firstMessage: summary.firstMessage || "(no messages)",
+		allMessagesText: summary.allMessagesText,
 	};
 }
 
@@ -259,7 +253,7 @@ app.use("/v1/*", async (ctx, next) => {
 app.get("/health", (ctx) => ctx.json({ ok: true, dataDir }));
 
 app.post("/v1/sessions", async (ctx) => {
-	const body = (await ctx.req.json()) as CreateSessionRequest;
+	const body = (await ctx.req.json()) as CreateRemoteSessionRequest;
 	const id = assertSessionId(body.id ?? createSessionId());
 	const entries: FileEntry[] = [makeHeader(id, body.cwd, body.parentSession)];
 	log("create session", { id, cwd: body.cwd, parentSession: body.parentSession, projectId: body.projectId });
@@ -308,7 +302,7 @@ app.get("/v1/sessions/:id", async (ctx) => {
 
 app.post("/v1/sessions/:id/entries", async (ctx) => {
 	const id = assertSessionId(ctx.req.param("id"));
-	const body = (await ctx.req.json()) as AppendEntriesRequest;
+	const body = (await ctx.req.json()) as AppendRemoteSessionEntriesRequest;
 	const entries = await loadEntries(id);
 	if (!validateBaseEtag(entries, body.baseEtag)) return ctx.text("ETag mismatch", 409);
 	const nextEntries = [...entries, ...body.entries];
@@ -324,7 +318,7 @@ app.post("/v1/sessions/:id/entries", async (ctx) => {
 
 app.put("/v1/sessions/:id/snapshot", async (ctx) => {
 	const id = assertSessionId(ctx.req.param("id"));
-	const body = (await ctx.req.json()) as ReplaceSnapshotRequest;
+	const body = (await ctx.req.json()) as ReplaceRemoteSessionSnapshotRequest;
 	const entries = await loadEntries(id);
 	if (!validateBaseEtag(entries, body.baseEtag)) return ctx.text("ETag mismatch", 409);
 	log("replace snapshot", { id, entries: body.entries.length, baseEtag: body.baseEtag });
@@ -334,7 +328,7 @@ app.put("/v1/sessions/:id/snapshot", async (ctx) => {
 
 app.post("/v1/sessions/:id/fork", async (ctx) => {
 	const sourceId = assertSessionId(ctx.req.param("id"));
-	const body = (await ctx.req.json()) as ForkSessionRequest;
+	const body = (await ctx.req.json()) as ForkRemoteSessionRequest;
 	const forkId = createSessionId();
 	const sourceEntries = await loadEntries(sourceId);
 	const entries = forkEntries(sourceEntries, makeHeader(forkId, body.cwd, referenceFor(sourceId)), body.leafId);
@@ -344,7 +338,7 @@ app.post("/v1/sessions/:id/fork", async (ctx) => {
 });
 
 app.post("/v1/sessions/import-jsonl", async (ctx) => {
-	const body = (await ctx.req.json()) as ImportJsonlRequest;
+	const body = (await ctx.req.json()) as ImportRemoteSessionJsonlRequest;
 	const id = assertSessionId(body.entries[0]?.type === "session" ? body.entries[0].id : createSessionId());
 	const entries = body.entries[0]?.type === "session" ? body.entries : [makeHeader(id, body.cwd), ...body.entries];
 	log("import jsonl", { id, sourceName: body.sourceName, entries: entries.length, projectId: body.projectId });

@@ -1,6 +1,12 @@
+import { fauxAssistantMessage } from "@fleetagent/pi-ai";
 import { describe, expect, test, vi } from "vitest";
 import triggerCompactExtension from "../examples/extensions/trigger-compact.ts";
-import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "../src/core/extensions/types.ts";
+import type {
+	ExtensionAPI,
+	ExtensionCommandContext,
+	ExtensionContext,
+	TurnEndEvent,
+} from "../src/core/extensions/types.ts";
 import { LocalToolOperations } from "../src/core/tools/operations.ts";
 
 function createContext(tokens: number | null, compact = vi.fn()): ExtensionContext {
@@ -34,12 +40,10 @@ function createContext(tokens: number | null, compact = vi.fn()): ExtensionConte
 
 describe("trigger-compact example extension", () => {
 	test("only auto-compacts when context usage crosses the threshold", () => {
-		let turnEndHandler:
-			| ((event: { type: "turn_end" }, ctx: ExtensionContext | ExtensionCommandContext) => void)
-			| undefined;
+		let turnEndHandler: ((event: TurnEndEvent, ctx: ExtensionContext | ExtensionCommandContext) => void) | undefined;
 
 		const api = {
-			on: (event: string, handler: (event: { type: "turn_end" }, ctx: ExtensionContext) => void) => {
+			on: (event: string, handler: (event: TurnEndEvent, ctx: ExtensionContext) => void) => {
 				if (event === "turn_end") {
 					turnEndHandler = handler;
 				}
@@ -51,7 +55,12 @@ describe("trigger-compact example extension", () => {
 		expect(turnEndHandler).toBeDefined();
 
 		const compact = vi.fn();
-		const event = { type: "turn_end" } as const;
+		const event: TurnEndEvent = {
+			type: "turn_end",
+			turnIndex: 0,
+			message: fauxAssistantMessage(""),
+			toolResults: [],
+		};
 
 		turnEndHandler?.(event, createContext(110_000, compact));
 		expect(compact).not.toHaveBeenCalled();

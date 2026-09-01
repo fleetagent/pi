@@ -2,9 +2,10 @@ import type { AgentTool } from "@fleetagent/pi-agent-core";
 import { fauxAssistantMessage, fauxThinking, fauxToolCall } from "@fleetagent/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
+import type { AgentSessionEvent } from "../../src/core/agent-session.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
-function normalizeEventOrder(events: Harness["events"]): string[] {
+function normalizeEventOrder(events: AgentSessionEvent[]): string[] {
 	const normalized: string[] = [];
 	for (const event of events) {
 		const label =

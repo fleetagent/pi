@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { AgentMessage } from "@fleetagent/pi-agent-core";
+import type { AgentMessage, JsonlPhysicalRecord } from "@fleetagent/pi-agent-core";
 import type { Message, TextContent } from "@fleetagent/pi-ai";
 import {
 	appendFileSync,
@@ -60,7 +60,7 @@ function getMessageActivityTime(entry: SessionMessageEntry): number | undefined 
 	if (!isMessageWithContent(message)) return undefined;
 	if (message.role !== "user" && message.role !== "assistant") return undefined;
 
-	const msgTimestamp = (message as { timestamp?: number }).timestamp;
+	const msgTimestamp = message.timestamp;
 	if (typeof msgTimestamp === "number") {
 		return msgTimestamp;
 	}
@@ -75,6 +75,11 @@ const SESSION_HEADER_READ_BUFFER_SIZE = 4096;
 const MAX_SESSION_HEADER_SCAN_BYTES = 1024 * 1024;
 const SAFE_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
 
+interface JsonlRecordLocation {
+	line: number;
+	byteOffset: number;
+}
+
 function parseSessionEntryLine(line: string): FileEntry | null {
 	if (!line.trim()) return null;
 	try {
@@ -84,14 +89,7 @@ function parseSessionEntryLine(line: string): FileEntry | null {
 	}
 }
 
-interface PhysicalRecord {
-	bytes: Uint8Array;
-	line: number;
-	start: number;
-	terminated: boolean;
-}
-
-function* readPhysicalRecords(filePath: string): Generator<PhysicalRecord> {
+function* readPhysicalRecords(filePath: string): Generator<JsonlPhysicalRecord> {
 	const fd = openSync(filePath, "r");
 	const buffer = Buffer.allocUnsafe(SESSION_READ_BUFFER_SIZE);
 	let pending = Buffer.alloc(0);
@@ -122,15 +120,15 @@ function* readPhysicalRecords(filePath: string): Generator<PhysicalRecord> {
 	}
 }
 
-const jsonlEntryLocations = new WeakMap<FileEntry[], ReadonlyArray<{ line: number; byteOffset: number } | undefined>>();
+const jsonlEntryLocations = new WeakMap<FileEntry[], ReadonlyArray<JsonlRecordLocation | undefined>>();
 
 export function getJsonlEntryLocations(
 	entries: FileEntry[],
-): ReadonlyArray<{ line: number; byteOffset: number } | undefined> | undefined {
+): ReadonlyArray<JsonlRecordLocation | undefined> | undefined {
 	return jsonlEntryLocations.get(entries);
 }
 
-function decodePhysicalRecord(record: PhysicalRecord): string {
+function decodePhysicalRecord(record: JsonlPhysicalRecord): string {
 	let bytes = record.bytes;
 	if (bytes.at(-1) === 0x0d) bytes = bytes.subarray(0, bytes.length - 1);
 	try {
@@ -144,7 +142,7 @@ function decodePhysicalRecord(record: PhysicalRecord): string {
 	}
 }
 
-function parseJsonObject(record: PhysicalRecord): Record<string, unknown> {
+function parseJsonObject(record: JsonlPhysicalRecord): Record<string, unknown> {
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(decodePhysicalRecord(record));
@@ -192,6 +190,31 @@ const MESSAGE_ROLES = new Set([
 	"hookMessage",
 ]);
 
+function validatePersistedMessageRole(message: Record<string, unknown>, role: string): void {
+	switch (role) {
+		case "toolResult":
+			requireString(message.toolCallId, "toolCallId");
+			requireString(message.toolName, "toolName");
+			if (typeof message.isError !== "boolean") throw new JsonlDecodeFailure("schema", "has invalid isError");
+			break;
+		case "custom":
+		case "hookMessage":
+			requireString(message.customType, "customType");
+			if (typeof message.display !== "boolean") throw new JsonlDecodeFailure("schema", "has invalid display");
+			break;
+		case "bashExecution":
+			requireString(message.command, "command");
+			if (typeof message.output !== "string") throw new JsonlDecodeFailure("schema", "has invalid output");
+			if (typeof message.cancelled !== "boolean" || typeof message.truncated !== "boolean") {
+				throw new JsonlDecodeFailure("schema", "has invalid bash state");
+			}
+			break;
+		case "branchSummary":
+		case "compactionSummary":
+			requireString(message.summary, "summary");
+	}
+}
+
 function validatePersistedMessage(value: unknown): void {
 	if (typeof value !== "object" || value === null) throw new JsonlDecodeFailure("schema", "has invalid message");
 	const message = value as Record<string, unknown>;
@@ -203,22 +226,7 @@ function validatePersistedMessage(value: unknown): void {
 	if (message.content != null && typeof message.content !== "string" && !Array.isArray(message.content)) {
 		throw new JsonlDecodeFailure("schema", "has invalid message content");
 	}
-	if (role === "toolResult") {
-		requireString(message.toolCallId, "toolCallId");
-		requireString(message.toolName, "toolName");
-		if (typeof message.isError !== "boolean") throw new JsonlDecodeFailure("schema", "has invalid isError");
-	} else if (role === "custom" || role === "hookMessage") {
-		requireString(message.customType, "customType");
-		if (typeof message.display !== "boolean") throw new JsonlDecodeFailure("schema", "has invalid display");
-	} else if (role === "bashExecution") {
-		requireString(message.command, "command");
-		if (typeof message.output !== "string") throw new JsonlDecodeFailure("schema", "has invalid output");
-		if (typeof message.cancelled !== "boolean" || typeof message.truncated !== "boolean") {
-			throw new JsonlDecodeFailure("schema", "has invalid bash state");
-		}
-	} else if (role === "branchSummary" || role === "compactionSummary") {
-		requireString(message.summary, "summary");
-	}
+	validatePersistedMessageRole(message, role);
 }
 
 const SESSION_ENTRY_TYPES = new Set<SessionEntry["type"]>([
@@ -233,7 +241,7 @@ const SESSION_ENTRY_TYPES = new Set<SessionEntry["type"]>([
 	"session_info",
 ]);
 
-function parseStrictHeader(record: PhysicalRecord): SessionHeader {
+function parseStrictHeader(record: JsonlPhysicalRecord): SessionHeader {
 	const value = parseJsonObject(record);
 	if (value.type !== "session") throw new JsonlDecodeFailure("schema", "is not a session header");
 	const version = value.version ?? 1;
@@ -248,20 +256,42 @@ function parseStrictHeader(record: PhysicalRecord): SessionHeader {
 	}
 	return value as unknown as SessionHeader;
 }
+function validateVersionedEntryLinks(value: Record<string, unknown>, version: number): void {
+	if (version < 2) return;
+	requireId(value.id, "entry id");
+	if (value.parentId !== null && (typeof value.parentId !== "string" || !SAFE_ID_PATTERN.test(value.parentId))) {
+		throw new JsonlDecodeFailure("schema", "has invalid parentId");
+	}
+}
 
-function parseStrictEntry(record: PhysicalRecord, version: number): SessionEntry {
+function validateCompactionEntry(value: Record<string, unknown>, version: number): void {
+	requireString(value.summary, "summary");
+	if (version === 1) {
+		if (value.firstKeptEntryId === undefined && !Number.isInteger(value.firstKeptEntryIndex)) {
+			throw new JsonlDecodeFailure("schema", "has invalid compaction target");
+		}
+	} else requireId(value.firstKeptEntryId, "firstKeptEntryId");
+	if (typeof value.tokensBefore !== "number" || !Number.isFinite(value.tokensBefore)) {
+		throw new JsonlDecodeFailure("schema", "has invalid tokensBefore");
+	}
+}
+
+function validateCustomMessageEntry(value: Record<string, unknown>): void {
+	requireString(value.customType, "customType");
+	if (value.content != null && typeof value.content !== "string" && !Array.isArray(value.content)) {
+		throw new JsonlDecodeFailure("schema", "has invalid content");
+	}
+	if (typeof value.display !== "boolean") throw new JsonlDecodeFailure("schema", "has invalid display");
+}
+
+function parseStrictEntry(record: JsonlPhysicalRecord, version: number): SessionEntry {
 	const value = parseJsonObject(record);
 	const type = requireString(value.type, "entry type");
 	if (!SESSION_ENTRY_TYPES.has(type as SessionEntry["type"])) {
 		throw new JsonlDecodeFailure("schema", `has unknown entry type ${type}`);
 	}
 	requireTimestamp(value.timestamp);
-	if (version >= 2) {
-		requireId(value.id, "entry id");
-		if (value.parentId !== null && (typeof value.parentId !== "string" || !SAFE_ID_PATTERN.test(value.parentId))) {
-			throw new JsonlDecodeFailure("schema", "has invalid parentId");
-		}
-	}
+	validateVersionedEntryLinks(value, version);
 	switch (type) {
 		case "message":
 			validatePersistedMessage(value.message);
@@ -274,15 +304,7 @@ function parseStrictEntry(record: PhysicalRecord, version: number): SessionEntry
 			requireString(value.modelId, "modelId");
 			break;
 		case "compaction":
-			requireString(value.summary, "summary");
-			if (version === 1) {
-				if (value.firstKeptEntryId === undefined && !Number.isInteger(value.firstKeptEntryIndex)) {
-					throw new JsonlDecodeFailure("schema", "has invalid compaction target");
-				}
-			} else requireId(value.firstKeptEntryId, "firstKeptEntryId");
-			if (typeof value.tokensBefore !== "number" || !Number.isFinite(value.tokensBefore)) {
-				throw new JsonlDecodeFailure("schema", "has invalid tokensBefore");
-			}
+			validateCompactionEntry(value, version);
 			break;
 		case "branch_summary":
 			requireId(value.fromId, "fromId");
@@ -292,10 +314,7 @@ function parseStrictEntry(record: PhysicalRecord, version: number): SessionEntry
 			requireString(value.customType, "customType");
 			break;
 		case "custom_message":
-			requireString(value.customType, "customType");
-			if (value.content != null && typeof value.content !== "string" && !Array.isArray(value.content)) {
-				throw new JsonlDecodeFailure("schema", "has invalid content");
-			}
+			validateCustomMessageEntry(value);
 			if (typeof value.display !== "boolean") throw new JsonlDecodeFailure("schema", "has invalid display");
 			break;
 		case "label":
@@ -315,7 +334,7 @@ function parseStrictEntry(record: PhysicalRecord, version: number): SessionEntry
 
 function invalidJsonl(
 	filePath: string,
-	record: PhysicalRecord,
+	record: JsonlPhysicalRecord,
 	failure: Error,
 	phase: JsonlErrorPhase,
 ): JsonlSessionError {
@@ -433,76 +452,79 @@ function getSessionHeaderCwd(header: SessionHeader): string | undefined {
 function sessionCwdMatches(cwd: string | undefined, resolvedCwd: string): boolean {
 	return cwd !== undefined && cwd !== "" && resolve(cwd) === resolvedCwd;
 }
+interface SessionInfoScanResult {
+	messageCount: number;
+	firstMessage: string;
+	allMessages: string[];
+	name: string | undefined;
+	lastActivityTime: number | undefined;
+}
+
+function recordSessionInfoEntry(result: SessionInfoScanResult, entry: FileEntry): void {
+	if (entry.type === "session_info") result.name = entry.name?.trim() || undefined;
+	if (entry.type !== "message") return;
+
+	result.messageCount++;
+	const activityTime = getMessageActivityTime(entry);
+	if (typeof activityTime === "number") {
+		result.lastActivityTime = Math.max(result.lastActivityTime ?? 0, activityTime);
+	}
+
+	const message = entry.message;
+	if (!isMessageWithContent(message)) return;
+	if (message.role !== "user" && message.role !== "assistant") return;
+	const textContent = extractTextContent(message);
+	if (!textContent) return;
+
+	result.allMessages.push(textContent);
+	if (!result.firstMessage && message.role === "user") result.firstMessage = textContent;
+}
+
+async function scanSessionInfo(filePath: string): Promise<SessionInfoScanResult> {
+	const result: SessionInfoScanResult = {
+		messageCount: 0,
+		firstMessage: "",
+		allMessages: [],
+		name: undefined,
+		lastActivityTime: undefined,
+	};
+	const lines = createInterface({
+		input: createReadStream(filePath, { encoding: "utf8" }),
+		crlfDelay: Infinity,
+	});
+	for await (const line of lines) {
+		const entry = parseSessionEntryLine(line);
+		if (entry && entry.type !== "session") recordSessionInfoEntry(result, entry);
+	}
+	return result;
+}
+
+function resolveSessionModifiedDate(header: SessionHeader, lastActivityTime: number | undefined, fallback: Date): Date {
+	if (typeof lastActivityTime === "number" && lastActivityTime > 0) return new Date(lastActivityTime);
+	const headerTime = typeof header.timestamp === "string" ? new Date(header.timestamp).getTime() : NaN;
+	return Number.isNaN(headerTime) ? fallback : new Date(headerTime);
+}
 
 async function buildSessionInfo(filePath: string): Promise<SessionInfo | null> {
 	try {
 		const stats = await stat(filePath);
 		const header = readSessionHeaderForDiscovery(filePath);
 		if (!header) return null;
-		let messageCount = 0;
-		let firstMessage = "";
-		const allMessages: string[] = [];
-		let name: string | undefined;
-		let lastActivityTime: number | undefined;
-
-		const rl = createInterface({
-			input: createReadStream(filePath, { encoding: "utf8" }),
-			crlfDelay: Infinity,
-		});
-
-		for await (const line of rl) {
-			const entry = parseSessionEntryLine(line);
-			if (!entry) continue;
-
-			if (entry.type === "session") continue;
-
-			if (entry.type === "session_info") {
-				name = entry.name?.trim() || undefined;
-			}
-
-			if (entry.type !== "message") continue;
-			messageCount++;
-
-			const activityTime = getMessageActivityTime(entry);
-			if (typeof activityTime === "number") {
-				lastActivityTime = Math.max(lastActivityTime ?? 0, activityTime);
-			}
-
-			const message = entry.message;
-			if (!isMessageWithContent(message)) continue;
-			if (message.role !== "user" && message.role !== "assistant") continue;
-
-			const textContent = extractTextContent(message);
-			if (!textContent) continue;
-
-			allMessages.push(textContent);
-			if (!firstMessage && message.role === "user") {
-				firstMessage = textContent;
-			}
-		}
-
+		const scan = await scanSessionInfo(filePath);
 		const cwd = typeof header.cwd === "string" ? header.cwd : "";
-		const parentSessionPath = header.parentSession;
-		const headerTime = typeof header.timestamp === "string" ? new Date(header.timestamp).getTime() : NaN;
-		const modified =
-			typeof lastActivityTime === "number" && lastActivityTime > 0
-				? new Date(lastActivityTime)
-				: !Number.isNaN(headerTime)
-					? new Date(headerTime)
-					: stats.mtime;
 
 		return {
 			reference: filePath,
 			path: filePath,
 			id: header.id,
 			cwd,
-			name,
-			parentSessionPath,
+			name: scan.name,
+			parentSessionPath: header.parentSession,
 			created: new Date(header.timestamp),
-			modified,
-			messageCount,
-			firstMessage: firstMessage || "(no messages)",
-			allMessagesText: allMessages.join(" "),
+			modified: resolveSessionModifiedDate(header, scan.lastActivityTime, stats.mtime),
+			messageCount: scan.messageCount,
+			firstMessage: scan.firstMessage || "(no messages)",
+			allMessagesText: scan.allMessages.join(" "),
 		};
 	} catch {
 		return null;
@@ -547,7 +569,108 @@ export function ensureDir(path: string): void {
 }
 export interface JsonlValidationContext {
 	phase?: JsonlErrorPhase;
-	locations?: ReadonlyArray<{ line: number; byteOffset: number } | undefined>;
+	locations?: ReadonlyArray<JsonlRecordLocation | undefined>;
+}
+interface CurrentSessionValidationState {
+	filePath: string;
+	phase: JsonlErrorPhase;
+	locations: ReadonlyArray<JsonlRecordLocation | undefined> | undefined;
+	entriesById: Map<string, SessionEntry>;
+}
+
+function failCurrentSessionValidation(
+	state: CurrentSessionValidationState,
+	index: number,
+	failure: JsonlDecodeFailure,
+): never {
+	const location = state.locations?.[index];
+	throw new JsonlSessionError({
+		code: "invalid_jsonl",
+		reference: state.filePath,
+		phase: state.phase,
+		line: location?.line ?? index + 1,
+		byteOffset: location?.byteOffset,
+		decodeKind: failure.decodeKind,
+		message: `Invalid JSONL session file ${state.filePath}: line ${location?.line ?? index + 1} ${failure.message}`,
+		cause: failure,
+	});
+}
+
+function validateCurrentSessionHeader(header: FileEntry | undefined, state: CurrentSessionValidationState): void {
+	if (header?.type !== "session" || header.version !== 3) {
+		failCurrentSessionValidation(
+			state,
+			0,
+			new JsonlDecodeFailure("state", "does not have a current version-3 header"),
+		);
+	}
+	try {
+		const encodedHeader = new TextEncoder().encode(JSON.stringify(header));
+		parseStrictHeader({ bytes: encodedHeader, line: 1, start: 0, terminated: true });
+	} catch (error) {
+		if (error instanceof JsonlDecodeFailure) failCurrentSessionValidation(state, 0, error);
+		throw error;
+	}
+}
+
+function validateCurrentSessionEntrySchema(
+	entry: FileEntry | undefined,
+	index: number,
+	state: CurrentSessionValidationState,
+): asserts entry is SessionEntry {
+	if (!entry || entry.type === "session") {
+		failCurrentSessionValidation(
+			state,
+			index,
+			new JsonlDecodeFailure("state", `has an unexpected session header at logical entry ${index + 1}`),
+		);
+	}
+	try {
+		const encodedEntry = new TextEncoder().encode(JSON.stringify(entry));
+		parseStrictEntry({ bytes: encodedEntry, line: index + 1, start: 0, terminated: true }, 3);
+	} catch (error) {
+		if (error instanceof JsonlDecodeFailure) failCurrentSessionValidation(state, index, error);
+		throw error;
+	}
+}
+
+function getCurrentSessionEntryTarget(entry: SessionEntry): string | undefined {
+	switch (entry.type) {
+		case "label":
+			return entry.targetId;
+		case "compaction":
+			return entry.firstKeptEntryId;
+		case "branch_summary":
+			return entry.fromId;
+		default:
+			return undefined;
+	}
+}
+
+function validateCurrentSessionEntryLinks(
+	entry: SessionEntry,
+	index: number,
+	state: CurrentSessionValidationState,
+): void {
+	if (state.entriesById.has(entry.id)) {
+		failCurrentSessionValidation(state, index, new JsonlDecodeFailure("state", `duplicates entry id ${entry.id}`));
+	}
+	if (entry.parentId !== null && !state.entriesById.has(entry.parentId)) {
+		failCurrentSessionValidation(
+			state,
+			index,
+			new JsonlDecodeFailure("state", `references missing parent ${entry.parentId}`),
+		);
+	}
+	const targetId = getCurrentSessionEntryTarget(entry);
+	if (targetId !== undefined && !state.entriesById.has(targetId)) {
+		failCurrentSessionValidation(
+			state,
+			index,
+			new JsonlDecodeFailure("state", `references missing target ${targetId}`),
+		);
+	}
+	state.entriesById.set(entry.id, entry);
 }
 
 export function validateCurrentSessionEntries(
@@ -555,62 +678,148 @@ export function validateCurrentSessionEntries(
 	filePath = "session",
 	context: JsonlValidationContext = {},
 ): void {
-	const phase = context.phase ?? "open";
-	const fail = (index: number, failure: JsonlDecodeFailure): never => {
-		const location = context.locations?.[index];
-		throw new JsonlSessionError({
-			code: "invalid_jsonl",
-			reference: filePath,
-			phase,
-			line: location?.line ?? index + 1,
-			byteOffset: location?.byteOffset,
-			decodeKind: failure.decodeKind,
-			message: `Invalid JSONL session file ${filePath}: line ${location?.line ?? index + 1} ${failure.message}`,
-			cause: failure,
-		});
+	const state: CurrentSessionValidationState = {
+		filePath,
+		phase: context.phase ?? "open",
+		locations: context.locations,
+		entriesById: new Map(),
 	};
-	const header = entries[0];
-	if (header?.type !== "session" || header.version !== 3) {
-		fail(0, new JsonlDecodeFailure("state", "does not have a current version-3 header"));
-	}
-	try {
-		const encodedHeader = new TextEncoder().encode(JSON.stringify(header));
-		parseStrictHeader({ bytes: encodedHeader, line: 1, start: 0, terminated: true });
-	} catch (error) {
-		if (error instanceof JsonlDecodeFailure) fail(0, error);
-		throw error;
-	}
-	const byId = new Map<string, SessionEntry>();
+	validateCurrentSessionHeader(entries[0], state);
 	for (let index = 1; index < entries.length; index++) {
 		const entry = entries[index];
-		if (!entry || entry.type === "session") {
-			fail(index, new JsonlDecodeFailure("state", `has an unexpected session header at logical entry ${index + 1}`));
-			continue;
-		}
-		try {
-			const encodedEntry = new TextEncoder().encode(JSON.stringify(entry));
-			parseStrictEntry({ bytes: encodedEntry, line: index + 1, start: 0, terminated: true }, 3);
-		} catch (error) {
-			if (error instanceof JsonlDecodeFailure) fail(index, error);
-			throw error;
-		}
-		if (byId.has(entry.id)) fail(index, new JsonlDecodeFailure("state", `duplicates entry id ${entry.id}`));
-		if (entry.parentId !== null && !byId.has(entry.parentId)) {
-			fail(index, new JsonlDecodeFailure("state", `references missing parent ${entry.parentId}`));
-		}
-		const targetId =
-			entry.type === "label"
-				? entry.targetId
-				: entry.type === "compaction"
-					? entry.firstKeptEntryId
-					: entry.type === "branch_summary"
-						? entry.fromId
-						: undefined;
-		if (targetId !== undefined && !byId.has(targetId)) {
-			fail(index, new JsonlDecodeFailure("state", `references missing target ${targetId}`));
-		}
-		byId.set(entry.id, entry);
+		validateCurrentSessionEntrySchema(entry, index, state);
+		validateCurrentSessionEntryLinks(entry, index, state);
 	}
+}
+
+interface JsonlLoadContext {
+	filePath: string;
+	publicationOptions: JsonlAtomicPublicationOptions;
+	repair: boolean;
+	phase: JsonlErrorPhase;
+}
+
+interface JsonlLoadState {
+	entries: FileEntry[];
+	locations: JsonlRecordLocation[];
+	header: SessionHeader | undefined;
+	headerRecord: JsonlPhysicalRecord | undefined;
+	finalRecord: JsonlPhysicalRecord | undefined;
+}
+
+type JsonlRecordScanAction = "continue" | "stop";
+
+function repairTornJsonlRecord(context: JsonlLoadContext, record: JsonlPhysicalRecord): void {
+	publishJsonlContentAtomically(context.filePath, readFileSync(context.filePath).subarray(0, record.start), {
+		...context.publicationOptions,
+		phase: "repair",
+	});
+}
+
+function isRepairableDecodeFailure(
+	context: JsonlLoadContext,
+	state: JsonlLoadState,
+	record: JsonlPhysicalRecord,
+	failure: Error,
+): boolean {
+	return context.repair && state.header !== undefined && !record.terminated && failure instanceof JsonlDecodeFailure;
+}
+
+function isRepairableSyntaxFailure(
+	context: JsonlLoadContext,
+	state: JsonlLoadState,
+	record: JsonlPhysicalRecord,
+	failure: Error,
+): boolean {
+	return (
+		context.repair &&
+		state.header !== undefined &&
+		!record.terminated &&
+		failure instanceof JsonlDecodeFailure &&
+		failure.kind === "syntax"
+	);
+}
+
+function scanJsonlRecord(
+	context: JsonlLoadContext,
+	state: JsonlLoadState,
+	record: JsonlPhysicalRecord,
+): JsonlRecordScanAction {
+	state.finalRecord = record;
+	let line: string;
+	try {
+		line = decodePhysicalRecord(record);
+	} catch (error) {
+		const failure = error instanceof Error ? error : new Error(String(error));
+		if (isRepairableDecodeFailure(context, state, record, failure)) {
+			repairTornJsonlRecord(context, record);
+			return "stop";
+		}
+		throw invalidJsonl(context.filePath, record, failure, context.phase);
+	}
+	if (!line.trim()) return "continue";
+
+	try {
+		if (!state.header) {
+			state.header = parseStrictHeader(record);
+			state.headerRecord = record;
+			state.entries.push(state.header);
+		} else {
+			state.entries.push(parseStrictEntry(record, state.header.version ?? 1));
+		}
+		state.locations.push({ line: record.line, byteOffset: record.start });
+		return "continue";
+	} catch (error) {
+		const failure = error instanceof Error ? error : new Error(String(error));
+		if (isRepairableSyntaxFailure(context, state, record, failure)) {
+			repairTornJsonlRecord(context, record);
+			return "stop";
+		}
+		throw invalidJsonl(context.filePath, record, failure, context.phase);
+	}
+}
+
+function requireLoadedSessionHeader(context: JsonlLoadContext, state: JsonlLoadState): SessionHeader {
+	if (state.header && state.headerRecord) return state.header;
+	const failure = new JsonlDecodeFailure("schema", "does not contain a session header");
+	throw new JsonlSessionError({
+		code: "invalid_jsonl",
+		reference: context.filePath,
+		phase: context.phase,
+		line: state.finalRecord?.line ?? 1,
+		byteOffset: state.finalRecord?.start ?? 0,
+		decodeKind: failure.decodeKind,
+		message: `Session file is not a valid pi session: ${context.filePath}`,
+		cause: failure,
+	});
+}
+
+function repairMissingFinalNewline(context: JsonlLoadContext, state: JsonlLoadState): void {
+	if (!context.repair || state.finalRecord?.terminated !== false || state.entries.at(-1) === undefined) return;
+	const original = readFileSync(context.filePath);
+	if (original.length === 0 || original.at(-1) === 0x0a) return;
+	const repaired = Buffer.allocUnsafe(original.length + 1);
+	original.copy(repaired);
+	repaired[original.length] = 0x0a;
+	publishJsonlContentAtomically(context.filePath, repaired, {
+		...context.publicationOptions,
+		phase: "repair",
+	});
+}
+
+function validateLoadedSessionEntries(context: JsonlLoadContext, state: JsonlLoadState, header: SessionHeader): void {
+	if ((header.version ?? 1) < 2) return;
+	const validationContext: JsonlValidationContext = { phase: context.phase, locations: state.locations };
+	if (header.version === 2) {
+		// Version 2 has current tree fields; validate via a non-mutating header projection.
+		validateCurrentSessionEntries(
+			[{ ...header, version: 3 }, ...state.entries.slice(1)],
+			context.filePath,
+			validationContext,
+		);
+		return;
+	}
+	validateCurrentSessionEntries(state.entries, context.filePath, validationContext);
 }
 
 function loadJsonlSession(
@@ -621,91 +830,23 @@ function loadJsonlSession(
 ): FileEntry[] {
 	if (!existsSync(filePath)) return [];
 	if (lstatSync(filePath).size === 0) return [];
-	const entries: FileEntry[] = [];
-	const locations: Array<{ line: number; byteOffset: number }> = [];
-	let header: SessionHeader | undefined;
-	let headerRecord: PhysicalRecord | undefined;
-	let finalRecord: PhysicalRecord | undefined;
+	const context: JsonlLoadContext = { filePath, publicationOptions, repair, phase };
+	const state: JsonlLoadState = {
+		entries: [],
+		locations: [],
+		header: undefined,
+		headerRecord: undefined,
+		finalRecord: undefined,
+	};
 
 	for (const record of readPhysicalRecords(filePath)) {
-		finalRecord = record;
-		let line: string;
-		try {
-			line = decodePhysicalRecord(record);
-		} catch (error) {
-			const failure = error instanceof Error ? error : new Error(String(error));
-			if (repair && header && !record.terminated && failure instanceof JsonlDecodeFailure) {
-				publishJsonlContentAtomically(filePath, readFileSync(filePath).subarray(0, record.start), {
-					...publicationOptions,
-					phase: "repair",
-				});
-				break;
-			}
-			throw invalidJsonl(filePath, record, failure, phase);
-		}
-		if (!line.trim()) continue;
-		try {
-			if (!header) {
-				header = parseStrictHeader(record);
-				headerRecord = record;
-				entries.push(header);
-				locations.push({ line: record.line, byteOffset: record.start });
-				continue;
-			}
-			entries.push(parseStrictEntry(record, header.version ?? 1));
-			locations.push({ line: record.line, byteOffset: record.start });
-		} catch (error) {
-			const failure = error instanceof Error ? error : new Error(String(error));
-			if (
-				repair &&
-				header &&
-				!record.terminated &&
-				failure instanceof JsonlDecodeFailure &&
-				failure.kind === "syntax"
-			) {
-				publishJsonlContentAtomically(filePath, readFileSync(filePath).subarray(0, record.start), {
-					...publicationOptions,
-					phase: "repair",
-				});
-				break;
-			}
-			throw invalidJsonl(filePath, record, failure, phase);
-		}
+		if (scanJsonlRecord(context, state, record) === "stop") break;
 	}
-
-	if (!header || !headerRecord) {
-		const failure = new JsonlDecodeFailure("schema", "does not contain a session header");
-		throw new JsonlSessionError({
-			code: "invalid_jsonl",
-			reference: filePath,
-			phase,
-			line: finalRecord?.line ?? 1,
-			byteOffset: finalRecord?.start ?? 0,
-			decodeKind: failure.decodeKind,
-			message: `Session file is not a valid pi session: ${filePath}`,
-			cause: failure,
-		});
-	}
-	if (repair && finalRecord?.terminated === false && entries.at(-1) !== undefined) {
-		const original = readFileSync(filePath);
-		if (original.length > 0 && original.at(-1) !== 0x0a) {
-			const repaired = Buffer.allocUnsafe(original.length + 1);
-			original.copy(repaired);
-			repaired[original.length] = 0x0a;
-			publishJsonlContentAtomically(filePath, repaired, { ...publicationOptions, phase: "repair" });
-		}
-	}
-	if ((header.version ?? 1) >= 2) {
-		if (header.version === 2) {
-			// Version 2 has current tree fields; validate via a non-mutating header projection.
-			validateCurrentSessionEntries([{ ...header, version: 3 }, ...entries.slice(1)], filePath, {
-				phase,
-				locations,
-			});
-		} else validateCurrentSessionEntries(entries, filePath, { phase, locations });
-	}
-	jsonlEntryLocations.set(entries, locations);
-	return entries;
+	const header = requireLoadedSessionHeader(context, state);
+	repairMissingFinalNewline(context, state);
+	validateLoadedSessionEntries(context, state, header);
+	jsonlEntryLocations.set(state.entries, state.locations);
+	return state.entries;
 }
 
 export function load(
@@ -723,7 +864,7 @@ export function load(
 	}
 }
 
-function getNextAppendPosition(bytes: Uint8Array): { line: number; byteOffset: number } {
+function getNextAppendPosition(bytes: Uint8Array): JsonlRecordLocation {
 	let line = 1;
 	for (const byte of bytes) {
 		if (byte === 0x0a) line++;
@@ -769,11 +910,7 @@ function renameWithRetry(
 	}
 }
 
-function publishJsonlContentAtomicallyUnsafe(
-	filePath: string,
-	content: string | Uint8Array,
-	options: JsonlAtomicPublicationOptions = {},
-): void {
+function assertJsonlDestinationReplaceable(filePath: string): void {
 	try {
 		const destinationInfo = lstatSync(filePath);
 		if (!destinationInfo.isFile()) throw new Error(`Refusing to replace non-file session path: ${filePath}`);
@@ -782,52 +919,75 @@ function publishJsonlContentAtomicallyUnsafe(
 			throw error;
 		}
 	}
+}
+
+function allocateJsonlStagingPath(filePath: string): string {
 	const parentDir = dirname(filePath);
 	ensureDir(parentDir);
-	let tempPath: string | undefined;
 	for (let attempt = 0; attempt < 100; attempt++) {
 		const candidate = join(parentDir, `.${basename(filePath)}.tmp-${randomUUID()}`);
-		if (!existsSync(candidate)) {
-			tempPath = candidate;
-			break;
-		}
+		if (!existsSync(candidate)) return candidate;
 	}
-	if (!tempPath) throw new Error(`Failed to allocate staging path for session: ${filePath}`);
+	throw new Error(`Failed to allocate staging path for session: ${filePath}`);
+}
+
+function stageJsonlContent(
+	tempPath: string,
+	filePath: string,
+	content: string | Uint8Array,
+	options: JsonlAtomicPublicationOptions,
+): void {
+	try {
+		writeFileSync(tempPath, content);
+	} catch (error) {
+		const cause = error instanceof Error ? error : new Error(String(error));
+		throw jsonlStorageError(
+			filePath,
+			options.phase ?? "replace",
+			`Failed to stage JSONL session ${filePath}: ${cause.message}`,
+			cause,
+			"not_written",
+		);
+	}
+}
+
+function publishJsonlStagingPath(tempPath: string, filePath: string, options: JsonlAtomicPublicationOptions): void {
+	try {
+		renameWithRetry(tempPath, filePath, options.rename ?? renameSync, options.platform ?? process.platform);
+	} catch (error) {
+		const cause = error instanceof Error ? error : new Error(String(error));
+		throw jsonlStorageError(
+			filePath,
+			options.phase ?? "replace",
+			`Failed to publish JSONL session ${filePath}: ${cause.message}`,
+			cause,
+			"unknown",
+		);
+	}
+}
+
+function removeUnpublishedJsonlStagingPath(tempPath: string, options: JsonlAtomicPublicationOptions): void {
+	try {
+		(options.remove ?? ((path) => rmSync(path, { force: true })))(tempPath);
+	} catch {
+		// Preserve the staging or rename failure; stale temps are undiscoverable.
+	}
+}
+
+function publishJsonlContentAtomicallyUnsafe(
+	filePath: string,
+	content: string | Uint8Array,
+	options: JsonlAtomicPublicationOptions = {},
+): void {
+	assertJsonlDestinationReplaceable(filePath);
+	const tempPath = allocateJsonlStagingPath(filePath);
 	let published = false;
 	try {
-		try {
-			writeFileSync(tempPath, content);
-		} catch (error) {
-			const cause = error instanceof Error ? error : new Error(String(error));
-			throw jsonlStorageError(
-				filePath,
-				options.phase ?? "replace",
-				`Failed to stage JSONL session ${filePath}: ${cause.message}`,
-				cause,
-				"not_written",
-			);
-		}
-		try {
-			renameWithRetry(tempPath, filePath, options.rename ?? renameSync, options.platform ?? process.platform);
-		} catch (error) {
-			const cause = error instanceof Error ? error : new Error(String(error));
-			throw jsonlStorageError(
-				filePath,
-				options.phase ?? "replace",
-				`Failed to publish JSONL session ${filePath}: ${cause.message}`,
-				cause,
-				"unknown",
-			);
-		}
+		stageJsonlContent(tempPath, filePath, content, options);
+		publishJsonlStagingPath(tempPath, filePath, options);
 		published = true;
 	} finally {
-		if (!published) {
-			try {
-				(options.remove ?? ((path) => rmSync(path, { force: true })))(tempPath);
-			} catch {
-				// Preserve the staging or rename failure; stale temps are undiscoverable.
-			}
-		}
+		if (!published) removeUnpublishedJsonlStagingPath(tempPath, options);
 	}
 }
 
@@ -984,28 +1144,39 @@ interface PreloadedSessionEntries {
 	entries: FileEntry[];
 }
 
+type JsonlNewSessionPublicationPhase = "create" | "fork";
+export type JsonlFirstPublicationPhase = JsonlNewSessionPublicationPhase | "import";
+
+interface JsonlFirstPublicationOptions {
+	allowExistingEmptyFile: boolean;
+	phase: JsonlFirstPublicationPhase;
+}
+
+interface JsonlSessionReferenceOptions {
+	allowExistingEmptyFile?: boolean;
+}
+
+interface JsonlSnapshotOptions {
+	phase?: JsonlErrorPhase;
+}
+
 export interface JsonlStoreWriteOperations {
 	append(filePath: string, serializedEntry: string): void;
 	publish(filePath: string, entries: FileEntry[], options?: JsonlAtomicPublicationOptions): void;
 }
 
 export interface JsonlFirstPublicationCoordinator {
-	publish(
-		filePath: string,
-		entries: FileEntry[],
-		operation: () => void,
-		options: { allowExistingEmptyFile: boolean; phase: "create" | "fork" | "import" },
-	): void;
+	publish(filePath: string, entries: FileEntry[], operation: () => void, options: JsonlFirstPublicationOptions): void;
 }
 
 export class SessionAlreadyExistsError extends Error {
 	readonly code = "already_exists";
 	readonly reference: string;
 	readonly path: string;
-	readonly phase: "create" | "fork" | "import";
+	readonly phase: JsonlFirstPublicationPhase;
 	readonly outcome = "not_written";
 
-	constructor(reference: string, sessionId: string, phase: "create" | "fork" | "import" = "create") {
+	constructor(reference: string, sessionId: string, phase: JsonlFirstPublicationPhase = "create") {
 		super(`Session already exists: ${sessionId}`);
 		this.name = "SessionAlreadyExistsError";
 		this.reference = reference;
@@ -1021,7 +1192,7 @@ function isDefinitelyNotWritten(error: unknown): boolean {
 	);
 }
 
-function getFirstPublicationPhase(entries: FileEntry[]): "create" | "fork" {
+function getFirstPublicationPhase(entries: FileEntry[]): JsonlNewSessionPublicationPhase {
 	const header = entries[0];
 	return header?.type === "session" && header.parentSession ? "fork" : "create";
 }
@@ -1060,7 +1231,7 @@ export class JsonlSessionStore extends InMemorySessionStore {
 		return this.reference;
 	}
 
-	setSessionReference(reference: string, options: { allowExistingEmptyFile?: boolean } = {}): void {
+	setSessionReference(reference: string, options: JsonlSessionReferenceOptions = {}): void {
 		const resolvedReference = resolve(reference);
 		if (this.reference !== resolvedReference) {
 			this.writeFence = undefined;
@@ -1104,6 +1275,46 @@ export class JsonlSessionStore extends InMemorySessionStore {
 		this.nextAppendOffset = position.byteOffset;
 	}
 
+	private persistAppendedEntry(
+		reference: string,
+		prospectiveEntries: FileEntry[],
+		serializedEntry: string | undefined,
+	): void {
+		try {
+			if (this.flushed) this.writeOperations.append(reference, serializedEntry!);
+			else this.publishFirstSnapshot(prospectiveEntries);
+		} catch (error) {
+			if (error instanceof SessionAlreadyExistsError) throw error;
+			const cause = error instanceof Error ? error : new Error(String(error));
+			if (this.flushed && isDefinitelyNotWritten(error)) {
+				throw jsonlStorageError(reference, "append", cause.message, cause, "not_written");
+			}
+			this.writeFence = jsonlStorageError(
+				reference,
+				this.flushed ? "append" : getFirstPublicationPhase(prospectiveEntries),
+				cause.message,
+				cause,
+				cause instanceof JsonlSessionError ? undefined : "unknown",
+			);
+			throw this.writeFence;
+		}
+	}
+
+	private recordAppendedEntryPosition(
+		wasFlushed: boolean,
+		serializedEntry: string | undefined,
+		prospectiveEntries: FileEntry[],
+	): void {
+		if (wasFlushed) {
+			this.nextAppendLine++;
+			this.nextAppendOffset += Buffer.byteLength(serializedEntry!);
+			return;
+		}
+		const position = getNextAppendPosition(new TextEncoder().encode(serializeJsonlEntries(prospectiveEntries)));
+		this.nextAppendLine = position.line;
+		this.nextAppendOffset = position.byteOffset;
+	}
+
 	appendEntry(entry: SessionEntry): void {
 		if (!this.reference) {
 			super.appendEntry(entry);
@@ -1115,7 +1326,7 @@ export class JsonlSessionStore extends InMemorySessionStore {
 		const appendPosition = wasFlushed
 			? { line: this.nextAppendLine, byteOffset: this.nextAppendOffset }
 			: getNextAppendPosition(new TextEncoder().encode(serializeJsonlEntries(this.getFileEntries())));
-		const locations: Array<{ line: number; byteOffset: number } | undefined> = [];
+		const locations: Array<JsonlRecordLocation | undefined> = [];
 		locations[prospectiveEntries.length - 1] = appendPosition;
 		validateCurrentSessionEntries(prospectiveEntries, this.reference, { phase: "append", locations });
 		const hasAssistantMessage = prospectiveEntries.some(
@@ -1129,36 +1340,9 @@ export class JsonlSessionStore extends InMemorySessionStore {
 
 		if (!this.flushed) serializeJsonlEntries(prospectiveEntries);
 		const serializedEntry = this.flushed ? `${JSON.stringify(entry)}\n` : undefined;
-		try {
-			if (!this.flushed) {
-				this.publishFirstSnapshot(prospectiveEntries);
-			} else {
-				this.writeOperations.append(this.reference, serializedEntry!);
-			}
-		} catch (error) {
-			if (error instanceof SessionAlreadyExistsError) throw error;
-			const cause = error instanceof Error ? error : new Error(String(error));
-			if (this.flushed && isDefinitelyNotWritten(error)) {
-				throw jsonlStorageError(this.reference, "append", cause.message, cause, "not_written");
-			}
-			this.writeFence = jsonlStorageError(
-				this.reference,
-				this.flushed ? "append" : getFirstPublicationPhase(prospectiveEntries),
-				cause.message,
-				cause,
-				cause instanceof JsonlSessionError ? undefined : "unknown",
-			);
-			throw this.writeFence;
-		}
+		this.persistAppendedEntry(this.reference, prospectiveEntries, serializedEntry);
 		super.appendEntry(entry);
-		if (wasFlushed) {
-			this.nextAppendLine++;
-			this.nextAppendOffset += Buffer.byteLength(serializedEntry!);
-		} else {
-			const position = getNextAppendPosition(new TextEncoder().encode(serializeJsonlEntries(prospectiveEntries)));
-			this.nextAppendLine = position.line;
-			this.nextAppendOffset = position.byteOffset;
-		}
+		this.recordAppendedEntryPosition(wasFlushed, serializedEntry, prospectiveEntries);
 		this.flushed = true;
 		this.allowExistingEmptyFile = false;
 	}
@@ -1189,7 +1373,7 @@ export class JsonlSessionStore extends InMemorySessionStore {
 		}
 	}
 
-	saveSnapshot(options: { phase?: JsonlErrorPhase } = {}): void {
+	saveSnapshot(options: JsonlSnapshotOptions = {}): void {
 		if (!this.reference) return;
 		this.assertWritable();
 		serializeJsonlEntries(this.getFileEntries());

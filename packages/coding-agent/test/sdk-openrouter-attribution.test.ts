@@ -18,6 +18,25 @@ import { InMemorySessionManager } from "../src/core/session/in-memory-session-ma
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { createTestExtensionsResult, createTestResourceLoader } from "./utilities.ts";
 
+interface CaptureHeadersOptions {
+	telemetryEnabled?: boolean;
+	providerHeaders?: ProviderHeaders;
+	requestHeaders?: ProviderHeaders;
+	authHeader?: boolean;
+	extensionFactories?: ExtensionFactory[];
+	sessionId?: string;
+}
+
+function registerHeaderOverrideProvider(
+	modelRegistry: ModelRegistry,
+	model: Model<Api>,
+	providerHeaders: ProviderHeaders | undefined,
+	authHeader: boolean | undefined,
+): () => void {
+	if (!providerHeaders && !authHeader) return () => undefined;
+	modelRegistry.registerProvider(model.provider, { headers: providerHeaders, authHeader });
+	return () => modelRegistry.unregisterProvider(model.provider);
+}
 describe("PiAgent OpenRouter attribution headers", () => {
 	let tempDir: string;
 	let cwd: string;
@@ -85,14 +104,7 @@ describe("PiAgent OpenRouter attribution headers", () => {
 
 	async function captureHeaders(
 		model: Model<Api>,
-		options: {
-			telemetryEnabled?: boolean;
-			providerHeaders?: ProviderHeaders;
-			requestHeaders?: ProviderHeaders;
-			authHeader?: boolean;
-			extensionFactories?: ExtensionFactory[];
-			sessionId?: string;
-		} = {},
+		options: CaptureHeadersOptions = {},
 	): Promise<ProviderHeaders | undefined> {
 		const settingsManager = SettingsManager.create(cwd, agentDir);
 		if (options.telemetryEnabled === false) {
@@ -102,7 +114,6 @@ describe("PiAgent OpenRouter attribution headers", () => {
 		const authStorage = AuthStorage.create(join(agentDir, "auth.json"));
 		authStorage.setRuntimeApiKey(model.provider, "test-api-key");
 		const modelRegistry = ModelRegistry.create(authStorage, join(agentDir, "models.json"));
-		const registeredProviders = ["capture-provider"];
 		let capturedOptions: SimpleStreamOptions | undefined;
 
 		modelRegistry.registerProvider("capture-provider", {
@@ -113,13 +124,12 @@ describe("PiAgent OpenRouter attribution headers", () => {
 			},
 		});
 
-		if (options.providerHeaders || options.authHeader) {
-			modelRegistry.registerProvider(model.provider, {
-				headers: options.providerHeaders,
-				authHeader: options.authHeader,
-			});
-			registeredProviders.push(model.provider);
-		}
+		const unregisterHeaderOverrideProvider = registerHeaderOverrideProvider(
+			modelRegistry,
+			model,
+			options.providerHeaders,
+			options.authHeader,
+		);
 		const extensionsResult = options.extensionFactories
 			? await createTestExtensionsResult(options.extensionFactories, cwd)
 			: undefined;
@@ -151,9 +161,8 @@ describe("PiAgent OpenRouter attribution headers", () => {
 			return capturedOptions?.headers;
 		} finally {
 			await pi.dispose();
-			for (const provider of registeredProviders.reverse()) {
-				modelRegistry.unregisterProvider(provider);
-			}
+			unregisterHeaderOverrideProvider();
+			modelRegistry.unregisterProvider("capture-provider");
 		}
 	}
 

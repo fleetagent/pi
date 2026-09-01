@@ -1,6 +1,6 @@
 import assert from "node:assert";
 import { describe, it } from "node:test";
-import { renderLatex } from "../src/index.ts";
+import { type RenderLatexOptions, renderLatex } from "../src/index.ts";
 
 type LatexCase = readonly [source: string, expected: string];
 
@@ -500,7 +500,7 @@ R\left(\frac{\pi}{4}\right)
 		}
 	});
 
-	function assertRejectedAndRecovers(source: string, options?: { display?: boolean }): void {
+	function assertRejectedAndRecovers(source: string, options?: RenderLatexOptions): void {
 		assert.strictEqual(renderLatex(source, options), undefined);
 		assert.strictEqual(renderLatex("x"), "x");
 	}

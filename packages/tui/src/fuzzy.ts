@@ -9,65 +9,46 @@ export interface FuzzyMatch {
 	score: number;
 }
 
+interface FuzzyMatchState {
+	queryIndex: number;
+	score: number;
+	lastMatchIndex: number;
+	consecutiveMatches: number;
+}
+
+function scoreFuzzyCharacterMatch(state: FuzzyMatchState, text: string, index: number): void {
+	const isWordBoundary = index === 0 || /[\s\-_./:]/.test(text[index - 1]!);
+	if (state.lastMatchIndex === index - 1) {
+		state.consecutiveMatches++;
+		state.score -= state.consecutiveMatches * 5;
+	} else {
+		state.consecutiveMatches = 0;
+		if (state.lastMatchIndex >= 0) state.score += (index - state.lastMatchIndex - 1) * 2;
+	}
+	if (isWordBoundary) state.score -= 10;
+	state.score += index * 0.1;
+	state.lastMatchIndex = index;
+	state.queryIndex++;
+}
+
+function matchNormalizedQuery(normalizedQuery: string, text: string): FuzzyMatch {
+	if (normalizedQuery.length === 0) return { matches: true, score: 0 };
+	if (normalizedQuery.length > text.length) return { matches: false, score: 0 };
+	const state: FuzzyMatchState = { queryIndex: 0, score: 0, lastMatchIndex: -1, consecutiveMatches: 0 };
+	for (let index = 0; index < text.length && state.queryIndex < normalizedQuery.length; index++) {
+		if (text[index] !== normalizedQuery[state.queryIndex]) continue;
+		scoreFuzzyCharacterMatch(state, text, index);
+	}
+	if (state.queryIndex < normalizedQuery.length) return { matches: false, score: 0 };
+	if (normalizedQuery === text) state.score -= 100;
+	return { matches: true, score: state.score };
+}
+
 export function fuzzyMatch(query: string, text: string): FuzzyMatch {
 	const queryLower = query.toLowerCase();
 	const textLower = text.toLowerCase();
 
-	const matchQuery = (normalizedQuery: string): FuzzyMatch => {
-		if (normalizedQuery.length === 0) {
-			return { matches: true, score: 0 };
-		}
-
-		if (normalizedQuery.length > textLower.length) {
-			return { matches: false, score: 0 };
-		}
-
-		let queryIndex = 0;
-		let score = 0;
-		let lastMatchIndex = -1;
-		let consecutiveMatches = 0;
-
-		for (let i = 0; i < textLower.length && queryIndex < normalizedQuery.length; i++) {
-			if (textLower[i] === normalizedQuery[queryIndex]) {
-				const isWordBoundary = i === 0 || /[\s\-_./:]/.test(textLower[i - 1]!);
-
-				// Reward consecutive matches
-				if (lastMatchIndex === i - 1) {
-					consecutiveMatches++;
-					score -= consecutiveMatches * 5;
-				} else {
-					consecutiveMatches = 0;
-					// Penalize gaps
-					if (lastMatchIndex >= 0) {
-						score += (i - lastMatchIndex - 1) * 2;
-					}
-				}
-
-				// Reward word boundary matches
-				if (isWordBoundary) {
-					score -= 10;
-				}
-
-				// Slight penalty for later matches
-				score += i * 0.1;
-
-				lastMatchIndex = i;
-				queryIndex++;
-			}
-		}
-
-		if (queryIndex < normalizedQuery.length) {
-			return { matches: false, score: 0 };
-		}
-
-		if (normalizedQuery === textLower) {
-			score -= 100;
-		}
-
-		return { matches: true, score };
-	};
-
-	const primaryMatch = matchQuery(queryLower);
+	const primaryMatch = matchNormalizedQuery(queryLower, textLower);
 	if (primaryMatch.matches) {
 		return primaryMatch;
 	}
@@ -84,7 +65,7 @@ export function fuzzyMatch(query: string, text: string): FuzzyMatch {
 		return primaryMatch;
 	}
 
-	const swappedMatch = matchQuery(swappedQuery);
+	const swappedMatch = matchNormalizedQuery(swappedQuery, textLower);
 	if (!swappedMatch.matches) {
 		return primaryMatch;
 	}
@@ -96,6 +77,7 @@ export function fuzzyMatch(query: string, text: string): FuzzyMatch {
  * Filter and sort items by fuzzy match quality (best matches first).
  * Supports space-separated tokens: all tokens must match.
  */
+// pi-ignore noExcessiveCollectionIterations: Multi-token filtering must independently score every query token against each candidate item, with short-circuiting on the first failed token.
 export function fuzzyFilter<T>(items: T[], query: string, getText: (item: T) => string): T[] {
 	if (!query.trim()) {
 		return items;

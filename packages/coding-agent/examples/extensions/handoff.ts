@@ -13,7 +13,7 @@
  */
 
 import type { AgentMessage } from "@fleetagent/pi-agent-core";
-import { complete, type Message } from "@fleetagent/pi-ai";
+import { complete, type Message, type TextContent } from "@fleetagent/pi-ai";
 import type { ExtensionAPI, SessionEntry } from "@fleetagent/pi-coding-agent";
 import { BorderedLoader, convertToLlm, serializeConversation } from "@fleetagent/pi-coding-agent";
 
@@ -144,7 +144,7 @@ export default function (pi: ExtensionAPI) {
 					}
 
 					return response.content
-						.filter((c): c is { type: "text"; text: string } => c.type === "text")
+						.filter((c): c is TextContent => c.type === "text")
 						.map((c) => c.text)
 						.join("\n");
 				};

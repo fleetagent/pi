@@ -4,6 +4,7 @@ import { streamOpenAIResponses } from "../src/providers/openai-responses.ts";
 import { processResponsesStream } from "../src/providers/openai-responses-shared.ts";
 import type { AssistantMessage, AssistantMessageEvent, Context, Model } from "../src/types.ts";
 import { AssistantMessageEventStream } from "../src/utils/event-stream.ts";
+import type { MockOpenAIRequestPromise } from "./openai-mock-types.ts";
 
 vi.mock("openai", () => {
 	async function* createMockResponsesStream(): AsyncIterable<ResponseStreamEvent> {
@@ -24,12 +25,9 @@ vi.mock("openai", () => {
 		responses = {
 			create: () => {
 				const responseStream = createMockResponsesStream();
-				const promise = Promise.resolve(responseStream) as Promise<AsyncIterable<ResponseStreamEvent>> & {
-					withResponse: () => Promise<{
-						data: AsyncIterable<ResponseStreamEvent>;
-						response: { status: number; headers: Headers };
-					}>;
-				};
+				const promise = Promise.resolve(responseStream) as MockOpenAIRequestPromise<
+					AsyncIterable<ResponseStreamEvent>
+				>;
 				promise.withResponse = async () => ({
 					data: responseStream,
 					response: { status: 200, headers: new Headers() },

@@ -1,10 +1,28 @@
 import { existsSync, readFileSync } from "fs";
 
-export interface ChangelogEntry {
+interface ChangelogVersion {
 	major: number;
 	minor: number;
 	patch: number;
+}
+
+export interface ChangelogEntry extends ChangelogVersion {
 	content: string;
+}
+
+function parseChangelogVersionHeader(line: string): ChangelogVersion | null {
+	const versionMatch = line.match(/##\s+\[?(\d+)\.(\d+)\.(\d+)\]?/);
+	if (!versionMatch) return null;
+	return {
+		major: Number.parseInt(versionMatch[1], 10),
+		minor: Number.parseInt(versionMatch[2], 10),
+		patch: Number.parseInt(versionMatch[3], 10),
+	};
+}
+
+function appendChangelogEntry(entries: ChangelogEntry[], version: ChangelogVersion | null, lines: string[]): void {
+	if (!version || lines.length === 0) return;
+	entries.push({ ...version, content: lines.join("\n").trim() });
 }
 
 /**
@@ -22,46 +40,20 @@ export function parseChangelog(changelogPath: string): ChangelogEntry[] {
 		const entries: ChangelogEntry[] = [];
 
 		let currentLines: string[] = [];
-		let currentVersion: { major: number; minor: number; patch: number } | null = null;
+		let currentVersion: ChangelogVersion | null = null;
 
 		for (const line of lines) {
-			// Check if this is a version header (## [x.y.z] ...)
-			if (line.startsWith("## ")) {
-				// Save previous entry if exists
-				if (currentVersion && currentLines.length > 0) {
-					entries.push({
-						...currentVersion,
-						content: currentLines.join("\n").trim(),
-					});
-				}
-
-				// Try to parse version from this line
-				const versionMatch = line.match(/##\s+\[?(\d+)\.(\d+)\.(\d+)\]?/);
-				if (versionMatch) {
-					currentVersion = {
-						major: Number.parseInt(versionMatch[1], 10),
-						minor: Number.parseInt(versionMatch[2], 10),
-						patch: Number.parseInt(versionMatch[3], 10),
-					};
-					currentLines = [line];
-				} else {
-					// Reset if we can't parse version
-					currentVersion = null;
-					currentLines = [];
-				}
-			} else if (currentVersion) {
-				// Collect lines for current version
-				currentLines.push(line);
+			if (!line.startsWith("## ")) {
+				if (currentVersion) currentLines.push(line);
+				continue;
 			}
+			appendChangelogEntry(entries, currentVersion, currentLines);
+			currentVersion = parseChangelogVersionHeader(line);
+			currentLines = currentVersion ? [line] : [];
 		}
 
 		// Save last entry
-		if (currentVersion && currentLines.length > 0) {
-			entries.push({
-				...currentVersion,
-				content: currentLines.join("\n").trim(),
-			});
-		}
+		appendChangelogEntry(entries, currentVersion, currentLines);
 
 		return entries;
 	} catch (error) {

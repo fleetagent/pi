@@ -1,6 +1,6 @@
 import { basename, dirname, isAbsolute, relative, resolve as resolvePath, sep } from "node:path";
-import type { AgentTool } from "@fleetagent/pi-agent-core";
-import type { Api, ImageContent, Model, TextContent } from "@fleetagent/pi-ai";
+import type { AgentTool, AgentToolResult } from "@fleetagent/pi-agent-core";
+import type { Api, Model } from "@fleetagent/pi-ai";
 import { Text } from "@fleetagent/pi-tui";
 
 import { type Static, Type } from "typebox";
@@ -31,8 +31,10 @@ export interface ReadToolDetails {
 	truncation?: TruncationResult;
 }
 
+type CompactReadClassificationKind = "docs" | "resource" | "skill" | "rule";
+
 interface CompactReadClassification {
-	kind: "docs" | "resource" | "skill" | "rule";
+	kind: CompactReadClassificationKind;
 	label: string;
 }
 
@@ -46,11 +48,13 @@ export interface ReadToolOperationsSelection {
 
 export type ReadToolOperations = ToolOperations | ReadToolOperationsSelection;
 
+type ReadToolOperationsSelector = (absolutePath: string) => ReadToolOperations | undefined;
+
 export interface ReadToolOptions {
 	/** Whether to auto-resize images to 2000x2000 max. Default: true */
 	autoResizeImages?: boolean;
 	/** Select a backend, and optionally a canonical path, for a resolved absolute path. Defaults to the tool backend. */
-	operationsForPath?: (absolutePath: string) => ReadToolOperations | undefined;
+	operationsForPath?: ReadToolOperationsSelector;
 }
 
 function isReadToolOperationsSelection(value: ReadToolOperations): value is ReadToolOperationsSelection {
@@ -167,9 +171,20 @@ function formatCompactReadCall(
 	);
 }
 
+function formatReadTruncationWarning(truncation: TruncationResult | undefined, theme: Theme): string {
+	if (!truncation?.truncated) return "";
+	if (truncation.firstLineExceedsLimit) {
+		return `\n${theme.fg("warning", `[First line exceeds ${formatSize(truncation.maxBytes ?? DEFAULT_MAX_BYTES)} limit]`)}`;
+	}
+	if (truncation.truncatedBy === "lines") {
+		return `\n${theme.fg("warning", `[Truncated: showing ${truncation.outputLines} of ${truncation.totalLines} lines (${truncation.maxLines ?? DEFAULT_MAX_LINES} line limit)]`)}`;
+	}
+	return `\n${theme.fg("warning", `[Truncated: ${truncation.outputLines} lines shown (${formatSize(truncation.maxBytes ?? DEFAULT_MAX_BYTES)} limit)]`)}`;
+}
+
 function formatReadResult(
 	args: ReadRenderArgs | undefined,
-	result: { content: (TextContent | ImageContent)[]; details?: ReadToolDetails },
+	result: AgentToolResult<ReadToolDetails | undefined>,
 	options: ToolRenderResultOptions,
 	theme: Theme,
 	showImages: boolean,
@@ -193,23 +208,180 @@ function formatReadResult(
 		text += `${theme.fg("muted", `\n... (${remaining} more lines,`)} ${keyHint("app.tools.expand", "to expand")})`;
 	}
 
-	const truncation = result.details?.truncation;
-	if (truncation?.truncated) {
-		if (truncation.firstLineExceedsLimit) {
-			text += `\n${theme.fg("warning", `[First line exceeds ${formatSize(truncation.maxBytes ?? DEFAULT_MAX_BYTES)} limit]`)}`;
-		} else if (truncation.truncatedBy === "lines") {
-			text += `\n${theme.fg("warning", `[Truncated: showing ${truncation.outputLines} of ${truncation.totalLines} lines (${truncation.maxLines ?? DEFAULT_MAX_LINES} line limit)]`)}`;
-		} else {
-			text += `\n${theme.fg("warning", `[Truncated: ${truncation.outputLines} lines shown (${formatSize(truncation.maxBytes ?? DEFAULT_MAX_BYTES)} limit)]`)}`;
-		}
-	}
+	text += formatReadTruncationWarning(result.details?.truncation, theme);
 	return text;
 }
 
-export function createReadToolDefinition(
+interface ResolvedReadTarget {
+	operations: ToolOperations;
+	path: string;
+}
+
+interface ReadExecutionOptions {
+	input: ReadToolInput;
+	defaultOperations: ToolOperations;
+	cwd: string;
+	operationsForPath: ReadToolOperationsSelector | undefined;
+	autoResizeImages: boolean;
+	model: Model<Api> | undefined;
+	signal: AbortSignal | undefined;
+}
+
+interface TextReadOutputOptions {
+	truncation: TruncationResult;
+	allLines: string[];
+	startLine: number;
+	startLineDisplay: number;
+	endLine: number;
+	totalFileLines: number;
+}
+
+async function resolveReadTarget(options: ReadExecutionOptions): Promise<ResolvedReadTarget> {
+	const absolutePath = await resolveReadPathAsync(options.input.path, options.cwd);
+	const selection = options.operationsForPath?.(absolutePath);
+	return {
+		operations: getReadToolOperations(selection) ?? options.defaultOperations,
+		path: selection && isReadToolOperationsSelection(selection) ? selection.path : absolutePath,
+	};
+}
+
+async function readImageFile(
 	operations: ToolOperations,
-	options?: ReadToolOptions,
-): ToolDefinition<typeof readSchema, ReadToolDetails | undefined> {
+	path: string,
+	mimeType: string,
+	autoResizeImages: boolean,
+	nonVisionImageNote: string | undefined,
+): Promise<AgentToolResult<ReadToolDetails | undefined>> {
+	const buffer = await operations.readFile(path);
+	const processed = await processImage(buffer, mimeType, { autoResizeImages });
+	if (!processed.ok) {
+		let text = `Read image file [${mimeType}]\n${processed.message}`;
+		if (nonVisionImageNote) text += `\n${nonVisionImageNote}`;
+		return { content: [{ type: "text", text }], details: undefined };
+	}
+	let text = `Read image file [${processed.mimeType}]`;
+	if (processed.hints.length > 0) text += `\n${processed.hints.join("\n")}`;
+	if (nonVisionImageNote) text += `\n${nonVisionImageNote}`;
+	return {
+		content: [
+			{ type: "text", text },
+			{ type: "image", data: processed.data, mimeType: processed.mimeType },
+		],
+		details: undefined,
+	};
+}
+
+function formatTextReadOutput(options: TextReadOutputOptions): AgentToolResult<ReadToolDetails | undefined> {
+	const { truncation } = options;
+	let text: string;
+	let details: ReadToolDetails | undefined;
+	if (truncation.firstLineExceedsLimit) {
+		const firstLineSize = formatSize(Buffer.byteLength(options.allLines[options.startLine] ?? "", "utf-8"));
+		text = `[Line ${options.startLineDisplay} is ${firstLineSize}, exceeds ${formatSize(DEFAULT_MAX_BYTES)} limit. Hashline output requires full lines; use bash for this line.]`;
+		details = { truncation };
+	} else if (truncation.truncated) {
+		const endLineDisplay = options.startLineDisplay + truncation.outputLines - 1;
+		const nextOffset = endLineDisplay + 1;
+		text = truncation.content;
+		if (truncation.truncatedBy === "lines") {
+			text += `\n\n[Showing lines ${options.startLineDisplay}-${endLineDisplay} of ${options.totalFileLines}. Use offset=${nextOffset} to continue.]`;
+		} else {
+			text += `\n\n[Showing lines ${options.startLineDisplay}-${endLineDisplay} of ${options.totalFileLines} (${formatSize(DEFAULT_MAX_BYTES)} limit). Use offset=${nextOffset} to continue.]`;
+		}
+		details = { truncation };
+	} else if (options.endLine < options.totalFileLines) {
+		const remaining = options.totalFileLines - options.endLine;
+		text = `${truncation.content}\n\n[${remaining} more lines in file. Use offset=${options.endLine + 1} to continue.]`;
+	} else {
+		text = truncation.content;
+	}
+	return { content: [{ type: "text", text }], details };
+}
+
+async function readTextFile(
+	operations: ToolOperations,
+	path: string,
+	offset: number | undefined,
+	limit: number | undefined,
+): Promise<AgentToolResult<ReadToolDetails | undefined>> {
+	await initHasher();
+	const buffer = await operations.readFile(path);
+	const textContent = buffer.toString("utf-8").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+	const allLines = hashlineVisLines(textContent);
+	const totalFileLines = allLines.length;
+	const startLine = offset ? Math.max(0, offset - 1) : 0;
+	const startLineDisplay = startLine + 1;
+	if (totalFileLines === 0) {
+		if (startLineDisplay !== 1) throw new Error(`Offset ${offset} is beyond end of file (0 lines total)`);
+		const emptyHash = (await lineHashes(textContent, path))[0] ?? "";
+		return {
+			content: [{ type: "text", text: `${emptyHash}${HASH_SEP}\n[File is empty. Use edit to insert content.]` }],
+			details: undefined,
+		};
+	}
+	if (startLine >= totalFileLines) {
+		throw new Error(`Offset ${offset} is beyond end of file (${totalFileLines} lines total)`);
+	}
+	const endLine = limit !== undefined ? Math.min(startLine + limit, totalFileLines) : totalFileLines;
+	const allHashes = await lineHashes(textContent, path);
+	const selectedContent = fmtRegion(allHashes.slice(startLine, endLine), allLines.slice(startLine, endLine));
+	return formatTextReadOutput({
+		truncation: truncateHead(selectedContent),
+		allLines,
+		startLine,
+		startLineDisplay,
+		endLine,
+		totalFileLines,
+	});
+}
+
+async function executeReadRequest(
+	options: ReadExecutionOptions,
+	isAborted: () => boolean,
+): Promise<AgentToolResult<ReadToolDetails | undefined> | undefined> {
+	const target = await resolveReadTarget(options);
+	if (isAborted()) return undefined;
+	await target.operations.access(target.path, "read");
+	if (isAborted()) return undefined;
+	const mimeType = target.operations.detectImageMimeType
+		? await target.operations.detectImageMimeType(target.path)
+		: undefined;
+	const nonVisionImageNote = getNonVisionImageNote(options.model);
+	const result = mimeType
+		? await readImageFile(target.operations, target.path, mimeType, options.autoResizeImages, nonVisionImageNote)
+		: await readTextFile(target.operations, target.path, options.input.offset, options.input.limit);
+	return isAborted() ? undefined : result;
+}
+
+function executeAbortableRead(options: ReadExecutionOptions): Promise<AgentToolResult<ReadToolDetails | undefined>> {
+	return new Promise((resolve, reject) => {
+		if (options.signal?.aborted) {
+			reject(new Error("Operation aborted"));
+			return;
+		}
+		let aborted = false;
+		const onAbort = () => {
+			aborted = true;
+			reject(new Error("Operation aborted"));
+		};
+		options.signal?.addEventListener("abort", onAbort, { once: true });
+		void executeReadRequest(options, () => aborted).then(
+			(result) => {
+				if (result === undefined) return;
+				options.signal?.removeEventListener("abort", onAbort);
+				resolve(result);
+			},
+			(error) => {
+				options.signal?.removeEventListener("abort", onAbort);
+				if (!aborted) reject(error);
+			},
+		);
+	});
+}
+
+export type ReadToolDefinition = ToolDefinition<typeof readSchema, ReadToolDetails | undefined>;
+
+export function createReadToolDefinition(operations: ToolOperations, options?: ReadToolOptions): ReadToolDefinition {
 	const autoResizeImages = options?.autoResizeImages ?? true;
 	const ops = operations;
 	const cwd = operations.cwd;
@@ -224,128 +396,16 @@ export function createReadToolDefinition(
 			"For edits, copy only the 3-character HASH values into edit hash_range_inclusive; do not include HASH│ prefixes in content_lines.",
 		],
 		parameters: readSchema,
-		async execute(
-			_toolCallId,
-			{ path, offset, limit }: { path: string; offset?: number; limit?: number },
-			signal?: AbortSignal,
-			_onUpdate?,
-			ctx?,
-		) {
-			return new Promise<{ content: (TextContent | ImageContent)[]; details: ReadToolDetails | undefined }>(
-				(resolve, reject) => {
-					if (signal?.aborted) {
-						reject(new Error("Operation aborted"));
-						return;
-					}
-					let aborted = false;
-					const onAbort = () => {
-						aborted = true;
-						reject(new Error("Operation aborted"));
-					};
-					signal?.addEventListener("abort", onAbort, { once: true });
-
-					(async () => {
-						try {
-							const absolutePath = await resolveReadPathAsync(path, cwd);
-							const selection = operationsForPath?.(absolutePath);
-							const readOps = getReadToolOperations(selection) ?? ops;
-							const readPath =
-								selection && isReadToolOperationsSelection(selection) ? selection.path : absolutePath;
-							if (aborted) return;
-							// Check if file exists and is readable.
-							await readOps.access(readPath, "read");
-							if (aborted) return;
-							const mimeType = readOps.detectImageMimeType
-								? await readOps.detectImageMimeType(readPath)
-								: undefined;
-							let content: (TextContent | ImageContent)[];
-							let details: ReadToolDetails | undefined;
-							const nonVisionImageNote = getNonVisionImageNote(ctx?.model);
-							if (mimeType) {
-								// Read image as binary.
-								const buffer = await readOps.readFile(readPath);
-								const processed = await processImage(buffer, mimeType, { autoResizeImages });
-								if (!processed.ok) {
-									let textNote = `Read image file [${mimeType}]\n${processed.message}`;
-									if (nonVisionImageNote) textNote += `\n${nonVisionImageNote}`;
-									content = [{ type: "text", text: textNote }];
-								} else {
-									let textNote = `Read image file [${processed.mimeType}]`;
-									if (processed.hints.length > 0) textNote += `\n${processed.hints.join("\n")}`;
-									if (nonVisionImageNote) textNote += `\n${nonVisionImageNote}`;
-									content = [
-										{ type: "text", text: textNote },
-										{ type: "image", data: processed.data, mimeType: processed.mimeType },
-									];
-								}
-							} else {
-								// Read text content with hashline anchors.
-								await initHasher();
-								const buffer = await readOps.readFile(readPath);
-								const textContent = buffer.toString("utf-8").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-								const allLines = hashlineVisLines(textContent);
-								const totalFileLines = allLines.length;
-								const startLine = offset ? Math.max(0, offset - 1) : 0;
-								const startLineDisplay = startLine + 1;
-								if (totalFileLines === 0) {
-									if (startLineDisplay !== 1) {
-										throw new Error(`Offset ${offset} is beyond end of file (0 lines total)`);
-									}
-									const emptyHash = (await lineHashes(textContent, readPath))[0] ?? "";
-									content = [
-										{
-											type: "text",
-											text: `${emptyHash}${HASH_SEP}\n[File is empty. Use edit to insert content.]`,
-										},
-									];
-								} else {
-									if (startLine >= totalFileLines) {
-										throw new Error(`Offset ${offset} is beyond end of file (${totalFileLines} lines total)`);
-									}
-									const endLine =
-										limit !== undefined ? Math.min(startLine + limit, totalFileLines) : totalFileLines;
-									const allHashes = await lineHashes(textContent, readPath);
-									const selectedContent = fmtRegion(
-										allHashes.slice(startLine, endLine),
-										allLines.slice(startLine, endLine),
-									);
-									const truncation = truncateHead(selectedContent);
-									let outputText: string;
-									if (truncation.firstLineExceedsLimit) {
-										const firstLineSize = formatSize(Buffer.byteLength(allLines[startLine] ?? "", "utf-8"));
-										outputText = `[Line ${startLineDisplay} is ${firstLineSize}, exceeds ${formatSize(DEFAULT_MAX_BYTES)} limit. Hashline output requires full lines; use bash for this line.]`;
-										details = { truncation };
-									} else if (truncation.truncated) {
-										const endLineDisplay = startLineDisplay + truncation.outputLines - 1;
-										const nextOffset = endLineDisplay + 1;
-										outputText = truncation.content;
-										if (truncation.truncatedBy === "lines") {
-											outputText += `\n\n[Showing lines ${startLineDisplay}-${endLineDisplay} of ${totalFileLines}. Use offset=${nextOffset} to continue.]`;
-										} else {
-											outputText += `\n\n[Showing lines ${startLineDisplay}-${endLineDisplay} of ${totalFileLines} (${formatSize(DEFAULT_MAX_BYTES)} limit). Use offset=${nextOffset} to continue.]`;
-										}
-										details = { truncation };
-									} else if (endLine < totalFileLines) {
-										const remaining = totalFileLines - endLine;
-										const nextOffset = endLine + 1;
-										outputText = `${truncation.content}\n\n[${remaining} more lines in file. Use offset=${nextOffset} to continue.]`;
-									} else {
-										outputText = truncation.content;
-									}
-									content = [{ type: "text", text: outputText }];
-								}
-							}
-
-							if (aborted) return;
-							signal?.removeEventListener("abort", onAbort);
-							resolve({ content, details });
-						} catch (error: any) {
-							signal?.removeEventListener("abort", onAbort);
-							if (!aborted) reject(error);
-						}
-					})();
-				},
-			);
+		async execute(_toolCallId, input: ReadToolInput, signal?: AbortSignal, _onUpdate?, ctx?) {
+			return executeAbortableRead({
+				input,
+				defaultOperations: ops,
+				cwd,
+				operationsForPath,
+				autoResizeImages,
+				model: ctx?.model,
+				signal,
+			});
 		},
 		renderCall(args, theme, context) {
 			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);

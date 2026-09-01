@@ -4,19 +4,65 @@ import { getModel } from "../src/models.ts";
 import { convertMessages } from "../src/providers/openai-completions.ts";
 import { streamSimple } from "../src/stream.ts";
 import type { AssistantMessage, Message, Model, Tool, ToolResultMessage } from "../src/types.ts";
+import type { MockCompletionPromise } from "./openai-mock-types.ts";
+
+interface MockCompletionChoice {
+	delta: Record<string, unknown>;
+	finish_reason: string | null;
+	usage?: unknown;
+}
+
+// pi-ignore noNearIdenticalDataStructures: The mock stream fixture schema is owned by this test, while provider token details accept independently evolving vendor payloads.
+interface MockPromptTokensDetails {
+	cached_tokens: number;
+	cache_write_tokens?: number;
+}
+
+interface MockCompletionTokensDetails {
+	reasoning_tokens: number;
+}
+
+interface MockCompletionUsage {
+	prompt_tokens: number;
+	completion_tokens: number;
+	prompt_tokens_details: MockPromptTokensDetails;
+	completion_tokens_details: MockCompletionTokensDetails;
+}
+
+interface StrictModeToolPayload {
+	function?: Record<string, unknown>;
+}
+
+interface InstructionMessagePayload {
+	role?: string;
+}
+
+// pi-ignore noNearIdenticalDataStructures: This normalized assertion view is test-owned and intentionally independent from provider requests and remote-session wire envelopes.
+interface NormalizedMessagePayload {
+	role?: string;
+	content?: unknown;
+}
+
+interface XiaomiThinkingPayload {
+	type?: string;
+}
+
+interface OpenRouterReasoningPayload {
+	effort?: string;
+}
+
+interface ZaiThinkingPayload {
+	type?: string;
+	clear_thinking?: boolean;
+}
 
 const mockState = vi.hoisted(() => ({
 	lastParams: undefined as unknown,
 	chunks: undefined as
 		| Array<null | {
 				id?: string;
-				choices?: Array<{ delta: Record<string, unknown>; finish_reason: string | null; usage?: unknown }>;
-				usage?: {
-					prompt_tokens: number;
-					completion_tokens: number;
-					prompt_tokens_details: { cached_tokens: number; cache_write_tokens?: number };
-					completion_tokens_details: { reasoning_tokens: number };
-				};
+				choices?: MockCompletionChoice[];
+				usage?: MockCompletionUsage;
 		  }>
 		| undefined,
 }));
@@ -45,12 +91,7 @@ vi.mock("openai", () => {
 							}
 						},
 					};
-					const promise = Promise.resolve(stream) as Promise<typeof stream> & {
-						withResponse: () => Promise<{
-							data: typeof stream;
-							response: { status: number; headers: Headers };
-						}>;
-					};
+					const promise = Promise.resolve(stream) as MockCompletionPromise<typeof stream>;
 					promise.withResponse = async () => ({
 						data: stream,
 						response: { status: 200, headers: new Headers() },
@@ -149,7 +190,7 @@ describe("openai-completions tool_choice", () => {
 			} as unknown as Parameters<typeof streamSimple>[2],
 		).result();
 
-		const params = (payload ?? mockState.lastParams) as { tools?: Array<{ function?: Record<string, unknown> }> };
+		const params = (payload ?? mockState.lastParams) as { tools?: StrictModeToolPayload[] };
 		const tool = params.tools?.[0]?.function;
 		expect(tool).toBeTruthy();
 		expect(tool?.strict).toBeUndefined();
@@ -886,7 +927,7 @@ describe("openai-completions tool_choice", () => {
 			},
 		).result();
 
-		const params = payload as { messages?: Array<{ role?: string }> };
+		const params = payload as { messages?: InstructionMessagePayload[] };
 		expect(params.messages?.[0]?.role).toBe("system");
 	});
 
@@ -909,7 +950,7 @@ describe("openai-completions tool_choice", () => {
 			},
 		).result();
 
-		const params = payload as { messages?: Array<{ role?: string }> };
+		const params = payload as { messages?: InstructionMessagePayload[] };
 		expect(params.messages?.[0]?.role).toBe("developer");
 	});
 
@@ -961,7 +1002,7 @@ describe("openai-completions tool_choice", () => {
 			},
 		).result();
 
-		const params = payload as { messages?: Array<{ role?: string; content?: unknown }>; tools?: unknown[] };
+		const params = payload as { messages?: NormalizedMessagePayload[]; tools?: unknown[] };
 		expect(params.messages).toEqual([
 			{ role: "tool", content: "(no tool output)", tool_call_id: "call_1" },
 			{ role: "user", content: "Hi" },
@@ -1033,7 +1074,7 @@ describe("openai-completions tool_choice", () => {
 
 		const params = (payload ?? mockState.lastParams) as {
 			messages?: Array<Record<string, unknown>>;
-			thinking?: { type?: string };
+			thinking?: XiaomiThinkingPayload;
 			reasoning_effort?: string;
 		};
 		const replayedAssistant = params.messages?.find((message) => message.role === "assistant");
@@ -1364,7 +1405,7 @@ describe("openai-completions tool_choice", () => {
 		).result();
 
 		const params = (payload ?? mockState.lastParams) as {
-			reasoning?: { effort?: string };
+			reasoning?: OpenRouterReasoningPayload;
 			reasoning_effort?: string;
 		};
 		expect(params.reasoning).toEqual({ effort: "high" });
@@ -1466,7 +1507,7 @@ describe("openai-completions tool_choice", () => {
 			const params = (payload ?? mockState.lastParams) as {
 				max_tokens?: number;
 				max_completion_tokens?: number;
-				thinking?: { type?: string; clear_thinking?: boolean };
+				thinking?: ZaiThinkingPayload;
 				reasoning_effort?: string;
 			};
 			expect(params.max_tokens).toBe(123);

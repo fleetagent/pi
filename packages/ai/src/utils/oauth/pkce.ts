@@ -14,11 +14,16 @@ function base64urlEncode(bytes: Uint8Array): string {
 	return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
 }
 
+export interface PKCEPair {
+	verifier: string;
+	challenge: string;
+}
+
 /**
  * Generate PKCE code verifier and challenge.
  * Uses Web Crypto API for cross-platform compatibility.
  */
-export async function generatePKCE(): Promise<{ verifier: string; challenge: string }> {
+export async function generatePKCE(): Promise<PKCEPair> {
 	// Generate random verifier
 	const verifierBytes = new Uint8Array(32);
 	crypto.getRandomValues(verifierBytes);

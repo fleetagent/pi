@@ -3,9 +3,11 @@ import { getModel } from "../src/models.ts";
 import { streamSimple } from "../src/stream.ts";
 import type { Context, Model, SimpleStreamOptions } from "../src/types.ts";
 
+type MistralPayloadReasoningEffort = "none" | "high";
+
 interface MistralPayload {
 	promptMode?: "reasoning";
-	reasoningEffort?: "none" | "high";
+	reasoningEffort?: MistralPayloadReasoningEffort;
 }
 
 function makeContext(): Context {

@@ -5,6 +5,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { TextContent } from "@fleetagent/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { createExtensionRuntime, discoverAndLoadExtensions } from "../src/core/extensions/loader.ts";
@@ -14,6 +15,7 @@ import type {
 	Extension,
 	ExtensionActions,
 	ExtensionContextActions,
+	ExtensionHandlers,
 	ProviderConfig,
 } from "../src/core/extensions/types.ts";
 import { KeybindingsManager, type KeyId } from "../src/core/keybindings.ts";
@@ -60,7 +62,7 @@ describe("ExtensionRunner", () => {
 		],
 	};
 
-	function extensionWithHandlers(path: string, handlers: Extension["handlers"]): Extension {
+	function extensionWithHandlers(path: string, handlers: ExtensionHandlers): Extension {
 		return {
 			path,
 			resolvedPath: path,
@@ -689,7 +691,7 @@ describe("ExtensionRunner", () => {
 			expect(chainedContent).toHaveLength(3);
 			const appendedText = chainedContent!
 				.slice(1)
-				.filter((item): item is { type: "text"; text: string } => item.type === "text")
+				.filter((item): item is TextContent => item.type === "text")
 				.map((item) => item.text);
 			expect(appendedText.sort()).toEqual(["ext1", "ext2"]);
 		});

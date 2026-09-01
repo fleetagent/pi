@@ -178,6 +178,29 @@ export class ProcessTerminal implements Terminal {
 		this.queryAndEnableKittyProtocol();
 	}
 
+	private handleInitialKeyboardProtocolInput(sequence: string): boolean {
+		if (!this.keyboardProtocolNegotiationPending) return false;
+		const negotiationSequence = this.readKeyboardProtocolNegotiationSequence(sequence, true);
+		if (negotiationSequence === "pending") return true;
+		return this.handleKeyboardProtocolNegotiationSequence(negotiationSequence);
+	}
+
+	private handleLateKeyboardProtocolInput(sequence: string): boolean {
+		if (!this.keyboardProtocolLateResponsePending) return false;
+		const negotiationSequence = this.readKeyboardProtocolNegotiationSequence(sequence, false);
+		if (negotiationSequence === "pending") {
+			this.scheduleKeyboardProtocolNegotiationBufferFlush();
+			return true;
+		}
+		return this.handleKeyboardProtocolNegotiationSequence(negotiationSequence);
+	}
+
+	private handleBufferedInputSequence(sequence: string): void {
+		if (this.handleInitialKeyboardProtocolInput(sequence)) return;
+		if (this.handleLateKeyboardProtocolInput(sequence)) return;
+		this.forwardInputSequence(sequence);
+	}
+
 	/**
 	 * Set up StdinBuffer to split batched input into individual sequences.
 	 * This ensures components receive single events, making matchesKey/isKeyRelease work correctly.
@@ -190,30 +213,7 @@ export class ProcessTerminal implements Terminal {
 		this.stdinBuffer = new StdinBuffer({ timeout: 10 });
 
 		// Forward individual sequences to the input handler
-		this.stdinBuffer.on("data", (sequence) => {
-			if (this.keyboardProtocolNegotiationPending) {
-				const negotiationSequence = this.readKeyboardProtocolNegotiationSequence(sequence, true);
-				if (negotiationSequence === "pending") {
-					return; // Wait for the rest of a split negotiation response.
-				}
-				if (this.handleKeyboardProtocolNegotiationSequence(negotiationSequence)) {
-					return;
-				}
-			}
-
-			if (this.keyboardProtocolLateResponsePending) {
-				const negotiationSequence = this.readKeyboardProtocolNegotiationSequence(sequence, false);
-				if (negotiationSequence === "pending") {
-					this.scheduleKeyboardProtocolNegotiationBufferFlush();
-					return; // Wait for the rest of a split late negotiation response.
-				}
-				if (this.handleKeyboardProtocolNegotiationSequence(negotiationSequence)) {
-					return;
-				}
-			}
-
-			this.forwardInputSequence(sequence);
-		});
+		this.stdinBuffer.on("data", (sequence) => this.handleBufferedInputSequence(sequence));
 
 		// Re-wrap paste content with bracketed paste markers for existing editor handling
 		this.stdinBuffer.on("paste", (content) => {

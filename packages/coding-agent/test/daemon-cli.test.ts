@@ -55,8 +55,12 @@ async function createConfiguration(
 	);
 	return { ...command.configuration!, port: 0, ...overrides };
 }
+interface DaemonWebSocketOptions {
+	authorization?: string;
+	origin?: string;
+}
 
-async function openWebSocket(url: string, options?: { authorization?: string; origin?: string }): Promise<WebSocket> {
+async function openWebSocket(url: string, options?: DaemonWebSocketOptions): Promise<WebSocket> {
 	const headers: Record<string, string> = {};
 	if (options?.authorization) headers.authorization = options.authorization;
 	if (options?.origin) headers.origin = options.origin;

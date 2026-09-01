@@ -12,6 +12,7 @@ import { registerFauxProvider } from "@fleetagent/pi-ai";
 import { AgentSession, type AgentSessionEvent } from "../../src/core/agent-session.ts";
 import { AuthStorage } from "../../src/core/auth-storage.ts";
 import type { ExtensionRunner } from "../../src/core/extensions/runner.ts";
+import type { HookDiagnostic, LoadedHooks } from "../../src/core/hooks/types.ts";
 import { convertToLlm } from "../../src/core/messages.ts";
 import { ModelRegistry } from "../../src/core/model-registry.ts";
 import { InMemorySessionManager } from "../../src/core/session/in-memory-session-manager.ts";
@@ -27,13 +28,23 @@ import {
 	createTestResourceLoader,
 } from "../utilities.ts";
 
-type MessageTextPart = { type: "text"; text: string };
+// pi-ignore noNearIdenticalDataStructures: The harness parses arbitrary session-message content, while the component fixture captures streamed tool-update content.
+interface HarnessMessageContentPart {
+	type: string;
+	text?: string;
+}
+
+interface MessageTextPart extends HarnessMessageContentPart {
+	type: "text";
+	text: string;
+}
+type HarnessEventOfType<T extends AgentSessionEvent["type"]> = Extract<AgentSessionEvent, { type: T }>;
 
 export function getMessageText(message: unknown): string {
 	if (!message || typeof message !== "object" || !("content" in message)) {
 		return "";
 	}
-	const content = (message as { content?: string | Array<{ type: string; text?: string }> }).content;
+	const content = (message as { content?: string | HarnessMessageContentPart[] }).content;
 	if (content === undefined) {
 		return "";
 	}
@@ -68,6 +79,8 @@ export interface HarnessOptions {
 	withConfiguredAuth?: boolean;
 	toolOperations?: ToolOperations;
 	subagentRunner?: SubagentRunner;
+	loadedHooks?: LoadedHooks;
+	onHookDiagnostic?: (diagnostic: HookDiagnostic) => void;
 }
 
 export interface Harness {
@@ -83,7 +96,7 @@ export interface Harness {
 	appendResponses: (responses: FauxResponseStep[]) => void;
 	getPendingResponseCount: () => number;
 	events: AgentSessionEvent[];
-	eventsOfType<T extends AgentSessionEvent["type"]>(type: T): Extract<AgentSessionEvent, { type: T }>[];
+	eventsOfType<T extends AgentSessionEvent["type"]>(type: T): HarnessEventOfType<T>[];
 	tempDir: string;
 	cleanup: () => void;
 }
@@ -181,6 +194,8 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		subagentRunner: options.subagentRunner,
 		baseToolsOverride: toolMap,
 		extensionRunnerRef,
+		loadedHooks: options.loadedHooks,
+		onHookDiagnostic: options.onHookDiagnostic,
 	});
 
 	const events: AgentSessionEvent[] = [];
@@ -201,7 +216,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		getPendingResponseCount: fauxProvider.getPendingResponseCount,
 		events,
 		eventsOfType<T extends AgentSessionEvent["type"]>(type: T) {
-			return events.filter((event): event is Extract<AgentSessionEvent, { type: T }> => event.type === type);
+			return events.filter((event): event is HarnessEventOfType<T> => event.type === type);
 		},
 		tempDir,
 		cleanup() {

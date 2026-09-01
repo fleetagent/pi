@@ -11,6 +11,10 @@ export interface ContextUsageEstimate {
 	lastUsageIndex: number | null;
 }
 
+export interface AssistantUsageInfo {
+	usage: Usage;
+	index: number;
+}
 const CHARS_PER_TOKEN = 4;
 const ESTIMATED_IMAGE_CHARS = 4800;
 
@@ -63,7 +67,7 @@ export function estimateMessageTokens(message: Message): number {
 	return Math.ceil(chars / CHARS_PER_TOKEN);
 }
 
-function getLastAssistantUsageInfo(messages: readonly Message[]): { usage: Usage; index: number } | undefined {
+function getLastAssistantUsageInfo(messages: readonly Message[]): AssistantUsageInfo | undefined {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const message = messages[i];
 		if (message.role !== "assistant") continue;

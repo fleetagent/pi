@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join, posix, resolve, win32 } from "node:path";
-import { Agent, type AgentMessage, type ThinkingLevel } from "@fleetagent/pi-agent-core";
+import { Agent, type ThinkingLevel } from "@fleetagent/pi-agent-core";
 import {
 	clampThinkingLevel,
 	type ImageContent,
@@ -8,6 +8,7 @@ import {
 	type Model,
 	refreshModelCatalog,
 	streamSimple,
+	type TextContent,
 } from "@fleetagent/pi-ai";
 import type { TuiMode } from "@fleetagent/pi-tui";
 import chalk from "chalk";
@@ -24,12 +25,22 @@ import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { ExtensionRunner } from "./extensions/runner.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import type {
+	ExtensionForkOptions,
+	ExtensionNewSessionOptions,
+	ExtensionSessionActionResult,
+	ExtensionSwitchSessionOptions,
 	ReplacedSessionContext,
-	SessionShutdownEvent,
+	SessionForkPosition,
+	SessionShutdownReason,
 	SessionStartEvent,
+	SessionSwitchReason,
 	ToolDefinition,
 } from "./extensions/types.ts";
+import { freezeLoadedHooks, loadHooks } from "./hooks/config.ts";
+import { canonicalProjectHookCwd, canonicalProjectHookIdentity } from "./hooks/trust-store.ts";
+import type { HookDiagnostic, LoadedHooks } from "./hooks/types.ts";
 import {
+	type LoadLspConfigurationResult,
 	type LspConfigurationInput,
 	type LspConfigurationSourceDiagnostic,
 	loadLspConfiguration,
@@ -37,7 +48,7 @@ import {
 import type { LspConnectionFactoryRegistry } from "./lsp/transport.ts";
 import { convertToLlm } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
-import { findInitialModel, resolveCliModel } from "./model-resolver.ts";
+import { findInitialModel, type ResolveCliModelResult, resolveCliModel, type ScopedModel } from "./model-resolver.ts";
 import { restoreStdout, takeOverStdout } from "./output-guard.ts";
 import { DefaultResourceLoader, type DefaultResourceLoaderOptions, type ResourceLoader } from "./resource-loader.ts";
 import { InMemorySessionManager } from "./session/in-memory-session-manager.ts";
@@ -45,9 +56,10 @@ import { getDefaultSessionDir } from "./session/jsonl-helpers.ts";
 import { LocalSessionManager } from "./session/local-session-manager.ts";
 import type { Session } from "./session/session.ts";
 import type { SessionManager } from "./session/session-manager.ts";
-import type { SessionInfo, SessionListProgress } from "./session/types.ts";
+import type { SessionContext, SessionInfo, SessionListProgress } from "./session/types.ts";
 import { assertSessionCwdExists } from "./session-cwd.ts";
 import { InMemorySettingsStorage, SettingsManager } from "./settings-manager.ts";
+import type { Skill } from "./skills.ts";
 import { getSourceBackend } from "./source-info.ts";
 import { isInstallTelemetryEnabled } from "./telemetry.ts";
 import { printTimings, time } from "./timings.ts";
@@ -61,12 +73,16 @@ import type {
 	SubagentConfigRegistry,
 	SubagentRunInfo,
 	SubagentRunner,
+	SubagentRunOutcome,
 	SubagentRunRegistry,
 	SubagentRunRequest,
 } from "./tools/subagent.ts";
 
+export type PiAgentDiagnosticType = "info" | "warning" | "error";
+export type PiAgentToolExclusionMode = "all" | "builtin";
+
 export interface PiAgentDiagnostic {
-	type: "info" | "warning" | "error";
+	type: PiAgentDiagnosticType;
 	message: string;
 	/** Whether this diagnostic must prevent application startup. Errors are fatal by default. */
 	fatal?: boolean;
@@ -84,6 +100,20 @@ export interface PiAgentServices {
 	modelRegistry: ModelRegistry;
 	resourceLoader: ResourceLoader;
 	diagnostics: PiAgentDiagnostic[];
+}
+
+interface HookDiscoveryResolution {
+	cwd: string;
+	discoverProjectHooks: boolean;
+}
+
+interface SessionModelResolution {
+	model: Model<any> | undefined;
+	fallbackMessage: string | undefined;
+}
+
+interface ExtensionRunnerReference {
+	current?: ExtensionRunner;
 }
 
 interface BuiltAgentSession {
@@ -104,21 +134,47 @@ function formatLspConfigurationDiagnostics(
 	}));
 }
 
+function formatHookDiagnostic(diagnostic: HookDiagnostic): PiAgentDiagnostic {
+	const source = diagnostic.source ? ` (${diagnostic.source.kind}: ${diagnostic.source.path})` : "";
+	return {
+		type: diagnostic.level,
+		fatal: false,
+		message: `Hook ${diagnostic.code}${source}: ${diagnostic.message}`,
+	};
+}
+
+export interface PiAgentHooksOptions {
+	/** Disable automatic trusted-user Pi and Claude-compatible hook discovery. Default: true. */
+	enabled?: boolean;
+	/** Override the home directory used for Claude compatibility discovery; native hooks use the active agentDir. */
+	home?: string;
+	/** Host ceiling for HTTP hook destinations. */
+	allowedHttpHookUrls?: readonly string[];
+	/** Host ceiling for HTTP hook header environment interpolation. */
+	httpHookAllowedEnvVars?: readonly string[];
+	/** Host-injected snapshot; cloned and frozen before use instead of reading settings files. */
+	snapshot?: LoadedHooks;
+}
+
 export interface PiAgentSessionOptions {
 	model?: Model<any>;
 	thinkingLevel?: ThinkingLevel;
-	scopedModels?: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
+	scopedModels?: ScopedModel[];
 	tools?: string[];
 	excludedTools?: string[];
 	/** Trust project-local subagent presets without an interactive host prompt. */
 	trustProjectAgents?: boolean;
+	/** Explicit host trust grant for project Pi and Claude-compatible hooks. Ignored by non-local backends. */
+	trustProjectHooks?: boolean;
+	/** Optional canonical repository identity constraining the project-hook trust grant. */
+	trustedProjectHooksIdentity?: string;
 	/** LSP layers or files supplied by a CLI, SDK, or host. Host scope is the default. */
 	lsp?: LspConfigurationInput | LspConfigurationInput[];
 	/** Host-provided factories referenced by LSP transports with type `connection`. */
 	lspConnectionFactories?: LspConnectionFactoryRegistry;
 	/** Trust active LSP transports from project settings after applying a host-controlled approval policy. */
 	trustProjectLspTransports?: boolean;
-	noTools?: "all" | "builtin";
+	noTools?: PiAgentToolExclusionMode;
 	customTools?: ToolDefinition[];
 	toolOperations?: ToolOperations;
 }
@@ -140,6 +196,8 @@ export interface CreatePiAgentOptions extends PiAgentSessionOptions {
 	mode?: PiAgentAppMode;
 	cwd?: string;
 	agentDir?: string;
+	/** Claude-compatible host-local hooks, or false to disable them. */
+	hooks?: false | PiAgentHooksOptions;
 	/** Session lifecycle/discovery backend. Default: local JSONL sessions for cwd. */
 	sessionManager?: SessionManager;
 	/** Shared auth storage reused across runtime recreation. */
@@ -158,6 +216,90 @@ export interface CreatePiAgentSessionOptions {
 	/** Initial active conversation state. Default: sessionManager.create(). */
 	session?: Session;
 	sessionStartEvent?: SessionStartEvent;
+}
+export interface PiAgentSwitchSessionOptions extends ExtensionSwitchSessionOptions {
+	cwdOverride?: string;
+}
+
+export interface PiAgentForkResult extends ExtensionSessionActionResult {
+	selectedText?: string;
+}
+
+export interface PiAgentStdioOptions {
+	mode: PiAgentAppMode;
+}
+
+interface PiAgentResolvedDependencies {
+	cwd: string;
+	agentDir: string;
+	sessionManager: SessionManager;
+	authStorage: AuthStorage;
+}
+
+interface ForkPreparationOptions {
+	position: SessionForkPosition;
+}
+
+interface MutableSubagentRunRegistry extends SubagentRunRegistry {
+	upsert(run: SubagentRunInfo): void;
+	get(runId: string): SubagentRunInfo | undefined;
+}
+
+interface EmbeddedSubagentChildState {
+	child: PiAgent;
+	session: AgentSession;
+	run: SubagentRunInfo;
+	toolOperations: ToolOperations;
+	backendIdentity: string;
+}
+
+interface EmbeddedSubagentRuntimeState {
+	nextRunNumber: number;
+	children: Map<string, EmbeddedSubagentChildState>;
+}
+
+interface EmbeddedSubagentRunnerContext {
+	services: PiAgentServices;
+	excludedTools: string[];
+	registry: MutableSubagentRunRegistry;
+	runtime: EmbeddedSubagentRuntimeState;
+}
+
+interface EmbeddedSubagentRequestContext {
+	resolvedModel: ResolveCliModelResult | undefined;
+	toolOperations: ToolOperations;
+	backendInfo: ToolBackendInfo | undefined;
+	backendIdentity: string;
+}
+
+type EmbeddedSubagentRequestResolution =
+	| { context: EmbeddedSubagentRequestContext; failure?: never }
+	| { context?: never; failure: SubagentRunOutcome };
+
+interface PreparedEmbeddedSubagentChild {
+	childState: EmbeddedSubagentChildState;
+	runId: string;
+	failure?: never;
+}
+
+type EmbeddedSubagentChildPreparation =
+	| PreparedEmbeddedSubagentChild
+	| { childState?: never; runId?: never; failure: SubagentRunOutcome };
+
+type EmbeddedSubagentChildCreation =
+	| { childState: EmbeddedSubagentChildState; failure?: never }
+	| { childState?: never; failure: SubagentRunOutcome };
+
+type EmbeddedSubagentSkillSelection =
+	| { skills: Skill[]; failure?: never }
+	| { skills?: never; failure: SubagentRunOutcome };
+
+type EmbeddedSubagentSkillPreload =
+	| { blocks: string[]; failure?: never }
+	| { blocks?: never; failure: SubagentRunOutcome };
+
+interface EmbeddedSubagentOutputState {
+	lastOutput: string | undefined;
 }
 
 export type PiAgentAppMode = "embedded" | "interactive" | "print" | "json" | "rpc";
@@ -181,21 +323,10 @@ export interface PiAgentRuntimeHost {
 	readonly modelFallbackMessage: string | undefined;
 	setRebindSession(rebindSession?: (session: AgentSession) => Promise<void>): void;
 	setBeforeSessionInvalidate(beforeSessionInvalidate?: () => void): void;
-	switchSession(
-		sessionPath: string,
-		options?: { cwdOverride?: string; withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
-	): Promise<{ cancelled: boolean }>;
-	newSession(options?: {
-		id?: string;
-		parentSession?: string;
-		setup?: (session: Session) => Promise<void>;
-		withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
-	}): Promise<{ cancelled: boolean }>;
-	fork(
-		entryId: string,
-		options?: { position?: "before" | "at"; withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
-	): Promise<{ cancelled: boolean; selectedText?: string }>;
-	importFromJsonl(inputPath: string, cwdOverride?: string): Promise<{ cancelled: boolean }>;
+	switchSession(sessionPath: string, options?: PiAgentSwitchSessionOptions): Promise<ExtensionSessionActionResult>;
+	newSession(options?: ExtensionNewSessionOptions): Promise<ExtensionSessionActionResult>;
+	fork(entryId: string, options?: ExtensionForkOptions): Promise<PiAgentForkResult>;
+	importFromJsonl(inputPath: string, cwdOverride?: string): Promise<ExtensionSessionActionResult>;
 	listSessions(onProgress?: SessionListProgress): Promise<SessionInfo[]>;
 	listAllSessions(onProgress?: SessionListProgress): Promise<SessionInfo[]>;
 	dispose(): Promise<void>;
@@ -213,9 +344,7 @@ export class SessionImportFileNotFoundError extends Error {
 
 function isSubagentCwdConfined(cwd: string, operations: ToolOperations, backend: ToolBackendInfo | undefined): boolean {
 	if (backend?.type === "local") return true;
-	if (backend?.type === "ssh" || backend === undefined) {
-		return posix.normalize(cwd) === posix.normalize(operations.cwd);
-	}
+	if (backend === undefined) return posix.normalize(cwd) === posix.normalize(operations.cwd);
 	const pathApi =
 		backend?.type === "remote" && backend.configured && backend.workspace.pathFlavor === "windows" ? win32 : posix;
 	const relative = pathApi.relative(pathApi.normalize(operations.cwd), pathApi.normalize(cwd));
@@ -225,15 +354,38 @@ function isSubagentCwdConfined(cwd: string, operations: ToolOperations, backend:
 	);
 }
 
-function extractUserMessageText(content: string | Array<{ type: string; text?: string }>): string {
+function extractUserMessageText(content: string | (TextContent | ImageContent)[]): string {
 	if (typeof content === "string") {
 		return content;
 	}
 
 	return content
-		.filter((part): part is { type: "text"; text: string } => part.type === "text" && typeof part.text === "string")
+		.filter((part): part is TextContent => part.type === "text")
 		.map((part) => part.text)
 		.join("");
+}
+
+function blockImagesInMessage(message: Message): Message {
+	if (message.role !== "user" && message.role !== "toolResult") return message;
+	const { content } = message;
+	if (!Array.isArray(content) || !content.some((part) => part.type === "image")) return message;
+	const filteredContent = content
+		.map((part) => (part.type === "image" ? { type: "text" as const, text: "Image reading is disabled." } : part))
+		.filter(
+			(part, index, parts) =>
+				!(
+					part.type === "text" &&
+					part.text === "Image reading is disabled." &&
+					index > 0 &&
+					parts[index - 1].type === "text" &&
+					(parts[index - 1] as TextContent).text === "Image reading is disabled."
+				),
+		);
+	return { ...message, content: filteredContent };
+}
+
+function asLspInputs(input: LspConfigurationInput | LspConfigurationInput[] | undefined): LspConfigurationInput[] {
+	return input === undefined ? [] : Array.isArray(input) ? input : [input];
 }
 
 function getAttributionHeaders(
@@ -322,6 +474,41 @@ function applyExtensionFlagValues(
 	return diagnostics;
 }
 
+async function runInteractiveAppMode(
+	runtimeHost: PiAgentRuntimeHost,
+	modelFallbackMessage: string | undefined,
+	options: RunPiAgentModeOptions,
+): Promise<void> {
+	const interactiveMode = new InteractiveMode(runtimeHost, {
+		migratedProviders: options.migratedProviders,
+		modelFallbackMessage,
+		initialMessage: options.initialMessage,
+		initialImages: options.initialImages,
+		initialMessages: options.initialMessages,
+		verbose: options.verbose,
+		tuiMode: options.tuiMode,
+	});
+	if (options.startupBenchmark) {
+		await interactiveMode.init();
+		time("interactiveMode.init");
+		// Give the TUI's stdin handler a brief chance to consume terminal query replies
+		// (Kitty keyboard protocol, device attributes, cell size) before restoring the terminal.
+		await new Promise((resolve) => setTimeout(resolve, 150));
+		interactiveMode.stop();
+		stopThemeWatcher();
+		printTimings();
+		if (process.stdout.writableLength > 0) {
+			await new Promise<void>((resolve) => process.stdout.once("drain", resolve));
+		}
+		if (process.stderr.writableLength > 0) {
+			await new Promise<void>((resolve) => process.stderr.once("drain", resolve));
+		}
+		return;
+	}
+	printTimings();
+	await interactiveMode.run();
+}
+
 /**
  * Application-level composition root for pi's coding agent runtime.
  *
@@ -350,15 +537,7 @@ export class PiAgent {
 	private disposePromise: Promise<void> | undefined;
 	private readonly subagentCleanupCallbacks = new Set<() => Promise<void>>();
 
-	private constructor(
-		options: CreatePiAgentOptions,
-		resolved: {
-			cwd: string;
-			agentDir: string;
-			sessionManager: SessionManager;
-			authStorage: AuthStorage;
-		},
-	) {
+	private constructor(options: CreatePiAgentOptions, resolved: PiAgentResolvedDependencies) {
 		this.options = options;
 		this.borrowedToolOperations = options.toolOperations ? borrowToolOperations(options.toolOperations) : undefined;
 		this._mode = options.mode ?? "embedded";
@@ -368,7 +547,7 @@ export class PiAgent {
 		this.authStorage = resolved.authStorage;
 	}
 
-	static setupStdio(options: { mode: PiAgentAppMode }): void {
+	static setupStdio(options: PiAgentStdioOptions): void {
 		if (options.mode !== "embedded" && options.mode !== "interactive") {
 			takeOverStdout();
 		}
@@ -460,10 +639,7 @@ export class PiAgent {
 			diagnostics,
 		};
 	}
-	private createSubagentRunRegistry(): SubagentRunRegistry & {
-		upsert(run: SubagentRunInfo): void;
-		get(runId: string): SubagentRunInfo | undefined;
-	} {
+	private createSubagentRunRegistry(): MutableSubagentRunRegistry {
 		const runs = new Map<string, SubagentRunInfo>();
 		return {
 			list: () => Array.from(runs.values()).sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
@@ -481,238 +657,535 @@ export class PiAgent {
 		};
 	}
 
+	private resolveEmbeddedSubagentRequest(
+		request: SubagentRunRequest,
+		services: PiAgentServices,
+	): EmbeddedSubagentRequestResolution {
+		const resolvedModel = request.model
+			? resolveCliModel({ cliModel: request.model, modelRegistry: services.modelRegistry })
+			: undefined;
+		if (resolvedModel?.error) return { failure: { exitCode: 1, stderr: resolvedModel.error } };
+		const toolOperations = request.toolOperations;
+		if (!toolOperations) {
+			return { failure: { exitCode: 1, stderr: "Subagents require explicit workspace tool operations" } };
+		}
+		const backendInfo = toolOperations.getBackendInfo?.();
+		if (backendInfo?.type === "remote" && !backendInfo.configured) {
+			return { failure: { exitCode: 1, stderr: "Subagents cannot run with an unconfigured remote backend" } };
+		}
+		if (!isSubagentCwdConfined(request.cwd, toolOperations, backendInfo)) {
+			return {
+				failure: {
+					exitCode: 1,
+					stderr: `Sandboxed subagent cwd must stay within the sandbox workspace root: ${toolOperations.cwd}`,
+				},
+			};
+		}
+		const backendIdentity = JSON.stringify(backendInfo ?? { type: "unknown", cwd: toolOperations.cwd });
+		return { context: { resolvedModel, toolOperations, backendInfo, backendIdentity } };
+	}
+
+	private selectEmbeddedSubagentSkills(
+		request: SubagentRunRequest,
+		services: PiAgentServices,
+	): EmbeddedSubagentSkillSelection {
+		const requestedSkills = request.skills ?? [];
+		const loadedSkills = services.resourceLoader.getSkills().skills;
+		const skillsByName = new Map<string, Skill>();
+		for (const skill of loadedSkills) {
+			if (!skillsByName.has(skill.name)) skillsByName.set(skill.name, skill);
+		}
+		const missingSkills: string[] = [];
+		const skills: Skill[] = [];
+		for (const name of requestedSkills) {
+			const skill = skillsByName.get(name);
+			if (skill) skills.push(skill);
+			else missingSkills.push(name);
+		}
+		if (missingSkills.length > 0) {
+			return { failure: { exitCode: 1, stderr: `Unknown subagent skill(s): ${missingSkills.join(", ")}` } };
+		}
+		return { skills };
+	}
+
+	private async loadEmbeddedSubagentSkillContent(
+		skill: Skill,
+		toolOperations: ToolOperations,
+		backendInfo: ToolBackendInfo | undefined,
+	): Promise<string> {
+		if (skill.content !== undefined) return skill.content;
+		if (backendInfo?.type === "local") return readFileSync(skill.filePath, "utf-8");
+		if (getSourceBackend(skill.sourceInfo) === "local") {
+			throw new Error("local skill files are unavailable to a sandboxed subagent");
+		}
+		return (await toolOperations.readFile(skill.filePath)).toString("utf-8");
+	}
+
+	private async preloadEmbeddedSubagentSkills(
+		skills: Skill[],
+		context: EmbeddedSubagentRequestContext,
+	): Promise<EmbeddedSubagentSkillPreload> {
+		const blocks: string[] = [];
+		for (const skill of skills) {
+			try {
+				const content = await this.loadEmbeddedSubagentSkillContent(
+					skill,
+					context.toolOperations,
+					context.backendInfo,
+				);
+				blocks.push(
+					`<preloaded-skill name="${skill.name}" location="${skill.filePath}">\nReferences are relative to ${skill.baseDir}.\n\n${stripFrontmatter(content).trim()}\n</preloaded-skill>`,
+				);
+			} catch (error) {
+				return {
+					failure: {
+						exitCode: 1,
+						stderr: `Failed to preload subagent skill ${skill.name}: ${error instanceof Error ? error.message : String(error)}`,
+					},
+				};
+			}
+		}
+		return { blocks };
+	}
+
+	private async createEmbeddedSubagentChild(
+		request: SubagentRunRequest,
+		requestContext: EmbeddedSubagentRequestContext,
+		runnerContext: EmbeddedSubagentRunnerContext,
+		runId: string,
+	): Promise<EmbeddedSubagentChildCreation> {
+		const settingsStorage = new InMemorySettingsStorage();
+		settingsStorage.withLock("global", () =>
+			JSON.stringify(runnerContext.services.settingsManager.getGlobalSettings()),
+		);
+		settingsStorage.withLock("project", () =>
+			JSON.stringify(runnerContext.services.settingsManager.getProjectSettings()),
+		);
+		const settingsManager = SettingsManager.fromStorage(settingsStorage);
+		const selection = this.selectEmbeddedSubagentSkills(request, runnerContext.services);
+		if (selection.failure) return selection;
+		const preload = await this.preloadEmbeddedSubagentSkills(selection.skills, requestContext);
+		if (preload.failure) return preload;
+
+		const childExcludedTools = new Set([
+			"subagent",
+			"subagent_runs",
+			"create_subagent",
+			...runnerContext.excludedTools,
+		]);
+		const requestedTools = request.tools ?? getDefaultActiveToolNames();
+		const skillTools = selection.skills.flatMap((skill) => skill.tools ?? []);
+		const tools = Array.from(new Set([...requestedTools, ...skillTools])).filter(
+			(name) => !childExcludedTools.has(name),
+		);
+		const child = await PiAgent.create({
+			mode: "embedded",
+			cwd: request.cwd,
+			agentDir: runnerContext.services.agentDir,
+			sessionManager: new InMemorySessionManager(request.cwd),
+			authStorage: runnerContext.services.authStorage,
+			modelRegistry: runnerContext.services.modelRegistry,
+			settingsManager,
+			model: requestContext.resolvedModel?.model,
+			thinkingLevel: requestContext.resolvedModel?.thinkingLevel,
+			tools,
+			excludedTools: Array.from(childExcludedTools),
+			toolOperations: requestContext.toolOperations,
+			resourceLoaderOptions: {
+				toolOperations: requestContext.toolOperations,
+				noExtensions: true,
+				noSkills: true,
+				noRules: true,
+				noPromptTemplates: true,
+				noThemes: true,
+				noContextFiles: true,
+				systemPrompt: "",
+				appendSystemPrompt: [],
+				systemPromptOverride: () => undefined,
+				appendSystemPromptOverride: () => [request.systemPrompt, ...preload.blocks],
+			},
+		});
+		const session = await child.createAgentSession();
+		const now = new Date().toISOString();
+		const run: SubagentRunInfo = {
+			runId,
+			sessionReference: session.sessionReference,
+			status: "running",
+			agent: request.agent,
+			task: request.task,
+			cwd: request.cwd,
+			model: request.model,
+			createdAt: now,
+			updatedAt: now,
+		};
+		const childState: EmbeddedSubagentChildState = {
+			child,
+			session,
+			run,
+			toolOperations: requestContext.toolOperations,
+			backendIdentity: requestContext.backendIdentity,
+		};
+		runnerContext.runtime.children.set(runId, childState);
+		runnerContext.registry.upsert(run);
+		return { childState };
+	}
+
+	private async prepareEmbeddedSubagentChild(
+		request: SubagentRunRequest,
+		requestContext: EmbeddedSubagentRequestContext,
+		runnerContext: EmbeddedSubagentRunnerContext,
+	): Promise<EmbeddedSubagentChildPreparation> {
+		const continuedRunId = request.continueSession;
+		const childState = continuedRunId ? runnerContext.runtime.children.get(continuedRunId) : undefined;
+		if (request.continueSession && !childState) {
+			return { failure: { exitCode: 1, stderr: `Unknown subagent run id: ${request.continueSession}` } };
+		}
+		if (
+			childState &&
+			(childState.toolOperations !== requestContext.toolOperations ||
+				childState.backendIdentity !== requestContext.backendIdentity)
+		) {
+			await childState.child.dispose();
+			runnerContext.runtime.children.delete(childState.run.runId);
+			childState.run = { ...childState.run, status: "failed", updatedAt: new Date().toISOString() };
+			runnerContext.registry.upsert(childState.run);
+			return {
+				failure: {
+					exitCode: 1,
+					stderr: "The parent workspace backend changed; start a new subagent instead of continuing this run",
+				},
+			};
+		}
+		if (!childState) {
+			const runId = `subagent:${runnerContext.runtime.nextRunNumber++}`;
+			const creation = await this.createEmbeddedSubagentChild(request, requestContext, runnerContext, runId);
+			if (creation.failure) return creation;
+			return { childState: creation.childState, runId };
+		}
+		childState.run = {
+			...childState.run,
+			status: "running",
+			task: request.task,
+			updatedAt: new Date().toISOString(),
+		};
+		runnerContext.registry.upsert(childState.run);
+		return { childState, runId: childState.run.runId };
+	}
+
+	private subscribeToEmbeddedSubagentRun(
+		childState: EmbeddedSubagentChildState,
+		request: SubagentRunRequest,
+		output: EmbeddedSubagentOutputState,
+		registry: MutableSubagentRunRegistry,
+	): () => void {
+		return childState.session.subscribe((event) => {
+			if (event.type !== "message_end") return;
+			if (event.message.role === "assistant" || event.message.role === "toolResult") {
+				request.onMessage(event.message as Message);
+			}
+			if (event.message.role !== "assistant") return;
+			output.lastOutput =
+				event.message.content
+					.filter((part) => part.type === "text")
+					.map((part) => part.text)
+					.join("\n") || output.lastOutput;
+			childState.run = {
+				...childState.run,
+				lastOutput: output.lastOutput,
+				updatedAt: new Date().toISOString(),
+			};
+			registry.upsert(childState.run);
+		});
+	}
+
+	private async executeEmbeddedSubagentRun(
+		request: SubagentRunRequest,
+		preparation: PreparedEmbeddedSubagentChild,
+		registry: MutableSubagentRunRegistry,
+	): Promise<SubagentRunOutcome> {
+		const { childState, runId } = preparation;
+		const session = childState.session;
+		const output: EmbeddedSubagentOutputState = { lastOutput: childState.run.lastOutput };
+		let unsubscribe: (() => void) | undefined;
+		const abort = (): void => {
+			void session.abort();
+		};
+		try {
+			unsubscribe = this.subscribeToEmbeddedSubagentRun(childState, request, output, registry);
+			if (request.signal?.aborted) {
+				return {
+					exitCode: 1,
+					stderr: "Subagent was aborted",
+					runId,
+					sessionReference: session.sessionReference,
+				};
+			}
+			request.signal?.addEventListener("abort", abort, { once: true });
+			await session.prompt(request.prompt);
+			const status = request.signal?.aborted ? "failed" : "completed";
+			childState.run = {
+				...childState.run,
+				status,
+				lastOutput: output.lastOutput,
+				updatedAt: new Date().toISOString(),
+			};
+			registry.upsert(childState.run);
+			return {
+				exitCode: request.signal?.aborted ? 1 : 0,
+				stderr: "",
+				runId,
+				sessionReference: session.sessionReference,
+			};
+		} catch (error) {
+			childState.run = {
+				...childState.run,
+				status: "failed",
+				updatedAt: new Date().toISOString(),
+			};
+			registry.upsert(childState.run);
+			return {
+				exitCode: 1,
+				stderr: error instanceof Error ? error.message : String(error),
+				runId,
+				sessionReference: session.sessionReference,
+			};
+		} finally {
+			request.signal?.removeEventListener("abort", abort);
+			unsubscribe?.();
+		}
+	}
+
+	private async runEmbeddedSubagent(
+		request: SubagentRunRequest,
+		runnerContext: EmbeddedSubagentRunnerContext,
+	): Promise<SubagentRunOutcome> {
+		const resolution = this.resolveEmbeddedSubagentRequest(request, runnerContext.services);
+		if (resolution.failure) return resolution.failure;
+		const preparation = await this.prepareEmbeddedSubagentChild(request, resolution.context, runnerContext);
+		if (preparation.failure) return preparation.failure;
+		return this.executeEmbeddedSubagentRun(request, preparation, runnerContext.registry);
+	}
+
 	private createEmbeddedSubagentRunner(
 		services: PiAgentServices,
 		excludedTools: string[],
-		registry: ReturnType<PiAgent["createSubagentRunRegistry"]>,
+		registry: MutableSubagentRunRegistry,
 	): SubagentRunner {
-		let nextRunNumber = 1;
-		const children = new Map<
-			string,
-			{
-				child: PiAgent;
-				session: AgentSession;
-				run: SubagentRunInfo;
-				toolOperations: ToolOperations;
-				backendIdentity: string;
-			}
-		>();
+		const runtime: EmbeddedSubagentRuntimeState = { nextRunNumber: 1, children: new Map() };
+		const runnerContext: EmbeddedSubagentRunnerContext = { services, excludedTools, registry, runtime };
 		const cleanup = async (): Promise<void> => {
-			for (const { child } of children.values()) await child.dispose();
-			children.clear();
+			for (const { child } of runtime.children.values()) await child.dispose();
+			runtime.children.clear();
 		};
 		this.subagentCleanupCallbacks.add(cleanup);
-		return async (request: SubagentRunRequest) => {
-			const resolvedModel = request.model
-				? resolveCliModel({ cliModel: request.model, modelRegistry: services.modelRegistry })
-				: undefined;
-			if (resolvedModel?.error) {
-				return { exitCode: 1, stderr: resolvedModel.error };
-			}
+		return (request) => this.runEmbeddedSubagent(request, runnerContext);
+	}
 
-			const activeToolOperations = request.toolOperations;
-			if (!activeToolOperations) {
-				return { exitCode: 1, stderr: "Subagents require explicit workspace tool operations" };
+	private resolveHookDiscovery(
+		services: PiAgentServices,
+		resolvedOptions: ResolvePiAgentSessionOptionsResult,
+		diagnostics: PiAgentDiagnostic[],
+	): HookDiscoveryResolution {
+		const hookOperations = resolvedOptions.toolOperations ?? this.borrowedToolOperations;
+		const customHookOperationsSupplied =
+			resolvedOptions.toolOperations !== undefined || this.borrowedToolOperations !== undefined;
+		const hookBackend = hookOperations?.getBackendInfo?.();
+		const trustProjectHooks = resolvedOptions.trustProjectHooks ?? this.options.trustProjectHooks;
+		const trustedIdentity = resolvedOptions.trustedProjectHooksIdentity ?? this.options.trustedProjectHooksIdentity;
+		let cwd = services.cwd;
+		let discoverProjectHooks =
+			trustProjectHooks === true && (!customHookOperationsSupplied || hookBackend?.type === "local");
+		if (!discoverProjectHooks) return { cwd, discoverProjectHooks };
+		try {
+			cwd = canonicalProjectHookCwd(services.cwd);
+			if (trustedIdentity && canonicalProjectHookIdentity(cwd) !== trustedIdentity) {
+				discoverProjectHooks = false;
+				diagnostics.push({
+					type: "warning",
+					message: "Project hook trust identity changed before hook loading; project hooks were not loaded",
+				});
 			}
-			const activeBackendInfo = activeToolOperations.getBackendInfo?.();
-			if (activeBackendInfo?.type === "remote" && !activeBackendInfo.configured) {
-				return { exitCode: 1, stderr: "Subagents cannot run with an unconfigured remote backend" };
-			}
-			if (!isSubagentCwdConfined(request.cwd, activeToolOperations, activeBackendInfo)) {
-				return {
-					exitCode: 1,
-					stderr: `Sandboxed subagent cwd must stay within the sandbox workspace root: ${activeToolOperations.cwd}`,
-				};
-			}
-			const backendIdentity = JSON.stringify(
-				activeBackendInfo ?? { type: "unknown", cwd: activeToolOperations.cwd },
-			);
-			let runId = request.continueSession;
-			let childState = runId ? children.get(runId) : undefined;
-			if (request.continueSession && !childState) {
-				return { exitCode: 1, stderr: `Unknown subagent run id: ${request.continueSession}` };
-			}
-			if (
-				childState &&
-				(childState.toolOperations !== activeToolOperations || childState.backendIdentity !== backendIdentity)
-			) {
-				await childState.child.dispose();
-				children.delete(childState.run.runId);
-				childState.run = { ...childState.run, status: "failed", updatedAt: new Date().toISOString() };
-				registry.upsert(childState.run);
-				return {
-					exitCode: 1,
-					stderr: "The parent workspace backend changed; start a new subagent instead of continuing this run",
-				};
-			}
+		} catch (error) {
+			discoverProjectHooks = false;
+			diagnostics.push({
+				type: "warning",
+				message: `Unable to canonicalize project hooks path; project hooks were not loaded: ${error instanceof Error ? error.message : String(error)}`,
+			});
+		}
+		return { cwd, discoverProjectHooks };
+	}
 
-			if (!childState) {
-				runId = `subagent:${nextRunNumber++}`;
-				const settingsStorage = new InMemorySettingsStorage();
-				settingsStorage.withLock("global", () => JSON.stringify(services.settingsManager.getGlobalSettings()));
-				settingsStorage.withLock("project", () => JSON.stringify(services.settingsManager.getProjectSettings()));
-				const settingsManager = SettingsManager.fromStorage(settingsStorage);
-				const requestedSkills = request.skills ?? [];
-				const loadedSkills = services.resourceLoader.getSkills().skills;
-				const missingSkills = requestedSkills.filter((name) => !loadedSkills.some((skill) => skill.name === name));
-				if (missingSkills.length > 0) {
-					return { exitCode: 1, stderr: `Unknown subagent skill(s): ${missingSkills.join(", ")}` };
-				}
-				const selectedSkills = requestedSkills
-					.map((name) => loadedSkills.find((skill) => skill.name === name))
-					.filter((skill): skill is (typeof loadedSkills)[number] => skill !== undefined);
-				const skillSystemPromptBlocks: string[] = [];
-				for (const skill of selectedSkills) {
-					try {
-						let content = skill.content;
-						if (content === undefined) {
-							if (activeBackendInfo?.type === "local") {
-								content = readFileSync(skill.filePath, "utf-8");
-							} else {
-								if (getSourceBackend(skill.sourceInfo) === "local") {
-									throw new Error("local skill files are unavailable to a sandboxed subagent");
-								}
-								content = (await activeToolOperations.readFile(skill.filePath)).toString("utf-8");
-							}
-						}
-						skillSystemPromptBlocks.push(
-							`<preloaded-skill name="${skill.name}" location="${skill.filePath}">\nReferences are relative to ${skill.baseDir}.\n\n${stripFrontmatter(content).trim()}\n</preloaded-skill>`,
-						);
-					} catch (error) {
-						return {
-							exitCode: 1,
-							stderr: `Failed to preload subagent skill ${skill.name}: ${error instanceof Error ? error.message : String(error)}`,
-						};
-					}
-				}
-				const childExcludedTools = new Set(["subagent", "subagent_runs", "create_subagent", ...excludedTools]);
-				const requestedTools = request.tools ?? getDefaultActiveToolNames();
-				const skillTools = selectedSkills.flatMap((skill) => skill.tools ?? []);
-				const tools = Array.from(new Set([...requestedTools, ...skillTools])).filter(
-					(name) => !childExcludedTools.has(name),
-				);
-				const child = await PiAgent.create({
-					mode: "embedded",
-					cwd: request.cwd,
+	private async loadSessionHooks(
+		services: PiAgentServices,
+		resolvedOptions: ResolvePiAgentSessionOptionsResult,
+		diagnostics: PiAgentDiagnostic[],
+	): Promise<LoadedHooks | undefined> {
+		const hookOptions = this.options.hooks;
+		const discovery = this.resolveHookDiscovery(services, resolvedOptions, diagnostics);
+		if (hookOptions === false || hookOptions?.enabled === false) return undefined;
+		const loadedHooks = hookOptions?.snapshot
+			? freezeLoadedHooks(hookOptions.snapshot)
+			: await loadHooks({
+					cwd: discovery.cwd,
+					home: hookOptions?.home,
 					agentDir: services.agentDir,
-					sessionManager: new InMemorySessionManager(request.cwd),
-					authStorage: services.authStorage,
-					modelRegistry: services.modelRegistry,
-					settingsManager,
-					model: resolvedModel?.model,
-					thinkingLevel: resolvedModel?.thinkingLevel,
-					tools,
-					excludedTools: Array.from(childExcludedTools),
-					toolOperations: activeToolOperations,
-					resourceLoaderOptions: {
-						toolOperations: activeToolOperations,
-						noExtensions: true,
-						noSkills: true,
-						noRules: true,
-						noPromptTemplates: true,
-						noThemes: true,
-						noContextFiles: true,
-						systemPrompt: "",
-						appendSystemPrompt: [],
-						systemPromptOverride: () => undefined,
-						appendSystemPromptOverride: () => [request.systemPrompt, ...skillSystemPromptBlocks],
-					},
+					sources: discovery.discoverProjectHooks ? ["user", "project", "local"] : ["user"],
 				});
-				const session = await child.createAgentSession();
-				const now = new Date().toISOString();
-				const run: SubagentRunInfo = {
-					runId,
-					sessionReference: session.sessionReference,
-					status: "running",
-					agent: request.agent,
-					task: request.task,
-					cwd: request.cwd,
-					model: request.model,
-					createdAt: now,
-					updatedAt: now,
-				};
-				childState = { child, session, run, toolOperations: activeToolOperations, backendIdentity };
-				children.set(runId, childState);
-				registry.upsert(run);
-			} else {
-				const now = new Date().toISOString();
-				childState.run = {
-					...childState.run,
-					status: "running",
-					task: request.task,
-					updatedAt: now,
-				};
-				registry.upsert(childState.run);
-			}
+		diagnostics.push(...loadedHooks.diagnostics.map(formatHookDiagnostic));
+		return loadedHooks;
+	}
 
-			const session = childState.session;
-			let lastOutput = childState.run.lastOutput;
-			let unsubscribe: (() => void) | undefined;
-			const abort = (): void => {
-				void session.abort();
-			};
-			try {
-				unsubscribe = session.subscribe((event) => {
-					if (event.type !== "message_end") return;
-					if (event.message.role === "assistant" || event.message.role === "toolResult") {
-						request.onMessage(event.message as Message);
-					}
-					if (event.message.role === "assistant") {
-						lastOutput =
-							event.message.content
-								.filter((part) => part.type === "text")
-								.map((part) => part.text)
-								.join("\n") || lastOutput;
-						childState.run = {
-							...childState.run,
-							lastOutput,
-							updatedAt: new Date().toISOString(),
-						};
-						registry.upsert(childState.run);
-					}
-				});
-				if (request.signal?.aborted) {
-					return {
-						exitCode: 1,
-						stderr: "Subagent was aborted",
-						runId,
-						sessionReference: session.sessionReference,
-					};
-				}
-				request.signal?.addEventListener("abort", abort, { once: true });
-				await session.prompt(request.prompt);
-				const status = request.signal?.aborted ? "failed" : "completed";
-				childState.run = {
-					...childState.run,
-					status,
-					lastOutput,
-					updatedAt: new Date().toISOString(),
-				};
-				registry.upsert(childState.run);
-				return {
-					exitCode: request.signal?.aborted ? 1 : 0,
-					stderr: "",
-					runId,
-					sessionReference: session.sessionReference,
-				};
-			} catch (error) {
-				childState.run = {
-					...childState.run,
-					status: "failed",
-					updatedAt: new Date().toISOString(),
-				};
-				registry.upsert(childState.run);
-				return {
-					exitCode: 1,
-					stderr: error instanceof Error ? error.message : String(error),
-					runId,
-					sessionReference: session.sessionReference,
-				};
-			} finally {
-				request.signal?.removeEventListener("abort", abort);
-				unsubscribe?.();
-			}
+	private mergeSessionOptions(resolvedOptions: ResolvePiAgentSessionOptionsResult): PiAgentSessionOptions {
+		return {
+			model: resolvedOptions.model ?? this.options.model,
+			thinkingLevel: resolvedOptions.thinkingLevel ?? this.options.thinkingLevel,
+			scopedModels: resolvedOptions.scopedModels ?? this.options.scopedModels,
+			tools: resolvedOptions.tools ?? this.options.tools,
+			excludedTools: resolvedOptions.excludedTools ?? this.options.excludedTools,
+			noTools: resolvedOptions.noTools ?? this.options.noTools,
+			customTools: resolvedOptions.customTools ?? this.options.customTools,
+			toolOperations: resolvedOptions.toolOperations
+				? borrowToolOperations(resolvedOptions.toolOperations)
+				: this.borrowedToolOperations,
+			trustProjectAgents: resolvedOptions.trustProjectAgents ?? this.options.trustProjectAgents,
+			trustProjectHooks: resolvedOptions.trustProjectHooks ?? this.options.trustProjectHooks,
+			trustProjectLspTransports: resolvedOptions.trustProjectLspTransports ?? this.options.trustProjectLspTransports,
+			lspConnectionFactories: resolvedOptions.lspConnectionFactories ?? this.options.lspConnectionFactories,
 		};
+	}
+
+	private resolveSessionLspConfiguration(
+		services: PiAgentServices,
+		sessionOptions: PiAgentSessionOptions,
+		inputs: LspConfigurationInput[],
+	): Promise<LoadLspConfigurationResult> {
+		if (sessionOptions.toolOperations?.getBackendInfo?.().type === "remote") {
+			return Promise.resolve({ configuration: { enabled: false, servers: [] }, diagnostics: [] });
+		}
+		return loadLspConfiguration({
+			settingsManager: services.settingsManager,
+			cwd: services.cwd,
+			agentDir: services.agentDir,
+			inputs,
+			trustProjectLspTransports: sessionOptions.trustProjectLspTransports,
+		});
+	}
+
+	private async resolveSessionModel(
+		services: PiAgentServices,
+		sessionOptions: PiAgentSessionOptions,
+		existingSession: SessionContext,
+	): Promise<SessionModelResolution> {
+		let model = sessionOptions.model;
+		let fallbackMessage: string | undefined;
+		if (model) model = services.modelRegistry.find(model.provider, model.id) ?? model;
+		if (!model && existingSession.messages.length > 0 && existingSession.model) {
+			const restoredModel = services.modelRegistry.find(
+				existingSession.model.provider,
+				existingSession.model.modelId,
+			);
+			if (restoredModel && services.modelRegistry.hasConfiguredAuth(restoredModel)) model = restoredModel;
+			if (!model)
+				fallbackMessage = `Could not restore model ${existingSession.model.provider}/${existingSession.model.modelId}`;
+		}
+		if (model) return { model, fallbackMessage };
+		const result = await findInitialModel({
+			scopedModels: [],
+			isContinuing: existingSession.messages.length > 0,
+			defaultProvider: services.settingsManager.getDefaultProvider(),
+			defaultModelId: services.settingsManager.getDefaultModel(),
+			defaultThinkingLevel: services.settingsManager.getDefaultThinkingLevel(),
+			modelRegistry: services.modelRegistry,
+		});
+		model = result.model;
+		if (!model) fallbackMessage = formatNoModelsAvailableMessage();
+		else if (fallbackMessage) fallbackMessage += `. Using ${model.provider}/${model.id}`;
+		return { model, fallbackMessage };
+	}
+
+	private resolveSessionThinkingLevel(
+		services: PiAgentServices,
+		activeSession: Session,
+		existingSession: SessionContext,
+		configuredLevel: ThinkingLevel | undefined,
+		model: Model<any> | undefined,
+	): ThinkingLevel {
+		const hasExistingSession = existingSession.messages.length > 0;
+		const hasThinkingEntry = activeSession.getBranch().some((entry) => entry.type === "thinking_level_change");
+		let thinkingLevel = configuredLevel;
+		if (thinkingLevel === undefined && hasExistingSession) {
+			thinkingLevel = hasThinkingEntry
+				? (existingSession.thinkingLevel as ThinkingLevel)
+				: (services.settingsManager.getDefaultThinkingLevel() ?? DEFAULT_THINKING_LEVEL);
+		}
+		thinkingLevel ??= services.settingsManager.getDefaultThinkingLevel() ?? DEFAULT_THINKING_LEVEL;
+		return model ? (clampThinkingLevel(model, thinkingLevel) as ThinkingLevel) : "off";
+	}
+
+	private createCoreAgent(
+		services: PiAgentServices,
+		activeSession: Session,
+		model: Model<any> | undefined,
+		thinkingLevel: ThinkingLevel,
+		extensionRunnerRef: ExtensionRunnerReference,
+	): Agent {
+		return new Agent({
+			initialState: { systemPrompt: "", model, thinkingLevel, tools: [] },
+			convertToLlm: (messages) => {
+				const converted = convertToLlm(messages);
+				return services.settingsManager.getBlockImages() ? converted.map(blockImagesInMessage) : converted;
+			},
+			streamFn: async (streamModel, context, options) => {
+				const auth = await services.modelRegistry.getApiKeyAndHeaders(streamModel);
+				if (!auth.ok) throw new Error(auth.error);
+				const providerRetrySettings = services.settingsManager.getProviderRetrySettings();
+				const timeoutMs =
+					options?.timeoutMs ??
+					providerRetrySettings.timeoutMs ??
+					(streamModel.api === "openai-codex-responses"
+						? services.settingsManager.getHttpIdleTimeoutMs()
+						: undefined);
+				const websocketConnectTimeoutMs =
+					options?.websocketConnectTimeoutMs ?? services.settingsManager.getWebSocketConnectTimeoutMs();
+				const attributionHeaders = getAttributionHeaders(streamModel, services.settingsManager, options?.sessionId);
+				let headers =
+					attributionHeaders || auth.headers || options?.headers
+						? { ...attributionHeaders, ...auth.headers, ...options?.headers }
+						: undefined;
+				const runner = extensionRunnerRef.current;
+				if (runner?.hasHandlers("before_provider_headers")) {
+					headers = await runner.emitBeforeProviderHeaders(headers ?? {});
+				}
+				return streamSimple(streamModel, context, {
+					...options,
+					apiKey: auth.apiKey,
+					timeoutMs,
+					websocketConnectTimeoutMs,
+					maxRetries: options?.maxRetries ?? providerRetrySettings.maxRetries,
+					maxRetryDelayMs: options?.maxRetryDelayMs ?? providerRetrySettings.maxRetryDelayMs,
+					headers,
+				});
+			},
+			onPayload: async (payload) => {
+				const runner = extensionRunnerRef.current;
+				return runner?.hasHandlers("before_provider_request") ? runner.emitBeforeProviderRequest(payload) : payload;
+			},
+			onResponse: async (response) => {
+				const runner = extensionRunnerRef.current;
+				if (!runner?.hasHandlers("after_provider_response")) return;
+				await runner.emit({ type: "after_provider_response", status: response.status, headers: response.headers });
+			},
+			sessionId: activeSession.getSessionId(),
+			transformContext: async (messages) => {
+				const runner = extensionRunnerRef.current;
+				return runner ? runner.emitContext(messages) : messages;
+			},
+			steeringMode: services.settingsManager.getSteeringMode(),
+			followUpMode: services.settingsManager.getFollowUpMode(),
+			transport: services.settingsManager.getTransport(),
+			thinkingBudgets: services.settingsManager.getThinkingBudgets(),
+			maxRetryDelayMs: services.settingsManager.getProviderRetrySettings().maxRetryDelayMs,
+		});
 	}
 
 	private async buildAgentSession(
@@ -730,35 +1203,11 @@ export class PiAgent {
 		const resolvedOptions =
 			(await this.options.resolveSessionOptions?.({ services, session: activeSession, sessionStartEvent })) ?? {};
 		diagnostics.push(...(resolvedOptions.diagnostics ?? []));
-		const sessionOptions: PiAgentSessionOptions = {
-			model: resolvedOptions.model ?? this.options.model,
-			thinkingLevel: resolvedOptions.thinkingLevel ?? this.options.thinkingLevel,
-			scopedModels: resolvedOptions.scopedModels ?? this.options.scopedModels,
-			tools: resolvedOptions.tools ?? this.options.tools,
-			excludedTools: resolvedOptions.excludedTools ?? this.options.excludedTools,
-			noTools: resolvedOptions.noTools ?? this.options.noTools,
-			customTools: resolvedOptions.customTools ?? this.options.customTools,
-			toolOperations: resolvedOptions.toolOperations
-				? borrowToolOperations(resolvedOptions.toolOperations)
-				: this.borrowedToolOperations,
-			trustProjectAgents: resolvedOptions.trustProjectAgents ?? this.options.trustProjectAgents,
-			trustProjectLspTransports: resolvedOptions.trustProjectLspTransports ?? this.options.trustProjectLspTransports,
-			lspConnectionFactories: resolvedOptions.lspConnectionFactories ?? this.options.lspConnectionFactories,
-		};
-		const asLspInputs = (
-			input: LspConfigurationInput | LspConfigurationInput[] | undefined,
-		): LspConfigurationInput[] => (input === undefined ? [] : Array.isArray(input) ? input : [input]);
+		const loadedHooks = await this.loadSessionHooks(services, resolvedOptions, diagnostics);
+		const sessionOptions = this.mergeSessionOptions(resolvedOptions);
 		const lspInputs = [...asLspInputs(this.options.lsp), ...asLspInputs(resolvedOptions.lsp)];
 		const resolveSessionLspConfiguration = () =>
-			sessionOptions.toolOperations?.getBackendInfo?.().type === "remote"
-				? Promise.resolve({ configuration: { enabled: false, servers: [] }, diagnostics: [] })
-				: loadLspConfiguration({
-						settingsManager: services.settingsManager,
-						cwd: services.cwd,
-						agentDir: services.agentDir,
-						inputs: lspInputs,
-						trustProjectLspTransports: sessionOptions.trustProjectLspTransports,
-					});
+			this.resolveSessionLspConfiguration(services, sessionOptions, lspInputs);
 		const lspResult = await resolveSessionLspConfiguration();
 		const lspDiagnostics = formatLspConfigurationDiagnostics(lspResult.diagnostics);
 		const baseDiagnostics = [...diagnostics];
@@ -766,54 +1215,15 @@ export class PiAgent {
 		const existingSession = activeSession.buildSessionContext();
 		const hasExistingSession = existingSession.messages.length > 0;
 		const hasThinkingEntry = activeSession.getBranch().some((entry) => entry.type === "thinking_level_change");
-
-		let model = sessionOptions.model;
-		let modelFallbackMessage: string | undefined;
-
-		if (model) {
-			model = services.modelRegistry.find(model.provider, model.id) ?? model;
-		}
-
-		if (!model && hasExistingSession && existingSession.model) {
-			const restoredModel = services.modelRegistry.find(
-				existingSession.model.provider,
-				existingSession.model.modelId,
-			);
-			if (restoredModel && services.modelRegistry.hasConfiguredAuth(restoredModel)) {
-				model = restoredModel;
-			}
-			if (!model) {
-				modelFallbackMessage = `Could not restore model ${existingSession.model.provider}/${existingSession.model.modelId}`;
-			}
-		}
-
-		if (!model) {
-			const result = await findInitialModel({
-				scopedModels: [],
-				isContinuing: hasExistingSession,
-				defaultProvider: services.settingsManager.getDefaultProvider(),
-				defaultModelId: services.settingsManager.getDefaultModel(),
-				defaultThinkingLevel: services.settingsManager.getDefaultThinkingLevel(),
-				modelRegistry: services.modelRegistry,
-			});
-			model = result.model;
-			if (!model) {
-				modelFallbackMessage = formatNoModelsAvailableMessage();
-			} else if (modelFallbackMessage) {
-				modelFallbackMessage += `. Using ${model.provider}/${model.id}`;
-			}
-		}
-
-		let thinkingLevel = sessionOptions.thinkingLevel;
-		if (thinkingLevel === undefined && hasExistingSession) {
-			thinkingLevel = hasThinkingEntry
-				? (existingSession.thinkingLevel as ThinkingLevel)
-				: (services.settingsManager.getDefaultThinkingLevel() ?? DEFAULT_THINKING_LEVEL);
-		}
-		if (thinkingLevel === undefined) {
-			thinkingLevel = services.settingsManager.getDefaultThinkingLevel() ?? DEFAULT_THINKING_LEVEL;
-		}
-		thinkingLevel = model ? (clampThinkingLevel(model, thinkingLevel) as ThinkingLevel) : "off";
+		const modelResolution = await this.resolveSessionModel(services, sessionOptions, existingSession);
+		const { model } = modelResolution;
+		const thinkingLevel = this.resolveSessionThinkingLevel(
+			services,
+			activeSession,
+			existingSession,
+			sessionOptions.thinkingLevel,
+			model,
+		);
 
 		const defaultActiveToolNames = getDefaultActiveToolNames();
 		const allowedToolNames = sessionOptions.tools ?? (sessionOptions.noTools === "all" ? [] : undefined);
@@ -822,125 +1232,20 @@ export class PiAgent {
 			: sessionOptions.noTools
 				? []
 				: defaultActiveToolNames;
-
-		const extensionRunnerRef: { current?: ExtensionRunner } = {};
-		const convertToLlmWithBlockImages = (messages: AgentMessage[]): Message[] => {
-			const converted = convertToLlm(messages);
-			if (!services.settingsManager.getBlockImages()) {
-				return converted;
-			}
-			return converted.map((msg) => {
-				if (msg.role === "user" || msg.role === "toolResult") {
-					const content = msg.content;
-					if (Array.isArray(content)) {
-						const hasImages = content.some((c) => c.type === "image");
-						if (hasImages) {
-							const filteredContent = content
-								.map((c) =>
-									c.type === "image" ? { type: "text" as const, text: "Image reading is disabled." } : c,
-								)
-								.filter(
-									(c, i, arr) =>
-										!(
-											c.type === "text" &&
-											c.text === "Image reading is disabled." &&
-											i > 0 &&
-											arr[i - 1].type === "text" &&
-											(arr[i - 1] as { type: "text"; text: string }).text === "Image reading is disabled."
-										),
-								);
-							return { ...msg, content: filteredContent };
-						}
-					}
-				}
-				return msg;
-			});
-		};
-
-		const agent = new Agent({
-			initialState: {
-				systemPrompt: "",
-				model,
-				thinkingLevel,
-				tools: [],
-			},
-			convertToLlm: convertToLlmWithBlockImages,
-			streamFn: async (model, context, options) => {
-				const auth = await services.modelRegistry.getApiKeyAndHeaders(model);
-				if (!auth.ok) {
-					throw new Error(auth.error);
-				}
-				const providerRetrySettings = services.settingsManager.getProviderRetrySettings();
-				const timeoutMs =
-					options?.timeoutMs ??
-					providerRetrySettings.timeoutMs ??
-					(model.api === "openai-codex-responses" ? services.settingsManager.getHttpIdleTimeoutMs() : undefined);
-				const websocketConnectTimeoutMs =
-					options?.websocketConnectTimeoutMs ?? services.settingsManager.getWebSocketConnectTimeoutMs();
-				const attributionHeaders = getAttributionHeaders(model, services.settingsManager, options?.sessionId);
-				let headers =
-					attributionHeaders || auth.headers || options?.headers
-						? { ...attributionHeaders, ...auth.headers, ...options?.headers }
-						: undefined;
-				const runner = extensionRunnerRef.current;
-				if (runner?.hasHandlers("before_provider_headers")) {
-					headers = await runner.emitBeforeProviderHeaders(headers ?? {});
-				}
-				return streamSimple(model, context, {
-					...options,
-					apiKey: auth.apiKey,
-					timeoutMs,
-					websocketConnectTimeoutMs,
-					maxRetries: options?.maxRetries ?? providerRetrySettings.maxRetries,
-					maxRetryDelayMs: options?.maxRetryDelayMs ?? providerRetrySettings.maxRetryDelayMs,
-					headers,
-				});
-			},
-			onPayload: async (payload) => {
-				const runner = extensionRunnerRef.current;
-				if (!runner?.hasHandlers("before_provider_request")) {
-					return payload;
-				}
-				return runner.emitBeforeProviderRequest(payload);
-			},
-			onResponse: async (response) => {
-				const runner = extensionRunnerRef.current;
-				if (!runner?.hasHandlers("after_provider_response")) {
-					return;
-				}
-				await runner.emit({
-					type: "after_provider_response",
-					status: response.status,
-					headers: response.headers,
-				});
-			},
-			sessionId: activeSession.getSessionId(),
-			transformContext: async (messages) => {
-				const runner = extensionRunnerRef.current;
-				return runner ? runner.emitContext(messages) : messages;
-			},
-			steeringMode: services.settingsManager.getSteeringMode(),
-			followUpMode: services.settingsManager.getFollowUpMode(),
-			transport: services.settingsManager.getTransport(),
-			thinkingBudgets: services.settingsManager.getThinkingBudgets(),
-			maxRetryDelayMs: services.settingsManager.getProviderRetrySettings().maxRetryDelayMs,
-		});
+		const extensionRunnerRef: ExtensionRunnerReference = {};
+		const agent = this.createCoreAgent(services, activeSession, model, thinkingLevel, extensionRunnerRef);
 
 		if (hasExistingSession) {
 			agent.state.messages = existingSession.messages;
-			if (!hasThinkingEntry) {
-				activeSession.appendThinkingLevelChange(thinkingLevel);
-			}
+			if (!hasThinkingEntry) activeSession.appendThinkingLevelChange(thinkingLevel);
 		} else {
-			if (model) {
-				activeSession.appendModelChange(model.provider, model.id);
-			}
+			if (model) activeSession.appendModelChange(model.provider, model.id);
 			activeSession.appendThinkingLevelChange(thinkingLevel);
 		}
 
 		const subagentRunRegistry = this.createSubagentRunRegistry();
 		const subagentConfigRegistry = this.createSubagentConfigRegistry();
-
+		const hookOptions = this.options.hooks;
 		return {
 			session: new AgentSession({
 				agent,
@@ -971,11 +1276,19 @@ export class PiAgent {
 				},
 				extensionRunnerRef,
 				sessionStartEvent,
+				loadedHooks,
+				hookRunOptions: hookOptions
+					? {
+							allowedHttpHookUrls: hookOptions.allowedHttpHookUrls,
+							httpHookAllowedEnvVars: hookOptions.httpHookAllowedEnvVars,
+						}
+					: undefined,
+				onHookDiagnostic: (diagnostic) => this.addHookDiagnostic(diagnostic),
 			}),
 			services,
 			baseDiagnostics,
 			lspDiagnostics,
-			modelFallbackMessage,
+			modelFallbackMessage: modelResolution.fallbackMessage,
 		};
 	}
 
@@ -990,6 +1303,12 @@ export class PiAgent {
 
 	private setLspConfigurationDiagnostics(diagnostics: readonly LspConfigurationSourceDiagnostic[]): void {
 		this._lspDiagnostics = formatLspConfigurationDiagnostics(diagnostics);
+		this._diagnostics = [...this._baseDiagnostics, ...this._lspDiagnostics];
+	}
+
+	private addHookDiagnostic(diagnostic: HookDiagnostic): void {
+		const formatted = formatHookDiagnostic(diagnostic);
+		this._baseDiagnostics = [...this._baseDiagnostics, formatted];
 		this._diagnostics = [...this._baseDiagnostics, ...this._lspDiagnostics];
 	}
 
@@ -1061,9 +1380,9 @@ export class PiAgent {
 	}
 
 	private async emitBeforeSwitch(
-		reason: "new" | "resume",
+		reason: SessionSwitchReason,
 		targetSessionReference?: string,
-	): Promise<{ cancelled: boolean }> {
+	): Promise<ExtensionSessionActionResult> {
 		const runner = this.session.extensionRunner;
 		if (!runner.hasHandlers("session_before_switch")) {
 			return { cancelled: false };
@@ -1080,8 +1399,8 @@ export class PiAgent {
 
 	private async emitBeforeFork(
 		entryId: string,
-		options: { position: "before" | "at" },
-	): Promise<{ cancelled: boolean }> {
+		options: ForkPreparationOptions,
+	): Promise<ExtensionSessionActionResult> {
 		const runner = this.session.extensionRunner;
 		if (!runner.hasHandlers("session_before_fork")) {
 			return { cancelled: false };
@@ -1104,12 +1423,15 @@ export class PiAgent {
 
 	private async replaceCurrentSession(
 		result: BuiltAgentSession,
-		reason: SessionShutdownEvent["reason"],
+		reason: SessionShutdownReason,
 		targetSessionReference: string | undefined,
 		withSession?: (ctx: ReplacedSessionContext) => Promise<void>,
 	): Promise<void> {
 		const previousSession = this.session;
 		try {
+			await previousSession.emitHookSessionEnd(
+				reason === "new" ? "clear" : reason === "resume" ? "resume" : "other",
+			);
 			await emitSessionShutdownEvent(previousSession.extensionRunner, {
 				type: "session_shutdown",
 				reason,
@@ -1138,8 +1460,8 @@ export class PiAgent {
 
 	async switchSession(
 		sessionPath: string,
-		options?: { cwdOverride?: string; withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
-	): Promise<{ cancelled: boolean }> {
+		options?: PiAgentSwitchSessionOptions,
+	): Promise<ExtensionSessionActionResult> {
 		const beforeResult = await this.emitBeforeSwitch("resume", sessionPath);
 		if (beforeResult.cancelled) {
 			return beforeResult;
@@ -1160,12 +1482,7 @@ export class PiAgent {
 		return { cancelled: false };
 	}
 
-	async newSession(options?: {
-		id?: string;
-		parentSession?: string;
-		setup?: (session: Session) => Promise<void>;
-		withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
-	}): Promise<{ cancelled: boolean }> {
+	async newSession(options?: ExtensionNewSessionOptions): Promise<ExtensionSessionActionResult> {
 		const beforeResult = await this.emitBeforeSwitch("new");
 		if (beforeResult.cancelled) {
 			return beforeResult;
@@ -1190,10 +1507,7 @@ export class PiAgent {
 		return { cancelled: false };
 	}
 
-	async fork(
-		entryId: string,
-		options?: { position?: "before" | "at"; withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
-	): Promise<{ cancelled: boolean; selectedText?: string }> {
+	async fork(entryId: string, options?: ExtensionForkOptions): Promise<PiAgentForkResult> {
 		const position = options?.position ?? "before";
 		const beforeResult = await this.emitBeforeFork(entryId, { position });
 		if (beforeResult.cancelled) {
@@ -1239,7 +1553,7 @@ export class PiAgent {
 		return { cancelled: false, selectedText };
 	}
 
-	async importFromJsonl(inputPath: string, cwdOverride?: string): Promise<{ cancelled: boolean }> {
+	async importFromJsonl(inputPath: string, cwdOverride?: string): Promise<ExtensionSessionActionResult> {
 		const resolvedPath = resolve(inputPath);
 		if (!existsSync(resolvedPath)) {
 			throw new SessionImportFileNotFoundError(resolvedPath);
@@ -1264,7 +1578,6 @@ export class PiAgent {
 		await this.replaceCurrentSession(result, "resume", nextSession.getSessionReference());
 		return { cancelled: false };
 	}
-
 	async runMode(options: RunPiAgentModeOptions = {}): Promise<void> {
 		const mode = options.mode ?? this._mode;
 		if (mode === "embedded") {
@@ -1288,35 +1601,7 @@ export class PiAgent {
 		}
 
 		if (mode === "interactive") {
-			const interactiveMode = new InteractiveMode(this, {
-				migratedProviders: options.migratedProviders,
-				modelFallbackMessage: this.modelFallbackMessage,
-				initialMessage: options.initialMessage,
-				initialImages: options.initialImages,
-				initialMessages: options.initialMessages,
-				verbose: options.verbose,
-				tuiMode: options.tuiMode,
-			});
-			if (options.startupBenchmark) {
-				await interactiveMode.init();
-				time("interactiveMode.init");
-				// Give the TUI's stdin handler a brief chance to consume terminal query replies
-				// (Kitty keyboard protocol, device attributes, cell size) before restoring the terminal.
-				await new Promise((resolve) => setTimeout(resolve, 150));
-				interactiveMode.stop();
-				stopThemeWatcher();
-				printTimings();
-				if (process.stdout.writableLength > 0) {
-					await new Promise<void>((resolve) => process.stdout.once("drain", resolve));
-				}
-				if (process.stderr.writableLength > 0) {
-					await new Promise<void>((resolve) => process.stderr.once("drain", resolve));
-				}
-				return;
-			}
-
-			printTimings();
-			await interactiveMode.run();
+			await runInteractiveAppMode(this, this.modelFallbackMessage, options);
 			return;
 		}
 
@@ -1366,6 +1651,7 @@ export class PiAgent {
 	private async disposeRuntime(): Promise<void> {
 		try {
 			if (this._session) {
+				await this.session.emitHookSessionEnd("prompt_input_exit");
 				await emitSessionShutdownEvent(this.session.extensionRunner, {
 					type: "session_shutdown",
 					reason: "quit",

@@ -13,9 +13,23 @@
  *   pi --extension examples/extensions/custom-compaction.ts
  */
 
-import { complete } from "@fleetagent/pi-ai";
-import type { ExtensionAPI } from "@fleetagent/pi-coding-agent";
+import { type AssistantMessage, complete } from "@fleetagent/pi-ai";
+import type { ExtensionAPI, ExtensionContext } from "@fleetagent/pi-coding-agent";
 import { convertToLlm, serializeConversation } from "@fleetagent/pi-coding-agent";
+
+function extractSummaryText(response: AssistantMessage): string {
+	return response.content.flatMap((content) => (content.type === "text" ? [content.text] : [])).join("\n");
+}
+
+function formatPreviousSummary(previousSummary: string | undefined): string {
+	return previousSummary ? `\n\nPrevious session summary for context:\n${previousSummary}` : "";
+}
+
+function hasUsableSummary(summary: string, signal: AbortSignal, ctx: ExtensionContext): boolean {
+	if (summary.trim()) return true;
+	if (!signal.aborted) ctx.ui.notify("Compaction summary was empty, using default compaction", "warning");
+	return false;
+}
 
 export default function (pi: ExtensionAPI) {
 	pi.on("session_before_compact", async (event, ctx) => {
@@ -54,7 +68,7 @@ export default function (pi: ExtensionAPI) {
 		const conversationText = serializeConversation(convertToLlm(allMessages));
 
 		// Include previous summary context if available
-		const previousContext = previousSummary ? `\n\nPrevious session summary for context:\n${previousSummary}` : "";
+		const previousContext = formatPreviousSummary(previousSummary);
 
 		// Build messages that ask for a comprehensive summary
 		const summaryMessages = [
@@ -98,18 +112,8 @@ ${conversationText}
 				},
 			);
 
-			const summary = response.content
-				.filter((c): c is { type: "text"; text: string } => c.type === "text")
-				.map((c) => c.text)
-				.join("\n");
-
-			if (!summary.trim()) {
-				if (!signal.aborted) ctx.ui.notify("Compaction summary was empty, using default compaction", "warning");
-				return;
-			}
-
-			// Return compaction content - Session adds id/parentId
-			// Use firstKeptEntryId from preparation to keep recent messages
+			const summary = extractSummaryText(response);
+			if (!hasUsableSummary(summary, signal, ctx)) return;
 			return {
 				compaction: {
 					summary,

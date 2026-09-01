@@ -4,6 +4,8 @@ import {
 	getCellDimensions,
 	getImageDimensions,
 	type ImageDimensions,
+	type ImageProtocol,
+	type ImageRenderResult,
 	imageFallback,
 	renderImage,
 } from "../terminal-image.ts";
@@ -57,70 +59,56 @@ export class Image implements Component {
 		this.cachedWidth = undefined;
 	}
 
+	private renderFallbackLines(): string[] {
+		const fallback = imageFallback(this.mimeType, this.dimensions, this.options.filename);
+		return [this.theme.fallbackColor(fallback)];
+	}
+
+	private renderKittyImageLines(result: ImageRenderResult): string[] {
+		const lines = [result.sequence];
+		for (let index = 0; index < result.rows - 1; index++) lines.push("");
+		return lines;
+	}
+
+	private renderITermImageLines(result: ImageRenderResult): string[] {
+		const lines: string[] = [];
+		for (let index = 0; index < result.rows - 1; index++) lines.push("");
+		const rowOffset = result.rows - 1;
+		const moveUp = rowOffset > 0 ? `\x1b[${rowOffset}A` : "";
+		lines.push(moveUp + result.sequence);
+		return lines;
+	}
+
+	private renderTerminalImageLines(
+		protocol: ImageProtocol,
+		maxWidthCells: number,
+		maxHeightCells: number,
+	): string[] | undefined {
+		if (!protocol) return undefined;
+		if (protocol === "kitty" && this.imageId === undefined) this.imageId = allocateImageId();
+		const result = renderImage(this.base64Data, this.dimensions, {
+			maxWidthCells,
+			maxHeightCells,
+			imageId: this.imageId,
+			moveCursor: false,
+		});
+		if (!result) return undefined;
+		if (result.imageId) this.imageId = result.imageId;
+		return protocol === "kitty" ? this.renderKittyImageLines(result) : this.renderITermImageLines(result);
+	}
+
 	render(width: number): string[] {
-		if (this.cachedLines && this.cachedWidth === width) {
-			return this.cachedLines;
-		}
+		if (this.cachedLines && this.cachedWidth === width) return this.cachedLines;
 
 		const maxWidth = Math.max(1, Math.min(width - 2, this.options.maxWidthCells ?? 60));
 		const cellDimensions = getCellDimensions();
 		const defaultMaxHeight = Math.max(1, Math.ceil((maxWidth * cellDimensions.widthPx) / cellDimensions.heightPx));
 		const maxHeight = this.options.maxHeightCells ?? defaultMaxHeight;
-
-		const caps = getCapabilities();
-		let lines: string[];
-
-		if (caps.images) {
-			if (caps.images === "kitty" && this.imageId === undefined) {
-				this.imageId = allocateImageId();
-			}
-			const result = renderImage(this.base64Data, this.dimensions, {
-				maxWidthCells: maxWidth,
-				maxHeightCells: maxHeight,
-				imageId: this.imageId,
-				moveCursor: false,
-			});
-
-			if (result) {
-				// Store the image ID for later cleanup
-				if (result.imageId) {
-					this.imageId = result.imageId;
-				}
-
-				if (caps.images === "kitty") {
-					// For Kitty: C=1 prevents cursor movement.
-					// Don't need the cursor movement.
-					lines = [result.sequence];
-
-					// Return `rows` lines so TUI accounts for image height.
-					for (let i = 0; i < result.rows - 1; i++) {
-						lines.push("");
-					}
-				} else {
-					// Return `rows` lines so TUI accounts for image height.
-					// First (rows-1) lines are empty and cleared before the image is drawn.
-					// Last line: move cursor back up, draw the image, then move back down
-					// so TUI cursor accounting stays inside the scroll area.
-					lines = [];
-					for (let i = 0; i < result.rows - 1; i++) {
-						lines.push("");
-					}
-					const rowOffset = result.rows - 1;
-					const moveUp = rowOffset > 0 ? `\x1b[${rowOffset}A` : "";
-					lines.push(moveUp + result.sequence);
-				}
-			} else {
-				const fallback = imageFallback(this.mimeType, this.dimensions, this.options.filename);
-				lines = [this.theme.fallbackColor(fallback)];
-			}
-		} else {
-			const fallback = imageFallback(this.mimeType, this.dimensions, this.options.filename);
-			lines = [this.theme.fallbackColor(fallback)];
-		}
+		const lines =
+			this.renderTerminalImageLines(getCapabilities().images, maxWidth, maxHeight) ?? this.renderFallbackLines();
 
 		this.cachedLines = lines;
 		this.cachedWidth = width;
-
 		return lines;
 	}
 }

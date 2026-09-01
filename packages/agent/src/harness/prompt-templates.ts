@@ -1,7 +1,15 @@
 import { parse } from "yaml";
-import { type ExecutionEnv, type FileInfo, type PromptTemplate, type Result, toError } from "./types.ts";
+import {
+	type ExecutionEnv,
+	type FileError,
+	type FileInfo,
+	type PromptTemplate,
+	type Result,
+	toError,
+} from "./types.ts";
 
 export type PromptTemplateDiagnosticCode = "file_info_failed" | "list_failed" | "read_failed" | "parse_failed";
+type PromptTemplatePathKind = "file" | "directory";
 
 /** Warning produced while loading prompt templates. */
 export interface PromptTemplateDiagnostic {
@@ -15,10 +23,55 @@ export interface PromptTemplateDiagnostic {
 	path: string;
 }
 
+/** Prompt templates loaded from a path together with non-fatal diagnostics. */
+export interface PromptTemplateLoadResult {
+	promptTemplates: PromptTemplate[];
+	diagnostics: PromptTemplateDiagnostic[];
+}
+
+/** Path and provenance used to load sourced prompt templates. */
+export interface SourcedPromptTemplatePath<TSource> {
+	path: string;
+	source: TSource;
+}
+
+interface PromptTemplateFileLoadResult {
+	promptTemplate: PromptTemplate | null;
+	diagnostics: PromptTemplateDiagnostic[];
+}
+
+function appendFileInfoDiagnostic(diagnostics: PromptTemplateDiagnostic[], error: FileError, path: string): void {
+	if (error.code === "not_found") return;
+	diagnostics.push({
+		type: "warning",
+		code: "file_info_failed",
+		message: error.message,
+		path,
+	});
+}
+
+export interface SourcedPromptTemplate<TSource, TPromptTemplate extends PromptTemplate> {
+	promptTemplate: TPromptTemplate;
+	source: TSource;
+}
+
+export type SourcedPromptTemplateDiagnostic<TSource> = PromptTemplateDiagnostic & { source: TSource };
+
+/** Source-tagged prompt templates and diagnostics produced by a load. */
+export interface SourcedPromptTemplateLoadResult<TSource, TPromptTemplate extends PromptTemplate> {
+	promptTemplates: SourcedPromptTemplate<TSource, TPromptTemplate>[];
+	diagnostics: SourcedPromptTemplateDiagnostic<TSource>[];
+}
+
 interface PromptTemplateFrontmatter {
 	description?: string;
 	"argument-hint"?: string;
 	[key: string]: unknown;
+}
+
+interface ParsedFrontmatter<T> {
+	frontmatter: T;
+	body: string;
 }
 
 /**
@@ -30,20 +83,13 @@ interface PromptTemplateFrontmatter {
 export async function loadPromptTemplates(
 	env: ExecutionEnv,
 	paths: string | string[],
-): Promise<{ promptTemplates: PromptTemplate[]; diagnostics: PromptTemplateDiagnostic[] }> {
+): Promise<PromptTemplateLoadResult> {
 	const promptTemplates: PromptTemplate[] = [];
 	const diagnostics: PromptTemplateDiagnostic[] = [];
 	for (const path of Array.isArray(paths) ? paths : [paths]) {
 		const infoResult = await env.fileInfo(path);
 		if (!infoResult.ok) {
-			if (infoResult.error.code !== "not_found") {
-				diagnostics.push({
-					type: "warning",
-					code: "file_info_failed",
-					message: infoResult.error.message,
-					path,
-				});
-			}
+			appendFileInfoDiagnostic(diagnostics, infoResult.error, path);
 			continue;
 		}
 		const info = infoResult.value;
@@ -69,14 +115,11 @@ export async function loadPromptTemplates(
  */
 export async function loadSourcedPromptTemplates<TSource, TPromptTemplate extends PromptTemplate = PromptTemplate>(
 	env: ExecutionEnv,
-	inputs: Array<{ path: string; source: TSource }>,
+	inputs: Array<SourcedPromptTemplatePath<TSource>>,
 	mapPromptTemplate?: (promptTemplate: PromptTemplate, source: TSource) => TPromptTemplate,
-): Promise<{
-	promptTemplates: Array<{ promptTemplate: TPromptTemplate; source: TSource }>;
-	diagnostics: Array<PromptTemplateDiagnostic & { source: TSource }>;
-}> {
-	const promptTemplates: Array<{ promptTemplate: TPromptTemplate; source: TSource }> = [];
-	const diagnostics: Array<PromptTemplateDiagnostic & { source: TSource }> = [];
+): Promise<SourcedPromptTemplateLoadResult<TSource, TPromptTemplate>> {
+	const promptTemplates: SourcedPromptTemplate<TSource, TPromptTemplate>[] = [];
+	const diagnostics: SourcedPromptTemplateDiagnostic<TSource>[] = [];
 	for (const input of inputs) {
 		const result = await loadPromptTemplates(env, input.path);
 		for (const promptTemplate of result.promptTemplates) {
@@ -92,10 +135,7 @@ export async function loadSourcedPromptTemplates<TSource, TPromptTemplate extend
 	return { promptTemplates, diagnostics };
 }
 
-async function loadTemplatesFromDir(
-	env: ExecutionEnv,
-	dir: string,
-): Promise<{ promptTemplates: PromptTemplate[]; diagnostics: PromptTemplateDiagnostic[] }> {
+async function loadTemplatesFromDir(env: ExecutionEnv, dir: string): Promise<PromptTemplateLoadResult> {
 	const promptTemplates: PromptTemplate[] = [];
 	const diagnostics: PromptTemplateDiagnostic[] = [];
 	const entriesResult = await env.listDir(dir);
@@ -120,10 +160,7 @@ async function loadTemplatesFromDir(
 	return { promptTemplates, diagnostics };
 }
 
-async function loadTemplateFromFile(
-	env: ExecutionEnv,
-	filePath: string,
-): Promise<{ promptTemplate: PromptTemplate | null; diagnostics: PromptTemplateDiagnostic[] }> {
+async function loadTemplateFromFile(env: ExecutionEnv, filePath: string): Promise<PromptTemplateFileLoadResult> {
 	const diagnostics: PromptTemplateDiagnostic[] = [];
 	const rawContent = await env.readTextFile(filePath);
 	if (!rawContent.ok) {
@@ -168,38 +205,22 @@ async function resolveKind(
 	env: ExecutionEnv,
 	info: FileInfo,
 	diagnostics: PromptTemplateDiagnostic[],
-): Promise<"file" | "directory" | undefined> {
+): Promise<PromptTemplatePathKind | undefined> {
 	if (info.kind === "file" || info.kind === "directory") return info.kind;
 	const canonicalPath = await env.canonicalPath(info.path);
 	if (!canonicalPath.ok) {
-		if (canonicalPath.error.code !== "not_found") {
-			diagnostics.push({
-				type: "warning",
-				code: "file_info_failed",
-				message: canonicalPath.error.message,
-				path: info.path,
-			});
-		}
+		appendFileInfoDiagnostic(diagnostics, canonicalPath.error, info.path);
 		return undefined;
 	}
 	const target = await env.fileInfo(canonicalPath.value);
 	if (!target.ok) {
-		if (target.error.code !== "not_found") {
-			diagnostics.push({
-				type: "warning",
-				code: "file_info_failed",
-				message: target.error.message,
-				path: info.path,
-			});
-		}
+		appendFileInfoDiagnostic(diagnostics, target.error, info.path);
 		return undefined;
 	}
 	return target.value.kind === "file" || target.value.kind === "directory" ? target.value.kind : undefined;
 }
 
-function parseFrontmatter<T extends Record<string, unknown>>(
-	content: string,
-): Result<{ frontmatter: T; body: string }, Error> {
+function parseFrontmatter<T extends Record<string, unknown>>(content: string): Result<ParsedFrontmatter<T>, Error> {
 	try {
 		const normalized = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 		if (!normalized.startsWith("---")) return { ok: true, value: { frontmatter: {} as T, body: normalized } };

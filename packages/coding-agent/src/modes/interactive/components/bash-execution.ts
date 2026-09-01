@@ -18,10 +18,12 @@ import { truncateToVisualLines } from "./visual-truncate.ts";
 // Preview line limit when not expanded (matches tool execution behavior)
 const PREVIEW_LINES = 20;
 
+type BashExecutionStatus = "running" | "complete" | "cancelled" | "error";
+
 export class BashExecutionComponent extends Container {
 	private command: string;
 	private outputLines: string[] = [];
-	private status: "running" | "complete" | "cancelled" | "error" = "running";
+	private status: BashExecutionStatus = "running";
 	private exitCode: number | undefined = undefined;
 	private loader: Loader;
 	private truncationResult?: TruncationResult;
@@ -116,6 +118,62 @@ export class BashExecutionComponent extends Container {
 		this.updateDisplay();
 	}
 
+	private renderOutput(availableLines: string[], previewLogicalLines: string[]): void {
+		if (availableLines.length === 0) return;
+		if (this.expanded) {
+			const displayText = availableLines.map((line) => theme.fg("muted", line)).join("\n");
+			this.contentContainer.addChild(new Text(`\n${displayText}`, 1, 0));
+			return;
+		}
+		const styledOutput = previewLogicalLines.map((line) => theme.fg("muted", line)).join("\n");
+		const styledInput = `\n${styledOutput}`;
+		let cachedWidth: number | undefined;
+		let cachedLines: string[] | undefined;
+		this.contentContainer.addChild({
+			render: (width: number) => {
+				if (cachedLines === undefined || cachedWidth !== width) {
+					const result = truncateToVisualLines(styledInput, PREVIEW_LINES, width, 1);
+					cachedLines = result.visualLines;
+					cachedWidth = width;
+				}
+				return cachedLines ?? [];
+			},
+			invalidate: () => {
+				cachedWidth = undefined;
+				cachedLines = undefined;
+			},
+		});
+	}
+
+	private renderStatus(hiddenLineCount: number, contextTruncation: TruncationResult): void {
+		if (this.status === "running") {
+			this.contentContainer.addChild(this.loader);
+			return;
+		}
+		const statusParts: string[] = [];
+		if (hiddenLineCount > 0) {
+			if (this.expanded) {
+				statusParts.push(`(${keyHint("app.tools.expand", "to collapse")})`);
+			} else {
+				statusParts.push(
+					`${theme.fg("muted", `... ${hiddenLineCount} more lines`)} (${keyHint("app.tools.expand", "to expand")})`,
+				);
+			}
+		}
+		if (this.status === "cancelled") {
+			statusParts.push(theme.fg("warning", "(cancelled)"));
+		} else if (this.status === "error") {
+			statusParts.push(theme.fg("error", `(exit ${this.exitCode})`));
+		}
+		const wasTruncated = this.truncationResult?.truncated || contextTruncation.truncated;
+		if (wasTruncated && this.fullOutputPath) {
+			statusParts.push(theme.fg("warning", `Output truncated. Full output: ${this.fullOutputPath}`));
+		}
+		if (statusParts.length > 0) {
+			this.contentContainer.addChild(new Text(`\n${statusParts.join("\n")}`, 1, 0));
+		}
+	}
+
 	private updateDisplay(): void {
 		// Apply truncation for LLM context limits (same limits as bash tool)
 		const fullOutput = this.outputLines.join("\n");
@@ -138,68 +196,8 @@ export class BashExecutionComponent extends Container {
 		const header = new Text(theme.fg("bashMode", theme.bold(`$ ${this.command}`)), 1, 0);
 		this.contentContainer.addChild(header);
 
-		// Output
-		if (availableLines.length > 0) {
-			if (this.expanded) {
-				// Show all lines
-				const displayText = availableLines.map((line) => theme.fg("muted", line)).join("\n");
-				this.contentContainer.addChild(new Text(`\n${displayText}`, 1, 0));
-			} else {
-				// Use shared visual truncation utility with width-aware caching
-				const styledOutput = previewLogicalLines.map((line) => theme.fg("muted", line)).join("\n");
-				const styledInput = `\n${styledOutput}`;
-				let cachedWidth: number | undefined;
-				let cachedLines: string[] | undefined;
-				this.contentContainer.addChild({
-					render: (width: number) => {
-						if (cachedLines === undefined || cachedWidth !== width) {
-							const result = truncateToVisualLines(styledInput, PREVIEW_LINES, width, 1);
-							cachedLines = result.visualLines;
-							cachedWidth = width;
-						}
-						return cachedLines ?? [];
-					},
-					invalidate: () => {
-						cachedWidth = undefined;
-						cachedLines = undefined;
-					},
-				});
-			}
-		}
-
-		// Loader or status
-		if (this.status === "running") {
-			this.contentContainer.addChild(this.loader);
-		} else {
-			const statusParts: string[] = [];
-
-			// Show how many lines are hidden (collapsed preview)
-			if (hiddenLineCount > 0) {
-				if (this.expanded) {
-					statusParts.push(`(${keyHint("app.tools.expand", "to collapse")})`);
-				} else {
-					statusParts.push(
-						`${theme.fg("muted", `... ${hiddenLineCount} more lines`)} (${keyHint("app.tools.expand", "to expand")})`,
-					);
-				}
-			}
-
-			if (this.status === "cancelled") {
-				statusParts.push(theme.fg("warning", "(cancelled)"));
-			} else if (this.status === "error") {
-				statusParts.push(theme.fg("error", `(exit ${this.exitCode})`));
-			}
-
-			// Add truncation warning (context truncation, not preview truncation)
-			const wasTruncated = this.truncationResult?.truncated || contextTruncation.truncated;
-			if (wasTruncated && this.fullOutputPath) {
-				statusParts.push(theme.fg("warning", `Output truncated. Full output: ${this.fullOutputPath}`));
-			}
-
-			if (statusParts.length > 0) {
-				this.contentContainer.addChild(new Text(`\n${statusParts.join("\n")}`, 1, 0));
-			}
-		}
+		this.renderOutput(availableLines, previewLogicalLines);
+		this.renderStatus(hiddenLineCount, contextTruncation);
 	}
 
 	/**

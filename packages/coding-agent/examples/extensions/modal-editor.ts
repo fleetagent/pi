@@ -12,6 +12,7 @@
 import { CustomEditor, type ExtensionAPI } from "@fleetagent/pi-coding-agent";
 import { matchesKey, truncateToWidth, visibleWidth } from "@fleetagent/pi-tui";
 
+type ModalEditorMode = "normal" | "insert";
 // Normal mode key mappings: key -> escape sequence (or null for mode switch)
 const NORMAL_KEYS: Record<string, string | null> = {
 	h: "\x1b[D", // left
@@ -26,7 +27,7 @@ const NORMAL_KEYS: Record<string, string | null> = {
 };
 
 class ModalEditor extends CustomEditor {
-	private mode: "normal" | "insert" = "insert";
+	private mode: ModalEditorMode = "insert";
 
 	handleInput(data: string): void {
 		// Escape toggles to normal mode, or passes through for app handling

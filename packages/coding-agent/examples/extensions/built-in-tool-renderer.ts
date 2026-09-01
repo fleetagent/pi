@@ -25,7 +25,13 @@
  *   pi -e ./built-in-tool-renderer.ts
  */
 
-import type { BashToolDetails, EditToolDetails, ExtensionAPI, ReadToolDetails } from "@fleetagent/pi-coding-agent";
+import type {
+	BashToolDetails,
+	EditToolDetails,
+	ExtensionAPI,
+	ReadToolDetails,
+	Theme,
+} from "@fleetagent/pi-coding-agent";
 import {
 	createBashTool,
 	createEditTool,
@@ -34,6 +40,44 @@ import {
 	LocalToolOperations,
 } from "@fleetagent/pi-coding-agent";
 import { Text } from "@fleetagent/pi-tui";
+
+function appendExpandedBashOutput(summary: string, output: string, theme: Theme): string {
+	let text = summary;
+	const lines = output.split("\n");
+	for (const line of lines.slice(0, 20)) text += `\n${theme.fg("dim", line)}`;
+	if (lines.length > 20) text += `\n${theme.fg("muted", "... more output")}`;
+	return text;
+}
+
+interface DiffStats {
+	additions: number;
+	removals: number;
+}
+
+function countDiffStats(lines: string[]): DiffStats {
+	let additions = 0;
+	let removals = 0;
+	for (const line of lines) {
+		if (line.startsWith("+") && !line.startsWith("+++")) additions++;
+		if (line.startsWith("-") && !line.startsWith("---")) removals++;
+	}
+	return { additions, removals };
+}
+
+function appendExpandedDiffOutput(summary: string, lines: string[], theme: Theme): string {
+	let text = summary;
+	for (const line of lines.slice(0, 30)) {
+		if (line.startsWith("+") && !line.startsWith("+++")) {
+			text += `\n${theme.fg("success", line)}`;
+		} else if (line.startsWith("-") && !line.startsWith("---")) {
+			text += `\n${theme.fg("error", line)}`;
+		} else {
+			text += `\n${theme.fg("dim", line)}`;
+		}
+	}
+	if (lines.length > 30) text += `\n${theme.fg("muted", `... ${lines.length - 30} more diff lines`)}`;
+	return text;
+}
 
 export default function (pi: ExtensionAPI) {
 	const cwd = process.cwd();
@@ -86,9 +130,7 @@ export default function (pi: ExtensionAPI) {
 
 			if (expanded) {
 				const lines = content.text.split("\n").slice(0, 15);
-				for (const line of lines) {
-					text += `\n${theme.fg("dim", line)}`;
-				}
+				text += lines.map((line) => `\n${theme.fg("dim", line)}`).join("");
 				if (lineCount > 15) {
 					text += `\n${theme.fg("muted", `... ${lineCount - 15} more lines`)}`;
 				}
@@ -143,15 +185,7 @@ export default function (pi: ExtensionAPI) {
 				text += theme.fg("warning", " [truncated]");
 			}
 
-			if (expanded) {
-				const lines = output.split("\n").slice(0, 20);
-				for (const line of lines) {
-					text += `\n${theme.fg("dim", line)}`;
-				}
-				if (output.split("\n").length > 20) {
-					text += `\n${theme.fg("muted", "... more output")}`;
-				}
-			}
+			if (expanded) text = appendExpandedBashOutput(text, output, theme);
 
 			return new Text(text, 0, 0);
 		},
@@ -190,33 +224,14 @@ export default function (pi: ExtensionAPI) {
 				return new Text(theme.fg("success", "Applied"), 0, 0);
 			}
 
-			// Count additions and removals from the diff
 			const diffLines = details.diff.split("\n");
-			let additions = 0;
-			let removals = 0;
-			for (const line of diffLines) {
-				if (line.startsWith("+") && !line.startsWith("+++")) additions++;
-				if (line.startsWith("-") && !line.startsWith("---")) removals++;
-			}
+			const { additions, removals } = countDiffStats(diffLines);
 
 			let text = theme.fg("success", `+${additions}`);
 			text += theme.fg("dim", " / ");
 			text += theme.fg("error", `-${removals}`);
 
-			if (expanded) {
-				for (const line of diffLines.slice(0, 30)) {
-					if (line.startsWith("+") && !line.startsWith("+++")) {
-						text += `\n${theme.fg("success", line)}`;
-					} else if (line.startsWith("-") && !line.startsWith("---")) {
-						text += `\n${theme.fg("error", line)}`;
-					} else {
-						text += `\n${theme.fg("dim", line)}`;
-					}
-				}
-				if (diffLines.length > 30) {
-					text += `\n${theme.fg("muted", `... ${diffLines.length - 30} more diff lines`)}`;
-				}
-			}
+			if (expanded) text = appendExpandedDiffOutput(text, diffLines, theme);
 
 			return new Text(text, 0, 0);
 		},

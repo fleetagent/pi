@@ -160,8 +160,12 @@ export function extractDoneSteps(message: string): number[] {
 
 export function markCompletedSteps(text: string, items: TodoItem[]): number {
 	const doneSteps = extractDoneSteps(text);
+	const firstItemByStep = new Map<number, TodoItem>();
+	for (const item of items) {
+		if (!firstItemByStep.has(item.step)) firstItemByStep.set(item.step, item);
+	}
 	for (const step of doneSteps) {
-		const item = items.find((t) => t.step === step);
+		const item = firstItemByStep.get(step);
 		if (item) item.completed = true;
 	}
 	return doneSteps.length;

@@ -10,7 +10,52 @@
  * 3. Use /commands extensions to filter by source
  */
 
-import type { ExtensionAPI, SlashCommandInfo } from "@fleetagent/pi-coding-agent";
+import type {
+	ExtensionAPI,
+	ExtensionCommandContext,
+	SlashCommandInfo,
+	SlashCommandSource,
+} from "@fleetagent/pi-coding-agent";
+
+interface CommandSourceGroup {
+	key: SlashCommandSource;
+	label: string;
+}
+
+const COMMAND_SOURCE_GROUPS: CommandSourceGroup[] = [
+	{ key: "extension", label: "Extensions" },
+	{ key: "prompt", label: "Prompts" },
+	{ key: "skill", label: "Skills" },
+];
+
+function buildCommandSelectionItems(commands: SlashCommandInfo[]): string[] {
+	const items: string[] = [];
+	const itemsBySource = new Map<SlashCommandSource, string[]>(COMMAND_SOURCE_GROUPS.map(({ key }) => [key, []]));
+	for (const command of commands) {
+		const description = command.description ? ` - ${command.description}` : "";
+		itemsBySource.get(command.source)?.push(`/${command.name}${description}`);
+	}
+	for (const { key, label } of COMMAND_SOURCE_GROUPS) {
+		const sourceItems = itemsBySource.get(key);
+		if (!sourceItems || sourceItems.length === 0) continue;
+		items.push(`--- ${label} ---`);
+		items.push(...sourceItems);
+	}
+	return items;
+}
+
+async function showSelectedCommandPath(
+	selected: string | undefined,
+	commands: SlashCommandInfo[],
+	ctx: ExtensionCommandContext,
+): Promise<void> {
+	if (!selected || selected.startsWith("---")) return;
+	const commandName = selected.split(" - ")[0].slice(1);
+	const command = commands.find((candidate) => candidate.name === commandName);
+	if (!command?.sourceInfo.path) return;
+	const showPath = await ctx.ui.confirm(command.name, `View source path?\n${command.sourceInfo.path}`);
+	if (showPath) ctx.ui.notify(command.sourceInfo.path, "info");
+}
 
 export default function commandsExtension(pi: ExtensionAPI) {
 	pi.registerCommand("commands", {
@@ -32,41 +77,11 @@ export default function commandsExtension(pi: ExtensionAPI) {
 				return;
 			}
 
-			// Build selection items grouped by source
-			const formatCommand = (cmd: SlashCommandInfo): string => {
-				const desc = cmd.description ? ` - ${cmd.description}` : "";
-				return `/${cmd.name}${desc}`;
-			};
-
-			const items: string[] = [];
-			const sources: Array<{ key: "extension" | "prompt" | "skill"; label: string }> = [
-				{ key: "extension", label: "Extensions" },
-				{ key: "prompt", label: "Prompts" },
-				{ key: "skill", label: "Skills" },
-			];
-
-			for (const { key, label } of sources) {
-				const cmds = filtered.filter((c) => c.source === key);
-				if (cmds.length > 0) {
-					items.push(`--- ${label} ---`);
-					items.push(...cmds.map(formatCommand));
-				}
-			}
+			const items = buildCommandSelectionItems(filtered);
 
 			// Show in a selector (user can scroll and see all commands)
 			const selected = await ctx.ui.select("Available Commands", items);
-
-			// If user selected a command (not a header), offer to show its path
-			if (selected && !selected.startsWith("---")) {
-				const cmdName = selected.split(" - ")[0].slice(1); // Remove leading /
-				const cmd = commands.find((c) => c.name === cmdName);
-				if (cmd?.sourceInfo.path) {
-					const showPath = await ctx.ui.confirm(cmd.name, `View source path?\n${cmd.sourceInfo.path}`);
-					if (showPath) {
-						ctx.ui.notify(cmd.sourceInfo.path, "info");
-					}
-				}
-			}
+			await showSelectedCommandPath(selected, commands, ctx);
 		},
 	});
 }

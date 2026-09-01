@@ -17,6 +17,7 @@ import {
 	type RemoteWorkspaceCatalogChanged,
 	type RemoteWorkspaceClientMessage,
 	type RemoteWorkspaceErrorCode,
+	type RemoteWorkspaceErrorMessage,
 	type RemoteWorkspaceExecutionState,
 	type RemoteWorkspaceHandshake,
 	type RemoteWorkspaceHandshakeAck,
@@ -28,7 +29,11 @@ import {
 	type RemoteWorkspaceProtocolError,
 	type RemoteWorkspaceProtocolLimits,
 	type RemoteWorkspaceRequest,
+	type RemoteWorkspaceResult,
 	type RemoteWorkspaceServerMessage,
+	type RemoteWorkspaceTransferChunk,
+	type RemoteWorkspaceTransferStart,
+	type RemoteWorkspaceUpdate,
 	RemoteWorkspaceValidationError,
 	type RemoteWorkspaceVersionRange,
 	validateRemoteWorkspaceCatalog,
@@ -37,8 +42,16 @@ import {
 	validateRemoteWorkspaceProtocolLimits,
 } from "./contract.ts";
 
+export type RemoteWorkspaceProtocolCloseCode =
+	| "protocol_error"
+	| "invalid_payload"
+	| "message_too_large"
+	| "policy_violation"
+	| "normal";
+export type RemoteWorkspaceCancellationErrorCode = Extract<RemoteWorkspaceErrorCode, "cancelled" | "deadline_exceeded">;
+
 export interface RemoteWorkspaceProtocolCloseReason {
-	code: "protocol_error" | "invalid_payload" | "message_too_large" | "policy_violation" | "normal";
+	code: RemoteWorkspaceProtocolCloseCode;
 	message: string;
 }
 
@@ -88,11 +101,27 @@ class RemoteWorkspaceTransportError extends Error {
 	}
 }
 
+export interface RemoteWorkspaceTransferMetadata {
+	length: number;
+	sha256: string;
+}
+
+type RemoteWorkspaceRequestMessage =
+	| RemoteWorkspaceUpdate
+	| RemoteWorkspaceTransferStart
+	| RemoteWorkspaceTransferChunk
+	| RemoteWorkspaceErrorMessage
+	| RemoteWorkspaceResult;
+
+export type RemoteWorkspaceTypedRequest = RemoteWorkspaceRequest & { method: RemoteWorkspaceMethod };
+
+export type RemoteWorkspaceUploadRequest = RemoteWorkspaceRequest & { method: "transfer.upload" };
+
 export interface RemoteWorkspaceRequestOptions {
 	timeoutMs?: number;
 	signal?: AbortSignal;
 	onUpdate?: (update: unknown) => void | Promise<void>;
-	onTransferStart?: (metadata: { length: number; sha256: string }) => void | Promise<void>;
+	onTransferStart?: (metadata: RemoteWorkspaceTransferMetadata) => void | Promise<void>;
 	onTransferChunk?: (chunk: Buffer) => void | Promise<void>;
 }
 
@@ -135,7 +164,7 @@ interface ClientPendingRequest {
 	signal?: AbortSignal;
 	onAbort?: () => void;
 	onUpdate?: (update: unknown) => void;
-	onTransferStart?: (metadata: { length: number; sha256: string }) => void;
+	onTransferStart?: (metadata: RemoteWorkspaceTransferMetadata) => void;
 	onTransferChunk?: (chunk: Buffer) => void;
 	nextUpdateSequence: number;
 	nextIncomingTransferSequence: number;
@@ -157,7 +186,7 @@ export interface RemoteWorkspaceClientProtocolOptions {
 	onCatalogRefreshed?: (catalog: RemoteWorkspaceCatalog) => void | Promise<void>;
 }
 
-function classifyValidationClose(error: unknown): RemoteWorkspaceProtocolCloseReason["code"] {
+function classifyValidationClose(error: unknown): RemoteWorkspaceProtocolCloseCode {
 	return error instanceof RemoteWorkspaceValidationError && error.message.includes("exceeds")
 		? "message_too_large"
 		: "invalid_payload";
@@ -510,142 +539,147 @@ export class RemoteWorkspaceClientProtocol {
 		await this.closeWithReason({ code: "normal", message: "Client closed" });
 	}
 
-	private async receivePayload(payload: string | Uint8Array): Promise<void> {
-		if (this.closed) return;
-		let message: RemoteWorkspaceServerMessage;
+	private async decodeServerMessage(payload: string | Uint8Array): Promise<RemoteWorkspaceServerMessage | undefined> {
 		try {
 			const limits = this.negotiated?.limits ?? this.receiveLimits;
 			const decoded = decodeRemoteWorkspaceMessage(payload, limits);
-			message = parseRemoteWorkspaceServerMessage(decoded, limits);
+			return parseRemoteWorkspaceServerMessage(decoded, limits);
 		} catch (error) {
 			await this.protocolFailure(error, classifyValidationClose(error));
+			return undefined;
+		}
+	}
+
+	private async handleHandshakeAck(message: RemoteWorkspaceHandshakeAck): Promise<void> {
+		if (!this.handshakeId || message.id !== this.handshakeId || !this.handshakeOffer || !this.handshakeResolve) {
+			await this.protocolFailure(new Error("Unexpected handshake response"));
 			return;
 		}
-		if (message.type === "handshake_ack") {
-			if (!this.handshakeId || message.id !== this.handshakeId || !this.handshakeOffer || !this.handshakeResolve) {
-				await this.protocolFailure(new Error("Unexpected handshake response"));
-				return;
-			}
-			try {
-				const ack = validateRemoteWorkspaceHandshakeAck(message, this.handshakeOffer, this.localToolSchemas);
-				this.negotiated = cloneHandshakeAck(ack);
-				const resolve = this.handshakeResolve;
-				this.clearHandshake();
-				this.addTombstone(message.id);
-				resolve(cloneHandshakeAck(ack));
-			} catch (error) {
-				this.failHandshake(error instanceof Error ? error : new Error(String(error)));
-				await this.closeWithReason({ code: "protocol_error", message: "Invalid handshake response" });
-			}
-			return;
-		}
-		if (message.type === "catalog_changed") {
-			if (!this.negotiated?.capabilities.includes("catalog_refresh")) {
-				await this.protocolFailure(new Error("Unnegotiated catalog event"));
-				return;
-			}
-			this.catalogRefreshing = true;
-			try {
-				this.onCatalogChanged?.(message);
-			} catch (error) {
-				await this.protocolFailure(error);
-				return;
-			}
-			this.latestCatalogEvent = message;
-			this.scheduleCatalogRefresh();
-			return;
-		}
-		if (message.type === "error" && this.handshakeId && message.id === this.handshakeId) {
+		try {
+			const ack = validateRemoteWorkspaceHandshakeAck(message, this.handshakeOffer, this.localToolSchemas);
+			this.negotiated = cloneHandshakeAck(ack);
+			const resolve = this.handshakeResolve;
+			this.clearHandshake();
 			this.addTombstone(message.id);
-			this.failHandshake(new RemoteWorkspaceRequestError(message.error));
+			resolve(cloneHandshakeAck(ack));
+		} catch (error) {
+			this.failHandshake(error instanceof Error ? error : new Error(String(error)));
+			await this.closeWithReason({ code: "protocol_error", message: "Invalid handshake response" });
+		}
+	}
+
+	private async handleCatalogChanged(message: RemoteWorkspaceCatalogChanged): Promise<void> {
+		if (!this.negotiated?.capabilities.includes("catalog_refresh")) {
+			await this.protocolFailure(new Error("Unnegotiated catalog event"));
 			return;
 		}
+		this.catalogRefreshing = true;
+		try {
+			this.onCatalogChanged?.(message);
+		} catch (error) {
+			await this.protocolFailure(error);
+			return;
+		}
+		this.latestCatalogEvent = message;
+		this.scheduleCatalogRefresh();
+	}
+
+	private handleHandshakeError(message: RemoteWorkspaceErrorMessage): boolean {
+		if (!this.handshakeId || message.id !== this.handshakeId) return false;
+		this.addTombstone(message.id);
+		this.failHandshake(new RemoteWorkspaceRequestError(message.error));
+		return true;
+	}
+
+	private async findPendingRequest(message: RemoteWorkspaceRequestMessage): Promise<ClientPendingRequest | undefined> {
 		const pending = this.pending.get(message.id);
-		if (!pending) {
-			this.pruneTombstones();
-			if (this.tombstones.has(message.id)) return;
+		if (pending) return pending;
+		this.pruneTombstones();
+		if (!this.tombstones.has(message.id)) {
 			await this.protocolFailure(new Error(`Response for unknown request ID: ${message.id}`));
+		}
+		return undefined;
+	}
+
+	private async handleRequestUpdate(message: RemoteWorkspaceUpdate, pending: ClientPendingRequest): Promise<void> {
+		if (!this.negotiated?.capabilities.includes("tool_updates") || message.sequence !== pending.nextUpdateSequence) {
+			await this.protocolFailure(new Error(`Out-of-order or unnegotiated update for request ${message.id}`));
 			return;
 		}
-		if (message.type === "update") {
-			if (
-				!this.negotiated?.capabilities.includes("tool_updates") ||
-				message.sequence !== pending.nextUpdateSequence
-			) {
-				await this.protocolFailure(new Error(`Out-of-order or unnegotiated update for request ${message.id}`));
-				return;
-			}
-			pending.nextUpdateSequence++;
-			try {
-				await pending.onUpdate?.(message.update);
-			} catch (error) {
-				await this.failClientCallback(message.id, error);
-			}
+		pending.nextUpdateSequence++;
+		try {
+			await pending.onUpdate?.(message.update);
+		} catch (error) {
+			await this.failClientCallback(message.id, error);
+		}
+	}
+
+	private async handleTransferStart(
+		message: RemoteWorkspaceTransferStart,
+		pending: ClientPendingRequest,
+	): Promise<void> {
+		if (
+			(pending.method !== "transfer.download" && pending.method !== "artifact.read") ||
+			pending.download ||
+			message.length > (this.negotiated?.limits.maxTransferBytes ?? 0)
+		) {
+			await this.protocolFailure(new Error(`Invalid transfer start for ${pending.method}`));
 			return;
 		}
-		if (message.type === "transfer_start") {
-			if (
-				(pending.method !== "transfer.download" && pending.method !== "artifact.read") ||
-				pending.download ||
-				message.length > (this.negotiated?.limits.maxTransferBytes ?? 0)
-			) {
-				await this.protocolFailure(new Error(`Invalid transfer start for ${pending.method}`));
-				return;
-			}
-			pending.download = {
-				expectedLength: message.length,
-				expectedSha256: message.sha256,
-				bytes: 0,
-				chunks: 0,
-				hash: createHash("sha256"),
-			};
-			try {
-				await pending.onTransferStart?.({ length: message.length, sha256: message.sha256 });
-			} catch (error) {
-				await this.failClientCallback(message.id, error);
-			}
+		pending.download = {
+			expectedLength: message.length,
+			expectedSha256: message.sha256,
+			bytes: 0,
+			chunks: 0,
+			hash: createHash("sha256"),
+		};
+		try {
+			await pending.onTransferStart?.({ length: message.length, sha256: message.sha256 });
+		} catch (error) {
+			await this.failClientCallback(message.id, error);
+		}
+	}
+
+	private async handleTransferChunk(
+		message: RemoteWorkspaceTransferChunk,
+		pending: ClientPendingRequest,
+	): Promise<void> {
+		const download = pending.download;
+		if (!download || message.sequence !== pending.nextIncomingTransferSequence) {
+			await this.protocolFailure(new Error(`Out-of-order transfer chunk for request ${message.id}`));
 			return;
 		}
-		if (message.type === "transfer_chunk") {
-			const download = pending.download;
-			if (!download || message.sequence !== pending.nextIncomingTransferSequence) {
-				await this.protocolFailure(new Error(`Out-of-order transfer chunk for request ${message.id}`));
-				return;
-			}
-			const limits = this.negotiated?.limits ?? this.receiveLimits;
-			let chunk: Buffer;
-			try {
-				chunk = decodeCanonicalBase64(message.dataBase64, limits.maxTransferChunkBytes);
-			} catch (error) {
-				await this.protocolFailure(error, "invalid_payload");
-				return;
-			}
-			if (
-				download.chunks + 1 > limits.maxTransferChunks ||
-				download.bytes + chunk.byteLength > limits.maxTransferBytes ||
-				download.bytes + chunk.byteLength > download.expectedLength
-			) {
-				await this.protocolFailure(
-					new Error(`Transfer exceeds declared or negotiated limits for request ${message.id}`),
-					"message_too_large",
-				);
-				return;
-			}
-			download.chunks++;
-			download.bytes += chunk.byteLength;
-			download.hash.update(chunk);
-			pending.nextIncomingTransferSequence++;
-			try {
-				await pending.onTransferChunk?.(chunk);
-			} catch (error) {
-				await this.failClientCallback(message.id, error);
-			}
+		const limits = this.negotiated?.limits ?? this.receiveLimits;
+		let chunk: Buffer;
+		try {
+			chunk = decodeCanonicalBase64(message.dataBase64, limits.maxTransferChunkBytes);
+		} catch (error) {
+			await this.protocolFailure(error, "invalid_payload");
 			return;
 		}
-		if (message.type === "error") {
-			this.rejectPending(message.id, new RemoteWorkspaceRequestError(message.error), true);
+		if (
+			download.chunks + 1 > limits.maxTransferChunks ||
+			download.bytes + chunk.byteLength > limits.maxTransferBytes ||
+			download.bytes + chunk.byteLength > download.expectedLength
+		) {
+			await this.protocolFailure(
+				new Error(`Transfer exceeds declared or negotiated limits for request ${message.id}`),
+				"message_too_large",
+			);
 			return;
 		}
+		download.chunks++;
+		download.bytes += chunk.byteLength;
+		download.hash.update(chunk);
+		pending.nextIncomingTransferSequence++;
+		try {
+			await pending.onTransferChunk?.(chunk);
+		} catch (error) {
+			await this.failClientCallback(message.id, error);
+		}
+	}
+
+	private async handleRequestResult(message: RemoteWorkspaceResult, pending: ClientPendingRequest): Promise<void> {
 		try {
 			const limits = this.negotiated?.limits ?? this.receiveLimits;
 			const result = parseRemoteWorkspaceResult(pending.method, message.result, limits);
@@ -657,16 +691,58 @@ export class RemoteWorkspaceClientProtocol {
 		}
 	}
 
+	private async handlePendingMessage(
+		message: RemoteWorkspaceRequestMessage,
+		pending: ClientPendingRequest,
+	): Promise<void> {
+		switch (message.type) {
+			case "update":
+				await this.handleRequestUpdate(message, pending);
+				return;
+			case "transfer_start":
+				await this.handleTransferStart(message, pending);
+				return;
+			case "transfer_chunk":
+				await this.handleTransferChunk(message, pending);
+				return;
+			case "error":
+				this.rejectPending(message.id, new RemoteWorkspaceRequestError(message.error), true);
+				return;
+			case "result":
+				await this.handleRequestResult(message, pending);
+				return;
+		}
+	}
+
+	private async receivePayload(payload: string | Uint8Array): Promise<void> {
+		if (this.closed) return;
+		const message = await this.decodeServerMessage(payload);
+		if (!message) return;
+		if (message.type === "handshake_ack") {
+			await this.handleHandshakeAck(message);
+			return;
+		}
+		if (message.type === "catalog_changed") {
+			await this.handleCatalogChanged(message);
+			return;
+		}
+		if (message.type === "error" && this.handleHandshakeError(message)) return;
+		const pending = await this.findPendingRequest(message);
+		if (!pending) return;
+		await this.handlePendingMessage(message, pending);
+	}
+
 	private assertMethodAvailable(
 		method: RemoteWorkspaceMethod,
 		params: unknown,
 		ack: RemoteWorkspaceHandshakeAck,
 	): void {
+		const capabilities = new Set(ack.capabilities);
 		const capability = methodCapability(method);
-		if (capability && !ack.capabilities.includes(capability)) {
+		if (capability && !capabilities.has(capability)) {
 			throw new Error(`Remote workspace capability was not negotiated: ${capability}`);
 		}
-		if (method === "artifact.read" && !ack.capabilities.includes("file_transfer")) {
+		if (method === "artifact.read" && !capabilities.has("file_transfer")) {
 			throw new Error("Remote workspace artifact reads require file transfer capability");
 		}
 		if (method !== "catalog.get" && method !== "tool.invoke" && !ack.catalog.operations.includes(method)) {
@@ -679,7 +755,7 @@ export class RemoteWorkspaceClientProtocol {
 		if (!remoteTool || !localHash)
 			throw new Error(`Remote tool has no matching local canonical definition: ${invocation.toolName}`);
 		for (const featureFlag of remoteTool.featureFlags) {
-			if (!ack.capabilities.includes(featureFlag)) {
+			if (!capabilities.has(featureFlag)) {
 				throw new Error(`Remote tool requires an unnegotiated capability: ${featureFlag}`);
 			}
 		}
@@ -856,7 +932,7 @@ export class RemoteWorkspaceClientProtocol {
 
 	private async requestCancellation(
 		id: string,
-		code: "cancelled" | "deadline_exceeded",
+		code: RemoteWorkspaceCancellationErrorCode,
 		message: string,
 	): Promise<void> {
 		const pending = this.pending.get(id);
@@ -1002,7 +1078,7 @@ export class RemoteWorkspaceClientProtocol {
 
 	private async protocolFailure(
 		error: unknown,
-		code: RemoteWorkspaceProtocolCloseReason["code"] = "protocol_error",
+		code: RemoteWorkspaceProtocolCloseCode = "protocol_error",
 	): Promise<void> {
 		const message = error instanceof Error ? error.message : String(error);
 		try {
@@ -1029,7 +1105,7 @@ export class RemoteWorkspaceClientProtocol {
 
 export interface RemoteWorkspaceServerRequestContext {
 	readonly signal: AbortSignal;
-	readonly request: RemoteWorkspaceRequest & { method: RemoteWorkspaceMethod };
+	readonly request: RemoteWorkspaceTypedRequest;
 	markSideEffectStarted(): void;
 	markCommitted(): void;
 	sendUpdate(update: unknown): Promise<void>;
@@ -1038,19 +1114,16 @@ export interface RemoteWorkspaceServerRequestContext {
 }
 
 export interface RemoteWorkspaceServerHandler {
-	handleRequest(
-		request: RemoteWorkspaceRequest & { method: RemoteWorkspaceMethod },
-		context: RemoteWorkspaceServerRequestContext,
-	): Promise<unknown>;
+	handleRequest(request: RemoteWorkspaceTypedRequest, context: RemoteWorkspaceServerRequestContext): Promise<unknown>;
 	handleUploadChunk?(
-		request: RemoteWorkspaceRequest & { method: "transfer.upload" },
+		request: RemoteWorkspaceUploadRequest,
 		chunk: Buffer,
 		sequence: number,
 		context: RemoteWorkspaceServerRequestContext,
 	): Promise<void>;
 	handleUploadFinish?(
-		request: RemoteWorkspaceRequest & { method: "transfer.upload" },
-		metadata: { length: number; sha256: string },
+		request: RemoteWorkspaceUploadRequest,
+		metadata: RemoteWorkspaceTransferMetadata,
 		context: RemoteWorkspaceServerRequestContext,
 	): Promise<void>;
 	validateToolArguments(toolName: string, value: unknown): boolean;
@@ -1081,7 +1154,7 @@ interface ServerTransferState {
 }
 
 interface ServerActiveRequest {
-	request: RemoteWorkspaceRequest & { method: RemoteWorkspaceMethod };
+	request: RemoteWorkspaceTypedRequest;
 	controller: AbortController;
 	context: RemoteWorkspaceServerRequestContext;
 	timer: NodeJS.Timeout;
@@ -1312,6 +1385,24 @@ export class RemoteWorkspaceServerProtocol {
 		}
 		await this.handleRequest(message);
 	}
+	private async handleRequestValidationFailure(requestId: string, error: unknown): Promise<void> {
+		this.addTombstone(requestId);
+		const semantic = error instanceof RemoteWorkspaceRequestError;
+		if (!semantic) this.strikes++;
+		const protocolError = semantic
+			? {
+					code: error.code,
+					message: error.message,
+					executionState: error.executionState,
+					retryable: error.retryable,
+					...(error.details === undefined ? {} : { details: error.details }),
+				}
+			: this.createError("invalid_request", this.errorMessage(error), "not_started", false);
+		await this.send({ type: "error", id: requestId, error: protocolError });
+		if (this.strikes >= this.invalidRequestStrikes) {
+			await this.closeWithReason({ code: "policy_violation", message: "Too many invalid requests" });
+		}
+	}
 
 	private async handleHandshake(handshake: RemoteWorkspaceHandshake): Promise<void> {
 		if (this.isDuplicateId(handshake.id)) {
@@ -1369,28 +1460,13 @@ export class RemoteWorkspaceServerProtocol {
 			);
 			return;
 		}
-		const typedRequest = request as RemoteWorkspaceRequest & { method: RemoteWorkspaceMethod };
+		const typedRequest = request as RemoteWorkspaceTypedRequest;
 		try {
 			parseRemoteWorkspaceRequestParams(typedRequest.method, typedRequest.params, this.limits);
 			this.assertMethodAvailable(typedRequest);
 			this.validateCatalogRequest(typedRequest);
 		} catch (error) {
-			this.addTombstone(request.id);
-			const semantic = error instanceof RemoteWorkspaceRequestError;
-			if (!semantic) this.strikes++;
-			const protocolError = semantic
-				? {
-						code: error.code,
-						message: error.message,
-						executionState: error.executionState,
-						retryable: error.retryable,
-						...(error.details === undefined ? {} : { details: error.details }),
-					}
-				: this.createError("invalid_request", this.errorMessage(error), "not_started", false);
-			await this.send({ type: "error", id: request.id, error: protocolError });
-			if (this.strikes >= this.invalidRequestStrikes) {
-				await this.closeWithReason({ code: "policy_violation", message: "Too many invalid requests" });
-			}
+			await this.handleRequestValidationFailure(request.id, error);
 			return;
 		}
 		if (this.active.size >= this.limits.maxActiveRequests) {
@@ -1418,7 +1494,7 @@ export class RemoteWorkspaceServerProtocol {
 	}
 
 	private createActiveRequest(
-		request: RemoteWorkspaceRequest & { method: RemoteWorkspaceMethod },
+		request: RemoteWorkspaceTypedRequest,
 		controller: AbortController,
 		timeoutMs: number,
 	): ServerActiveRequest {
@@ -1724,7 +1800,7 @@ export class RemoteWorkspaceServerProtocol {
 		});
 	}
 
-	private assertMethodAvailable(request: RemoteWorkspaceRequest & { method: RemoteWorkspaceMethod }): void {
+	private assertMethodAvailable(request: RemoteWorkspaceTypedRequest): void {
 		const capability = methodCapability(request.method);
 		if (capability && !this.negotiatedCapabilities.has(capability)) {
 			throw new RemoteWorkspaceRequestError(
@@ -1755,7 +1831,7 @@ export class RemoteWorkspaceServerProtocol {
 		}
 	}
 
-	private validateCatalogRequest(request: RemoteWorkspaceRequest & { method: RemoteWorkspaceMethod }): void {
+	private validateCatalogRequest(request: RemoteWorkspaceTypedRequest): void {
 		if (request.method !== "tool.invoke") return;
 		const params = request.params as {
 			generation: number;
@@ -1797,9 +1873,7 @@ export class RemoteWorkspaceServerProtocol {
 		}
 	}
 
-	private requestKind(
-		request: RemoteWorkspaceRequest & { method: RemoteWorkspaceMethod },
-	): RemoteWorkspaceOperationKind {
+	private requestKind(request: RemoteWorkspaceTypedRequest): RemoteWorkspaceOperationKind {
 		if (request.method !== "tool.invoke") return getRemoteWorkspaceMethodKind(request.method);
 		const params = request.params as { toolName: string };
 		return this.catalog.tools.find((tool) => tool.name === params.toolName)?.executionMode ?? "service";
@@ -1865,7 +1939,7 @@ export class RemoteWorkspaceServerProtocol {
 			.then(async () => {
 				if (active.settled) return;
 				await this.handler.handleUploadChunk?.(
-					active.request as RemoteWorkspaceRequest & { method: "transfer.upload" },
+					active.request as RemoteWorkspaceUploadRequest,
 					chunk,
 					sequence,
 					active.context,
@@ -1910,7 +1984,7 @@ export class RemoteWorkspaceServerProtocol {
 		const operation = active.inboundQueue.then(async () => {
 			if (active.settled) return;
 			await this.handler.handleUploadFinish?.(
-				active.request as RemoteWorkspaceRequest & { method: "transfer.upload" },
+				active.request as RemoteWorkspaceUploadRequest,
 				{ length, sha256 },
 				active.context,
 			);

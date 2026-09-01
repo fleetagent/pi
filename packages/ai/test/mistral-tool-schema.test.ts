@@ -4,14 +4,18 @@ import { getModel } from "../src/models.ts";
 import { complete } from "../src/stream.ts";
 import type { Context, Model } from "../src/types.ts";
 
+interface MistralPayloadFunctionDefinition {
+	name: string;
+	parameters: Record<string, unknown>;
+}
+
+interface MistralPayloadTool {
+	type: "function";
+	function: MistralPayloadFunctionDefinition;
+}
+
 interface MistralToolPayload {
-	tools?: Array<{
-		type: "function";
-		function: {
-			name: string;
-			parameters: Record<string, unknown>;
-		};
-	}>;
+	tools?: MistralPayloadTool[];
 }
 
 describe("Mistral tool schema serialization", () => {

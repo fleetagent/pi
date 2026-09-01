@@ -1,6 +1,6 @@
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
-import { createEventBus } from "../../../src/core/event-bus.ts";
+import { createEventBus, type EventBusController } from "../../../src/core/event-bus.ts";
 import { createExtensionRuntime, loadExtensionFromFactory } from "../../../src/core/extensions/loader.ts";
 import type {
 	ExtensionAPI,
@@ -23,7 +23,7 @@ function createLazyTool(name: string): ToolDefinition {
 	};
 }
 
-async function createReloadableResourceLoader(factory: ExtensionFactory, eventBus: ReturnType<typeof createEventBus>) {
+async function createReloadableResourceLoader(factory: ExtensionFactory, eventBus: EventBusController) {
 	let extensionsResult: LoadExtensionsResult;
 	let skills: Skill[] = [];
 	let rules: Rule[] = [];

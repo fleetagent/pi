@@ -1,7 +1,12 @@
 import assert from "node:assert";
 import { describe, it } from "node:test";
 import { stripVTControlCharacters } from "node:util";
-import { type AutocompleteProvider, CombinedAutocompleteProvider } from "../src/autocomplete.ts";
+import {
+	type AutocompleteCompletion,
+	type AutocompleteItem,
+	type AutocompleteProvider,
+	CombinedAutocompleteProvider,
+} from "../src/autocomplete.ts";
 import { Editor, wordWrapLine } from "../src/components/editor.ts";
 import type { TUI } from "../src/tui.ts";
 import { TuiMainScreen } from "../src/tui-main-screen.ts";
@@ -19,9 +24,9 @@ function applyCompletion(
 	lines: string[],
 	cursorLine: number,
 	cursorCol: number,
-	item: { value: string },
+	item: AutocompleteItem,
 	prefix: string,
-): { lines: string[]; cursorLine: number; cursorCol: number } {
+): AutocompleteCompletion {
 	const line = lines[cursorLine] || "";
 	const before = line.slice(0, cursorCol - prefix.length);
 	const after = line.slice(cursorCol);
@@ -697,7 +702,8 @@ describe("Editor component", () => {
 	});
 
 	describe("Scroll indicators", () => {
-		it("bounds colored top and bottom indicators at one, two, and wider columns", () => {
+		/* pi-ignore noExcessiveCollectionIterations: Four fixed width cases each inspect at most the 20 configured content rows. */
+		function verifyBoundedScrollIndicators(): void {
 			const borderColor = (text: string) => `\x1b[35m${text}\x1b[39m`;
 			const cases = [
 				{ width: 1, top: ".", bottom: "." },
@@ -725,7 +731,8 @@ describe("Editor component", () => {
 					assert.strictEqual(visibleWidth(line), width, `line exceeds width ${width}: ${JSON.stringify(line)}`);
 				}
 			}
-		});
+		}
+		it("bounds colored top and bottom indicators at one, two, and wider columns", verifyBoundedScrollIndicators);
 	});
 
 	describe("Grapheme-aware text wrapping", () => {
@@ -761,7 +768,8 @@ describe("Editor component", () => {
 			}
 		});
 
-		it("renders isolated Thai and Lao AM clusters without width drift", () => {
+		/* pi-ignore noExcessiveCollectionIterations: Two fixed five-character samples are rendered at width 8. */
+		function verifyThaiAndLaoClusterWidths(): void {
 			for (const text of ["ำabc", "ຳabc"]) {
 				const editor = new Editor(createTestTUI(), defaultEditorTheme);
 				const width = 8;
@@ -771,7 +779,8 @@ describe("Editor component", () => {
 					assert.strictEqual(visibleWidth(line), width, `line width drift for ${JSON.stringify(text)}: ${line}`);
 				}
 			}
-		});
+		}
+		it("renders isolated Thai and Lao AM clusters without width drift", verifyThaiAndLaoClusterWidths);
 
 		it("wraps CJK characters correctly (each is 2 columns wide)", () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
@@ -840,7 +849,8 @@ describe("Editor component", () => {
 			}
 		});
 
-		it("shows cursor at end of line before wrap, wraps on next char", () => {
+		/* pi-ignore noExcessiveCollectionIterations: Two padding variants each replay exactly nine initial keystrokes. */
+		function verifyCursorWrapBoundaries(): void {
 			const width = 10;
 			for (const paddingX of [0, 1]) {
 				const editor = new Editor(createTestTUI(width + paddingX), defaultEditorTheme, { paddingX });
@@ -858,7 +868,8 @@ describe("Editor component", () => {
 				contentLines = lines.slice(1, -1);
 				assert.strictEqual(contentLines.length, 2, "Should wrap to 2 content lines");
 			}
-		});
+		}
+		it("shows cursor at end of line before wrap, wraps on next char", verifyCursorWrapBoundaries);
 	});
 
 	describe("Word wrapping", () => {
@@ -2698,7 +2709,7 @@ describe("Editor component", () => {
 						description: "Load skills",
 						getArgumentCompletions: (() => "not-an-array") as unknown as (
 							argumentPrefix: string,
-						) => Promise<{ value: string; label: string }[] | null>,
+						) => Promise<AutocompleteItem[] | null>,
 					},
 				],
 				process.cwd(),

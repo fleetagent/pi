@@ -20,6 +20,11 @@ export interface VirtualTerminalCell {
 	overline: number;
 }
 
+interface VirtualTerminalCursorPosition {
+	x: number;
+	y: number;
+}
+
 // Extract Terminal class from the module
 const XtermTerminal = xterm.Terminal;
 
@@ -162,6 +167,7 @@ export class VirtualTerminal implements Terminal {
 	}
 
 	/** Snapshot every visible cell, including width, color, and style state. */
+	// pi-ignore noExcessiveCollectionIterations: A complete terminal snapshot must visit each visible row-column cell exactly once, so work is linear in viewport cells.
 	getCellSnapshot(): VirtualTerminalCell[][] {
 		const buffer = this.xterm.buffer.active;
 		const reusableCell = buffer.getNullCell();
@@ -253,7 +259,7 @@ export class VirtualTerminal implements Terminal {
 	/**
 	 * Get cursor position
 	 */
-	getCursorPosition(): { x: number; y: number } {
+	getCursorPosition(): VirtualTerminalCursorPosition {
 		const buffer = this.xterm.buffer.active;
 		return {
 			x: buffer.cursorX,

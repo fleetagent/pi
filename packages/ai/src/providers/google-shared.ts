@@ -2,8 +2,29 @@
  * Shared utilities for Google Generative AI and Google Vertex providers.
  */
 
-import { type Content, FinishReason, FunctionCallingConfigMode, type Part } from "@google/genai";
-import type { Context, ImageContent, Model, StopReason, StreamOptions, TextContent, Tool } from "../types.ts";
+import {
+	type Content,
+	FinishReason,
+	FunctionCallingConfigMode,
+	type Tool as GoogleTool,
+	type Part,
+	type Schema,
+} from "@google/genai";
+import type {
+	AssistantContent,
+	AssistantMessage,
+	AssistantMessageEventStream,
+	Context,
+	ImageContent,
+	Model,
+	StopReason,
+	StreamOptions,
+	TextContent,
+	ThinkingContent,
+	Tool,
+	ToolResultMessage,
+	UserMessage,
+} from "../types.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { transformMessages } from "./transform-messages.ts";
@@ -15,6 +36,19 @@ type GoogleApiType = "google-generative-ai" | "google-vertex";
  * Mirrors Google's ThinkingLevel enum values.
  */
 export type GoogleThinkingLevel = "THINKING_LEVEL_UNSPECIFIED" | "MINIMAL" | "LOW" | "MEDIUM" | "HIGH";
+export type GoogleToolChoice = "auto" | "none" | "any";
+
+export interface GoogleThinkingOptions {
+	enabled: boolean;
+	budgetTokens?: number; // -1 for dynamic, 0 to disable
+	level?: GoogleThinkingLevel;
+}
+
+export interface GoogleStreamState {
+	output: AssistantMessage;
+	stream: AssistantMessageEventStream;
+	currentBlock: TextContent | ThinkingContent | null;
+}
 
 /**
  * Determines whether a streamed Gemini `Part` should be treated as "thinking".
@@ -91,158 +125,126 @@ function supportsMultimodalFunctionResponse(modelId: string): boolean {
 	return true;
 }
 
+function normalizeGoogleToolCallId(modelId: string, id: string): string {
+	if (!requiresToolCallId(modelId)) return id;
+	return id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
+}
+
+function convertGoogleUserMessage(message: UserMessage): Content | undefined {
+	const parts: Part[] =
+		typeof message.content === "string"
+			? [{ text: sanitizeSurrogates(message.content) }]
+			: message.content.map((item) =>
+					item.type === "text"
+						? { text: sanitizeSurrogates(item.text) }
+						: { inlineData: { mimeType: item.mimeType, data: item.data } },
+				);
+	if (parts.length === 0) return undefined;
+	return { role: "user", parts };
+}
+
+function convertGoogleThinkingBlock(block: ThinkingContent, isSameProviderAndModel: boolean): Part | undefined {
+	if (isSameProviderAndModel) {
+		const thoughtSignature = resolveThoughtSignature(true, block.thinkingSignature);
+		if ((!block.thinking || block.thinking.trim() === "") && !thoughtSignature) return undefined;
+		return {
+			thought: true,
+			text: sanitizeSurrogates(block.thinking),
+			...(thoughtSignature && { thoughtSignature }),
+		};
+	}
+	if (!block.thinking || block.thinking.trim() === "") return undefined;
+	return { text: sanitizeSurrogates(block.thinking) };
+}
+
+function convertGoogleAssistantBlock(
+	block: AssistantContent,
+	model: Model<GoogleApiType>,
+	isSameProviderAndModel: boolean,
+): Part | undefined {
+	if (block.type === "text") {
+		const thoughtSignature = resolveThoughtSignature(isSameProviderAndModel, block.textSignature);
+		if ((!block.text || block.text.trim() === "") && !thoughtSignature) return undefined;
+		return {
+			text: sanitizeSurrogates(block.text),
+			...(thoughtSignature && { thoughtSignature }),
+		};
+	}
+	if (block.type === "thinking") return convertGoogleThinkingBlock(block, isSameProviderAndModel);
+	const thoughtSignature = resolveThoughtSignature(isSameProviderAndModel, block.thoughtSignature);
+	return {
+		functionCall: {
+			name: block.name,
+			args: block.arguments ?? {},
+			...(requiresToolCallId(model.id) ? { id: block.id } : {}),
+		},
+		...(thoughtSignature && { thoughtSignature }),
+	};
+}
+
+function convertGoogleAssistantMessage(message: AssistantMessage, model: Model<GoogleApiType>): Content | undefined {
+	const isSameProviderAndModel = message.provider === model.provider && message.model === model.id;
+	const parts: Part[] = [];
+	for (const block of message.content) {
+		const part = convertGoogleAssistantBlock(block, model, isSameProviderAndModel);
+		if (part) parts.push(part);
+	}
+	return parts.length > 0 ? { role: "model", parts } : undefined;
+}
+
+function appendGoogleToolResult(contents: Content[], message: ToolResultMessage, model: Model<GoogleApiType>): void {
+	const textResult = message.content
+		.filter((content): content is TextContent => content.type === "text")
+		.map((content) => content.text)
+		.join("\n");
+	const imageContent = model.input.includes("image")
+		? message.content.filter((content): content is ImageContent => content.type === "image")
+		: [];
+	const hasImages = imageContent.length > 0;
+	const supportsMultimodalResponse = supportsMultimodalFunctionResponse(model.id);
+	const responseValue =
+		textResult.length > 0 ? sanitizeSurrogates(textResult) : hasImages ? "(see attached image)" : "";
+	const imageParts: Part[] = imageContent.map((imageBlock) => ({
+		inlineData: { mimeType: imageBlock.mimeType, data: imageBlock.data },
+	}));
+	const functionResponsePart: Part = {
+		functionResponse: {
+			name: message.toolName,
+			response: message.isError ? { error: responseValue } : { output: responseValue },
+			...(hasImages && supportsMultimodalResponse && { parts: imageParts }),
+			...(requiresToolCallId(model.id) ? { id: message.toolCallId } : {}),
+		},
+	};
+	const lastContent = contents[contents.length - 1];
+	if (lastContent?.role === "user" && lastContent.parts?.some((part) => part.functionResponse)) {
+		lastContent.parts.push(functionResponsePart);
+	} else {
+		contents.push({ role: "user", parts: [functionResponsePart] });
+	}
+	if (hasImages && !supportsMultimodalResponse) {
+		contents.push({ role: "user", parts: [{ text: "Tool result image:" }, ...imageParts] });
+	}
+}
+
 /**
  * Convert internal messages to Gemini Content[] format.
  */
 export function convertMessages<T extends GoogleApiType>(model: Model<T>, context: Context): Content[] {
 	const contents: Content[] = [];
-	const normalizeToolCallId = (id: string): string => {
-		if (!requiresToolCallId(model.id)) return id;
-		return id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
-	};
-
-	const transformedMessages = transformMessages(context.messages, model, normalizeToolCallId);
-
-	for (const msg of transformedMessages) {
-		if (msg.role === "user") {
-			if (typeof msg.content === "string") {
-				contents.push({
-					role: "user",
-					parts: [{ text: sanitizeSurrogates(msg.content) }],
-				});
-			} else {
-				const parts: Part[] = msg.content.map((item) => {
-					if (item.type === "text") {
-						return { text: sanitizeSurrogates(item.text) };
-					} else {
-						return {
-							inlineData: {
-								mimeType: item.mimeType,
-								data: item.data,
-							},
-						};
-					}
-				});
-				if (parts.length === 0) continue;
-				contents.push({
-					role: "user",
-					parts,
-				});
-			}
-		} else if (msg.role === "assistant") {
-			const parts: Part[] = [];
-			// Check if message is from same provider and model - only then keep thinking blocks
-			const isSameProviderAndModel = msg.provider === model.provider && msg.model === model.id;
-
-			for (const block of msg.content) {
-				if (block.type === "text") {
-					const thoughtSignature = resolveThoughtSignature(isSameProviderAndModel, block.textSignature);
-					// Skip empty text blocks — unless they carry a thought signature. Gemini can attach
-					// the signature to a part whose visible text is empty and requires it echoed back;
-					// dropping it breaks the reasoning chain and the model intermittently ends mid-task
-					// turns with a thought-only STOP (empty completion, no tool call).
-					if ((!block.text || block.text.trim() === "") && !thoughtSignature) continue;
-					parts.push({
-						text: sanitizeSurrogates(block.text),
-						...(thoughtSignature && { thoughtSignature }),
-					});
-				} else if (block.type === "thinking") {
-					// Only keep as thinking block if same provider AND same model
-					// Otherwise convert to plain text (no tags to avoid model mimicking them)
-					if (isSameProviderAndModel) {
-						const thoughtSignature = resolveThoughtSignature(isSameProviderAndModel, block.thinkingSignature);
-						// Same rule as text blocks: an empty thinking block is dropped only when it
-						// carries no signature (mirrors the anthropic converter's handling).
-						if ((!block.thinking || block.thinking.trim() === "") && !thoughtSignature) continue;
-						parts.push({
-							thought: true,
-							text: sanitizeSurrogates(block.thinking),
-							...(thoughtSignature && { thoughtSignature }),
-						});
-					} else {
-						// Cross-provider/model: the signature is unusable, empty blocks stay dropped.
-						if (!block.thinking || block.thinking.trim() === "") continue;
-						parts.push({
-							text: sanitizeSurrogates(block.thinking),
-						});
-					}
-				} else if (block.type === "toolCall") {
-					const thoughtSignature = resolveThoughtSignature(isSameProviderAndModel, block.thoughtSignature);
-					const part: Part = {
-						functionCall: {
-							name: block.name,
-							args: block.arguments ?? {},
-							...(requiresToolCallId(model.id) ? { id: block.id } : {}),
-						},
-						...(thoughtSignature && { thoughtSignature }),
-					};
-					parts.push(part);
-				}
-			}
-
-			if (parts.length === 0) continue;
-			contents.push({
-				role: "model",
-				parts,
-			});
-		} else if (msg.role === "toolResult") {
-			// Extract text and image content
-			const textContent = msg.content.filter((c): c is TextContent => c.type === "text");
-			const textResult = textContent.map((c) => c.text).join("\n");
-			const imageContent = model.input.includes("image")
-				? msg.content.filter((c): c is ImageContent => c.type === "image")
-				: [];
-
-			const hasText = textResult.length > 0;
-			const hasImages = imageContent.length > 0;
-
-			// Gemini 3+ models support multimodal function responses with images nested inside
-			// functionResponse.parts. Claude and other non-Gemini models behind Cloud Code Assist /
-			// Gemini < 3 still needs a separate user image turn.
-			const modelSupportsMultimodalFunctionResponse = supportsMultimodalFunctionResponse(model.id);
-
-			// Use "output" key for success, "error" key for errors as per SDK documentation
-			const responseValue = hasText ? sanitizeSurrogates(textResult) : hasImages ? "(see attached image)" : "";
-
-			const imageParts: Part[] = imageContent.map((imageBlock) => ({
-				inlineData: {
-					mimeType: imageBlock.mimeType,
-					data: imageBlock.data,
-				},
-			}));
-
-			const includeId = requiresToolCallId(model.id);
-			const functionResponsePart: Part = {
-				functionResponse: {
-					name: msg.toolName,
-					response: msg.isError ? { error: responseValue } : { output: responseValue },
-					...(hasImages && modelSupportsMultimodalFunctionResponse && { parts: imageParts }),
-					...(includeId ? { id: msg.toolCallId } : {}),
-				},
-			};
-
-			// Cloud Code Assist API requires all function responses to be in a single user turn.
-			// Check if the last content is already a user turn with function responses and merge.
-			const lastContent = contents[contents.length - 1];
-			if (lastContent?.role === "user" && lastContent.parts?.some((p) => p.functionResponse)) {
-				lastContent.parts.push(functionResponsePart);
-			} else {
-				contents.push({
-					role: "user",
-					parts: [functionResponsePart],
-				});
-			}
-
-			// For Gemini < 3, add images in a separate user message
-			if (hasImages && !modelSupportsMultimodalFunctionResponse) {
-				contents.push({
-					role: "user",
-					parts: [{ text: "Tool result image:" }, ...imageParts],
-				});
-			}
+	const transformedMessages = transformMessages(context.messages, model, (id) =>
+		normalizeGoogleToolCallId(model.id, id),
+	);
+	for (const message of transformedMessages) {
+		if (message.role === "user") {
+			const content = convertGoogleUserMessage(message);
+			if (content) contents.push(content);
+		} else if (message.role === "assistant") {
+			const content = convertGoogleAssistantMessage(message, model);
+			if (content) contents.push(content);
+		} else if (message.role === "toolResult") {
+			appendGoogleToolResult(contents, message, model);
 		}
 	}
-
 	return contents;
 }
 
@@ -281,10 +283,7 @@ function sanitizeForOpenApi(schema: unknown): unknown {
  * field instead (OpenAPI 3.03 Schema). This is needed for Cloud Code Assist with Claude
  * models, where the API translates `parameters` into Anthropic's `input_schema`.
  */
-export function convertTools(
-	tools: Tool[],
-	useParameters = false,
-): { functionDeclarations: Record<string, unknown>[] }[] | undefined {
+export function convertTools(tools: Tool[], useParameters = false): GoogleTool[] | undefined {
 	if (tools.length === 0) return undefined;
 	return [
 		{
@@ -292,7 +291,7 @@ export function convertTools(
 				name: tool.name,
 				description: tool.description,
 				...(useParameters
-					? { parameters: sanitizeForOpenApi(tool.parameters as unknown) }
+					? { parameters: sanitizeForOpenApi(tool.parameters as unknown) as Schema }
 					: { parametersJsonSchema: tool.parameters }),
 			})),
 		},

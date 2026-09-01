@@ -1,7 +1,21 @@
-import type { AssistantMessage, ImageContent, Model, TextContent, Usage } from "@fleetagent/pi-ai";
+import type {
+	ContextUsageEstimate as AiContextUsageEstimate,
+	AssistantMessage,
+	AssistantUsageInfo,
+	ImageContent,
+	Model,
+	TextContent,
+	ToolResultMessage,
+	Usage,
+	UserMessage,
+} from "@fleetagent/pi-ai";
 import { completeSimple } from "@fleetagent/pi-ai";
 import type { AgentMessage, ThinkingLevel } from "../../types.ts";
 import {
+	type BashExecutionMessage,
+	type BranchSummaryMessage,
+	type CompactionSummaryMessage,
+	type CustomMessage,
 	convertToLlm,
 	createBranchSummaryMessage,
 	createCompactionSummaryMessage,
@@ -13,23 +27,36 @@ import {
 	computeFileLists,
 	createFileOps,
 	extractFileOpsFromMessage,
+	type FileOperationLists,
 	type FileOperations,
 	formatFileOperations,
 	serializeConversation,
 } from "./utils.ts";
 
-/** File-operation details stored on generated compaction entries. */
-export interface CompactionDetails {
-	/** Files read in the compacted history. */
-	readFiles: string[];
-	/** Files modified in the compacted history. */
-	modifiedFiles: string[];
-}
+/** File-operation lists stored on generated compaction entries. */
+export type CompactionDetails = FileOperationLists;
 function safeJsonStringify(value: unknown): string {
 	try {
 		return JSON.stringify(value) ?? "undefined";
 	} catch {
 		return "[unserializable]";
+	}
+}
+
+function restorePreviousCompactionFileOperations(
+	fileOps: FileOperations,
+	entries: SessionTreeEntry[],
+	prevCompactionIndex: number,
+): void {
+	if (prevCompactionIndex < 0) return;
+	const prevCompaction = entries[prevCompactionIndex] as CompactionEntry;
+	if (prevCompaction.fromHook || !prevCompaction.details) return;
+	const details = prevCompaction.details as CompactionDetails;
+	if (Array.isArray(details.readFiles)) {
+		for (const file of details.readFiles) fileOps.read.add(file);
+	}
+	if (Array.isArray(details.modifiedFiles)) {
+		for (const file of details.modifiedFiles) fileOps.edited.add(file);
 	}
 }
 
@@ -39,18 +66,7 @@ function extractFileOperations(
 	prevCompactionIndex: number,
 ): FileOperations {
 	const fileOps = createFileOps();
-	if (prevCompactionIndex >= 0) {
-		const prevCompaction = entries[prevCompactionIndex] as CompactionEntry;
-		if (!prevCompaction.fromHook && prevCompaction.details) {
-			const details = prevCompaction.details as CompactionDetails;
-			if (Array.isArray(details.readFiles)) {
-				for (const f of details.readFiles) fileOps.read.add(f);
-			}
-			if (Array.isArray(details.modifiedFiles)) {
-				for (const f of details.modifiedFiles) fileOps.edited.add(f);
-			}
-		}
-	}
+	restorePreviousCompactionFileOperations(fileOps, entries, prevCompactionIndex);
 	for (const msg of messages) {
 		extractFileOpsFromMessage(msg, fileOps);
 	}
@@ -142,18 +158,9 @@ export function getLastAssistantUsage(entries: SessionTreeEntry[]): Usage | unde
 }
 
 /** Estimated context-token usage for a message list. */
-export interface ContextUsageEstimate {
-	/** Estimated total context tokens. */
-	tokens: number;
-	/** Tokens reported by the most recent assistant usage block. */
-	usageTokens: number;
-	/** Estimated tokens after the most recent assistant usage block. */
-	trailingTokens: number;
-	/** Index of the message that provided usage, or null when none exists. */
-	lastUsageIndex: number | null;
-}
+export type ContextUsageEstimate = AiContextUsageEstimate;
 
-function getLastAssistantUsageInfo(messages: AgentMessage[]): { usage: Usage; index: number } | undefined {
+function getLastAssistantUsageInfo(messages: AgentMessage[]): AssistantUsageInfo | undefined {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const usage = getAssistantUsage(messages[i]);
 		if (usage) return { usage, index: i };
@@ -198,65 +205,65 @@ export function shouldCompact(contextTokens: number, contextWindow: number, sett
 	return contextTokens > contextWindow - settings.reserveTokens;
 }
 
-/** Estimate token count for one message using a conservative character heuristic. */
-export function estimateTokens(message: AgentMessage): number {
-	let chars = 0;
+function estimateUserMessageTokens(message: UserMessage): number {
+	if (typeof message.content === "string") return Math.ceil(message.content.length / 4);
+	let characters = 0;
+	for (const block of message.content) {
+		if (block.type === "text" && block.text) characters += block.text.length;
+	}
+	return Math.ceil(characters / 4);
+}
 
-	switch (message.role) {
-		case "user": {
-			const content = (message as { content: string | Array<{ type: string; text?: string }> }).content;
-			if (typeof content === "string") {
-				chars = content.length;
-			} else if (Array.isArray(content)) {
-				for (const block of content) {
-					if (block.type === "text" && block.text) {
-						chars += block.text.length;
-					}
-				}
-			}
-			return Math.ceil(chars / 4);
-		}
-		case "assistant": {
-			const assistant = message as AssistantMessage;
-			for (const block of assistant.content) {
-				if (block.type === "text") {
-					chars += block.text.length;
-				} else if (block.type === "thinking") {
-					chars += block.thinking.length;
-				} else if (block.type === "toolCall") {
-					chars += block.name.length + safeJsonStringify(block.arguments).length;
-				}
-			}
-			return Math.ceil(chars / 4);
-		}
-		case "custom":
-		case "toolResult": {
-			if (typeof message.content === "string") {
-				chars = message.content.length;
-			} else {
-				for (const block of message.content) {
-					if (block.type === "text" && block.text) {
-						chars += block.text.length;
-					}
-					if (block.type === "image") {
-						chars += 4800;
-					}
-				}
-			}
-			return Math.ceil(chars / 4);
-		}
-		case "bashExecution": {
-			chars = message.command.length + message.output.length;
-			return Math.ceil(chars / 4);
-		}
-		case "branchSummary":
-		case "compactionSummary": {
-			chars = message.summary.length;
-			return Math.ceil(chars / 4);
+function estimateAssistantMessageTokens(message: AssistantMessage): number {
+	let characters = 0;
+	for (const block of message.content) {
+		if (block.type === "text") {
+			characters += block.text.length;
+		} else if (block.type === "thinking") {
+			characters += block.thinking.length;
+		} else if (block.type === "toolCall") {
+			characters += block.name.length + safeJsonStringify(block.arguments).length;
 		}
 	}
+	return Math.ceil(characters / 4);
+}
 
-	return 0;
+function estimateContentMessageTokens(message: CustomMessage | ToolResultMessage): number {
+	if (typeof message.content === "string") return Math.ceil(message.content.length / 4);
+	let characters = 0;
+	for (const block of message.content) {
+		if (block.type === "text" && block.text) characters += block.text.length;
+		if (block.type === "image") characters += 4800;
+	}
+	return Math.ceil(characters / 4);
+}
+
+function estimateBashExecutionTokens(message: BashExecutionMessage): number {
+	return Math.ceil((message.command.length + message.output.length) / 4);
+}
+
+function estimateSummaryTokens(message: BranchSummaryMessage | CompactionSummaryMessage): number {
+	return Math.ceil(message.summary.length / 4);
+}
+
+/** Estimate token count for one message using a conservative character heuristic. */
+export function estimateTokens(message: AgentMessage): number {
+	switch (message.role) {
+		case "user":
+			return estimateUserMessageTokens(message);
+		case "assistant":
+			return estimateAssistantMessageTokens(message);
+		case "custom":
+		case "toolResult":
+			return estimateContentMessageTokens(message);
+		case "bashExecution":
+			return estimateBashExecutionTokens(message);
+		case "branchSummary":
+		case "compactionSummary":
+			return estimateSummaryTokens(message);
+		default:
+			return 0;
+	}
 }
 function findValidCutPoints(entries: SessionTreeEntry[], startIndex: number, endIndex: number): number[] {
 	const cutPoints: number[] = [];
@@ -324,6 +331,37 @@ export interface CutPointResult {
 	isSplitTurn: boolean;
 }
 
+function selectTokenBudgetCutIndex(
+	entries: SessionTreeEntry[],
+	startIndex: number,
+	endIndex: number,
+	keepRecentTokens: number,
+	cutPoints: number[],
+): number {
+	const defaultCutIndex = cutPoints[0]!;
+	let accumulatedTokens = 0;
+	let budgetIndex = -1;
+	for (let index = endIndex - 1; index >= startIndex; index--) {
+		const entry = entries[index];
+		if (entry.type !== "message") continue;
+		accumulatedTokens += estimateTokens(entry.message as AgentMessage);
+		if (accumulatedTokens < keepRecentTokens) continue;
+		budgetIndex = index;
+		break;
+	}
+	if (budgetIndex === -1) return defaultCutIndex;
+	return cutPoints.find((cutPoint) => cutPoint >= budgetIndex) ?? defaultCutIndex;
+}
+
+function moveCutIndexBeforeMetadata(entries: SessionTreeEntry[], cutIndex: number, startIndex: number): number {
+	while (cutIndex > startIndex) {
+		const previousEntry = entries[cutIndex - 1];
+		if (previousEntry.type === "compaction" || previousEntry.type === "message") return cutIndex;
+		cutIndex--;
+	}
+	return cutIndex;
+}
+
 /** Find the compaction cut point that keeps approximately the requested recent-token budget. */
 export function findCutPoint(
 	entries: SessionTreeEntry[],
@@ -332,42 +370,15 @@ export function findCutPoint(
 	keepRecentTokens: number,
 ): CutPointResult {
 	const cutPoints = findValidCutPoints(entries, startIndex, endIndex);
-
 	if (cutPoints.length === 0) {
 		return { firstKeptEntryIndex: startIndex, turnStartIndex: -1, isSplitTurn: false };
 	}
-	let accumulatedTokens = 0;
-	let cutIndex = cutPoints[0];
 
-	for (let i = endIndex - 1; i >= startIndex; i--) {
-		const entry = entries[i];
-		if (entry.type !== "message") continue;
-		const messageTokens = estimateTokens(entry.message as AgentMessage);
-		accumulatedTokens += messageTokens;
-		if (accumulatedTokens >= keepRecentTokens) {
-			for (let c = 0; c < cutPoints.length; c++) {
-				if (cutPoints[c] >= i) {
-					cutIndex = cutPoints[c];
-					break;
-				}
-			}
-			break;
-		}
-	}
-	while (cutIndex > startIndex) {
-		const prevEntry = entries[cutIndex - 1];
-		if (prevEntry.type === "compaction") {
-			break;
-		}
-		if (prevEntry.type === "message") {
-			break;
-		}
-		cutIndex--;
-	}
+	const selectedCutIndex = selectTokenBudgetCutIndex(entries, startIndex, endIndex, keepRecentTokens, cutPoints);
+	const cutIndex = moveCutIndexBeforeMetadata(entries, selectedCutIndex, startIndex);
 	const cutEntry = entries[cutIndex];
 	const isUserMessage = cutEntry.type === "message" && cutEntry.message.role === "user";
 	const turnStartIndex = isUserMessage ? -1 : findTurnStartIndex(entries, cutIndex, startIndex);
-
 	return {
 		firstKeptEntryIndex: cutIndex,
 		turnStartIndex,
@@ -510,7 +521,7 @@ export async function generateSummary(
 	}
 
 	const textContent = response.content
-		.filter((c): c is { type: "text"; text: string } => c.type === "text")
+		.filter((c): c is TextContent => c.type === "text")
 		.map((c) => c.text)
 		.join("\n");
 
@@ -537,6 +548,42 @@ export interface CompactionPreparation {
 	settings: CompactionSettings;
 }
 
+interface PreviousCompactionBoundary {
+	index: number;
+	startIndex: number;
+	summary: string | undefined;
+}
+
+function findPreviousCompactionBoundary(pathEntries: SessionTreeEntry[]): PreviousCompactionBoundary {
+	let index = -1;
+	for (let entryIndex = pathEntries.length - 1; entryIndex >= 0; entryIndex--) {
+		if (pathEntries[entryIndex].type !== "compaction") continue;
+		index = entryIndex;
+		break;
+	}
+	if (index < 0) return { index, startIndex: 0, summary: undefined };
+	const compaction = pathEntries[index] as CompactionEntry;
+	const firstKeptEntryIndex = pathEntries.findIndex((entry) => entry.id === compaction.firstKeptEntryId);
+	return {
+		index,
+		startIndex: firstKeptEntryIndex >= 0 ? firstKeptEntryIndex : index + 1,
+		summary: compaction.summary,
+	};
+}
+
+function collectCompactionMessages(
+	pathEntries: SessionTreeEntry[],
+	startIndex: number,
+	endIndex: number,
+): AgentMessage[] {
+	const messages: AgentMessage[] = [];
+	for (let index = startIndex; index < endIndex; index++) {
+		const message = getMessageFromEntryForCompaction(pathEntries[index]);
+		if (message) messages.push(message);
+	}
+	return messages;
+}
+
 /** Prepare session entries for compaction, or return undefined when compaction is not applicable. */
 export function prepareCompaction(
 	pathEntries: SessionTreeEntry[],
@@ -546,22 +593,10 @@ export function prepareCompaction(
 		return ok(undefined);
 	}
 
-	let prevCompactionIndex = -1;
-	for (let i = pathEntries.length - 1; i >= 0; i--) {
-		if (pathEntries[i].type === "compaction") {
-			prevCompactionIndex = i;
-			break;
-		}
-	}
-
-	let previousSummary: string | undefined;
-	let boundaryStart = 0;
-	if (prevCompactionIndex >= 0) {
-		const prevCompaction = pathEntries[prevCompactionIndex] as CompactionEntry;
-		previousSummary = prevCompaction.summary;
-		const firstKeptEntryIndex = pathEntries.findIndex((entry) => entry.id === prevCompaction.firstKeptEntryId);
-		boundaryStart = firstKeptEntryIndex >= 0 ? firstKeptEntryIndex : prevCompactionIndex + 1;
-	}
+	const previousCompaction = findPreviousCompactionBoundary(pathEntries);
+	const prevCompactionIndex = previousCompaction.index;
+	const previousSummary = previousCompaction.summary;
+	const boundaryStart = previousCompaction.startIndex;
 	const boundaryEnd = pathEntries.length;
 
 	const tokensBefore = estimateContextTokens(buildSessionContext(pathEntries).messages).tokens;
@@ -574,24 +609,12 @@ export function prepareCompaction(
 	const firstKeptEntryId = firstKeptEntry.id;
 
 	const historyEnd = cutPoint.isSplitTurn ? cutPoint.turnStartIndex : cutPoint.firstKeptEntryIndex;
-	const messagesToSummarize: AgentMessage[] = [];
-	for (let i = boundaryStart; i < historyEnd; i++) {
-		const msg = getMessageFromEntryForCompaction(pathEntries[i]);
-		if (msg) messagesToSummarize.push(msg);
-	}
-	const turnPrefixMessages: AgentMessage[] = [];
-	if (cutPoint.isSplitTurn) {
-		for (let i = cutPoint.turnStartIndex; i < cutPoint.firstKeptEntryIndex; i++) {
-			const msg = getMessageFromEntryForCompaction(pathEntries[i]);
-			if (msg) turnPrefixMessages.push(msg);
-		}
-	}
+	const messagesToSummarize = collectCompactionMessages(pathEntries, boundaryStart, historyEnd);
+	const turnPrefixMessages = cutPoint.isSplitTurn
+		? collectCompactionMessages(pathEntries, cutPoint.turnStartIndex, cutPoint.firstKeptEntryIndex)
+		: [];
 	const fileOps = extractFileOperations(messagesToSummarize, pathEntries, prevCompactionIndex);
-	if (cutPoint.isSplitTurn) {
-		for (const msg of turnPrefixMessages) {
-			extractFileOpsFromMessage(msg, fileOps);
-		}
-	}
+	for (const message of turnPrefixMessages) extractFileOpsFromMessage(message, fileOps);
 
 	return ok({
 		firstKeptEntryId,
@@ -745,7 +768,7 @@ async function generateTurnPrefixSummary(
 
 	return ok(
 		response.content
-			.filter((c): c is { type: "text"; text: string } => c.type === "text")
+			.filter((c): c is TextContent => c.type === "text")
 			.map((c) => c.text)
 			.join("\n"),
 	);

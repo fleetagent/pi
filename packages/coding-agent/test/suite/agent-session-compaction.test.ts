@@ -7,10 +7,19 @@ import {
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHarness, getUserTexts, type Harness } from "./harness.ts";
 
+type AutoCompactionReasonFixture = "overflow" | "threshold";
+
 type SessionWithCompactionInternals = {
 	_checkCompaction: (assistantMessage: AssistantMessage, skipAbortedCheck?: boolean) => Promise<boolean>;
-	_runAutoCompaction: (reason: "overflow" | "threshold", willRetry: boolean) => Promise<boolean>;
+	_runAutoCompaction: (reason: AutoCompactionReasonFixture, willRetry: boolean) => Promise<boolean>;
 };
+
+interface AssistantFixtureOptions {
+	stopReason?: AssistantMessage["stopReason"];
+	errorMessage?: string;
+	totalTokens?: number;
+	timestamp?: number;
+}
 
 function createUsage(totalTokens: number) {
 	return {
@@ -23,15 +32,7 @@ function createUsage(totalTokens: number) {
 	};
 }
 
-function createAssistant(
-	harness: Harness,
-	options: {
-		stopReason?: AssistantMessage["stopReason"];
-		errorMessage?: string;
-		totalTokens?: number;
-		timestamp?: number;
-	},
-): AssistantMessage {
+function createAssistant(harness: Harness, options: AssistantFixtureOptions): AssistantMessage {
 	const model = harness.getModel();
 	return {
 		...fauxAssistantMessage("", {

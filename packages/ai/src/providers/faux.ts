@@ -6,12 +6,15 @@ import type {
 	ImageContent,
 	Message,
 	Model,
+	ModelInputModality,
 	SimpleStreamOptions,
+	StopReason,
 	StreamFunction,
 	StreamOptions,
 	TextContent,
 	ThinkingContent,
 	ToolCall,
+	ToolCallArguments,
 	ToolResultMessage,
 	Usage,
 } from "../types.ts";
@@ -38,8 +41,8 @@ export interface FauxModelDefinition {
 	id: string;
 	name?: string;
 	reasoning?: boolean;
-	input?: ("text" | "image")[];
-	cost?: { input: number; output: number; cacheRead: number; cacheWrite: number };
+	input?: ModelInputModality[];
+	cost?: Model<string>["cost"];
 	contextWindow?: number;
 	maxTokens?: number;
 }
@@ -54,7 +57,11 @@ export function fauxThinking(thinking: string): ThinkingContent {
 	return { type: "thinking", thinking };
 }
 
-export function fauxToolCall(name: string, arguments_: ToolCall["arguments"], options: { id?: string } = {}): ToolCall {
+export interface FauxToolCallOptions {
+	id?: string;
+}
+
+export function fauxToolCall(name: string, arguments_: ToolCallArguments, options: FauxToolCallOptions = {}): ToolCall {
 	return {
 		type: "toolCall",
 		id: options.id ?? randomId("tool"),
@@ -70,14 +77,16 @@ function normalizeFauxAssistantContent(content: string | FauxContentBlock | Faux
 	return Array.isArray(content) ? content : [content];
 }
 
+export interface FauxAssistantMessageOptions {
+	stopReason?: StopReason;
+	errorMessage?: string;
+	responseId?: string;
+	timestamp?: number;
+}
+
 export function fauxAssistantMessage(
 	content: string | FauxContentBlock | FauxContentBlock[],
-	options: {
-		stopReason?: AssistantMessage["stopReason"];
-		errorMessage?: string;
-		responseId?: string;
-		timestamp?: number;
-	} = {},
+	options: FauxAssistantMessageOptions = {},
 ): AssistantMessage {
 	return {
 		role: "assistant",
@@ -93,24 +102,31 @@ export function fauxAssistantMessage(
 	};
 }
 
+export interface FauxProviderState {
+	callCount: number;
+}
+
 export type FauxResponseFactory = (
 	context: Context,
 	options: StreamOptions | undefined,
-	state: { callCount: number },
+	state: FauxProviderState,
 	model: Model<string>,
 ) => AssistantMessage | Promise<AssistantMessage>;
 
 export type FauxResponseStep = AssistantMessage | FauxResponseFactory;
+
+// pi-ignore noNearIdenticalDataStructures: Faux token chunk sizing and TUI column layout bounds have unrelated behavior and evolve in separate packages.
+export interface FauxTokenSizeRange {
+	min?: number;
+	max?: number;
+}
 
 export interface RegisterFauxProviderOptions {
 	api?: string;
 	provider?: string;
 	models?: FauxModelDefinition[];
 	tokensPerSecond?: number;
-	tokenSize?: {
-		min?: number;
-		max?: number;
-	};
+	tokenSize?: FauxTokenSizeRange;
 }
 
 export interface FauxProviderRegistration {
@@ -118,7 +134,7 @@ export interface FauxProviderRegistration {
 	models: [Model<string>, ...Model<string>[]];
 	getModel(): Model<string>;
 	getModel(modelId: string): Model<string> | undefined;
-	state: { callCount: number };
+	state: FauxProviderState;
 	setResponses: (responses: FauxResponseStep[]) => void;
 	appendResponses: (responses: FauxResponseStep[]) => void;
 	getPendingResponseCount: () => number;
@@ -299,6 +315,99 @@ function scheduleChunk(chunk: string, tokensPerSecond: number | undefined): Prom
 	return new Promise((resolve) => setTimeout(resolve, delayMs));
 }
 
+interface FauxDeltaStreamState {
+	stream: AssistantMessageEventStream;
+	partial: AssistantMessage;
+	minTokenSize: number;
+	maxTokenSize: number;
+	tokensPerSecond: number | undefined;
+	signal: AbortSignal | undefined;
+}
+
+function abortFauxDeltaStream(state: FauxDeltaStreamState): boolean {
+	if (!state.signal?.aborted) return false;
+	const aborted = createAbortedMessage(state.partial);
+	state.stream.push({ type: "error", reason: "aborted", error: aborted });
+	state.stream.end(aborted);
+	return true;
+}
+
+async function streamFauxThinkingBlock(
+	block: ThinkingContent,
+	index: number,
+	state: FauxDeltaStreamState,
+): Promise<boolean> {
+	state.partial.content = [...state.partial.content, { type: "thinking", thinking: "" }];
+	state.stream.push({ type: "thinking_start", contentIndex: index, partial: { ...state.partial } });
+	for (const chunk of splitStringByTokenSize(block.thinking, state.minTokenSize, state.maxTokenSize)) {
+		await scheduleChunk(chunk, state.tokensPerSecond);
+		if (abortFauxDeltaStream(state)) return true;
+		(state.partial.content[index] as ThinkingContent).thinking += chunk;
+		state.stream.push({
+			type: "thinking_delta",
+			contentIndex: index,
+			delta: chunk,
+			partial: { ...state.partial },
+		});
+	}
+	state.stream.push({
+		type: "thinking_end",
+		contentIndex: index,
+		content: block.thinking,
+		partial: { ...state.partial },
+	});
+	return false;
+}
+
+async function streamFauxTextBlock(block: TextContent, index: number, state: FauxDeltaStreamState): Promise<boolean> {
+	state.partial.content = [...state.partial.content, { type: "text", text: "" }];
+	state.stream.push({ type: "text_start", contentIndex: index, partial: { ...state.partial } });
+	for (const chunk of splitStringByTokenSize(block.text, state.minTokenSize, state.maxTokenSize)) {
+		await scheduleChunk(chunk, state.tokensPerSecond);
+		if (abortFauxDeltaStream(state)) return true;
+		(state.partial.content[index] as TextContent).text += chunk;
+		state.stream.push({ type: "text_delta", contentIndex: index, delta: chunk, partial: { ...state.partial } });
+	}
+	state.stream.push({
+		type: "text_end",
+		contentIndex: index,
+		content: block.text,
+		partial: { ...state.partial },
+	});
+	return false;
+}
+
+async function streamFauxToolCallBlock(block: ToolCall, index: number, state: FauxDeltaStreamState): Promise<boolean> {
+	state.partial.content = [
+		...state.partial.content,
+		{ type: "toolCall", id: block.id, name: block.name, arguments: {} },
+	];
+	state.stream.push({ type: "toolcall_start", contentIndex: index, partial: { ...state.partial } });
+	for (const chunk of splitStringByTokenSize(
+		JSON.stringify(block.arguments),
+		state.minTokenSize,
+		state.maxTokenSize,
+	)) {
+		await scheduleChunk(chunk, state.tokensPerSecond);
+		if (abortFauxDeltaStream(state)) return true;
+		state.stream.push({ type: "toolcall_delta", contentIndex: index, delta: chunk, partial: { ...state.partial } });
+	}
+	(state.partial.content[index] as ToolCall).arguments = block.arguments;
+	state.stream.push({ type: "toolcall_end", contentIndex: index, toolCall: block, partial: { ...state.partial } });
+	return false;
+}
+
+function completeFauxDeltaStream(stream: AssistantMessageEventStream, message: AssistantMessage): void {
+	if (message.stopReason === "pending") throw new Error("Faux stream cannot complete with a pending stop reason");
+	if (message.stopReason === "error" || message.stopReason === "aborted") {
+		stream.push({ type: "error", reason: message.stopReason, error: message });
+		stream.end(message);
+		return;
+	}
+	stream.push({ type: "done", reason: message.stopReason, message });
+	stream.end(message);
+}
+
 async function streamWithDeltas(
 	stream: AssistantMessageEventStream,
 	message: AssistantMessage,
@@ -307,94 +416,34 @@ async function streamWithDeltas(
 	tokensPerSecond: number | undefined,
 	signal: AbortSignal | undefined,
 ): Promise<void> {
-	const partial: AssistantMessage = { ...message, content: [] };
-	if (signal?.aborted) {
-		const aborted = createAbortedMessage(partial);
-		stream.push({ type: "error", reason: "aborted", error: aborted });
-		stream.end(aborted);
-		return;
-	}
-
-	stream.push({ type: "start", partial: { ...partial } });
-
+	const state: FauxDeltaStreamState = {
+		stream,
+		partial: { ...message, content: [] },
+		minTokenSize,
+		maxTokenSize,
+		tokensPerSecond,
+		signal,
+	};
+	if (abortFauxDeltaStream(state)) return;
+	stream.push({ type: "start", partial: { ...state.partial } });
 	for (let index = 0; index < message.content.length; index++) {
-		if (signal?.aborted) {
-			const aborted = createAbortedMessage(partial);
-			stream.push({ type: "error", reason: "aborted", error: aborted });
-			stream.end(aborted);
-			return;
-		}
-
+		if (abortFauxDeltaStream(state)) return;
 		const block = message.content[index];
-
-		if (block.type === "thinking") {
-			partial.content = [...partial.content, { type: "thinking", thinking: "" }];
-			stream.push({ type: "thinking_start", contentIndex: index, partial: { ...partial } });
-			for (const chunk of splitStringByTokenSize(block.thinking, minTokenSize, maxTokenSize)) {
-				await scheduleChunk(chunk, tokensPerSecond);
-				if (signal?.aborted) {
-					const aborted = createAbortedMessage(partial);
-					stream.push({ type: "error", reason: "aborted", error: aborted });
-					stream.end(aborted);
-					return;
-				}
-				(partial.content[index] as ThinkingContent).thinking += chunk;
-				stream.push({ type: "thinking_delta", contentIndex: index, delta: chunk, partial: { ...partial } });
-			}
-			stream.push({
-				type: "thinking_end",
-				contentIndex: index,
-				content: block.thinking,
-				partial: { ...partial },
-			});
-			continue;
+		let aborted: boolean;
+		switch (block.type) {
+			case "thinking":
+				aborted = await streamFauxThinkingBlock(block, index, state);
+				break;
+			case "text":
+				aborted = await streamFauxTextBlock(block, index, state);
+				break;
+			case "toolCall":
+				aborted = await streamFauxToolCallBlock(block, index, state);
+				break;
 		}
-
-		if (block.type === "text") {
-			partial.content = [...partial.content, { type: "text", text: "" }];
-			stream.push({ type: "text_start", contentIndex: index, partial: { ...partial } });
-			for (const chunk of splitStringByTokenSize(block.text, minTokenSize, maxTokenSize)) {
-				await scheduleChunk(chunk, tokensPerSecond);
-				if (signal?.aborted) {
-					const aborted = createAbortedMessage(partial);
-					stream.push({ type: "error", reason: "aborted", error: aborted });
-					stream.end(aborted);
-					return;
-				}
-				(partial.content[index] as TextContent).text += chunk;
-				stream.push({ type: "text_delta", contentIndex: index, delta: chunk, partial: { ...partial } });
-			}
-			stream.push({ type: "text_end", contentIndex: index, content: block.text, partial: { ...partial } });
-			continue;
-		}
-
-		partial.content = [...partial.content, { type: "toolCall", id: block.id, name: block.name, arguments: {} }];
-		stream.push({ type: "toolcall_start", contentIndex: index, partial: { ...partial } });
-		for (const chunk of splitStringByTokenSize(JSON.stringify(block.arguments), minTokenSize, maxTokenSize)) {
-			await scheduleChunk(chunk, tokensPerSecond);
-			if (signal?.aborted) {
-				const aborted = createAbortedMessage(partial);
-				stream.push({ type: "error", reason: "aborted", error: aborted });
-				stream.end(aborted);
-				return;
-			}
-			stream.push({ type: "toolcall_delta", contentIndex: index, delta: chunk, partial: { ...partial } });
-		}
-		(partial.content[index] as ToolCall).arguments = block.arguments;
-		stream.push({ type: "toolcall_end", contentIndex: index, toolCall: block, partial: { ...partial } });
+		if (aborted) return;
 	}
-
-	if (message.stopReason === "pending") {
-		throw new Error("Faux stream cannot complete with a pending stop reason");
-	}
-	if (message.stopReason === "error" || message.stopReason === "aborted") {
-		stream.push({ type: "error", reason: message.stopReason, error: message });
-		stream.end(message);
-		return;
-	}
-
-	stream.push({ type: "done", reason: message.stopReason, message });
-	stream.end(message);
+	completeFauxDeltaStream(stream, message);
 }
 
 export function registerFauxProvider(options: RegisterFauxProviderOptions = {}): FauxProviderRegistration {

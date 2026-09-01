@@ -5,22 +5,27 @@ import type { ReadonlyFooterDataProvider } from "../src/core/footer-data-provide
 import { FooterComponent, formatCwdForFooter } from "../src/modes/interactive/components/footer.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 
+interface AssistantUsageCost {
+	total: number;
+}
+
 type AssistantUsage = {
 	input: number;
 	output: number;
 	cacheRead: number;
 	cacheWrite: number;
-	cost: { total: number };
+	cost: AssistantUsageCost;
 };
-
-function createSession(options: {
+interface FooterSessionFixtureOptions {
 	sessionName: string;
 	modelId?: string;
 	provider?: string;
 	reasoning?: boolean;
 	thinkingLevel?: string;
 	usage?: AssistantUsage;
-}): AgentSession {
+}
+
+function createSession(options: FooterSessionFixtureOptions): AgentSession {
 	const usage = options.usage;
 	const entries =
 		usage === undefined

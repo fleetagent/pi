@@ -5,6 +5,7 @@ import {
 	allocateSandboxDaemonPort,
 	buildDockerRunInvocation,
 	DEFAULT_SANDBOX_IMAGE,
+	type DockerCommandOptions,
 	type DockerCommandResult,
 	type DockerRunner,
 	DockerSandboxService,
@@ -27,11 +28,7 @@ class FakeDockerRunner implements DockerRunner {
 		this.responses = [...responses];
 	}
 
-	async run(
-		command: string,
-		args: string[],
-		options: { env?: Record<string, string> } = {},
-	): Promise<DockerCommandResult> {
+	async run(command: string, args: string[], options: DockerCommandOptions = {}): Promise<DockerCommandResult> {
 		this.calls.push({ command, args, env: options.env });
 		const response = this.responses.shift();
 		if (!response) return { exitCode: 0, stdout: "", stderr: "" };
@@ -100,13 +97,15 @@ describe("Docker sandbox core", () => {
 		);
 
 		expect(invocation.command).toBe("docker");
-		expect(invocation.containerName).toMatch(/^pi-sandbox-my-project-[a-f0-9]{16}-session-1$/);
+		expect(invocation.containerName).toMatch(/^pi-sandbox-my-project-[a-f0-9]{16}-session-1-87f3c6de$/);
 		expect(invocation.args).toEqual(
 			expect.arrayContaining([
 				"run",
 				"--detach",
 				"--network",
-				"host",
+				"bridge",
+				"--publish",
+				"127.0.0.1:8787:8787",
 				"--mount",
 				"type=bind,source=/tmp/My Project,target=/workspace",
 				"--env",
@@ -115,12 +114,13 @@ describe("Docker sandbox core", () => {
 				"pi",
 				"--daemon",
 				"--daemon-host",
-				"127.0.0.1",
+				"0.0.0.0",
+				"--daemon-allow-insecure-transport",
 				"--daemon-cwd",
 				"/workspace",
 			]),
 		);
-		expect(invocation.args).not.toContain("--publish");
+		expect(invocation.args).toContain("--publish");
 		expect(invocation.args.join(" ")).not.toContain("secret-token");
 		expect(invocation.env.PI_DAEMON_TOKEN).toContain("secret-token");
 		expect(invocation.labels[SANDBOX_LABEL_ENABLED]).toBe("true");
@@ -128,7 +128,39 @@ describe("Docker sandbox core", () => {
 		expect(invocation.labels[SANDBOX_LABEL_DAEMON_PORT]).toBe("8787");
 	});
 
-	it("allocates distinct host-network daemon ports for concurrent session sandboxes", async () => {
+	it("formats IPv6 daemon publication and connection hosts", async () => {
+		const config = resolveSandboxConfig(undefined, {}, { image: "pi-sandbox:test", daemonHostBind: "::1" });
+		const invocation = buildDockerRunInvocation(
+			config,
+			{ workspaceRoot: "/tmp/ipv6-workspace", sessionId: "ipv6-session" },
+			"ipv6-token",
+		);
+		expect(invocation.args).toContain("[::1]:8787:8787");
+
+		const runner = new FakeDockerRunner([ok("29.3.1\n"), ok("ipv6-container\n")]);
+		const service = new DockerSandboxService({
+			runner,
+			env: { PI_SANDBOX_DAEMON_HOST_BIND: "::1" },
+			readinessWaiter: async () => {},
+			portAllocator: async (_host, preferredPort) => preferredPort,
+		});
+		const result = await service.start({ workspaceRoot: "/tmp/ipv6-workspace", image: "pi-sandbox:test" });
+		expect(result).toMatchObject({ daemonUrl: "ws://[::1]:8787/pi/workspace" });
+		await service.stop({ workspaceRoot: "/tmp/ipv6-workspace", currentContainerId: result.containerId });
+	});
+
+	it("uses a unique container name for repeated starts of the same session", () => {
+		const config = resolveSandboxConfig(undefined, {}, { image: "pi-sandbox:test" });
+		const options = { workspaceRoot: "/tmp/project", sessionId: "01a02823-75fe-7ae1-967b-c724c363ca90" };
+		const first = buildDockerRunInvocation(config, options, "first-token");
+		const second = buildDockerRunInvocation(config, options, "second-token");
+
+		expect(first.containerName).not.toBe(second.containerName);
+		expect(first.containerName).toMatch(/^pi-sandbox-project-[a-f0-9]{16}-01a02823-75fe-7a-[a-f0-9]{8}$/);
+		expect(first.labels).toEqual(second.labels);
+	});
+
+	it("allocates distinct bridge-published daemon ports for concurrent session sandboxes", async () => {
 		const runner = new FakeDockerRunner([ok("29.3.1\n"), ok("container123\n"), ok("29.3.1\n"), ok("container456\n")]);
 		const service = new DockerSandboxService({
 			runner,
@@ -338,6 +370,14 @@ describe("Docker sandbox core", () => {
 					Mounts: [{ Type: "bind", Source: "/host/workspace", Destination: "/workspace" }],
 					NetworkSettings: { Ports: { "8787/tcp": [{ HostIp: "0.0.0.0", HostPort: "49153" }] } },
 				},
+				{
+					Id: "ipv6",
+					Name: "/pi-sandbox-ipv6",
+					Config: { Image: "pi-sandbox:test", Labels: {} },
+					State: { Status: "running", Running: true, StartedAt: "2026-01-01T00:00:00Z" },
+					Mounts: [],
+					NetworkSettings: { Ports: { "8787/tcp": [{ HostIp: "::", HostPort: "49154" }] } },
+				},
 			]),
 		);
 
@@ -347,6 +387,7 @@ describe("Docker sandbox core", () => {
 			workspaceRoot: "/host/workspace",
 			daemonEndpoint: "ws://127.0.0.1:49153/pi/workspace",
 		});
+		expect(inspect[1]?.daemonEndpoint).toBe("ws://[::1]:49154/pi/workspace");
 		expect(parseDockerPortOutput("0.0.0.0:49154\n")).toBe("ws://127.0.0.1:49154/pi/workspace");
 	});
 

@@ -6,6 +6,12 @@ import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.ts";
 
+interface CliRunResult {
+	stdout: string;
+	stderr: string;
+	code: number | null;
+}
+
 const cliPath = resolve(__dirname, "../src/cli.ts");
 const tsxLoaderPath = createRequire(import.meta.url).resolve("tsx");
 
@@ -23,7 +29,7 @@ function createTempDir(): string {
 	return dir;
 }
 
-async function runCli(args: string[]): Promise<{ stdout: string; stderr: string; code: number | null }> {
+async function runCli(args: string[]): Promise<CliRunResult> {
 	const tempRoot = createTempDir();
 	const agentDir = join(tempRoot, "agent");
 	const projectDir = join(tempRoot, "project");

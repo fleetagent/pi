@@ -262,19 +262,47 @@ function isRootProcess(): boolean {
 export function isDaemonCommand(args: readonly string[]): boolean {
 	return args[0] === "--daemon";
 }
+interface DaemonEndpointConfiguration {
+	host: string;
+	port: number;
+}
 
-export async function parseDaemonCommand(
-	args: readonly string[],
-	environment: NodeJS.ProcessEnv = process.env,
-	startupCwd = process.cwd(),
-): Promise<DaemonCommand> {
-	const inputs = parseInputs(args);
-	if (inputs.help) return { help: true };
+interface DaemonWorkspaceRootsConfiguration {
+	allowRoot: boolean;
+	workspaceRoot: string;
+	temporaryRoot: string | undefined;
+}
 
+interface DaemonTransportSecurityConfiguration {
+	token: string | undefined;
+	allowedOrigins: string[];
+	tls: DaemonTlsConfiguration | undefined;
+}
+
+interface DaemonCapacityConfiguration {
+	maxGlobalRequests: number;
+	maxGlobalTransfers: number;
+	maxBufferedOutputBytes: number;
+	protocolLimits: RemoteWorkspaceProtocolLimits;
+}
+
+function resolveDaemonEndpoint(
+	inputs: ParsedDaemonInputs,
+	environment: NodeJS.ProcessEnv,
+): DaemonEndpointConfiguration {
 	const host = inputs.host ?? environment.PI_DAEMON_HOST ?? "127.0.0.1";
-	if (host.length === 0 || /\s/u.test(host))
+	if (host.length === 0 || /\s/u.test(host)) {
 		throw new DaemonConfigurationError("Daemon host must be a non-empty IP address");
+	}
 	const port = parseInteger(inputs.port ?? environment.PI_DAEMON_PORT, "PI_DAEMON_PORT/--daemon-port", 1, 65535, 8787);
+	return { host, port };
+}
+
+async function resolveDaemonWorkspaceRoots(
+	inputs: ParsedDaemonInputs,
+	environment: NodeJS.ProcessEnv,
+	startupCwd: string,
+): Promise<DaemonWorkspaceRootsConfiguration> {
 	const allowRoot = inputs.allowRoot ?? parseBoolean(environment.PI_DAEMON_ALLOW_ROOT, "PI_DAEMON_ALLOW_ROOT");
 	if (isRootProcess() && !allowRoot) {
 		throw new DaemonConfigurationError(
@@ -289,6 +317,14 @@ export async function parseDaemonCommand(
 	const temporaryRoot = environment.PI_DAEMON_TEMP_ROOT
 		? await resolveConfinedRoot(environment.PI_DAEMON_TEMP_ROOT, startupCwd, "temporary root")
 		: undefined;
+	return { allowRoot, workspaceRoot, temporaryRoot };
+}
+
+async function resolveDaemonTransportSecurity(
+	inputs: ParsedDaemonInputs,
+	environment: NodeJS.ProcessEnv,
+	startupCwd: string,
+): Promise<DaemonTransportSecurityConfiguration> {
 	const token = validateToken(environment.PI_DAEMON_TOKEN);
 	const allowedOrigins = [
 		...(environment.PI_DAEMON_ORIGINS?.split(",")
@@ -296,9 +332,9 @@ export async function parseDaemonCommand(
 			.filter(Boolean) ?? []),
 		...inputs.origins,
 	].map(parseOrigin);
-	if (new Set(allowedOrigins).size !== allowedOrigins.length)
+	if (new Set(allowedOrigins).size !== allowedOrigins.length) {
 		throw new DaemonConfigurationError("Daemon origins must be unique");
-
+	}
 	const tlsCertPath = inputs.tlsCertPath ?? environment.PI_DAEMON_TLS_CERT;
 	const tlsKeyPath = inputs.tlsKeyPath ?? environment.PI_DAEMON_TLS_KEY;
 	if ((tlsCertPath === undefined) !== (tlsKeyPath === undefined)) {
@@ -312,7 +348,10 @@ export async function parseDaemonCommand(
 					passphrase: environment.PI_DAEMON_TLS_PASSPHRASE,
 				})
 			: undefined;
+	return { token, allowedOrigins, tls };
+}
 
+function resolveDaemonCapacity(environment: NodeJS.ProcessEnv): DaemonCapacityConfiguration {
 	const maxConnectionRequests = parseInteger(
 		environment.PI_DAEMON_MAX_CONNECTION_REQUESTS,
 		"PI_DAEMON_MAX_CONNECTION_REQUESTS",
@@ -384,6 +423,26 @@ export async function parseDaemonCommand(
 		maxActiveRequests: maxConnectionRequests,
 		maxActiveTransfers: Math.min(maxConnectionTransfers, maxGlobalTransfers),
 	});
+	return { maxGlobalRequests, maxGlobalTransfers, maxBufferedOutputBytes, protocolLimits };
+}
+
+export async function parseDaemonCommand(
+	args: readonly string[],
+	environment: NodeJS.ProcessEnv = process.env,
+	startupCwd = process.cwd(),
+): Promise<DaemonCommand> {
+	const inputs = parseInputs(args);
+	if (inputs.help) return { help: true };
+
+	const { host, port } = resolveDaemonEndpoint(inputs, environment);
+	const { allowRoot, workspaceRoot, temporaryRoot } = await resolveDaemonWorkspaceRoots(
+		inputs,
+		environment,
+		startupCwd,
+	);
+	const { token, allowedOrigins, tls } = await resolveDaemonTransportSecurity(inputs, environment, startupCwd);
+	const { maxGlobalRequests, maxGlobalTransfers, maxBufferedOutputBytes, protocolLimits } =
+		resolveDaemonCapacity(environment);
 
 	const allowInsecureTransport =
 		inputs.allowInsecureTransport ??

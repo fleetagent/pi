@@ -1,3 +1,5 @@
+import type { AgentToolResult } from "@fleetagent/pi-agent-core";
+import type { ImageContent } from "@fleetagent/pi-ai";
 import { applyPatch } from "diff";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
@@ -206,9 +208,7 @@ describe("Coding Agent Tools", () => {
 			expect(result.content[0]?.type).toBe("text");
 			expect(getTextOutput(result)).toContain("Read image file [image/png]");
 
-			const imageBlock = result.content.find(
-				(c): c is { type: "image"; mimeType: string; data: string } => c.type === "image",
-			);
+			const imageBlock = result.content.find((c): c is ImageContent => c.type === "image");
 			expect(imageBlock).toBeDefined();
 			expect(imageBlock?.mimeType).toBe("image/png");
 			expect(typeof imageBlock?.data).toBe("string");
@@ -588,7 +588,7 @@ describe("Coding Agent Tools", () => {
 				}
 				return { exitCode: 0 };
 			};
-			const updates: Array<{ content: Array<{ type: string; text?: string }>; details?: unknown }> = [];
+			const updates: AgentToolResult<unknown>[] = [];
 			const bash = createBashTool(operations);
 
 			const result = await bash.execute("test-call-chatty-updates", { command: "chatty" }, undefined, (update) =>

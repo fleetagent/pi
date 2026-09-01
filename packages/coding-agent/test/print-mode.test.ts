@@ -1,5 +1,5 @@
-import type { AssistantMessage, ImageContent } from "@fleetagent/pi-ai";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import type { AssistantMessage, ImageContent, StopReason } from "@fleetagent/pi-ai";
+import { afterEach, describe, expect, it, type Mock, vi } from "vitest";
 import type { SessionShutdownEvent } from "../src/index.ts";
 import { runPrintMode } from "../src/modes/print-mode.ts";
 
@@ -7,35 +7,50 @@ type EmitEvent = SessionShutdownEvent;
 
 type FakeExtensionRunner = {
 	hasHandlers: (eventType: string) => boolean;
-	emit: ReturnType<typeof vi.fn<(event: EmitEvent) => Promise<void>>>;
+	emit: Mock<(event: EmitEvent) => Promise<void>>;
 };
 
-type FakeSession = {
-	session: { getHeader: () => object | undefined };
-	agent: { waitForIdle: () => Promise<void>; subscribe: ReturnType<typeof vi.fn> };
+interface FakeSessionStore {
+	getHeader: () => object | undefined;
+}
+
+interface FakeAgent {
 	waitForIdle: () => Promise<void>;
-	state: { messages: AssistantMessage[] };
+	subscribe: Mock;
+}
+
+interface FakeSessionState {
+	messages: AssistantMessage[];
+}
+
+interface FakeSession {
+	session: FakeSessionStore;
+	agent: FakeAgent;
+	waitForIdle: () => Promise<void>;
+	state: FakeSessionState;
 	extensionRunner: FakeExtensionRunner;
-	bindExtensions: ReturnType<typeof vi.fn>;
-	subscribe: ReturnType<typeof vi.fn>;
-	prompt: ReturnType<typeof vi.fn>;
-	reload: ReturnType<typeof vi.fn>;
-};
+	bindExtensions: Mock;
+	subscribe: Mock;
+	prompt: Mock;
+	reload: Mock;
+}
 
 type FakeRuntimeHost = {
 	session: FakeSession;
-	newSession: ReturnType<typeof vi.fn>;
-	fork: ReturnType<typeof vi.fn>;
-	switchSession: ReturnType<typeof vi.fn>;
-	dispose: ReturnType<typeof vi.fn>;
-	setRebindSession: ReturnType<typeof vi.fn>;
+	newSession: Mock;
+	fork: Mock;
+	switchSession: Mock;
+	dispose: Mock;
+	setRebindSession: Mock;
 };
 
-function createAssistantMessage(options?: {
+interface AssistantMessageFixtureOptions {
 	text?: string;
-	stopReason?: AssistantMessage["stopReason"];
+	stopReason?: StopReason;
 	errorMessage?: string;
-}): AssistantMessage {
+}
+
+function createAssistantMessage(options?: AssistantMessageFixtureOptions): AssistantMessage {
 	return {
 		role: "assistant",
 		content: options?.text ? [{ type: "text", text: options.text }] : [],

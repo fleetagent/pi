@@ -1,5 +1,5 @@
 import { MODELS } from "./models.generated.ts";
-import type { Api, KnownProvider, Model, ModelThinkingLevel, Usage } from "./types.ts";
+import type { Api, KnownProvider, Model, ModelThinkingLevel, Usage, UsageCost } from "./types.ts";
 
 const MODEL_CATALOG_SCHEMA_VERSION = 1;
 
@@ -48,9 +48,18 @@ export interface ModelCatalogRefreshResult {
 	providerCount: number;
 	modelCount: number;
 }
+interface NodeDirectoryCreationOptions {
+	recursive: boolean;
+}
+
+interface ModelCatalogCounts {
+	providerCount: number;
+	modelCount: number;
+}
+
 type NodeFs = {
 	existsSync(path: string): boolean;
-	mkdirSync(path: string, options: { recursive: boolean }): void;
+	mkdirSync(path: string, options: NodeDirectoryCreationOptions): void;
 	readFileSync(path: string, encoding: BufferEncoding): string;
 	writeFileSync(path: string, content: string): void;
 };
@@ -83,6 +92,18 @@ function isFinitePositiveNumber(value: unknown): value is number {
 	return typeof value === "number" && Number.isFinite(value) && value > 0;
 }
 
+function isModelInput(value: unknown): boolean {
+	return Array.isArray(value) && value.every((entry) => entry === "text" || entry === "image");
+}
+
+function isModelCost(value: unknown): boolean {
+	if (!isRecord(value)) return false;
+	for (const field of ["input", "output", "cacheRead", "cacheWrite"] as const) {
+		if (typeof value[field] !== "number" || !Number.isFinite(value[field])) return false;
+	}
+	return true;
+}
+
 function isModel(value: unknown, provider: string, id: string): value is Model<Api> {
 	if (!isRecord(value)) return false;
 	if (value.id !== id || value.provider !== provider) return false;
@@ -90,11 +111,8 @@ function isModel(value: unknown, provider: string, id: string): value is Model<A
 	if (typeof value.api !== "string" || value.api.length === 0) return false;
 	if (typeof value.baseUrl !== "string" || value.baseUrl.length === 0) return false;
 	if (typeof value.reasoning !== "boolean") return false;
-	if (!Array.isArray(value.input) || value.input.some((entry) => entry !== "text" && entry !== "image")) return false;
-	if (!isRecord(value.cost)) return false;
-	for (const field of ["input", "output", "cacheRead", "cacheWrite"] as const) {
-		if (typeof value.cost[field] !== "number" || !Number.isFinite(value.cost[field])) return false;
-	}
+	if (!isModelInput(value.input)) return false;
+	if (!isModelCost(value.cost)) return false;
 	return isFinitePositiveNumber(value.contextWindow) && isFinitePositiveNumber(value.maxTokens);
 }
 
@@ -113,10 +131,7 @@ function validateCatalogModels(value: unknown): Record<string, Record<string, Mo
 	return providers;
 }
 
-function countCatalogModels(models: Record<string, Record<string, Model<Api>>>): {
-	providerCount: number;
-	modelCount: number;
-} {
+function countCatalogModels(models: Record<string, Record<string, Model<Api>>>): ModelCatalogCounts {
 	let modelCount = 0;
 	for (const providerModels of Object.values(models)) modelCount += Object.keys(providerModels).length;
 	return { providerCount: Object.keys(models).length, modelCount };
@@ -191,6 +206,49 @@ function createResult(
 	return { ...result, ...counts };
 }
 
+function getFreshCatalogCache(
+	options: ModelCatalogRefreshOptions,
+	cached: CachedModelCatalog | undefined,
+	now: number,
+	ttlMs: number,
+): CachedModelCatalog | undefined {
+	if (options.force || !cached || now - cached.fetchedAt >= ttlMs) return undefined;
+	return cached;
+}
+
+function createConditionalCatalogHeaders(
+	options: ModelCatalogRefreshOptions,
+	cached: CachedModelCatalog | undefined,
+): Record<string, string> {
+	const headers: Record<string, string> = {};
+	if (!options.force && cached?.etag) headers["If-None-Match"] = cached.etag;
+	if (!options.force && cached?.lastModified) headers["If-Modified-Since"] = cached.lastModified;
+	return headers;
+}
+
+function reuseCachedCatalog(
+	cachePath: string | undefined,
+	cached: CachedModelCatalog,
+	fetchedAt: number,
+): ModelCatalogRefreshResult {
+	const refreshedCache = { ...cached, fetchedAt };
+	writeCachedCatalog(cachePath, refreshedCache);
+	applyCatalogModels(refreshedCache.models);
+	return createResult(refreshedCache.models, {
+		loaded: true,
+		updated: false,
+		fromCache: true,
+		revision: refreshedCache.revision,
+	});
+}
+
+function validateCatalogIndex(value: unknown): ModelCatalogIndex {
+	if (!isRecord(value) || value.schemaVersion !== MODEL_CATALOG_SCHEMA_VERSION) {
+		throw new Error("Unsupported model catalog index schema");
+	}
+	return value as unknown as ModelCatalogIndex;
+}
+
 function initializeStaticRegistry(): void {
 	modelRegistry.clear();
 	for (const [provider, models] of Object.entries(MODELS)) {
@@ -240,50 +298,26 @@ export async function refreshModelCatalog(
 	const cached = readCachedCatalog(cachePath, indexUrl);
 	const now = options.now?.() ?? Date.now();
 	const ttlMs = options.ttlMs ?? 6 * 60 * 60 * 1000;
-	if (!options.force && cached && now - cached.fetchedAt < ttlMs) {
-		applyCatalogModels(cached.models);
-		return createResult(cached.models, {
+	const freshCache = getFreshCatalogCache(options, cached, now, ttlMs);
+	if (freshCache) {
+		applyCatalogModels(freshCache.models);
+		return createResult(freshCache.models, {
 			loaded: true,
 			updated: false,
 			fromCache: true,
-			revision: cached.revision,
+			revision: freshCache.revision,
 		});
 	}
 
 	const fetchImpl = options.fetch ?? fetch;
-	const headers: Record<string, string> = {};
-	if (!options.force && cached?.etag) headers["If-None-Match"] = cached.etag;
-	if (!options.force && cached?.lastModified) headers["If-Modified-Since"] = cached.lastModified;
+	const headers = createConditionalCatalogHeaders(options, cached);
 	const indexResponse = await fetchImpl(indexUrl, { headers, signal: options.signal });
-	if (indexResponse.status === 304 && cached) {
-		const nextCached = { ...cached, fetchedAt: now };
-		writeCachedCatalog(cachePath, nextCached);
-		applyCatalogModels(nextCached.models);
-		return createResult(nextCached.models, {
-			loaded: true,
-			updated: false,
-			fromCache: true,
-			revision: nextCached.revision,
-		});
-	}
+	if (indexResponse.status === 304 && cached) return reuseCachedCatalog(cachePath, cached, now);
 	if (!indexResponse.ok) throw new Error(`Model catalog index request failed: ${indexResponse.status}`);
-	const index = (await indexResponse.json()) as ModelCatalogIndex;
-	if (!isRecord(index) || index.schemaVersion !== MODEL_CATALOG_SCHEMA_VERSION) {
-		throw new Error("Unsupported model catalog index schema");
-	}
+	const index = validateCatalogIndex(await indexResponse.json());
 	const revision = selectRevision(index);
 	if (!revision) throw new Error("Model catalog index does not contain a revision");
-	if (!options.force && cached?.revision === revision) {
-		const nextCached = { ...cached, fetchedAt: now };
-		writeCachedCatalog(cachePath, nextCached);
-		applyCatalogModels(nextCached.models);
-		return createResult(nextCached.models, {
-			loaded: true,
-			updated: false,
-			fromCache: true,
-			revision,
-		});
-	}
+	if (!options.force && cached?.revision === revision) return reuseCachedCatalog(cachePath, cached, now);
 
 	const catalogResponse = await fetchImpl(resolveCatalogUrl(indexUrl, revision), { signal: options.signal });
 	if (!catalogResponse.ok) throw new Error(`Model catalog request failed: ${catalogResponse.status}`);
@@ -328,7 +362,7 @@ export function getModels<TProvider extends KnownProvider>(
 	return models ? (Array.from(models.values()) as Model<ModelApi<TProvider, keyof (typeof MODELS)[TProvider]>>[]) : [];
 }
 
-export function calculateCost<TApi extends Api>(model: Model<TApi>, usage: Usage): Usage["cost"] {
+export function calculateCost<TApi extends Api>(model: Model<TApi>, usage: Usage): UsageCost {
 	usage.cost.input = (model.cost.input / 1000000) * usage.input;
 	usage.cost.output = (model.cost.output / 1000000) * usage.output;
 	usage.cost.cacheRead = (model.cost.cacheRead / 1000000) * usage.cacheRead;
@@ -355,18 +389,19 @@ export function clampThinkingLevel<TApi extends Api>(
 	level: ModelThinkingLevel,
 ): ModelThinkingLevel {
 	const availableLevels = getSupportedThinkingLevels(model);
-	if (availableLevels.includes(level)) return level;
+	const availableLevelSet = new Set(availableLevels);
+	if (availableLevelSet.has(level)) return level;
 
 	const requestedIndex = EXTENDED_THINKING_LEVELS.indexOf(level);
 	if (requestedIndex === -1) return availableLevels[0] ?? "off";
 
 	for (let i = requestedIndex; i < EXTENDED_THINKING_LEVELS.length; i++) {
 		const candidate = EXTENDED_THINKING_LEVELS[i];
-		if (availableLevels.includes(candidate)) return candidate;
+		if (availableLevelSet.has(candidate)) return candidate;
 	}
 	for (let i = requestedIndex - 1; i >= 0; i--) {
 		const candidate = EXTENDED_THINKING_LEVELS[i];
-		if (availableLevels.includes(candidate)) return candidate;
+		if (availableLevelSet.has(candidate)) return candidate;
 	}
 	return availableLevels[0] ?? "off";
 }

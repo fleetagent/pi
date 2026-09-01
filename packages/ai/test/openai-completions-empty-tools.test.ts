@@ -1,11 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getModel } from "../src/models.ts";
 import { streamSimple } from "../src/stream.ts";
+import type { MockCompletionPromise } from "./openai-mock-types.ts";
 
 // Empty tools arrays must NOT be serialized as `tools: []` — some OpenAI-compatible
 // backends (e.g. DashScope / Aliyun Qwen via compatible-mode) reject the request with
 // `"[] is too short - 'tools'"` (HTTP 400) when `--no-tools` produces an empty array.
 // Regression for https://github.com/fleetagent/pi/issues/<issue-number>
+
+interface CapturedCompletionMessageRole {
+	role: string;
+}
 
 const mockState = vi.hoisted(() => ({
 	lastParams: undefined as unknown,
@@ -35,12 +40,7 @@ vi.mock("openai", () => {
 							};
 						},
 					};
-					const promise = Promise.resolve(stream) as Promise<typeof stream> & {
-						withResponse: () => Promise<{
-							data: typeof stream;
-							response: { status: number; headers: Headers };
-						}>;
-					};
+					const promise = Promise.resolve(stream) as MockCompletionPromise<typeof stream>;
 					promise.withResponse = async () => ({
 						data: stream,
 						response: { status: 200, headers: new Headers() },
@@ -142,7 +142,7 @@ describe("openai-completions empty tools handling", () => {
 		).result();
 
 		const params = mockState.lastParams as {
-			messages: Array<{ role: string }>;
+			messages: CapturedCompletionMessageRole[];
 			max_tokens?: number;
 			max_completion_tokens?: number;
 			reasoning_effort?: string;

@@ -23,6 +23,61 @@ function getUrl(input: unknown): string {
 	throw new Error(`Unsupported fetch input: ${String(input)}`);
 }
 
+interface SlowDownOAuthTestState {
+	accessTokenPollTimes: number[];
+	accessTokenResponses: Response[];
+}
+
+function handleSlowDownDeviceCodeRequest(init: RequestInit | undefined): Response {
+	expect(init?.method).toBe("POST");
+	expect(init?.headers).toMatchObject({
+		Accept: "application/json",
+		"Content-Type": "application/x-www-form-urlencoded",
+	});
+	expect(String(init?.body)).toContain("client_id=");
+	expect(String(init?.body)).toContain("scope=read%3Auser");
+	return jsonResponse({
+		device_code: "device-code",
+		user_code: "ABCD-EFGH",
+		verification_uri: "https://github.com/login/device",
+		interval: 5,
+		expires_in: 900,
+	});
+}
+
+function handleSlowDownAccessTokenRequest(init: RequestInit | undefined, state: SlowDownOAuthTestState): Response {
+	state.accessTokenPollTimes.push(Date.now());
+	expect(init?.method).toBe("POST");
+	expect(init?.headers).toMatchObject({
+		Accept: "application/json",
+		"Content-Type": "application/x-www-form-urlencoded",
+	});
+	expect(String(init?.body)).toContain("client_id=");
+	expect(String(init?.body)).toContain("device_code=device-code");
+	expect(String(init?.body)).toContain("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code");
+	const response = state.accessTokenResponses.shift();
+	if (!response) throw new Error("Unexpected extra access token poll");
+	return response;
+}
+
+async function handleSlowDownOAuthRequest(
+	input: unknown,
+	init: RequestInit | undefined,
+	state: SlowDownOAuthTestState,
+): Promise<Response> {
+	const url = getUrl(input);
+	if (url.endsWith("/login/device/code")) return handleSlowDownDeviceCodeRequest(init);
+	if (url.endsWith("/login/oauth/access_token")) return handleSlowDownAccessTokenRequest(init, state);
+	if (url.includes("/copilot_internal/v2/token")) {
+		return jsonResponse({
+			token: "tid=test;exp=9999999999;proxy-ep=proxy.individual.githubcopilot.com;",
+			expires_at: 9999999999,
+		});
+	}
+	if (url.includes("/models/") && url.endsWith("/policy")) return new Response("", { status: 200 });
+	throw new Error(`Unexpected fetch URL: ${url}`);
+}
+
 describe("GitHub Copilot OAuth device flow", () => {
 	afterEach(() => {
 		vi.unstubAllGlobals();
@@ -187,56 +242,8 @@ describe("GitHub Copilot OAuth device flow", () => {
 			jsonResponse({ access_token: "ghu_refresh_token" }),
 		];
 
-		const fetchMock = vi.fn(async (input: unknown, init?: RequestInit): Promise<Response> => {
-			const url = getUrl(input);
-
-			if (url.endsWith("/login/device/code")) {
-				expect(init?.method).toBe("POST");
-				expect(init?.headers).toMatchObject({
-					Accept: "application/json",
-					"Content-Type": "application/x-www-form-urlencoded",
-				});
-				expect(String(init?.body)).toContain("client_id=");
-				expect(String(init?.body)).toContain("scope=read%3Auser");
-				return jsonResponse({
-					device_code: "device-code",
-					user_code: "ABCD-EFGH",
-					verification_uri: "https://github.com/login/device",
-					interval: 5,
-					expires_in: 900,
-				});
-			}
-
-			if (url.endsWith("/login/oauth/access_token")) {
-				accessTokenPollTimes.push(Date.now());
-				expect(init?.method).toBe("POST");
-				expect(init?.headers).toMatchObject({
-					Accept: "application/json",
-					"Content-Type": "application/x-www-form-urlencoded",
-				});
-				expect(String(init?.body)).toContain("client_id=");
-				expect(String(init?.body)).toContain("device_code=device-code");
-				expect(String(init?.body)).toContain("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code");
-				const response = accessTokenResponses.shift();
-				if (!response) {
-					throw new Error("Unexpected extra access token poll");
-				}
-				return response;
-			}
-
-			if (url.includes("/copilot_internal/v2/token")) {
-				return jsonResponse({
-					token: "tid=test;exp=9999999999;proxy-ep=proxy.individual.githubcopilot.com;",
-					expires_at: 9999999999,
-				});
-			}
-
-			if (url.includes("/models/") && url.endsWith("/policy")) {
-				return new Response("", { status: 200 });
-			}
-
-			throw new Error(`Unexpected fetch URL: ${url}`);
-		});
+		const state: SlowDownOAuthTestState = { accessTokenPollTimes, accessTokenResponses };
+		const fetchMock = vi.fn((input: unknown, init?: RequestInit) => handleSlowDownOAuthRequest(input, init, state));
 
 		vi.stubGlobal("fetch", fetchMock);
 

@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getModel } from "@fleetagent/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import type { ExtensionFactory } from "../src/core/extensions/types.ts";
 import { PiAgent } from "../src/core/pi-agent.ts";
@@ -26,7 +27,7 @@ describe("AgentSession dynamic provider registration", () => {
 		}
 	});
 
-	async function createSession(extensionFactories: ExtensionFactory[]) {
+	async function createSession(extensionFactories: ExtensionFactory[]): Promise<AgentSession> {
 		const settingsManager = SettingsManager.create(tempDir, agentDir);
 		const sessionManager = new InMemorySessionManager().create();
 		const authStorage = AuthStorage.create(join(agentDir, "auth.json"));
@@ -52,9 +53,7 @@ describe("AgentSession dynamic provider registration", () => {
 		return pi.createAgentSession({ session: sessionManager });
 	}
 
-	async function capturePromptBaseUrl(
-		session: Awaited<ReturnType<typeof createSession>>,
-	): Promise<string | undefined> {
+	async function capturePromptBaseUrl(session: AgentSession): Promise<string | undefined> {
 		let baseUrl: string | undefined;
 		session.agent.streamFn = async (model) => {
 			baseUrl = model.baseUrl;

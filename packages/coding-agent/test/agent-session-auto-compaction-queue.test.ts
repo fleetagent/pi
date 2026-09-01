@@ -13,27 +13,37 @@ import type { Session } from "../src/core/session/session.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { createTestResourceLoader } from "./utilities.ts";
 
+interface CompactionUsageSample {
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+	totalTokens?: number;
+}
+
+interface CompactionMessageSample {
+	role: string;
+	usage?: CompactionUsageSample;
+	stopReason?: string;
+}
+
+interface CompactionThresholdSettings {
+	enabled: boolean;
+	reserveTokens: number;
+}
+
+type AutoCompactionReasonFixture = "overflow" | "threshold";
+
 vi.mock("../src/core/compaction/compaction.ts", () => ({
-	calculateContextTokens: (usage: {
-		input: number;
-		output: number;
-		cacheRead: number;
-		cacheWrite: number;
-		totalTokens?: number;
-	}) => usage.totalTokens ?? usage.input + usage.output + usage.cacheRead + usage.cacheWrite,
+	calculateContextTokens: (usage: CompactionUsageSample) =>
+		usage.totalTokens ?? usage.input + usage.output + usage.cacheRead + usage.cacheWrite,
 	compact: async () => ({
 		summary: "compacted",
 		firstKeptEntryId: "entry-1",
 		tokensBefore: 100,
 		details: {},
 	}),
-	estimateContextTokens: (
-		messages: Array<{
-			role: string;
-			usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens?: number };
-			stopReason?: string;
-		}>,
-	) => {
+	estimateContextTokens: (messages: CompactionMessageSample[]) => {
 		// Walk backwards to find last non-error, non-aborted assistant with usage
 		for (let i = messages.length - 1; i >= 0; i--) {
 			const msg = messages[i];
@@ -46,11 +56,8 @@ vi.mock("../src/core/compaction/compaction.ts", () => ({
 		return { tokens: 0, usageTokens: 0, trailingTokens: 0, lastUsageIndex: null };
 	},
 	prepareCompaction: () => ({ dummy: true }),
-	shouldCompact: (
-		contextTokens: number,
-		contextWindow: number,
-		settings: { enabled: boolean; reserveTokens: number },
-	) => settings.enabled && contextTokens > contextWindow - settings.reserveTokens,
+	shouldCompact: (contextTokens: number, contextWindow: number, settings: CompactionThresholdSettings) =>
+		settings.enabled && contextTokens > contextWindow - settings.reserveTokens,
 }));
 
 vi.mock("../src/core/compaction/branch-summarization.ts", () => ({
@@ -188,7 +195,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 
 		const runAutoCompaction = (
 			session as unknown as {
-				_runAutoCompaction: (reason: "overflow" | "threshold", willRetry: boolean) => Promise<boolean>;
+				_runAutoCompaction: (reason: AutoCompactionReasonFixture, willRetry: boolean) => Promise<boolean>;
 			}
 		)._runAutoCompaction.bind(session);
 
@@ -221,7 +228,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 		const runAutoCompactionSpy = vi
 			.spyOn(
 				session as unknown as {
-					_runAutoCompaction: (reason: "overflow" | "threshold", willRetry: boolean) => Promise<void>;
+					_runAutoCompaction: (reason: AutoCompactionReasonFixture, willRetry: boolean) => Promise<void>;
 				},
 				"_runAutoCompaction",
 			)
@@ -292,7 +299,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 		const runAutoCompactionSpy = vi
 			.spyOn(
 				session as unknown as {
-					_runAutoCompaction: (reason: "overflow" | "threshold", willRetry: boolean) => Promise<void>;
+					_runAutoCompaction: (reason: AutoCompactionReasonFixture, willRetry: boolean) => Promise<void>;
 				},
 				"_runAutoCompaction",
 			)
@@ -362,7 +369,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 		const runAutoCompactionSpy = vi
 			.spyOn(
 				session as unknown as {
-					_runAutoCompaction: (reason: "overflow" | "threshold", willRetry: boolean) => Promise<void>;
+					_runAutoCompaction: (reason: AutoCompactionReasonFixture, willRetry: boolean) => Promise<void>;
 				},
 				"_runAutoCompaction",
 			)
@@ -410,7 +417,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 		const runAutoCompactionSpy = vi
 			.spyOn(
 				session as unknown as {
-					_runAutoCompaction: (reason: "overflow" | "threshold", willRetry: boolean) => Promise<void>;
+					_runAutoCompaction: (reason: AutoCompactionReasonFixture, willRetry: boolean) => Promise<void>;
 				},
 				"_runAutoCompaction",
 			)
@@ -491,7 +498,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 		const runAutoCompactionSpy = vi
 			.spyOn(
 				session as unknown as {
-					_runAutoCompaction: (reason: "overflow" | "threshold", willRetry: boolean) => Promise<void>;
+					_runAutoCompaction: (reason: AutoCompactionReasonFixture, willRetry: boolean) => Promise<void>;
 				},
 				"_runAutoCompaction",
 			)

@@ -51,13 +51,47 @@ function formatAzureOpenAIError(error: unknown): string {
 }
 
 // Azure OpenAI Responses-specific options
+export type AzureOpenAIReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh";
+export type AzureOpenAIReasoningSummary = "auto" | "detailed" | "concise";
+type CompletedAzureOpenAIStopReason = "stop" | "length" | "toolUse";
+type CompletedAzureOpenAIMessage = AssistantMessage & { stopReason: CompletedAzureOpenAIStopReason };
 export interface AzureOpenAIResponsesOptions extends StreamOptions {
-	reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh";
-	reasoningSummary?: "auto" | "detailed" | "concise" | null;
+	reasoningEffort?: AzureOpenAIReasoningEffort;
+	reasoningSummary?: AzureOpenAIReasoningSummary | null;
 	azureApiVersion?: string;
 	azureResourceName?: string;
 	azureBaseUrl?: string;
 	azureDeploymentName?: string;
+}
+
+function validateAzureStreamCompletion(
+	output: AssistantMessage,
+	signal: AbortSignal | undefined,
+): asserts output is CompletedAzureOpenAIMessage {
+	if (signal?.aborted) throw new Error("Request was aborted");
+	if (output.stopReason === "pending") {
+		throw new Error("Azure OpenAI Responses stream ended without a stop reason");
+	}
+	if (output.stopReason === "aborted" || output.stopReason === "error") {
+		throw new Error("An unknown error occurred");
+	}
+}
+
+function handleAzureStreamFailure(
+	error: unknown,
+	output: AssistantMessage,
+	stream: AssistantMessageEventStream,
+	signal: AbortSignal | undefined,
+): void {
+	for (const block of output.content) {
+		delete (block as { index?: number }).index;
+		// partialJson is only a streaming scratch buffer; never persist it.
+		delete (block as { partialJson?: string }).partialJson;
+	}
+	output.stopReason = signal?.aborted ? "aborted" : "error";
+	output.errorMessage = formatAzureOpenAIError(error);
+	stream.push({ type: "error", reason: output.stopReason, error: output });
+	stream.end();
 }
 
 /**
@@ -119,29 +153,12 @@ export const streamAzureOpenAIResponses: StreamFunction<"azure-openai-responses"
 
 			await processResponsesStream(openaiStream, output, stream, model);
 
-			if (options?.signal?.aborted) {
-				throw new Error("Request was aborted");
-			}
-
-			if (output.stopReason === "pending") {
-				throw new Error("Azure OpenAI Responses stream ended without a stop reason");
-			}
-			if (output.stopReason === "aborted" || output.stopReason === "error") {
-				throw new Error("An unknown error occurred");
-			}
+			validateAzureStreamCompletion(output, options?.signal);
 
 			stream.push({ type: "done", reason: output.stopReason, message: output });
 			stream.end();
 		} catch (error) {
-			for (const block of output.content) {
-				delete (block as { index?: number }).index;
-				// partialJson is only a streaming scratch buffer; never persist it.
-				delete (block as { partialJson?: string }).partialJson;
-			}
-			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-			output.errorMessage = formatAzureOpenAIError(error);
-			stream.push({ type: "error", reason: output.stopReason, error: output });
-			stream.end();
+			handleAzureStreamFailure(error, output, stream, options?.signal);
 		}
 	})();
 
@@ -195,10 +212,15 @@ function buildDefaultBaseUrl(resourceName: string): string {
 	return `https://${resourceName}.openai.azure.com/openai/v1`;
 }
 
+interface ResolvedAzureOpenAIConfig {
+	baseUrl: string;
+	apiVersion: string;
+}
+
 function resolveAzureConfig(
 	model: Model<"azure-openai-responses">,
 	options?: AzureOpenAIResponsesOptions,
-): { baseUrl: string; apiVersion: string } {
+): ResolvedAzureOpenAIConfig {
 	const apiVersion = options?.azureApiVersion || process.env.AZURE_OPENAI_API_VERSION || DEFAULT_AZURE_API_VERSION;
 
 	const baseUrl = options?.azureBaseUrl?.trim() || process.env.AZURE_OPENAI_BASE_URL?.trim() || undefined;
@@ -253,6 +275,30 @@ function createClient(model: Model<"azure-openai-responses">, apiKey: string, op
 	});
 }
 
+function applyAzureOpenAIReasoning(
+	params: ResponseCreateParamsStreaming,
+	model: Model<"azure-openai-responses">,
+	options: AzureOpenAIResponsesOptions | undefined,
+): void {
+	if (!model.reasoning) return;
+	if (options?.reasoningEffort || options?.reasoningSummary) {
+		const effort = options.reasoningEffort
+			? (model.thinkingLevelMap?.[options.reasoningEffort] ?? options.reasoningEffort)
+			: "medium";
+		params.reasoning = {
+			effort: effort as NonNullable<typeof params.reasoning>["effort"],
+			summary: options.reasoningSummary || "auto",
+		};
+		params.include = ["reasoning.encrypted_content"];
+		return;
+	}
+	if (model.thinkingLevelMap?.off !== null) {
+		params.reasoning = {
+			effort: (model.thinkingLevelMap?.off ?? "none") as NonNullable<typeof params.reasoning>["effort"],
+		};
+	}
+}
+
 function buildParams(
 	model: Model<"azure-openai-responses">,
 	context: Context,
@@ -280,22 +326,7 @@ function buildParams(
 		params.tools = convertResponsesTools(context.tools);
 	}
 
-	if (model.reasoning) {
-		if (options?.reasoningEffort || options?.reasoningSummary) {
-			const effort = options?.reasoningEffort
-				? (model.thinkingLevelMap?.[options.reasoningEffort] ?? options.reasoningEffort)
-				: "medium";
-			params.reasoning = {
-				effort: effort as NonNullable<typeof params.reasoning>["effort"],
-				summary: options?.reasoningSummary || "auto",
-			};
-			params.include = ["reasoning.encrypted_content"];
-		} else if (model.thinkingLevelMap?.off !== null) {
-			params.reasoning = {
-				effort: (model.thinkingLevelMap?.off ?? "none") as NonNullable<typeof params.reasoning>["effort"],
-			};
-		}
-	}
+	applyAzureOpenAIReasoning(params, model, options);
 
 	return params;
 }

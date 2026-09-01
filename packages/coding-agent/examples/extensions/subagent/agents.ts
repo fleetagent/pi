@@ -4,9 +4,10 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { getAgentDir, parseFrontmatter } from "@fleetagent/pi-coding-agent";
+import { type AgentListFormatResult, getAgentDir, parseFrontmatter } from "@fleetagent/pi-coding-agent";
 
 export type AgentScope = "user" | "project" | "both";
+export type AgentConfigSource = "user" | "project";
 
 export interface AgentConfig {
 	name: string;
@@ -14,16 +15,44 @@ export interface AgentConfig {
 	tools?: string[];
 	model?: string;
 	systemPrompt: string;
-	source: "user" | "project";
+	source: AgentConfigSource;
 	filePath: string;
 }
 
+// pi-ignore noNearIdenticalDataStructures: The example owns user/project-only discovery, while core discovery also supports bundled/session agents and backend-aware loading.
 export interface AgentDiscoveryResult {
 	agents: AgentConfig[];
 	projectAgentsDir: string | null;
 }
 
-function loadAgentsFromDir(dir: string, source: "user" | "project"): AgentConfig[] {
+function loadAgentEntry(dir: string, entry: fs.Dirent, source: AgentConfigSource): AgentConfig | undefined {
+	if (!entry.name.endsWith(".md")) return undefined;
+	if (!entry.isFile() && !entry.isSymbolicLink()) return undefined;
+	const filePath = path.join(dir, entry.name);
+	let content: string;
+	try {
+		content = fs.readFileSync(filePath, "utf-8");
+	} catch {
+		return undefined;
+	}
+	const { frontmatter, body } = parseFrontmatter<Record<string, string>>(content);
+	if (!frontmatter.name || !frontmatter.description) return undefined;
+	const tools = frontmatter.tools
+		?.split(",")
+		.map((tool) => tool.trim())
+		.filter(Boolean);
+	return {
+		name: frontmatter.name,
+		description: frontmatter.description,
+		tools: tools && tools.length > 0 ? tools : undefined,
+		model: frontmatter.model,
+		systemPrompt: body,
+		source,
+		filePath,
+	};
+}
+
+function loadAgentsFromDir(dir: string, source: AgentConfigSource): AgentConfig[] {
 	const agents: AgentConfig[] = [];
 
 	if (!fs.existsSync(dir)) {
@@ -38,37 +67,8 @@ function loadAgentsFromDir(dir: string, source: "user" | "project"): AgentConfig
 	}
 
 	for (const entry of entries) {
-		if (!entry.name.endsWith(".md")) continue;
-		if (!entry.isFile() && !entry.isSymbolicLink()) continue;
-
-		const filePath = path.join(dir, entry.name);
-		let content: string;
-		try {
-			content = fs.readFileSync(filePath, "utf-8");
-		} catch {
-			continue;
-		}
-
-		const { frontmatter, body } = parseFrontmatter<Record<string, string>>(content);
-
-		if (!frontmatter.name || !frontmatter.description) {
-			continue;
-		}
-
-		const tools = frontmatter.tools
-			?.split(",")
-			.map((t: string) => t.trim())
-			.filter(Boolean);
-
-		agents.push({
-			name: frontmatter.name,
-			description: frontmatter.description,
-			tools: tools && tools.length > 0 ? tools : undefined,
-			model: frontmatter.model,
-			systemPrompt: body,
-			source,
-			filePath,
-		});
+		const agent = loadAgentEntry(dir, entry, source);
+		if (agent) agents.push(agent);
 	}
 
 	return agents;
@@ -115,7 +115,7 @@ export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryRe
 	return { agents: Array.from(agentMap.values()), projectAgentsDir };
 }
 
-export function formatAgentList(agents: AgentConfig[], maxItems: number): { text: string; remaining: number } {
+export function formatAgentList(agents: AgentConfig[], maxItems: number): AgentListFormatResult {
 	if (agents.length === 0) return { text: "none", remaining: 0 };
 	const listed = agents.slice(0, maxItems);
 	const remaining = agents.length - listed.length;

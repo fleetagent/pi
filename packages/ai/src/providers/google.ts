@@ -1,7 +1,10 @@
 import {
+	type Candidate,
 	type GenerateContentConfig,
 	type GenerateContentParameters,
+	type GenerateContentResponse,
 	GoogleGenAI,
+	type Part,
 	type ThinkingConfig,
 } from "@google/genai";
 import { getEnvApiKey } from "../env-api-keys.ts";
@@ -24,7 +27,12 @@ import type {
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { providerHeadersToRecord } from "../utils/headers.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
-import type { GoogleThinkingLevel } from "./google-shared.ts";
+import type {
+	GoogleStreamState,
+	GoogleThinkingLevel,
+	GoogleThinkingOptions,
+	GoogleToolChoice,
+} from "./google-shared.ts";
 import {
 	convertMessages,
 	convertTools,
@@ -36,17 +44,215 @@ import {
 } from "./google-shared.ts";
 import { buildBaseOptions } from "./simple-options.ts";
 
+export type { GoogleThinkingOptions } from "./google-shared.ts";
+
 export interface GoogleOptions extends StreamOptions {
-	toolChoice?: "auto" | "none" | "any";
-	thinking?: {
-		enabled: boolean;
-		budgetTokens?: number; // -1 for dynamic, 0 to disable
-		level?: GoogleThinkingLevel;
-	};
+	toolChoice?: GoogleToolChoice;
+	thinking?: GoogleThinkingOptions;
 }
 
 // Counter for generating unique tool call IDs
 let toolCallCounter = 0;
+
+type GoogleGenerativeStreamState = GoogleStreamState;
+
+function createGoogleOutput(model: Model<"google-generative-ai">): AssistantMessage {
+	return {
+		role: "assistant",
+		content: [],
+		api: "google-generative-ai" as Api,
+		provider: model.provider,
+		model: model.id,
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "stop",
+		timestamp: Date.now(),
+	};
+}
+
+function googleBlockIndex(state: GoogleGenerativeStreamState): number {
+	return state.output.content.length - 1;
+}
+
+function endGoogleBlock(state: GoogleGenerativeStreamState): void {
+	const block = state.currentBlock;
+	if (!block) return;
+	if (block.type === "text") {
+		state.stream.push({
+			type: "text_end",
+			contentIndex: googleBlockIndex(state),
+			content: block.text,
+			partial: state.output,
+		});
+	} else {
+		state.stream.push({
+			type: "thinking_end",
+			contentIndex: googleBlockIndex(state),
+			content: block.thinking,
+			partial: state.output,
+		});
+	}
+	state.currentBlock = null;
+}
+
+function ensureGoogleTextBlock(state: GoogleGenerativeStreamState, isThinking: boolean): TextContent | ThinkingContent {
+	const current = state.currentBlock;
+	if (current && ((isThinking && current.type === "thinking") || (!isThinking && current.type === "text"))) {
+		return current;
+	}
+	endGoogleBlock(state);
+	if (isThinking) {
+		const block: ThinkingContent = { type: "thinking", thinking: "", thinkingSignature: undefined };
+		state.currentBlock = block;
+		state.output.content.push(block);
+		state.stream.push({ type: "thinking_start", contentIndex: googleBlockIndex(state), partial: state.output });
+		return block;
+	}
+	const block: TextContent = { type: "text", text: "" };
+	state.currentBlock = block;
+	state.output.content.push(block);
+	state.stream.push({ type: "text_start", contentIndex: googleBlockIndex(state), partial: state.output });
+	return block;
+}
+
+function appendGoogleTextPart(state: GoogleGenerativeStreamState, part: Part): void {
+	if (part.text === undefined) return;
+	const block = ensureGoogleTextBlock(state, isThinkingPart(part));
+	if (block.type === "thinking") {
+		block.thinking += part.text;
+		block.thinkingSignature = retainThoughtSignature(block.thinkingSignature, part.thoughtSignature);
+		state.stream.push({
+			type: "thinking_delta",
+			contentIndex: googleBlockIndex(state),
+			delta: part.text,
+			partial: state.output,
+		});
+		return;
+	}
+	block.text += part.text;
+	block.textSignature = retainThoughtSignature(block.textSignature, part.thoughtSignature);
+	state.stream.push({
+		type: "text_delta",
+		contentIndex: googleBlockIndex(state),
+		delta: part.text,
+		partial: state.output,
+	});
+}
+
+function appendGoogleToolCall(state: GoogleGenerativeStreamState, part: Part): void {
+	if (!part.functionCall) return;
+	endGoogleBlock(state);
+	const providedId = part.functionCall.id;
+	const needsNewId =
+		!providedId || state.output.content.some((block) => block.type === "toolCall" && block.id === providedId);
+	const toolCall: ToolCall = {
+		type: "toolCall",
+		id: needsNewId ? `${part.functionCall.name}_${Date.now()}_${++toolCallCounter}` : providedId,
+		name: part.functionCall.name || "",
+		arguments: (part.functionCall.args as Record<string, any>) ?? {},
+		...(part.thoughtSignature && { thoughtSignature: part.thoughtSignature }),
+	};
+	state.output.content.push(toolCall);
+	state.stream.push({ type: "toolcall_start", contentIndex: googleBlockIndex(state), partial: state.output });
+	state.stream.push({
+		type: "toolcall_delta",
+		contentIndex: googleBlockIndex(state),
+		delta: JSON.stringify(toolCall.arguments),
+		partial: state.output,
+	});
+	state.stream.push({
+		type: "toolcall_end",
+		contentIndex: googleBlockIndex(state),
+		toolCall,
+		partial: state.output,
+	});
+}
+
+function applyGoogleFinishReason(output: AssistantMessage, candidate: Candidate | undefined): void {
+	if (!candidate?.finishReason) return;
+	output.stopReason = mapStopReason(candidate.finishReason);
+	if (output.content.some((block) => block.type === "toolCall")) output.stopReason = "toolUse";
+}
+
+function applyGoogleUsage(
+	output: AssistantMessage,
+	chunk: GenerateContentResponse,
+	model: Model<"google-generative-ai">,
+): void {
+	if (!chunk.usageMetadata) return;
+	output.usage = {
+		input: (chunk.usageMetadata.promptTokenCount || 0) - (chunk.usageMetadata.cachedContentTokenCount || 0),
+		output: (chunk.usageMetadata.candidatesTokenCount || 0) + (chunk.usageMetadata.thoughtsTokenCount || 0),
+		cacheRead: chunk.usageMetadata.cachedContentTokenCount || 0,
+		cacheWrite: 0,
+		totalTokens: chunk.usageMetadata.totalTokenCount || 0,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+	};
+	calculateCost(model, output.usage);
+}
+
+function processGoogleChunk(
+	state: GoogleGenerativeStreamState,
+	chunk: GenerateContentResponse,
+	model: Model<"google-generative-ai">,
+): void {
+	state.output.responseId ||= chunk.responseId;
+	const candidate = chunk.candidates?.[0];
+	for (const part of candidate?.content?.parts ?? []) {
+		appendGoogleTextPart(state, part);
+		appendGoogleToolCall(state, part);
+	}
+	applyGoogleFinishReason(state.output, candidate);
+	applyGoogleUsage(state.output, chunk, model);
+}
+
+function completeGoogleStream(state: GoogleGenerativeStreamState, signal: AbortSignal | undefined): void {
+	endGoogleBlock(state);
+	if (signal?.aborted) throw new Error("Request was aborted");
+	if (state.output.stopReason === "pending") throw new Error("Google stream ended without a finish reason");
+	if (state.output.stopReason === "aborted" || state.output.stopReason === "error") {
+		throw new Error("An unknown error occurred");
+	}
+	state.stream.push({ type: "done", reason: state.output.stopReason, message: state.output });
+	state.stream.end();
+}
+
+function failGoogleStream(state: GoogleGenerativeStreamState, error: unknown, signal: AbortSignal | undefined): void {
+	for (const block of state.output.content) {
+		if ("index" in block) delete (block as { index?: number }).index;
+	}
+	state.output.stopReason = signal?.aborted ? "aborted" : "error";
+	state.output.errorMessage = error instanceof Error ? error.message : JSON.stringify(error);
+	state.stream.push({ type: "error", reason: state.output.stopReason, error: state.output });
+	state.stream.end();
+}
+
+async function runGoogleStream(
+	model: Model<"google-generative-ai">,
+	context: Context,
+	options: GoogleOptions | undefined,
+	state: GoogleGenerativeStreamState,
+): Promise<void> {
+	try {
+		const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
+		const client = createClient(model, apiKey, options?.headers);
+		let params = buildParams(model, context, options);
+		const nextParams = await options?.onPayload?.(params, model);
+		if (nextParams !== undefined) params = nextParams as GenerateContentParameters;
+		const googleStream = await retryGoogleRequest(() => client.models.generateContentStream(params), options);
+		state.stream.push({ type: "start", partial: state.output });
+		for await (const chunk of googleStream) processGoogleChunk(state, chunk, model);
+		completeGoogleStream(state, options?.signal);
+	} catch (error) {
+		failGoogleStream(state, error, options?.signal);
+	}
+}
 
 export const streamGoogle: StreamFunction<"google-generative-ai", GoogleOptions> = (
 	model: Model<"google-generative-ai">,
@@ -54,230 +260,12 @@ export const streamGoogle: StreamFunction<"google-generative-ai", GoogleOptions>
 	options?: GoogleOptions,
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
-
-	(async () => {
-		const output: AssistantMessage = {
-			role: "assistant",
-			content: [],
-			api: "google-generative-ai" as Api,
-			provider: model.provider,
-			model: model.id,
-			usage: {
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			stopReason: "stop",
-			timestamp: Date.now(),
-		};
-
-		try {
-			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
-			const client = createClient(model, apiKey, options?.headers);
-			let params = buildParams(model, context, options);
-			const nextParams = await options?.onPayload?.(params, model);
-			if (nextParams !== undefined) {
-				params = nextParams as GenerateContentParameters;
-			}
-			const googleStream = await retryGoogleRequest(() => client.models.generateContentStream(params), options);
-
-			stream.push({ type: "start", partial: output });
-			let currentBlock: TextContent | ThinkingContent | null = null;
-			const blocks = output.content;
-			const blockIndex = () => blocks.length - 1;
-			for await (const chunk of googleStream) {
-				// @google/genai documents GenerateContentResponse.responseId as an output-only field
-				// used to identify each response. Keep the first non-empty one from the stream.
-				output.responseId ||= chunk.responseId;
-				const candidate = chunk.candidates?.[0];
-				if (candidate?.content?.parts) {
-					for (const part of candidate.content.parts) {
-						if (part.text !== undefined) {
-							const isThinking = isThinkingPart(part);
-							if (
-								!currentBlock ||
-								(isThinking && currentBlock.type !== "thinking") ||
-								(!isThinking && currentBlock.type !== "text")
-							) {
-								if (currentBlock) {
-									if (currentBlock.type === "text") {
-										stream.push({
-											type: "text_end",
-											contentIndex: blocks.length - 1,
-											content: currentBlock.text,
-											partial: output,
-										});
-									} else {
-										stream.push({
-											type: "thinking_end",
-											contentIndex: blockIndex(),
-											content: currentBlock.thinking,
-											partial: output,
-										});
-									}
-								}
-								if (isThinking) {
-									currentBlock = { type: "thinking", thinking: "", thinkingSignature: undefined };
-									output.content.push(currentBlock);
-									stream.push({ type: "thinking_start", contentIndex: blockIndex(), partial: output });
-								} else {
-									currentBlock = { type: "text", text: "" };
-									output.content.push(currentBlock);
-									stream.push({ type: "text_start", contentIndex: blockIndex(), partial: output });
-								}
-							}
-							if (currentBlock.type === "thinking") {
-								currentBlock.thinking += part.text;
-								currentBlock.thinkingSignature = retainThoughtSignature(
-									currentBlock.thinkingSignature,
-									part.thoughtSignature,
-								);
-								stream.push({
-									type: "thinking_delta",
-									contentIndex: blockIndex(),
-									delta: part.text,
-									partial: output,
-								});
-							} else {
-								currentBlock.text += part.text;
-								currentBlock.textSignature = retainThoughtSignature(
-									currentBlock.textSignature,
-									part.thoughtSignature,
-								);
-								stream.push({
-									type: "text_delta",
-									contentIndex: blockIndex(),
-									delta: part.text,
-									partial: output,
-								});
-							}
-						}
-
-						if (part.functionCall) {
-							if (currentBlock) {
-								if (currentBlock.type === "text") {
-									stream.push({
-										type: "text_end",
-										contentIndex: blockIndex(),
-										content: currentBlock.text,
-										partial: output,
-									});
-								} else {
-									stream.push({
-										type: "thinking_end",
-										contentIndex: blockIndex(),
-										content: currentBlock.thinking,
-										partial: output,
-									});
-								}
-								currentBlock = null;
-							}
-
-							// Generate unique ID if not provided or if it's a duplicate
-							const providedId = part.functionCall.id;
-							const needsNewId =
-								!providedId || output.content.some((b) => b.type === "toolCall" && b.id === providedId);
-							const toolCallId = needsNewId
-								? `${part.functionCall.name}_${Date.now()}_${++toolCallCounter}`
-								: providedId;
-
-							const toolCall: ToolCall = {
-								type: "toolCall",
-								id: toolCallId,
-								name: part.functionCall.name || "",
-								arguments: (part.functionCall.args as Record<string, any>) ?? {},
-								...(part.thoughtSignature && { thoughtSignature: part.thoughtSignature }),
-							};
-
-							output.content.push(toolCall);
-							stream.push({ type: "toolcall_start", contentIndex: blockIndex(), partial: output });
-							stream.push({
-								type: "toolcall_delta",
-								contentIndex: blockIndex(),
-								delta: JSON.stringify(toolCall.arguments),
-								partial: output,
-							});
-							stream.push({ type: "toolcall_end", contentIndex: blockIndex(), toolCall, partial: output });
-						}
-					}
-				}
-
-				if (candidate?.finishReason) {
-					output.stopReason = mapStopReason(candidate.finishReason);
-					if (output.content.some((b) => b.type === "toolCall")) {
-						output.stopReason = "toolUse";
-					}
-				}
-
-				if (chunk.usageMetadata) {
-					output.usage = {
-						input:
-							(chunk.usageMetadata.promptTokenCount || 0) - (chunk.usageMetadata.cachedContentTokenCount || 0),
-						output:
-							(chunk.usageMetadata.candidatesTokenCount || 0) + (chunk.usageMetadata.thoughtsTokenCount || 0),
-						cacheRead: chunk.usageMetadata.cachedContentTokenCount || 0,
-						cacheWrite: 0,
-						totalTokens: chunk.usageMetadata.totalTokenCount || 0,
-						cost: {
-							input: 0,
-							output: 0,
-							cacheRead: 0,
-							cacheWrite: 0,
-							total: 0,
-						},
-					};
-					calculateCost(model, output.usage);
-				}
-			}
-
-			if (currentBlock) {
-				if (currentBlock.type === "text") {
-					stream.push({
-						type: "text_end",
-						contentIndex: blockIndex(),
-						content: currentBlock.text,
-						partial: output,
-					});
-				} else {
-					stream.push({
-						type: "thinking_end",
-						contentIndex: blockIndex(),
-						content: currentBlock.thinking,
-						partial: output,
-					});
-				}
-			}
-
-			if (options?.signal?.aborted) {
-				throw new Error("Request was aborted");
-			}
-
-			if (output.stopReason === "pending") {
-				throw new Error("Google stream ended without a finish reason");
-			}
-			if (output.stopReason === "aborted" || output.stopReason === "error") {
-				throw new Error("An unknown error occurred");
-			}
-
-			stream.push({ type: "done", reason: output.stopReason, message: output });
-			stream.end();
-		} catch (error) {
-			// Remove internal index property used during streaming
-			for (const block of output.content) {
-				if ("index" in block) {
-					delete (block as { index?: number }).index;
-				}
-			}
-			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-			output.errorMessage = error instanceof Error ? error.message : JSON.stringify(error);
-			stream.push({ type: "error", reason: output.stopReason, error: output });
-			stream.end();
-		}
-	})();
-
+	const state: GoogleGenerativeStreamState = {
+		output: createGoogleOutput(model),
+		stream,
+		currentBlock: null,
+	};
+	void runGoogleStream(model, context, options, state);
 	return stream;
 };
 
@@ -340,6 +328,24 @@ function createClient(
 	});
 }
 
+function resolveGoogleThinkingConfig(
+	model: Model<"google-generative-ai">,
+	thinking: GoogleThinkingOptions | undefined,
+): ThinkingConfig | undefined {
+	if (thinking?.enabled && model.reasoning) {
+		const config: ThinkingConfig = { includeThoughts: true };
+		if (thinking.level !== undefined) {
+			// Cast to any since our GoogleThinkingLevel mirrors Google's ThinkingLevel enum values
+			config.thinkingLevel = thinking.level as any;
+		} else if (thinking.budgetTokens !== undefined) {
+			config.thinkingBudget = thinking.budgetTokens;
+		}
+		return config;
+	}
+	if (model.reasoning && thinking && !thinking.enabled) return getDisabledThinkingConfig(model);
+	return undefined;
+}
+
 function buildParams(
 	model: Model<"google-generative-ai">,
 	context: Context,
@@ -371,18 +377,8 @@ function buildParams(
 		config.toolConfig = undefined;
 	}
 
-	if (options.thinking?.enabled && model.reasoning) {
-		const thinkingConfig: ThinkingConfig = { includeThoughts: true };
-		if (options.thinking.level !== undefined) {
-			// Cast to any since our GoogleThinkingLevel mirrors Google's ThinkingLevel enum values
-			thinkingConfig.thinkingLevel = options.thinking.level as any;
-		} else if (options.thinking.budgetTokens !== undefined) {
-			thinkingConfig.thinkingBudget = options.thinking.budgetTokens;
-		}
-		config.thinkingConfig = thinkingConfig;
-	} else if (model.reasoning && options.thinking && !options.thinking.enabled) {
-		config.thinkingConfig = getDisabledThinkingConfig(model);
-	}
+	const thinkingConfig = resolveGoogleThinkingConfig(model, options.thinking);
+	if (thinkingConfig) config.thinkingConfig = thinkingConfig;
 
 	if (options.signal) {
 		if (options.signal.aborted) {

@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getModel } from "@fleetagent/pi-ai";
+import { getModel, type TextContent } from "@fleetagent/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { PiAgent } from "../src/core/pi-agent.ts";
 import { InMemorySession } from "../src/core/session/in-memory-session.ts";
@@ -140,7 +140,7 @@ describe("PiAgent session manager defaults", () => {
 		expect(bashTool).toBeTruthy();
 		const result = await bashTool!.execute("test", { command: "pwd" });
 		const output = result.content
-			.filter((item): item is { type: "text"; text: string } => item.type === "text")
+			.filter((item): item is TextContent => item.type === "text")
 			.map((item) => item.text)
 			.join("");
 
