@@ -187,9 +187,11 @@ export {
 export {
 	LspClient,
 	type LspClientOptions,
+	type LspClientOwnership,
 	type LspClientStartResult,
 	type LspConnectionState,
 	type LspDocumentSyncCapabilities,
+	type LspShutdownMode,
 } from "./core/lsp/client.ts";
 export {
 	type LspClientInfo,

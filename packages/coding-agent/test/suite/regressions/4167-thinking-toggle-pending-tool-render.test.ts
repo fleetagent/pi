@@ -73,7 +73,7 @@ type HandleEvent = (this: RenderSessionContextThis, event: AgentSessionEvent) =>
 
 function createFakeInteractiveModeThis(): RenderSessionContextThis {
 	const chatContainer = new Container();
-	return {
+	const context: RenderSessionContextThis = {
 		pendingTools: new Map<string, ToolExecutionComponent>(),
 		chatContainer,
 		footer: { invalidate: vi.fn() },
@@ -92,6 +92,8 @@ function createFakeInteractiveModeThis(): RenderSessionContextThis {
 			chatContainer.addChild(new Text(message.role, 0, 0));
 		},
 	};
+	Object.setPrototypeOf(context, InteractiveMode.prototype);
+	return context;
 }
 
 function createAssistantToolCallMessage(): AssistantMessage {

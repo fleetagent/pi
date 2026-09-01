@@ -31,6 +31,7 @@ interface ShutdownThis {
 	isShuttingDown: boolean;
 	unregisterSignalHandlers: () => void;
 	runtimeHost: ShutdownRuntimeHost;
+	disposeRuntimeResources: () => Promise<Error[]>;
 	settingsManager: ShutdownSettingsManager;
 	ui: ShutdownUI;
 	stop: (fullscreenExitOutput?: FullscreenExitOutput) => void;
@@ -65,6 +66,10 @@ function createContext(order: string[], fullscreenExitOutput: FullscreenExitOutp
 			dispose: vi.fn(async () => {
 				order.push("dispose");
 			}),
+		},
+		async disposeRuntimeResources() {
+			await this.runtimeHost.dispose();
+			return [];
 		},
 		settingsManager: { getFullscreenExitOutput: () => fullscreenExitOutput },
 		ui: {

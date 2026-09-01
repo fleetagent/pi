@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { PassThrough } from "node:stream";
@@ -905,15 +905,15 @@ Content`,
 
 				await expect(packageManager.resolve()).rejects.toThrow("outside checkout");
 
-				rmSync(join(extensions, "nested", "escape"));
+				unlinkSync(join(extensions, "nested", "escape"));
 				symlinkSync(join(tempDir, "missing-resource"), join(extensions, "nested", "broken"), "dir");
 				await expect(packageManager.resolve()).rejects.toThrow("unreadable or broken");
 
-				rmSync(join(extensions, "nested", "broken"));
+				unlinkSync(join(extensions, "nested", "broken"));
 				const ignorePath = join(extensions, "nested", ".gitignore");
 				symlinkSync(join(tempDir, "missing-ignore"), ignorePath);
 				await expect(packageManager.resolve()).rejects.toThrow("unreadable or broken");
-				rmSync(ignorePath);
+				unlinkSync(ignorePath);
 				const nodeModules = join(installedPath, "node_modules");
 				mkdirSync(nodeModules, { recursive: true });
 				symlinkSync(outside, join(nodeModules, "a"), "dir");
@@ -952,7 +952,7 @@ Content`,
 
 				await expect(packageManager.resolve()).rejects.toThrow("outside checkout");
 
-				rmSync(join(installedPath, "extensions"));
+				unlinkSync(join(installedPath, "extensions"));
 				const internal = join(installedPath, "internal-extensions");
 				mkdirSync(internal, { recursive: true });
 				writeFileSync(join(internal, "index.ts"), "export default function() {};");

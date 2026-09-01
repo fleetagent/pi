@@ -878,6 +878,30 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 			}
 		}
 
+		// Fireworks keeps the Fire Pass router available even when models.dev
+		// temporarily omits it from the provider catalog.
+		const fireworksTurboRouterId = "accounts/fireworks/routers/kimi-k2p6-turbo";
+		if (!models.some((model) => model.provider === "fireworks" && model.id === fireworksTurboRouterId)) {
+			models.push({
+				id: fireworksTurboRouterId,
+				name: "Kimi K2.6 Turbo",
+				api: "anthropic-messages",
+				provider: "fireworks",
+				baseUrl: "https://api.fireworks.ai/inference",
+				reasoning: true,
+				input: ["text", "image"],
+				cost: { input: 2, output: 8, cacheRead: 0.3, cacheWrite: 0 },
+				contextWindow: 262000,
+				maxTokens: 262000,
+				compat: {
+					sendSessionAffinityHeaders: true,
+					supportsEagerToolInputStreaming: false,
+					supportsCacheControlOnTools: false,
+					supportsLongCacheRetention: false,
+				},
+			});
+		}
+
 		// Process Together AI models
 		const togetherProvider = data.together ?? data.togetherai ?? data["together-ai"];
 		if (togetherProvider?.models) {

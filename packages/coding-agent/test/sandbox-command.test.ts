@@ -546,7 +546,7 @@ describe("hidden sandbox command", () => {
 		);
 		const rpcModeSource = readFileSync(new URL("../src/modes/rpc/rpc-mode.ts", import.meta.url), "utf8");
 		expect(rpcModeSource).not.toContain('"/sandbox"');
-		expect(rpcModeSource).toContain("HIDDEN_BUILTIN_SLASH_COMMAND_NAMES.has(command.name)");
+		expect(rpcModeSource).toContain("HIDDEN_BUILTIN_SLASH_COMMAND_NAMES.has(registeredCommand.name)");
 		const agentSessionSource = readFileSync(new URL("../src/core/agent-session.ts", import.meta.url), "utf8");
 		expect(agentSessionSource).not.toContain('"/sandbox"');
 		expect(agentSessionSource).toContain("HIDDEN_BUILTIN_SLASH_COMMAND_NAMES.has(command.name)");
