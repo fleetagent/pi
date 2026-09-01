@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.2.0](https://github.com/fleetagent/pi/compare/@fleetagent/pi-ai-v0.1.9...@fleetagent/pi-ai-v0.2.0) (2026-09-01)
+
+
+### ⚠ BREAKING CHANGES
+
+* JSON/RPC message updates now emit deltas only, and deprecated TypeBox APIs are removed.
+
+### Features
+
+* **coding-agent:** add hooks and custom Biome checks ([66e670c](https://github.com/fleetagent/pi/commit/66e670c5a80407b0b26a59366d0ef0d92abd2c85))
+* **coding-agent:** harden session and sandbox infrastructure ([49b9db0](https://github.com/fleetagent/pi/commit/49b9db0654bee932eccfb57bdaf5917ce48ac7be))
+* integrate selective upstream migration ([0e3d391](https://github.com/fleetagent/pi/commit/0e3d391b8bfcdad751881a04a7967cc747b8e0fe))
+
+
+### Bug Fixes
+
+* restore CI test compatibility ([242196c](https://github.com/fleetagent/pi/commit/242196cc27176fbcda8f26cd2fc0f084126a8d0f))
+
 ## [0.1.9](https://github.com/fleetagent/pi/compare/@fleetagent/pi-ai-v0.1.8...@fleetagent/pi-ai-v0.1.9) (2026-07-27)
 
 

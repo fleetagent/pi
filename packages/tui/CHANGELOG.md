@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.2.0](https://github.com/fleetagent/pi/compare/@fleetagent/pi-tui-v0.1.9...@fleetagent/pi-tui-v0.2.0) (2026-09-01)
+
+
+### ⚠ BREAKING CHANGES
+
+* JSON/RPC message updates now emit deltas only, and deprecated TypeBox APIs are removed.
+
+### Features
+
+* **coding-agent:** add hooks and custom Biome checks ([66e670c](https://github.com/fleetagent/pi/commit/66e670c5a80407b0b26a59366d0ef0d92abd2c85))
+* integrate selective upstream migration ([0e3d391](https://github.com/fleetagent/pi/commit/0e3d391b8bfcdad751881a04a7967cc747b8e0fe))
+
 ## [0.1.9](https://github.com/fleetagent/pi/compare/@fleetagent/pi-tui-v0.1.8...@fleetagent/pi-tui-v0.1.9) (2026-07-27)
 
 
