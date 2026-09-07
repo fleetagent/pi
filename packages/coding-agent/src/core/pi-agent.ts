@@ -1225,7 +1225,7 @@ export class PiAgent {
 			model,
 		);
 
-		const defaultActiveToolNames = getDefaultActiveToolNames();
+		const defaultActiveToolNames = getDefaultActiveToolNames(services.settingsManager.getEnableSubagents());
 		const allowedToolNames = sessionOptions.tools ?? (sessionOptions.noTools === "all" ? [] : undefined);
 		const initialActiveToolNames: string[] = sessionOptions.tools
 			? [...sessionOptions.tools]
