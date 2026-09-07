@@ -685,10 +685,10 @@ describe("totalTokens field", () => {
 
 	describe("GitHub Copilot (OAuth)", () => {
 		it.skipIf(!githubCopilotToken)(
-			"gpt-4.1 - should return totalTokens equal to sum of components",
+			"gpt-5-mini - should return totalTokens equal to sum of components",
 			{ retry: 3, timeout: 60000 },
 			async () => {
-				const llm = getModel("github-copilot", "gpt-4.1");
+				const llm = getModel("github-copilot", "gpt-5-mini");
 
 				console.log(`\nGitHub Copilot / ${llm.id}:`);
 				const { first, second } = await testTotalTokensWithCache(llm, { apiKey: githubCopilotToken });

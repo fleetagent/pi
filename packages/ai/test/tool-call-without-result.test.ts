@@ -297,10 +297,10 @@ describe("Tool Call Without Result Tests", () => {
 
 	describe("GitHub Copilot Provider", () => {
 		it.skipIf(!githubCopilotToken)(
-			"gpt-4.1 - should filter out tool calls without corresponding tool results",
+			"gpt-5-mini - should filter out tool calls without corresponding tool results",
 			{ retry: 3, timeout: 30000 },
 			async () => {
-				const model = getModel("github-copilot", "gpt-4.1");
+				const model = getModel("github-copilot", "gpt-5-mini");
 				await testToolCallWithoutResult(model, { apiKey: githubCopilotToken });
 			},
 		);
