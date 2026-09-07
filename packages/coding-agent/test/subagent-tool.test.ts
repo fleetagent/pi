@@ -52,17 +52,211 @@ afterEach(() => {
 });
 
 describe("native subagent tool", () => {
-	it("is registered and active by default", () => {
+	it("is registered but inactive by default", () => {
 		const cwd = createTempDir("pi-subagent-tools-");
 		const definitions = createAllToolDefinitions(new LocalToolOperations(cwd));
 		expect(definitions.subagent.name).toBe("subagent");
-		expect(DEFAULT_ACTIVE_TOOL_NAMES).toContain("subagent");
+		expect(definitions.subagent_runs.name).toBe("subagent_runs");
+		expect(definitions.create_subagent.name).toBe("create_subagent");
+		expect(DEFAULT_ACTIVE_TOOL_NAMES).not.toContain("subagent");
+		expect(DEFAULT_ACTIVE_TOOL_NAMES).not.toContain("subagent_runs");
+		expect(DEFAULT_ACTIVE_TOOL_NAMES).not.toContain("create_subagent");
 	});
 
-	it("does not expose subagent in sessions without an embedded runner", async () => {
+	it("activates the full subagent tool family when enabled", async () => {
+		const cwd = createTempDir("pi-subagent-enabled-");
+		const pi = await PiAgent.create({
+			cwd,
+			sessionManager: new InMemorySessionManager(cwd),
+			settingsManager: SettingsManager.inMemory({ enableSubagents: true }),
+		});
+		try {
+			const session = await pi.createAgentSession();
+			expect(session.getActiveToolNames()).toEqual(
+				expect.arrayContaining(["subagent", "subagent_runs", "create_subagent"]),
+			);
+		} finally {
+			await pi.dispose();
+		}
+	});
+
+	it("applies runtime setting changes to active tools and orchestration guidance", async () => {
+		const cwd = createTempDir("pi-subagent-toggle-");
+		const pi = await PiAgent.create({
+			cwd,
+			sessionManager: new InMemorySessionManager(cwd),
+			settingsManager: SettingsManager.inMemory(),
+		});
+		try {
+			const session = await pi.createAgentSession();
+			expect(session.subagentsEnabled).toBe(false);
+			expect(session.getActiveToolNames()).not.toContain("subagent");
+			expect(session.getToolDefinition("subagent")).toBeDefined();
+			expect(session.getToolDefinition("subagent_runs")).toBeDefined();
+			expect(session.getToolDefinition("create_subagent")).toBeDefined();
+			expect(session.systemPrompt).not.toContain("## Orchestration");
+
+			session.setSubagentsEnabled(true);
+			expect(session.subagentsEnabled).toBe(true);
+			expect(session.getActiveToolNames()).toEqual(
+				expect.arrayContaining(["subagent", "subagent_runs", "create_subagent"]),
+			);
+			expect(session.systemPrompt).toContain("## Orchestration");
+
+			session.setSubagentsEnabled(false);
+			expect(session.getActiveToolNames()).not.toContain("subagent");
+			expect(session.getActiveToolNames()).not.toContain("subagent_runs");
+			expect(session.getActiveToolNames()).not.toContain("create_subagent");
+			expect(session.systemPrompt).not.toContain("## Orchestration");
+		} finally {
+			await pi.dispose();
+		}
+	});
+
+	it("applies settings file changes on reload", async () => {
+		const cwd = createTempDir("pi-subagent-reload-");
+		const agentDir = createTempDir("pi-subagent-reload-config-");
+		const settingsPath = join(agentDir, "settings.json");
+		writeFileSync(settingsPath, JSON.stringify({ enableSubagents: false }));
+		const pi = await PiAgent.create({
+			cwd,
+			agentDir,
+			sessionManager: new InMemorySessionManager(cwd),
+			settingsManager: SettingsManager.create(cwd, agentDir),
+		});
+		try {
+			const session = await pi.createAgentSession();
+			expect(session.getActiveToolNames()).not.toContain("subagent");
+
+			writeFileSync(settingsPath, JSON.stringify({ enableSubagents: true }));
+			await session.reload();
+			expect(session.getActiveToolNames()).toEqual(
+				expect.arrayContaining(["subagent", "subagent_runs", "create_subagent"]),
+			);
+			expect(session.systemPrompt).toContain("## Orchestration");
+
+			writeFileSync(settingsPath, JSON.stringify({ enableSubagents: false }));
+			await session.reload();
+			expect(session.getActiveToolNames()).not.toContain("subagent");
+			expect(session.systemPrompt).not.toContain("## Orchestration");
+		} finally {
+			await pi.dispose();
+		}
+	});
+
+	it("lets explicit tool allowlists opt in to only the requested subagent tools", async () => {
+		const cwd = createTempDir("pi-subagent-allowlist-");
+		const pi = await PiAgent.create({
+			cwd,
+			sessionManager: new InMemorySessionManager(cwd),
+			settingsManager: SettingsManager.inMemory(),
+			tools: ["subagent"],
+		});
+		try {
+			const session = await pi.createAgentSession();
+			expect(session.getActiveToolNames()).toEqual(["subagent"]);
+			session.setSubagentsEnabled(false);
+			expect(session.getActiveToolNames()).toEqual(["subagent"]);
+		} finally {
+			await pi.dispose();
+		}
+	});
+
+	it("preserves explicit subsets and exclusions when the setting is enabled", async () => {
+		const cwd = createTempDir("pi-subagent-subset-");
+		const subsetPi = await PiAgent.create({
+			cwd,
+			sessionManager: new InMemorySessionManager(cwd),
+			settingsManager: SettingsManager.inMemory({ enableSubagents: true }),
+			tools: ["subagent_runs"],
+		});
+		try {
+			const session = await subsetPi.createAgentSession();
+			expect(session.getActiveToolNames()).toEqual(["subagent_runs"]);
+		} finally {
+			await subsetPi.dispose();
+		}
+
+		const excludedPi = await PiAgent.create({
+			cwd,
+			sessionManager: new InMemorySessionManager(cwd),
+			settingsManager: SettingsManager.inMemory({ enableSubagents: true }),
+			excludedTools: ["subagent"],
+		});
+		try {
+			const session = await excludedPi.createAgentSession();
+			expect(session.getActiveToolNames()).not.toContain("subagent");
+			expect(session.getActiveToolNames()).toEqual(expect.arrayContaining(["subagent_runs", "create_subagent"]));
+		} finally {
+			await excludedPi.dispose();
+		}
+	});
+
+	it("keeps empty and no-tools modes authoritative without removing custom tools from builtin-only mode", async () => {
+		const cwd = createTempDir("pi-subagent-no-tools-");
+		const emptyPi = await PiAgent.create({
+			cwd,
+			sessionManager: new InMemorySessionManager(cwd),
+			settingsManager: SettingsManager.inMemory({ enableSubagents: true }),
+			tools: [],
+		});
+		try {
+			expect((await emptyPi.createAgentSession()).getActiveToolNames()).toEqual([]);
+		} finally {
+			await emptyPi.dispose();
+		}
+
+		const customTool = {
+			name: "custom",
+			label: "Custom",
+			description: "Custom tool",
+			parameters: Type.Object({}),
+			execute: async () => ({ content: [{ type: "text" as const, text: "custom" }], details: {} }),
+		};
+		const builtinOnlyPi = await PiAgent.create({
+			cwd,
+			sessionManager: new InMemorySessionManager(cwd),
+			settingsManager: SettingsManager.inMemory({ enableSubagents: true }),
+			customTools: [customTool],
+			noTools: "builtin",
+		});
+		try {
+			expect((await builtinOnlyPi.createAgentSession()).getActiveToolNames()).toEqual(["custom"]);
+		} finally {
+			await builtinOnlyPi.dispose();
+		}
+
+		const noToolsPi = await PiAgent.create({
+			cwd,
+			sessionManager: new InMemorySessionManager(cwd),
+			settingsManager: SettingsManager.inMemory({ enableSubagents: true }),
+			customTools: [customTool],
+			noTools: "all",
+		});
+		try {
+			expect((await noToolsPi.createAgentSession()).getActiveToolNames()).toEqual([]);
+		} finally {
+			await noToolsPi.dispose();
+		}
+	});
+
+	it("keeps subagent tools inactive by default without an embedded runner", async () => {
 		const harness = await createHarness();
 		try {
 			expect(harness.session.getActiveToolNames()).not.toContain("subagent");
+			expect(harness.session.getActiveToolNames()).not.toContain("subagent_runs");
+			expect(harness.session.getActiveToolNames()).not.toContain("create_subagent");
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("does not activate subagent tools when enabled without an embedded runner", async () => {
+		const harness = await createHarness({ settings: { enableSubagents: true } });
+		try {
+			expect(harness.session.getActiveToolNames()).not.toContain("subagent");
+			expect(harness.session.getActiveToolNames()).not.toContain("subagent_runs");
+			expect(harness.session.getActiveToolNames()).not.toContain("create_subagent");
 		} finally {
 			harness.cleanup();
 		}
@@ -451,7 +645,7 @@ describe("native subagent tool", () => {
 			sessionManager: new InMemorySessionManager(cwd),
 			authStorage,
 			modelRegistry,
-			settingsManager: SettingsManager.inMemory(),
+			settingsManager: SettingsManager.inMemory({ enableSubagents: true }),
 			model,
 			scopedModels: [{ model }],
 			excludedTools: ["bash"],
@@ -747,7 +941,7 @@ describe("native subagent tool", () => {
 			sessionManager: new InMemorySessionManager(remoteCwd),
 			authStorage,
 			modelRegistry,
-			settingsManager: SettingsManager.inMemory(),
+			settingsManager: SettingsManager.inMemory({ enableSubagents: true }),
 			model,
 			toolOperations: operations,
 			resourceLoaderOptions: { toolOperations: operations },
