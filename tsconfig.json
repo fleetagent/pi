@@ -9,7 +9,7 @@
 			"@fleetagent/pi-ai/*": ["./packages/ai/src/*.ts", "./packages/ai/src/providers/*.ts"],
 			"@fleetagent/pi-ai/dist/*": ["./packages/ai/src/*"],
 			"@fleetagent/pi-agent-core": ["./packages/agent/src/index.ts"],
-			"@fleetagent/pi-agent-core/*": ["./packages/agent/src/*"],
+			"@fleetagent/pi-agent-core/*": ["./packages/agent/src/*.ts"],
 			"@fleetagent/pi-coding-agent": ["./packages/coding-agent/src/index.ts"],
 			"@fleetagent/pi-coding-agent/hooks": ["./packages/coding-agent/src/core/hooks/index.ts"],
 			"@fleetagent/pi-coding-agent/*": ["./packages/coding-agent/src/*"],
