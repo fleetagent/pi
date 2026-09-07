@@ -19,7 +19,7 @@
 
 Pi is a minimal terminal coding harness. Adapt pi to your workflows, not the other way around, without having to fork and modify pi internals. Extend it with TypeScript [Extensions](#extensions), [Skills](#skills), [Rules](#rules), [Prompt Templates](#prompt-templates), and [Themes](#themes). Put your extensions, skills, rules, prompt templates, and themes in [Pi Packages](#pi-packages) and share them with others via npm or git.
 
-Pi ships with powerful defaults, including isolated subagent delegation, while leaving broader workflows such as plan mode to extensions and packages.
+Pi ships with powerful defaults and optional isolated subagent delegation, while leaving broader workflows such as plan mode to extensions and packages.
 
 Pi runs in four modes: interactive, print or JSON, RPC for process integration, and an SDK for embedding in your own apps. See [openclaw/openclaw](https://github.com/openclaw/openclaw) for a real-world SDK integration.
 
@@ -96,7 +96,7 @@ pi
 /login  # Then select provider
 ```
 
-Then just talk to pi. By default, pi gives the model file, shell, and subagent tools. LSP tools are available after you [configure an external language server](docs/lsp.md). The model uses enabled tools to fulfill your requests. Add capabilities via [skills](#skills), [prompt templates](#prompt-templates), [extensions](#extensions), or [pi packages](#pi-packages).
+Then just talk to pi. By default, pi gives the model file and shell tools. Enable the built-in subagent tool family through `/settings` or `enableSubagents` in `settings.json`. LSP tools are available after you [configure an external language server](docs/lsp.md). The model uses enabled tools to fulfill your requests. Add capabilities via [skills](#skills), [prompt templates](#prompt-templates), [extensions](#extensions), or [pi packages](#pi-packages).
 
 **Platform notes:** [Windows](docs/windows.md) | [Termux (Android)](docs/termux.md) | [tmux](docs/tmux.md) | [Terminal setup](docs/terminal-setup.md) | [Shell aliases](docs/shell-aliases.md)
 
@@ -532,7 +532,7 @@ Pi is aggressively extensible so it doesn't have to dictate your workflow. Featu
 
 **No MCP.** Build CLI tools with READMEs (see [Skills](#skills)), or build an extension that adds MCP support. [Why?](https://mariozechner.at/posts/2025-11-02-what-if-you-dont-need-mcp/)
 
-**Focused sub-agents.** The built-in `subagent` tool delegates single, parallel, or chained tasks to fresh in-memory agent sessions with isolated conversations and shared authentication/model services. The parent can define each task's persona, response format, model, and tools dynamically or use bundled and user-defined presets. Extensions and packages can still provide alternative orchestration models.
+**Focused sub-agents.** Enable the built-in subagent tool family through `/settings` or `enableSubagents` in `settings.json` to delegate single, parallel, or chained tasks to fresh in-memory agent sessions with isolated conversations and shared authentication/model services. The parent can define each task's persona, response format, model, and tools dynamically or use bundled and user-defined presets. Extensions and packages can still provide alternative orchestration models.
 
 **No permission popups.** Run in a container, or build your own confirmation flow with [extensions](#extensions) inline with your environment and security requirements.
 
@@ -617,7 +617,7 @@ cat README.md | pi -p "Summarize this text"
 | `--remote-deferred` | Start with a deferred daemon backend and connect later with `/sandbox --attach <ws://url>` |
 | `--remote-cwd <path>` | Stable daemon workspace cwd for deferred remote mode |
 | `--daemon` | Start the integrated remote workspace daemon instead of a normal Pi session |
-Available built-in tools: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`, `websearch`, `session_search`, `session_entry_get`, `subagent`, `subagent_runs`, `create_subagent`, and—when externally configured—`lsp_diagnostics`, `lsp_hover`, `lsp_definition`, `lsp_references`, `lsp_rename`, and `lsp_code_actions`.
+Available built-in tools: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`, `websearch`, `session_search`, `session_entry_get`, `subagent`, `subagent_runs`, `create_subagent`, and—when externally configured—`lsp_diagnostics`, `lsp_hover`, `lsp_definition`, `lsp_references`, `lsp_rename`, and `lsp_code_actions`. The subagent family is inactive by default; enable it in `/settings` or with `enableSubagents`, or explicitly select its names with `--tools`. Explicit allowlists may select any subset, while `--no-tools` and `--no-builtin-tools` remain authoritative.
 
 ### Resource Options
 

@@ -247,12 +247,13 @@ const pi = await PiAgent.create({
 await pi.createAgentSession();
 ```
 
-Built-in tool names: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`, `subagent`, and the `lsp_*` navigation/refactoring tools.
+Built-in tool names include `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`, `subagent`, `subagent_runs`, `create_subagent`, and the `lsp_*` navigation/refactoring tools. The subagent family is inactive by default. Set `enableSubagents: true` to activate all three by default, or use the explicit `tools` option to select any subset. Explicit `tools` selection overrides the setting; `noTools: "all"` and `noTools: "builtin"` remain authoritative.
 
 ### Settings
 
 ```typescript
 const settingsManager = SettingsManager.inMemory({
+  enableSubagents: true,
   compaction: { enabled: false },
   retry: { enabled: true, maxRetries: 2 },
 });
@@ -260,6 +261,8 @@ const settingsManager = SettingsManager.inMemory({
 const pi = await PiAgent.create({ settingsManager });
 await pi.createAgentSession();
 ```
+
+For a live session, `session.setSubagentsEnabled(enabled)` persists the setting and immediately refreshes active tools and orchestration guidance. `session.reload()` applies settings-file changes.
 
 ## Language servers
 
