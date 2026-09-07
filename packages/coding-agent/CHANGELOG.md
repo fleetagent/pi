@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.2.1](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.2.0...@fleetagent/pi-coding-agent-v0.2.1) (2026-09-07)
+
+
+### Features
+
+* **coding-agent:** disable-subagents-default - add toggle ([6c5e627](https://github.com/fleetagent/pi/commit/6c5e627823246be6bb91595bece1057669a2bf71))
+* **coding-agent:** disable-subagents-default - gate tools ([ad83255](https://github.com/fleetagent/pi/commit/ad83255bda15381c16b07b737caec852100bff40))
+* **coding-agent:** disable-subagents-default - persist setting ([d42dbbf](https://github.com/fleetagent/pi/commit/d42dbbfce1316c046365351f8d07ac4691780626))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @fleetagent/pi-agent-core bumped from ^0.2.0 to ^0.2.1
+    * @fleetagent/pi-ai bumped from ^0.2.0 to ^0.2.1
+    * @fleetagent/pi-tui bumped from ^0.2.0 to ^0.2.1
+
 ## [0.2.0](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.1.9...@fleetagent/pi-coding-agent-v0.2.0) (2026-09-01)
 
 
