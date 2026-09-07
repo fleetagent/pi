@@ -4496,6 +4496,7 @@ export class InteractiveMode {
 					autoResizeImages: this.settingsManager.getImageAutoResize(),
 					blockImages: this.settingsManager.getBlockImages(),
 					enableSkillCommands: this.settingsManager.getEnableSkillCommands(),
+					enableSubagents: this.session.subagentsEnabled,
 					steeringMode: this.session.steeringMode,
 					followUpMode: this.session.followUpMode,
 					transport: this.settingsManager.getTransport(),
@@ -4552,6 +4553,9 @@ export class InteractiveMode {
 					onEnableSkillCommandsChange: (enabled) => {
 						this.settingsManager.setEnableSkillCommands(enabled);
 						this.setupAutocompleteProvider();
+					},
+					onEnableSubagentsChange: (enabled) => {
+						this.session.setSubagentsEnabled(enabled);
 					},
 					onSteeringModeChange: (mode) => {
 						this.session.setSteeringMode(mode);
