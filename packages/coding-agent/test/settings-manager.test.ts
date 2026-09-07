@@ -340,6 +340,69 @@ describe("SettingsManager", () => {
 		});
 	});
 
+	describe("enableSubagents", () => {
+		it("defaults to false when omitted", () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getEnableSubagents()).toBe(false);
+		});
+
+		it("reads explicit values from global and project settings", () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ enableSubagents: true }));
+			expect(SettingsManager.create(projectDir, agentDir).getEnableSubagents()).toBe(true);
+
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ enableSubagents: false }));
+			expect(SettingsManager.create(projectDir, agentDir).getEnableSubagents()).toBe(false);
+		});
+
+		it("lets project settings override global settings", () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ enableSubagents: true }));
+			writeFileSync(join(projectDir, ".pi", "settings.json"), JSON.stringify({ enableSubagents: false }));
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getEnableSubagents()).toBe(false);
+		});
+
+		it("lets runtime overrides override file settings", () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ enableSubagents: false }));
+			writeFileSync(join(projectDir, ".pi", "settings.json"), JSON.stringify({ enableSubagents: false }));
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+			manager.applyOverrides({ enableSubagents: true });
+			expect(manager.getEnableSubagents()).toBe(true);
+		});
+
+		it("persists setter updates and preserves unrelated file changes", async () => {
+			const settingsPath = join(agentDir, "settings.json");
+			writeFileSync(settingsPath, JSON.stringify({ theme: "dark", enableSubagents: false }));
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+			const currentSettings = JSON.parse(readFileSync(settingsPath, "utf-8"));
+			currentSettings.shellPath = "/bin/zsh";
+			writeFileSync(settingsPath, JSON.stringify(currentSettings, null, 2));
+
+			manager.setEnableSubagents(true);
+			await manager.flush();
+
+			const savedSettings = JSON.parse(readFileSync(settingsPath, "utf-8"));
+			expect(savedSettings.enableSubagents).toBe(true);
+			expect(savedSettings.theme).toBe("dark");
+			expect(savedSettings.shellPath).toBe("/bin/zsh");
+		});
+
+		it("reloads enableSubagents from disk", async () => {
+			const settingsPath = join(agentDir, "settings.json");
+			writeFileSync(settingsPath, JSON.stringify({ enableSubagents: false }));
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getEnableSubagents()).toBe(false);
+
+			writeFileSync(settingsPath, JSON.stringify({ enableSubagents: true }));
+			await manager.reload();
+
+			expect(manager.getEnableSubagents()).toBe(true);
+		});
+	});
+
 	describe("getSessionDir", () => {
 		it("should return undefined when not set", () => {
 			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ theme: "dark" }));

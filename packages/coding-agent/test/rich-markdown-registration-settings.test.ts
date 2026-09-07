@@ -94,7 +94,8 @@ describe("Mermaid settings", () => {
 		expect(manager.getCodeBlockIndent()).toBe("\t");
 	});
 
-	it("offers Mermaid and fullscreen modes in /settings and invokes their callbacks", () => {
+	it("offers subagent, Mermaid, and fullscreen settings and invokes their callbacks", () => {
+		const onEnableSubagentsChange = vi.fn();
 		const onMermaidRenderingModeChange = vi.fn();
 		const onFullscreenExitOutputChange = vi.fn();
 		const onFullscreenScrollbarChange = vi.fn();
@@ -105,6 +106,7 @@ describe("Mermaid settings", () => {
 			autoResizeImages: true,
 			blockImages: false,
 			enableSkillCommands: true,
+			enableSubagents: false,
 			steeringMode: "one-at-a-time",
 			followUpMode: "one-at-a-time",
 			transport: "auto",
@@ -139,6 +141,7 @@ describe("Mermaid settings", () => {
 			onAutoResizeImagesChange: noop,
 			onBlockImagesChange: noop,
 			onEnableSkillCommandsChange: noop,
+			onEnableSubagentsChange,
 			onSteeringModeChange: noop,
 			onFollowUpModeChange: noop,
 			onTransportChange: noop,
@@ -164,6 +167,14 @@ describe("Mermaid settings", () => {
 			onWarningsChange: noop,
 			onCancel: noop,
 		};
+		const subagentSelector = new SettingsSelectorComponent(config, callbacks);
+		const subagentList = subagentSelector.getSettingsList();
+		for (const character of "Enable subagents") subagentList.handleInput(character);
+		expect(subagentSelector.render(80).join("\n")).toContain("Enable subagents");
+		subagentList.handleInput("\r");
+		subagentList.handleInput("\r");
+		expect(onEnableSubagentsChange.mock.calls.map(([enabled]) => enabled)).toEqual([true, false]);
+
 		const selector = new SettingsSelectorComponent(config, callbacks);
 		const list = selector.getSettingsList();
 		for (const character of "Mermaid diagrams") list.handleInput(character);
