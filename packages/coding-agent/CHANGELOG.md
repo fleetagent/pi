@@ -77,6 +77,7 @@
 
 ### Added
 
+* Add a persisted, default-off `enableSubagents` setting with immediate `/settings` and `/reload` activation of the built-in subagent tool family while preserving explicit tool allowlists and no-tools precedence.
 * Add Phase 0 Claude-compatible host-local hooks across prompt, tool, stop, compaction, and PiAgent session lifecycle boundaries, with preferred native Pi settings, additive Claude settings compatibility, immutable per-session snapshots, interactive per-repository trust choices, persistent Trust always approvals, sandbox-transition support, diagnostics, SDK controls, bounded continuations, argument revalidation, and security documentation.
 * Allow converging Stop-hook workflows to continue beyond the default eight-turn cap by reporting a decreasing `continuationProgress` remaining-work metric, with bounded tolerance for temporary regressions.
 * Add bounded TUI-only hook execution cards showing matching handler calls and explicit returned model-visible prompts with distinct styling across transcript rebuilds, without persisting activity or exposing non-actionable hook output.

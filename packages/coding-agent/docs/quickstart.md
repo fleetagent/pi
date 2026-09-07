@@ -79,9 +79,10 @@ By default, pi gives the model tools for:
 - reading, writing, and editing files
 - running shell commands
 - language-server diagnostics, navigation, and refactoring when an external LSP server is explicitly configured
-- delegating isolated work through `subagent`
 
-Additional built-in read-only tools (`grep`, `find`, `ls`) are available through tool options. Pi runs in your current working directory and can modify files there. Use git or another checkpointing workflow if you want easy rollback. The `subagent` tool includes explore, worker, and reviewer agents.
+Additional built-in read-only tools (`grep`, `find`, `ls`) are available through tool options. Pi runs in your current working directory and can modify files there. Use git or another checkpointing workflow if you want easy rollback.
+
+Subagent delegation is opt-in. Open `/settings` and set **Enable subagents** to `true`, or set `"enableSubagents": true` in `settings.json`, to activate `subagent`, `subagent_runs`, and `create_subagent`. The `subagent` tool includes explore, worker, and reviewer presets.
 
 ## Give pi project instructions
 

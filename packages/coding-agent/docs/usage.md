@@ -198,8 +198,9 @@ cat README.md | pi -p "Summarize this text"
 | `--no-tools`, `-nt` | Disable all tools |
 | `--remote <url>` | Run built-in tools through a `pi --daemon` backend (`ws://` or `wss://`) |
 
-Built-in tools: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`, `subagent`, and—when configured—`lsp_diagnostics`, `lsp_hover`, `lsp_definition`, `lsp_references`, `lsp_rename`, and `lsp_code_actions`.
+Built-in tools: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`, `session_search`, `session_entry_get`, `subagent`, `subagent_runs`, `create_subagent`, and—when configured—`lsp_diagnostics`, `lsp_hover`, `lsp_definition`, `lsp_references`, `lsp_rename`, and `lsp_code_actions`.
 
+The three subagent tools are inactive by default. Enable them through `/settings` or `"enableSubagents": true` in `settings.json`. An explicit `--tools` allowlist can opt in to any subset regardless of that setting; `--no-tools` and `--no-builtin-tools` still suppress them.
 LSP servers are external and disabled when no configuration is present. See [Language Server Protocol](lsp.md) for CLI files, settings precedence, server setup, remote path mapping, and troubleshooting.
 
 The `subagent` tool runs fresh in-memory agent sessions in single, parallel, or chained mode. Each session has an isolated conversation while sharing parent authentication and model services, avoiding separate process startup. Each task can provide an optional named preset, persona (`systemPrompt`), output contract (`responseFormat`), model, tool allowlist, and working directory. Without a model it inherits the parent model; the parent receives authenticated same-family model metadata including context and token costs. Bundled presets are `explore`, `worker`, and `reviewer`. User definitions in `~/.pi/agent/agents/*.md` override bundled presets; project definitions in `.pi/agents/*.md` are opt-in through `agentScope` and require interactive confirmation by default.
