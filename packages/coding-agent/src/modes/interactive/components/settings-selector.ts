@@ -46,6 +46,7 @@ export interface SettingsConfig {
 	autoResizeImages: boolean;
 	blockImages: boolean;
 	enableSkillCommands: boolean;
+	enableSubagents: boolean;
 	steeringMode: QueueMode;
 	followUpMode: QueueMode;
 	transport: Transport;
@@ -80,6 +81,7 @@ export interface SettingsCallbacks {
 	onAutoResizeImagesChange: (enabled: boolean) => void;
 	onBlockImagesChange: (blocked: boolean) => void;
 	onEnableSkillCommandsChange: (enabled: boolean) => void;
+	onEnableSubagentsChange: (enabled: boolean) => void;
 	onSteeringModeChange: (mode: QueueMode) => void;
 	onFollowUpModeChange: (mode: QueueMode) => void;
 	onTransportChange: (transport: Transport) => void;
@@ -432,9 +434,17 @@ export class SettingsSelectorComponent extends Container {
 			values: ["true", "false"],
 		});
 
-		// Hardware cursor toggle (insert after skill-commands)
-		const skillCommandsIndex = items.findIndex((item) => item.id === "skill-commands");
-		items.splice(skillCommandsIndex + 1, 0, {
+		// Subagent toggle (insert after skill-commands)
+		items.splice(blockImagesIndex + 2, 0, {
+			id: "enable-subagents",
+			label: "Enable subagents",
+			description: "Expose built-in tools for delegating work to subagents",
+			currentValue: String(config.enableSubagents),
+			values: ["true", "false"],
+		});
+
+		// Hardware cursor toggle (insert after enable-subagents)
+		items.splice(blockImagesIndex + 3, 0, {
 			id: "show-hardware-cursor",
 			label: "Show hardware cursor",
 			description: "Show the terminal cursor while still positioning it for IME support",
@@ -544,6 +554,9 @@ export class SettingsSelectorComponent extends Container {
 						break;
 					case "skill-commands":
 						callbacks.onEnableSkillCommandsChange(newValue === "true");
+						break;
+					case "enable-subagents":
+						callbacks.onEnableSubagentsChange(newValue === "true");
 						break;
 					case "steering-mode":
 						callbacks.onSteeringModeChange(newValue as "all" | "one-at-a-time");
