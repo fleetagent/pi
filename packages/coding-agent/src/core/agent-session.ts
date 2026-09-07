@@ -202,17 +202,15 @@ import { WORKSPACE_TOOL_NAMES, WorkspaceToolHost } from "./tools/workspace-tool-
 
 const CORE_DEFAULT_TOOL_NAMES = ["read", "bash", "edit", "write", "websearch"] as const;
 const SESSION_HISTORY_TOOL_NAMES = ["session_search", "session_entry_get"] as const;
+export const SUBAGENT_TOOL_NAMES = ["subagent", "subagent_runs", "create_subagent"] as const;
 export const DEFAULT_ACTIVE_TOOL_NAMES = [
 	...CORE_DEFAULT_TOOL_NAMES,
 	...SESSION_HISTORY_TOOL_NAMES,
 	...LSP_TOOL_NAMES,
-	"subagent",
-	"subagent_runs",
-	"create_subagent",
 ] as const;
 
-export function getDefaultActiveToolNames(): string[] {
-	return [...DEFAULT_ACTIVE_TOOL_NAMES];
+export function getDefaultActiveToolNames(enableSubagents = false): string[] {
+	return enableSubagents ? [...DEFAULT_ACTIVE_TOOL_NAMES, ...SUBAGENT_TOOL_NAMES] : [...DEFAULT_ACTIVE_TOOL_NAMES];
 }
 
 // ============================================================================
@@ -4699,6 +4697,17 @@ export class AgentSession {
 		return this.settingsManager.getCompactionEnabled();
 	}
 
+	/** Whether built-in subagent tools are enabled by default. */
+	get subagentsEnabled(): boolean {
+		return this.settingsManager.getEnableSubagents();
+	}
+
+	/** Persist and immediately apply built-in subagent tool activation. */
+	setSubagentsEnabled(enabled: boolean): void {
+		this.settingsManager.setEnableSubagents(enabled);
+		this._refreshToolRegistry({ activeToolNames: this._withCurrentDefaultTools(this.getActiveToolNames()) });
+	}
+
 	bindExtensions(bindings: ExtensionBindings): Promise<void> {
 		return this._runActivity("extension binding", () => this._bindExtensions(bindings));
 	}
@@ -5403,11 +5412,16 @@ export class AgentSession {
 		if (this._baseToolsOverride || this._allowedToolNames) {
 			return activeToolNames.filter((name) => !this._excludedToolNames.has(name));
 		}
-		const active = new Set(activeToolNames);
+		const configuredDefaults = getDefaultActiveToolNames(this.settingsManager.getEnableSubagents());
+		const subagentToolNames = new Set<string>(SUBAGENT_TOOL_NAMES);
+		const retainedToolNames = this.settingsManager.getEnableSubagents()
+			? activeToolNames
+			: activeToolNames.filter((name) => !subagentToolNames.has(name));
+		const active = new Set(retainedToolNames);
 		const usesDefaultCoreTools = CORE_DEFAULT_TOOL_NAMES.every((toolName) => active.has(toolName));
 		const expanded = usesDefaultCoreTools
-			? [...activeToolNames, ...getDefaultActiveToolNames().filter((toolName) => !active.has(toolName))]
-			: activeToolNames;
+			? [...retainedToolNames, ...configuredDefaults.filter((toolName) => !active.has(toolName))]
+			: retainedToolNames;
 		return expanded.filter((toolName) => !this._excludedToolNames.has(toolName));
 	}
 	private _isToolPermitted(name: string): boolean {
