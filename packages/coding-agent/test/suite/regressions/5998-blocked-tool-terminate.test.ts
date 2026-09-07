@@ -15,6 +15,7 @@ describe("#5998 blocked tool termination", () => {
 	it("lets a tool_call handler terminate after blocking the native subagent tool", async () => {
 		let subagentRuns = 0;
 		const harness = await createHarness({
+			settings: { enableSubagents: true },
 			subagentRunner: async () => {
 				subagentRuns++;
 				return { exitCode: 0, stderr: "" };
@@ -59,6 +60,7 @@ describe("#5998 blocked tool termination", () => {
 		let subagentRuns = 0;
 		const echoInputs: string[] = [];
 		const harness = await createHarness({
+			settings: { enableSubagents: true },
 			subagentRunner: async () => {
 				subagentRuns++;
 				return { exitCode: 0, stderr: "" };
