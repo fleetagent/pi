@@ -1245,6 +1245,10 @@ export class AgentSession {
 		return this.getToolOperations().getBackendInfo?.() ?? { type: "local", cwd: this._cwd };
 	}
 
+	supportsDirectoryChange(): boolean {
+		return this._toolOperations === undefined && this.getToolBackendInfo().type === "local";
+	}
+
 	private _getLocalResourceToolOperations(shellPath?: string): ToolOperations {
 		this._localResourceToolOperations ??= new LocalToolOperations(this._cwd, { shellPath });
 		return this._localResourceToolOperations;

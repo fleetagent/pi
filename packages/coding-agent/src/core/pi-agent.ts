@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { join, posix, resolve, win32 } from "node:path";
 import { Agent, type ThinkingLevel } from "@fleetagent/pi-agent-core";
 import {
@@ -323,6 +323,7 @@ export interface PiAgentRuntimeHost {
 	readonly modelFallbackMessage: string | undefined;
 	setRebindSession(rebindSession?: (session: AgentSession) => Promise<void>): void;
 	setBeforeSessionInvalidate(beforeSessionInvalidate?: () => void): void;
+	changeDirectory(cwd: string): Promise<ExtensionSessionActionResult>;
 	switchSession(sessionPath: string, options?: PiAgentSwitchSessionOptions): Promise<ExtensionSessionActionResult>;
 	newSession(options?: ExtensionNewSessionOptions): Promise<ExtensionSessionActionResult>;
 	fork(entryId: string, options?: ExtensionForkOptions): Promise<PiAgentForkResult>;
@@ -1479,6 +1480,39 @@ export class PiAgent {
 			previousSessionFile: previousSessionReference,
 		});
 		await this.replaceCurrentSession(result, "resume", nextSession.getSessionReference(), options?.withSession);
+		return { cancelled: false };
+	}
+
+	async changeDirectory(cwd: string): Promise<ExtensionSessionActionResult> {
+		if (!existsSync(cwd) || !statSync(cwd).isDirectory()) {
+			throw new Error(`Directory does not exist: ${cwd}`);
+		}
+
+		const currentSession = this.session;
+		const persistedSession = currentSession.session;
+		const previousCwd = persistedSession.getCwd();
+		const sessionReference = currentSession.sessionReference;
+		await this.flushSession(currentSession);
+		persistedSession.setCwd(cwd);
+
+		let result: BuiltAgentSession;
+		try {
+			result = await this.buildAgentSession(persistedSession, {
+				type: "session_start",
+				reason: "resume",
+				previousSessionReference: sessionReference,
+				previousSessionFile: sessionReference,
+			});
+		} catch (error) {
+			persistedSession.setCwd(previousCwd);
+			throw error;
+		}
+		try {
+			await this.replaceCurrentSession(result, "resume", sessionReference);
+		} catch (error) {
+			if (this._session === currentSession) persistedSession.setCwd(previousCwd);
+			throw error;
+		}
 		return { cancelled: false };
 	}
 

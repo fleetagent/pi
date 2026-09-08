@@ -227,12 +227,19 @@ When multiple sources specify a session directory, precedence is `--session-dir`
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `enabledModels` | string[] | - | Model patterns for Ctrl+P cycling (same format as `--models` CLI flag) |
+| `modelProfiles` | object | `{}` | Named snapshots created with `/profile create <name>` |
 
 ```json
 {
-  "enabledModels": ["claude-*", "gpt-4o", "gemini-2*"]
+  "enabledModels": ["claude-*", "gpt-4o", "gemini-2*"],
+  "modelProfiles": {
+    "deep": ["anthropic/claude-opus-4-7:high", "openai-codex/gpt-5.6"],
+    "fast": ["anthropic/claude-haiku-4-5", "google/gemini-3-flash-preview"]
+  }
 }
 ```
+
+`/profile create <name>` snapshots the current scoped model list. `/profile use <name>` restores that list for the current session and saves it as the global `enabledModels` default. A project-level `enabledModels` override still takes precedence on future startup. Profiles are stored in the global settings file. Creating an existing name replaces its snapshot.
 
 ### Markdown
 

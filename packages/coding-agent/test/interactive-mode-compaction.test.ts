@@ -3,7 +3,7 @@ import type { AgentSessionEvent } from "../src/core/agent-session.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 
 describe("InteractiveMode compaction events", () => {
-	test("rebuilds chat and appends a synthetic compaction summary at the bottom", async () => {
+	test("rebuilds compacted chat without stale hook cards and appends a synthetic summary", async () => {
 		const fakeThis = {
 			isInitialized: true,
 			footer: { invalidate: vi.fn() },
@@ -12,6 +12,8 @@ describe("InteractiveMode compaction events", () => {
 			defaultEditor: {},
 			statusContainer: { clear: vi.fn() },
 			chatContainer: { clear: vi.fn() },
+			hookExecutionNotices: [{ event: "PreToolUse" }],
+			hookExecutionComponents: [{ render: vi.fn() }],
 			rebuildChatFromMessages: vi.fn(),
 			addMessageToChat: vi.fn(),
 			showError: vi.fn(),
@@ -40,6 +42,8 @@ describe("InteractiveMode compaction events", () => {
 		});
 
 		expect(fakeThis.chatContainer.clear).toHaveBeenCalledTimes(1);
+		expect(fakeThis.hookExecutionNotices).toEqual([]);
+		expect(fakeThis.hookExecutionComponents).toEqual([]);
 		expect(fakeThis.rebuildChatFromMessages).toHaveBeenCalledTimes(1);
 		expect(fakeThis.addMessageToChat).toHaveBeenCalledTimes(1);
 		expect(fakeThis.addMessageToChat).toHaveBeenCalledWith(

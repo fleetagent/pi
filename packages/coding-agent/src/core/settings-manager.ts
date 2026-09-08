@@ -129,6 +129,7 @@ export interface Settings {
 	terminal?: TerminalSettings;
 	images?: ImageSettings;
 	enabledModels?: string[]; // Model patterns for cycling (same format as --models CLI flag)
+	modelProfiles?: Record<string, string[]>; // Named snapshots of scoped model patterns
 	doubleEscapeAction?: DoubleEscapeAction; // Action for double-escape with empty editor (default: "tree")
 	treeFilterMode?: TreeFilterMode; // Default filter when opening /tree
 	thinkingBudgets?: ThinkingBudgetsSettings; // Custom token budgets for thinking levels
@@ -148,6 +149,10 @@ export interface Settings {
 	tuiMode?: TuiMode; // default: "regular"
 	fullscreenExitOutput?: FullscreenExitOutput; // default: "transcript"; no effect in regular TUI mode
 	fullscreenScrollbar?: ScrollViewScrollbar; // default: "auto"; no effect in regular TUI mode
+}
+
+export function isValidModelProfileName(name: string): boolean {
+	return /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(name);
 }
 
 const RECURSIVELY_MERGED_SETTINGS = new Set<keyof Settings>([
@@ -641,7 +646,7 @@ export class SettingsManager {
 					const inMemoryNested = value as Record<string, unknown>;
 					const mergedNested = { ...baseNested };
 					for (const nestedKey of nestedModified) {
-						mergedNested[nestedKey] = inMemoryNested[nestedKey];
+						setOwnValue(mergedNested, nestedKey, inMemoryNested[nestedKey]);
 					}
 					(mergedSettings as Record<string, unknown>)[field] = mergedNested;
 				} else {
@@ -1184,13 +1189,39 @@ export class SettingsManager {
 	getEnabledModels(): string[] | undefined {
 		return this.settings.enabledModels;
 	}
-
 	setEnabledModels(patterns: string[] | undefined): void {
 		this.globalSettings.enabledModels = patterns;
 		this.markModified("enabledModels");
 		this.save();
 	}
 
+	getModelProfiles(): Record<string, string[]> {
+		const storedProfiles: unknown = this.globalSettings.modelProfiles;
+		if (!isMergeableObject(storedProfiles)) return {};
+		const profiles: Record<string, string[]> = {};
+		for (const [name, patterns] of Object.entries(storedProfiles)) {
+			if (
+				!isValidModelProfileName(name) ||
+				!Array.isArray(patterns) ||
+				!patterns.every((value) => typeof value === "string")
+			) {
+				continue;
+			}
+			setOwnValue(profiles, name, [...patterns]);
+		}
+		return profiles;
+	}
+
+	setModelProfile(name: string, patterns: string[]): void {
+		if (!isValidModelProfileName(name)) throw new Error(`Invalid model profile name: ${name}`);
+		if (patterns.length === 0 || !patterns.every((pattern) => typeof pattern === "string" && pattern.length > 0)) {
+			throw new Error("Model profiles must contain at least one non-empty model pattern");
+		}
+		if (!isMergeableObject(this.globalSettings.modelProfiles)) this.globalSettings.modelProfiles = {};
+		setOwnValue(this.globalSettings.modelProfiles, name, [...patterns]);
+		this.markModified("modelProfiles", name);
+		this.save();
+	}
 	getDoubleEscapeAction(): DoubleEscapeAction {
 		return this.settings.doubleEscapeAction ?? "tree";
 	}

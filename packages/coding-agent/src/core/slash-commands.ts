@@ -20,9 +20,11 @@ export const HIDDEN_BUILTIN_SLASH_COMMAND_NAMES: ReadonlySet<string> = new Set([
 export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "hooks", description: "Enable or disable hooks for this session" },
 	{ name: "sandbox", description: "Configure or manage the workspace tool sandbox" },
+	{ name: "cd", description: "Change the working directory" },
 	{ name: "settings", description: "Open settings menu" },
 	{ name: "model", description: "Switch models" },
 	{ name: "scoped-models", description: "Enable/disable models for Ctrl+P cycling" },
+	{ name: "profile", description: "Create or use a scoped-model profile" },
 	{ name: "export", description: "Export session (HTML default, or specify path: .html/.jsonl)" },
 	{ name: "import", description: "Import and resume a session from a JSONL file" },
 	{ name: "share", description: "Share session as a secret GitHub gist" },

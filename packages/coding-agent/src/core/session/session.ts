@@ -152,6 +152,11 @@ export abstract class Session {
 		return this.cwd;
 	}
 
+	/** Update the active runtime cwd without rewriting the session's original header. */
+	setCwd(cwd: string): void {
+		this.cwd = cwd;
+	}
+
 	getSessionDir(): string {
 		return this.sessionDir;
 	}

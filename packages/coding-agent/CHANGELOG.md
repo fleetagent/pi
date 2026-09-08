@@ -100,6 +100,8 @@
 * Allow converging Stop-hook workflows to continue beyond the default eight-turn cap by reporting a decreasing `continuationProgress` remaining-work metric, with bounded tolerance for temporary regressions.
 * Add bounded TUI-only hook execution cards showing matching handler calls and explicit returned model-visible prompts with distinct styling across transcript rebuilds, without persisting activity or exposing non-actionable hook output.
 * Add a hidden user-only `/hooks enable|disable` command for session-local control of subsequent hook dispatch.
+* Add `/cd` with directory-only path autocomplete to change the active interactive session's working directory.
+* Add named `/profile create` and `/profile use` snapshots for persisting and switching scoped model sets.
 
 * Add shared instruction resource loaders for skills and rules.
 * Add validated global, project, CLI, and SDK/host LSP configuration loading with source-relative paths and host-controlled project transport trust.
@@ -146,6 +148,7 @@
 * Retire daemon file-transfer and resource-limit work from the separate package into the integrated, bounded `pi --daemon` protocol.
 ### Fixed
 
+* Clear TUI hook execution cards from compacted history alongside regular chat messages.
 * Keep registered host-local skills, rules, prompts, and their referenced assets readable after remote or sandbox workspace tools switch to canonical remote execution.
 * Keep sandbox backends session-local, allocate non-conflicting daemon ports for concurrent session containers, restore sandboxes when returning to their sessions, stop all process-owned sandbox containers during graceful Pi shutdown, and confine subagents to the parent's active workspace backend.
 * Generate a unique Docker container name for every sandbox start so stale containers from the same session cannot block restart with a name conflict.

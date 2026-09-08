@@ -139,7 +139,7 @@ import { LocalSessionManager } from "../../core/session/local-session-manager.ts
 import type { Session } from "../../core/session/session.ts";
 import type { SessionContext } from "../../core/session/types.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
-import type { FullscreenExitOutput } from "../../core/settings-manager.ts";
+import { type FullscreenExitOutput, isValidModelProfileName } from "../../core/settings-manager.ts";
 import type { LoadSkillsResult } from "../../core/skills.ts";
 import { BUILTIN_SLASH_COMMANDS, HIDDEN_BUILTIN_SLASH_COMMAND_NAMES } from "../../core/slash-commands.ts";
 import { getSourceBackendIcon, type SourceInfo } from "../../core/source-info.ts";
@@ -149,6 +149,7 @@ import type { TruncationResult } from "../../core/tools/truncate.ts";
 import { getNewEntries, parseChangelog } from "../../utils/changelog.ts";
 import { copyToClipboard, readClipboardText } from "../../utils/clipboard.ts";
 import { extensionForImageMimeType, readClipboardImage } from "../../utils/clipboard-image.ts";
+import { getDirectoryCompletions, resolveDirectoryPath } from "../../utils/directory-completions.ts";
 import { parseGitUrl } from "../../utils/git.ts";
 import { openBrowser } from "../../utils/open-browser.ts";
 import { getCwdRelativePath } from "../../utils/paths.ts";
@@ -234,7 +235,7 @@ type ExtensionNotificationType = "info" | "warning" | "error";
 type CompactionDisplayReason = "manual" | "threshold" | "overflow";
 type ProviderAuthenticationType = "oauth" | "api_key";
 type AuthenticationOperation = "login" | "logout";
-type SessionPathCommand = "/export" | "/import";
+type SessionPathCommand = "/cd" | "/export" | "/import";
 
 interface ProviderAuthenticationModelSelection {
 	selectedModel?: Model<any>;
@@ -801,6 +802,13 @@ export class InteractiveMode {
 			description: command.description,
 		}));
 
+		const cdCommand = slashCommands.find((command) => command.name === "cd");
+		if (cdCommand) {
+			cdCommand.argumentHint = "<directory>";
+			cdCommand.getArgumentCompletions = (prefix: string): AutocompleteItem[] =>
+				this.session.supportsDirectoryChange() ? getDirectoryCompletions(prefix, this.activeSession.getCwd()) : [];
+		}
+
 		const modelCommand = slashCommands.find((command) => command.name === "model");
 		if (modelCommand) {
 			modelCommand.getArgumentCompletions = (prefix: string): AutocompleteItem[] | null => {
@@ -829,6 +837,24 @@ export class InteractiveMode {
 					label: item.id,
 					description: item.provider,
 				}));
+			};
+		}
+
+		const profileCommand = slashCommands.find((command) => command.name === "profile");
+		if (profileCommand) {
+			profileCommand.argumentHint = "use <name> | create <name>";
+			profileCommand.getArgumentCompletions = (prefix: string): AutocompleteItem[] | null => {
+				if (!prefix.includes(" ")) {
+					return fuzzyFilter(["create", "use"], prefix, (action) => action).map((action) => ({
+						value: `${action} `,
+						label: action,
+					}));
+				}
+				const useMatch = prefix.match(/^use\s+(.*)$/);
+				if (!useMatch) return null;
+				const profileNames = Object.keys(this.settingsManager.getModelProfiles());
+				const matches = fuzzyFilter(profileNames, useMatch[1] ?? "", (name) => name);
+				return matches.map((name) => ({ value: `use ${name}`, label: name }));
 			};
 		}
 
@@ -2902,6 +2928,22 @@ export class InteractiveMode {
 	}
 
 	private resolveParameterizedEditorCommand(text: string): EditorCommandAction | undefined {
+		if (this.matchesEditorCommand(text, "/cd")) {
+			return {
+				run: async () => {
+					this.editor.setText("");
+					await this.handleCdCommand(text);
+				},
+			};
+		}
+		if (this.matchesEditorCommand(text, "/profile")) {
+			return {
+				run: async () => {
+					this.editor.setText("");
+					await this.handleProfileCommand(text);
+				},
+			};
+		}
 		if (this.matchesEditorCommand(text, "/model")) {
 			const searchTerm = text.slice("/model".length).trim() || undefined;
 			return {
@@ -3367,6 +3409,8 @@ export class InteractiveMode {
 			else this.showStatus("Auto-compaction cancelled");
 		} else if (event.result) {
 			this.chatContainer.clear();
+			this.hookExecutionNotices = [];
+			this.hookExecutionComponents = [];
 			this.rebuildChatFromMessages();
 			this.addMessageToChat(
 				createCompactionSummaryMessage(event.result.summary, event.result.tokensBefore, new Date().toISOString()),
@@ -5559,6 +5603,100 @@ export class InteractiveMode {
 
 	// =========================================================================
 	// Command handlers
+	private async handleCdCommand(text: string): Promise<void> {
+		if (!this.session.isIdle || this.session.isBashRunning) {
+			this.showWarning("Wait for the current operation to finish before changing directories.");
+			return;
+		}
+		if (!this.session.supportsDirectoryChange()) {
+			this.showWarning("Changing directories is not supported with the active workspace backend.");
+			return;
+		}
+
+		const argument = this.getPathCommandArgument(text, "/cd");
+		if (text !== "/cd" && !argument) {
+			this.showError("Usage: /cd [directory]");
+			return;
+		}
+		const requestedPath = argument ?? os.homedir();
+		const targetDirectory = resolveDirectoryPath(requestedPath, this.activeSession.getCwd());
+		if (!targetDirectory) {
+			this.showError(`Directory not found: ${requestedPath}`);
+			return;
+		}
+
+		if (targetDirectory === resolveDirectoryPath(this.activeSession.getCwd(), this.activeSession.getCwd())) {
+			this.showStatus(`Working directory: ${targetDirectory}`);
+			return;
+		}
+		try {
+			const result = await this.runtimeHost.changeDirectory(targetDirectory);
+			if (result.cancelled) {
+				this.showStatus("Directory change cancelled");
+				return;
+			}
+			this.renderCurrentSessionState();
+			this.showStatus(`Working directory: ${targetDirectory}`);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			this.showError(
+				this.activeSession.getCwd() === targetDirectory
+					? `Working directory changed, but the runtime failed to rebind: ${message}`
+					: `Failed to change directory: ${message}`,
+			);
+		}
+	}
+
+	private async handleProfileCommand(text: string): Promise<void> {
+		const match = text.match(/^\/profile\s+(create|use)\s+(\S+)$/);
+		if (!match) {
+			this.showError("Usage: /profile create <name> | /profile use <name>");
+			return;
+		}
+		const action = match[1];
+		const name = match[2]!;
+		if (!isValidModelProfileName(name)) {
+			this.showError("Profile names must be 1-64 letters, numbers, dots, underscores, or hyphens.");
+			return;
+		}
+
+		if (action === "create") {
+			const currentScope = this.session.scopedModels;
+			const patterns =
+				currentScope.length > 0
+					? currentScope.map(
+							(scoped) =>
+								`${scoped.model.provider}/${scoped.model.id}${scoped.thinkingLevel ? `:${scoped.thinkingLevel}` : ""}`,
+						)
+					: this.session.modelRegistry.getAvailable().map((model) => `${model.provider}/${model.id}`);
+			if (patterns.length === 0) {
+				this.showError("Cannot create a profile because no models are available.");
+				return;
+			}
+			const exists = Object.hasOwn(this.settingsManager.getModelProfiles(), name);
+			this.settingsManager.setModelProfile(name, patterns);
+			this.showStatus(`${exists ? "Updated" : "Created"} profile "${name}" with ${patterns.length} models`);
+			return;
+		}
+
+		const profiles = this.settingsManager.getModelProfiles();
+		if (!Object.hasOwn(profiles, name)) {
+			this.showError(`Unknown profile: ${name}`);
+			return;
+		}
+		const patterns = profiles[name]!;
+		const scopedModels = await resolveModelScope(patterns, this.session.modelRegistry);
+		if (scopedModels.length === 0) {
+			this.showError(`Profile "${name}" has no available models`);
+			return;
+		}
+		this.session.setScopedModels(scopedModels);
+		this.settingsManager.setEnabledModels([...patterns]);
+		await this.updateAvailableProviderCount();
+		this.ui.requestRender();
+		this.showStatus(`Using profile "${name}" with ${scopedModels.length} models`);
+	}
+
 	// =========================================================================
 
 	private async handleReloadCommand(): Promise<void> {
