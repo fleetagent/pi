@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/fleetagent/pi/compare/@fleetagent/pi-ai-v0.2.1...@fleetagent/pi-ai-v0.2.2) (2026-09-08)
+
+
+### Features
+
+* add GPT-6 Astra support ([7b3a28b](https://github.com/fleetagent/pi/commit/7b3a28b796a4b03e36bb6defd9b45a93805ae316))
+
 ## [0.2.1](https://github.com/fleetagent/pi/compare/@fleetagent/pi-ai-v0.2.0...@fleetagent/pi-ai-v0.2.1) (2026-09-07)
 
 
