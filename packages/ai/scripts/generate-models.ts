@@ -144,6 +144,7 @@ const OPENAI_RESPONSES_NONE_REASONING_MODELS = new Set([
 	"gpt-5.6-luna",
 	"gpt-5.6-sol",
 	"gpt-5.6-terra",
+	"gpt-6-astra",
 ]);
 
 function mergeThinkingLevelMap(model: Model<any>, map: NonNullable<Model<any>["thinkingLevelMap"]>): void {
@@ -175,7 +176,8 @@ function supportsOpenAiXhigh(modelId: string): boolean {
 		modelId.includes("gpt-5.3") ||
 		modelId.includes("gpt-5.4") ||
 		modelId.includes("gpt-5.5") ||
-		modelId.includes("gpt-5.6")
+		modelId.includes("gpt-5.6") ||
+		modelId.includes("gpt-6")
 	);
 }
 
@@ -221,11 +223,14 @@ function isGemma4Model(modelId: string): boolean {
 function applyThinkingLevelMetadata(model: Model<any>): void {
 	if (
 		(model.api === "openai-responses" || model.api === "azure-openai-responses") &&
-		model.id.startsWith("gpt-5")
+		(model.id.startsWith("gpt-5") || model.id.startsWith("gpt-6"))
 	) {
 		mergeThinkingLevelMap(model, { off: null });
 	}
-	if (model.provider === "github-copilot" && model.id.startsWith("gpt-5")) {
+	if (
+		model.provider === "github-copilot" &&
+		(model.id.startsWith("gpt-5") || model.id.startsWith("gpt-6"))
+	) {
 		mergeThinkingLevelMap(model, { minimal: "low" });
 	}
 	if (
@@ -241,7 +246,10 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 	if (model.provider === "openai" && model.id === "gpt-5.5") {
 		mergeThinkingLevelMap(model, { minimal: null });
 	}
-	if (model.provider === "openai" && model.id.startsWith("gpt-5.6")) {
+	if (
+		model.provider === "openai" &&
+		(model.id.startsWith("gpt-5.6") || model.id.startsWith("gpt-6"))
+	) {
 		mergeThinkingLevelMap(model, { minimal: null });
 	}
 	if (
@@ -1038,8 +1046,9 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 
 				// Claude 4.x models route to Anthropic Messages API
 				const isCopilotClaude4 = /^claude-(haiku|sonnet|opus)-4([.\-]|$)/.test(modelId);
-				// gpt-5 models require responses API, others use completions
-				const needsResponsesApi = modelId.startsWith("gpt-5") || modelId.startsWith("oswe");
+				// GPT-5 and GPT-6 models require Responses API; others use Completions.
+				const needsResponsesApi =
+					modelId.startsWith("gpt-5") || modelId.startsWith("gpt-6") || modelId.startsWith("oswe");
 
 				const api: Api = isCopilotClaude4
 					? "anthropic-messages"
@@ -1753,6 +1762,18 @@ async function generateModels() {
 			reasoning: true,
 			input: ["text", "image"],
 			cost: { input: 2.5, output: 15, cacheRead: 0.25, cacheWrite: 3.125 },
+			contextWindow: CODEX_CONTEXT,
+			maxTokens: CODEX_MAX_TOKENS,
+		},
+		{
+			id: "gpt-6-astra",
+			name: "GPT-6 Astra",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: CODEX_BASE_URL,
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 },
 			contextWindow: CODEX_CONTEXT,
 			maxTokens: CODEX_MAX_TOKENS,
 		},

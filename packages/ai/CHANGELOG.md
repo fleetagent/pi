@@ -83,6 +83,7 @@
 
 * Support custom headers for Bedrock requests.
 * Add GPT-5.6 model metadata.
+* Add GPT-6 Astra model metadata and OpenAI Codex support.
 * Export `ProviderHeaders` and honor `null` deletion markers across text-provider request adapters for mutable coding-agent provider-header hooks ([upstream prerequisite `129eb460c`](https://github.com/fleetagent/pi/commit/129eb460cdf88c1b3034620b91993decd714ed56), follow-up [`a24fb9e96`](https://github.com/fleetagent/pi/commit/a24fb9e96a3fbc7be2a87e81aa1aa5c0ddf95d35)).
 
 ### Changed

@@ -22,16 +22,28 @@ describe("getSupportedThinkingLevels", () => {
 		expect(getSupportedThinkingLevels(model!)).not.toContain("xhigh");
 	});
 
-	it.each(["gpt-5.4", "gpt-5.5", ...GPT_5_6_CODEX_MODELS] as const)("includes xhigh for %s models", (modelId) => {
-		const model = getModel("openai-codex", modelId);
-		expect(model).toBeDefined();
-		expect(getSupportedThinkingLevels(model!)).toContain("xhigh");
-	});
+	it.each(["gpt-5.4", "gpt-5.5", ...GPT_5_6_CODEX_MODELS, "gpt-6-astra"] as const)(
+		"includes xhigh for %s models",
+		(modelId) => {
+			const model = getModel("openai-codex", modelId);
+			expect(model).toBeDefined();
+			expect(getSupportedThinkingLevels(model!)).toContain("xhigh");
+		},
+	);
 
-	it.each(GPT_5_6_CODEX_MODELS)("uses the 272k context window for %s", (modelId) => {
+	it.each([...GPT_5_6_CODEX_MODELS, "gpt-6-astra"] as const)("uses the 272k context window for %s", (modelId) => {
 		const model = getModel("openai-codex", modelId);
 		expect(model).toBeDefined();
 		expect(model!.contextWindow).toBe(272000);
+	});
+
+	it("configures GPT-6 Astra reasoning levels across OpenAI providers", () => {
+		for (const provider of ["openai", "azure-openai-responses", "github-copilot"] as const) {
+			const model = getModel(provider, "gpt-6-astra");
+			expect(model).toBeDefined();
+			expect(model!.api).not.toBe("openai-completions");
+			expect(getSupportedThinkingLevels(model!)).toContain("xhigh");
+		}
 	});
 
 	it("includes only high/xhigh plus off for DeepSeek V4 Flash on the DeepSeek provider", () => {

@@ -140,6 +140,7 @@
 
 ### Changed
 
+* Use GPT-6 Astra as the default OpenAI Codex model.
 * Keep all existing coding-agent TUI construction sites on the explicitly named main-screen renderer while the TUI package adds an alternate-screen implementation ([upstream `c13ffe187`](https://github.com/fleetagent/pi/commit/c13ffe187)).
 * Make LSP startup lazy and configuration-driven, preserve explicit tool allowlists, and keep synchronization independent from model tool exposure.
 * Aggregate capability-aware results from overlapping language servers deterministically and isolate ordinary provider failures.
