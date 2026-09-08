@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.2.2](https://github.com/fleetagent/pi/compare/@fleetagent/pi-agent-core-v0.2.1...@fleetagent/pi-agent-core-v0.2.2) (2026-09-08)
+
+
+### Miscellaneous Chores
+
+* **@fleetagent/pi-agent-core:** Synchronize pi versions
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @fleetagent/pi-ai bumped from ^0.2.1 to ^0.2.2
+
 ## [0.2.1](https://github.com/fleetagent/pi/compare/@fleetagent/pi-agent-core-v0.2.0...@fleetagent/pi-agent-core-v0.2.1) (2026-09-07)
 
 

@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.2.2](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.2.1...@fleetagent/pi-coding-agent-v0.2.2) (2026-09-08)
+
+
+### Features
+
+* add GPT-6 Astra support ([7b3a28b](https://github.com/fleetagent/pi/commit/7b3a28b796a4b03e36bb6defd9b45a93805ae316))
+* **coding-agent:** add directory and model profile commands ([08bed18](https://github.com/fleetagent/pi/commit/08bed1806bed747350dfb720695fe484950db339))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @fleetagent/pi-agent-core bumped from ^0.2.1 to ^0.2.2
+    * @fleetagent/pi-ai bumped from ^0.2.1 to ^0.2.2
+    * @fleetagent/pi-tui bumped from ^0.2.1 to ^0.2.2
+
 ## [0.2.1](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.2.0...@fleetagent/pi-coding-agent-v0.2.1) (2026-09-07)
 
 
