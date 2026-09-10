@@ -137,6 +137,7 @@
 * Finalize incomplete OpenAI Responses streams, reject premature stream endings, and report cache-write and reasoning token usage.
 * Backfill encrypted Azure OpenAI reasoning data for stateless replay.
 * Recover Codex WebSocket requests when cached response continuations are missing.
+* Fix direct Anthropic Claude Fable 5.1 requests with always-on adaptive thinking, off-to-low effort mapping, explicit forced-tool-choice errors, and prefix-binding recovery. Preserve signed empty thinking on replay; see [usage and recovery tradeoffs](docs/anthropic-fable-5-1.md).
 
 ## [0.1.4](https://github.com/fleetagent/pi/compare/@fleetagent/pi-ai-v0.1.3...@fleetagent/pi-ai-v0.1.4) (2026-06-16)
 

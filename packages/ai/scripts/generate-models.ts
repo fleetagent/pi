@@ -3,6 +3,7 @@
 import { writeFileSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
+import { isAnthropicFable51 } from "../src/providers/anthropic-fable.ts";
 import {
 	CLOUDFLARE_AI_GATEWAY_ANTHROPIC_BASE_URL,
 	CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL,
@@ -221,6 +222,10 @@ function isGemma4Model(modelId: string): boolean {
 }
 
 function applyThinkingLevelMetadata(model: Model<any>): void {
+	if (isAnthropicFable51(model)) {
+		mergeThinkingLevelMap(model, { off: "low", minimal: "low", xhigh: "xhigh" });
+		mergeAnthropicMessagesCompat(model, { supportsTemperature: false });
+	}
 	if (
 		(model.api === "openai-responses" || model.api === "azure-openai-responses") &&
 		(model.id.startsWith("gpt-5") || model.id.startsWith("gpt-6"))
