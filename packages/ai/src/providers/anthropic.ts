@@ -1,4 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
+import type { BetaThinkingConfigAdaptive } from "@anthropic-ai/sdk/resources/beta/messages/messages.js";
 import type {
 	CacheControlEphemeral,
 	ContentBlockParam,
@@ -43,6 +44,7 @@ import { headersToRecord } from "../utils/headers.ts";
 import { parseJsonWithRepair, parseStreamingJson } from "../utils/json-parse.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
+import { isAnthropicFable51 } from "./anthropic-fable.ts";
 
 import { resolveCloudflareBaseUrl } from "./cloudflare.ts";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
@@ -84,7 +86,7 @@ function getCacheControl(
 }
 
 // Stealth mode: Mimic Claude Code's tool naming exactly
-const claudeCodeVersion = "2.1.75";
+const claudeCodeVersion = "2.1.251";
 
 // Claude Code 2.x tool names (canonical casing)
 // Source: https://cchistory.mariozechner.at/data/prompts-2.1.11.md
@@ -711,11 +713,27 @@ async function executeAnthropicStream(
 	let params = buildParams(state.model, state.context, state.isOAuth, options);
 	const nextParams = await options?.onPayload?.(params, state.model);
 	if (nextParams !== undefined) params = nextParams as MessageCreateParamsStreaming;
-	const requestOptions = {
+	const requestOptions: Anthropic.RequestOptions = {
 		...(options?.signal ? { signal: options.signal } : {}),
 		...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
 		maxRetries: 0,
 	};
+	if (isAnthropicFable51(state.model)) {
+		// Run after SDK/default header merging, including on injected clients.
+		requestOptions.middleware = [
+			(request, next) => {
+				const betas = new Set(
+					(request.headers.get("anthropic-beta") ?? "")
+						.split(",")
+						.map((value) => value.trim())
+						.filter(Boolean),
+				);
+				betas.add("thinking-binding-controls-2026-08-01");
+				request.headers.set("anthropic-beta", [...betas].join(","));
+				return next(request);
+			},
+		];
+	}
 	const response = await retryProviderRequest(
 		() => configuredClient.client.messages.create({ ...params, stream: true }, requestOptions).asResponse(),
 		{
@@ -800,6 +818,8 @@ function mapThinkingLevelToEffort(
 			return "medium";
 		case "high":
 			return "high";
+		case "xhigh":
+			return isAnthropicFable51(model) ? "xhigh" : "high";
 		default:
 			return "high";
 	}
@@ -816,6 +836,13 @@ export const streamSimpleAnthropic: StreamFunction<"anthropic-messages", SimpleS
 	}
 
 	const base = buildBaseOptions(model, context, options, apiKey);
+	if (isAnthropicFable51(model)) {
+		return streamAnthropic(model, context, {
+			...base,
+			thinkingEnabled: true,
+			effort: options?.reasoning ? mapThinkingLevelToEffort(model, options.reasoning) : "low",
+		});
+	}
 	if (!options?.reasoning) {
 		return streamAnthropic(model, context, { ...base, thinkingEnabled: false } satisfies AnthropicOptions);
 	}
@@ -868,7 +895,8 @@ function createClient(
 ): ConfiguredAnthropicClient {
 	// Adaptive thinking models (Opus 4.6, Sonnet 4.6) have interleaved thinking built-in.
 	// The beta header is deprecated on Opus 4.6 and redundant on Sonnet 4.6, so skip it.
-	const needsInterleavedBeta = interleavedThinking && !supportsAdaptiveThinking(model.id);
+	const needsInterleavedBeta =
+		interleavedThinking && !supportsAdaptiveThinking(model.id) && !isAnthropicFable51(model);
 	const betaFeatures: string[] = [];
 	if (useFineGrainedToolStreamingBeta) {
 		betaFeatures.push(FINE_GRAINED_TOOL_STREAMING_BETA);
@@ -1059,6 +1087,16 @@ function applyAnthropicThinking(
 	model: Model<"anthropic-messages">,
 	options: AnthropicOptions | undefined,
 ): void {
+	if (isAnthropicFable51(model)) {
+		const thinking = {
+			type: "adaptive",
+			display: options?.thinkingDisplay ?? "summarized",
+			block_binding: { prefix_mismatch_behavior: "drop_block" },
+		} satisfies BetaThinkingConfigAdaptive;
+		params.thinking = thinking;
+		applyAdaptiveThinkingEffort(params, options?.thinkingEnabled === false ? "low" : (options?.effort ?? "high"));
+		return;
+	}
 	if (!model.reasoning) return;
 	if (options?.thinkingEnabled) {
 		applyEnabledAnthropicThinking(params, model, options);
@@ -1083,6 +1121,14 @@ function buildParams(
 	isOAuthToken: boolean,
 	options?: AnthropicOptions,
 ): MessageCreateParamsStreaming {
+	if (
+		isAnthropicFable51(model) &&
+		options?.toolChoice &&
+		options.toolChoice !== "auto" &&
+		options.toolChoice !== "none"
+	) {
+		throw new Error("Claude Fable 5.1 does not support forced tool choice; use auto or none.");
+	}
 	const { cacheControl } = getCacheControl(model, options?.cacheRetention);
 	const compat = getAnthropicCompat(model);
 	const params: MessageCreateParamsStreaming = {
@@ -1092,7 +1138,7 @@ function buildParams(
 		stream: true,
 	};
 	applyAnthropicSystemPrompt(params, context, isOAuthToken, cacheControl);
-	applyAnthropicTemperature(params, options, compat);
+	if (!isAnthropicFable51(model)) applyAnthropicTemperature(params, options, compat);
 	applyAnthropicTools(params, context, isOAuthToken, cacheControl, compat);
 	applyAnthropicThinking(params, model, options);
 	applyAnthropicMetadata(params, options);
@@ -1134,7 +1180,7 @@ function convertAnthropicThinkingBlock(
 	allowEmptySignature: boolean,
 ): ContentBlockParam | undefined {
 	if (block.redacted) return { type: "redacted_thinking", data: block.thinkingSignature! };
-	if (block.thinking.trim().length === 0) return undefined;
+	if (block.thinking.trim().length === 0 && !block.thinkingSignature?.trim()) return undefined;
 	if (!block.thinkingSignature || block.thinkingSignature.trim().length === 0) {
 		return allowEmptySignature
 			? { type: "thinking", thinking: sanitizeSurrogates(block.thinking), signature: "" }
