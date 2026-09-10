@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.3](https://github.com/fleetagent/pi/compare/@fleetagent/pi-ai-v0.2.2...@fleetagent/pi-ai-v0.2.3) (2026-09-10)
+
+
+### Bug Fixes
+
+* **ai:** fix/anthropic-fable-5-1 - support direct Anthropic Fable ([dd211fa](https://github.com/fleetagent/pi/commit/dd211fa0ef44ded9d17a0b6a4210b578d0e34e2f))
+
 ## [0.2.2](https://github.com/fleetagent/pi/compare/@fleetagent/pi-ai-v0.2.1...@fleetagent/pi-ai-v0.2.2) (2026-09-08)
 
 
