@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.2.3](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.2.2...@fleetagent/pi-coding-agent-v0.2.3) (2026-09-10)
+
+
+### Bug Fixes
+
+* **ai:** fix/anthropic-fable-5-1 - support direct Anthropic Fable ([dd211fa](https://github.com/fleetagent/pi/commit/dd211fa0ef44ded9d17a0b6a4210b578d0e34e2f))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @fleetagent/pi-agent-core bumped from ^0.2.2 to ^0.2.3
+    * @fleetagent/pi-ai bumped from ^0.2.2 to ^0.2.3
+    * @fleetagent/pi-tui bumped from ^0.2.2 to ^0.2.3
+
 ## [0.2.2](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.2.1...@fleetagent/pi-coding-agent-v0.2.2) (2026-09-08)
 
 
