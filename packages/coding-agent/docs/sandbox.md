@@ -20,7 +20,7 @@ Type these commands in interactive mode:
 - `/sandbox` and `/sandbox status` show the active workspace tool backend.
 - `/sandbox clear` disconnects the active deferred or sandbox backend without stopping a managed container or VM.
 - `/sandbox --attach` connects to an already-running sandbox daemon without starting or managing its container. Set `PI_REMOTE_TOKEN` when the daemon requires authentication. The daemon workspace root must match `--remote-cwd` in deferred mode, or `sandbox.workspaceMountPath` (default `/workspace`) otherwise.
-- `/sandbox start` launches a Docker container by default. With `--runtime lima`, it creates a Lima VM from `template:ubuntu-26.04`, mounts the current working directory read-write at `/workspace`, starts `pi --daemon` inside the VM, and switches workspace tools and project resource loading to that daemon. Use `--template` to override the Lima template. `--name` reuses an existing Lima instance after verifying that its writable `/workspace` mount maps to the current directory.
+- `/sandbox start` launches a Docker container by default. With `--runtime lima`, it creates a Lima VM from `template:docker-rootful`, mounts the current working directory read-write at `/workspace`, starts `pi --daemon` inside the VM, and switches workspace tools and project resource loading to that daemon. Use `--template` to override the Lima template. `--name` reuses an existing Lima instance after verifying that its writable `/workspace` mount maps to the current directory.
 - `/sandbox list` lists sandboxes for the current workspace. Use `/sandbox list --runtime lima` to list matching Lima instances that can be reused by name.
 - `/sandbox stop` stops the active Pi-owned sandbox. For a daemon connected with `--attach`, it only detaches and restores the previous tool backend. Reused user-owned Lima VMs remain running, but their Pi daemon is stopped. With an id or name, it uses the active runtime, or `sandbox.runtime` when no sandbox is active. Ambiguous cases require an explicit target.
 
@@ -58,7 +58,7 @@ Defaults:
 | Daemon preferred bind and endpoint | `127.0.0.1:8787` |
 | Daemon token | generated per start |
 | Lima binary | `limactl` |
-| Lima template | `template:ubuntu-26.04` |
+| Lima template | `template:docker-rootful` |
 
 The mounted workspace is read/write. Any process in the container can modify files in the mounted host directory. Paths reported by the daemon use the container workspace root (`/workspace`), while local Pi keeps session and UI state on the host. The container uses Docker bridge networking and publishes only the authenticated daemon port to the configured host bind address (`127.0.0.1` by default), so sandbox processes cannot directly access host loopback services. Pi uses the configured daemon port when available and otherwise selects an available host port, allowing separate sessions to keep concurrent sandbox containers. The default image also configures `/tmp` as an additional confined temporary root, so workspace tools can use disposable scratch files without exposing another host mount.
 
@@ -85,7 +85,7 @@ Sandbox settings:
     "image": "pi-sandbox:local",
     "dockerBinary": "docker",
     "limaBinary": "limactl",
-    "limaTemplate": "template:ubuntu-26.04",
+    "limaTemplate": "template:docker-rootful",
     "limaInstanceNamePrefix": "pi-sandbox",
     "workspaceMountPath": "/workspace",
     "containerNamePrefix": "pi-sandbox",

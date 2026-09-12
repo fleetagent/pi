@@ -152,7 +152,7 @@
 * Add authenticated remote project-resource provenance, remote subagent preset discovery, and operator-owned colocated LSP tools/status for daemon workspaces.
 * Add integrated `pi --daemon` documentation and a Docker example that runs the packaged Pi CLI.
 * Add hidden user-only `/sandbox start|list|stop` documentation, settings references, and a Docker base-image guide for `pi --daemon` sandbox containers.
-* Add managed Ubuntu 26.04 Lima VM sandboxes, command-level template overrides, named-instance reuse, writable `/workspace` mounts, guest daemon startup, and runtime-specific listing.
+* Add managed Lima VM sandboxes, command-level template overrides, named-instance reuse, writable `/workspace` mounts, guest daemon startup, and runtime-specific listing.
 * Add host-owned `session_search` and `session_entry_get` tools for bounded regex searching of finalized active-session history across compaction boundaries and fetching exact model-visible entries by ID without routing session data through workspace backends.
 * Allow extension `tool_call` policies to mark blocked calls as terminating, skipping the follow-up model call when every finalized batch result terminates ([upstream `1eb988cfe`](https://github.com/fleetagent/pi/commit/1eb988cfe88fb0ff740ff62583d2f16359f7b6b0)).
 * Add an authoritative AgentSession `waitForIdle()` boundary and additive extension/RPC `agent_settled` event after retries, compaction, queued continuations, runtime synchronization, remote operations, and child subagent calls settle ([upstream `e9fa5a68a`](https://github.com/fleetagent/pi/commit/e9fa5a68a1967f42a90a1c07f512bc8af63517a9)).
@@ -175,6 +175,7 @@
 ### Changed
 
 * Use GPT-6 Astra as the default OpenAI Codex model.
+* Use Lima's rootful Docker template as the default managed VM base.
 * Keep all existing coding-agent TUI construction sites on the explicitly named main-screen renderer while the TUI package adds an alternate-screen implementation ([upstream `c13ffe187`](https://github.com/fleetagent/pi/commit/c13ffe187)).
 * Make LSP startup lazy and configuration-driven, preserve explicit tool allowlists, and keep synchronization independent from model tool exposure.
 * Aggregate capability-aware results from overlapping language servers deterministically and isolate ordinary provider failures.

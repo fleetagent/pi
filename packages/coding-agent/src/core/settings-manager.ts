@@ -75,7 +75,7 @@ export interface SandboxSettings {
 	image?: string; // default Docker sandbox image used by /sandbox start
 	dockerBinary?: string; // default: docker
 	limaBinary?: string; // default: limactl
-	limaTemplate?: string; // default: template:ubuntu-26.04
+	limaTemplate?: string; // default: template:docker-rootful
 	limaInstanceNamePrefix?: string; // default: pi-sandbox
 	workspaceMountPath?: string; // default: /workspace
 	containerNamePrefix?: string; // default: pi-sandbox

@@ -58,7 +58,7 @@ describe("Lima sandbox core", () => {
 		});
 		expect(result.containerName).toMatch(/^pi-sandbox-project-[a-f0-9]{12}-session-p8787-[a-f0-9]{8}$/);
 		expect(runner.calls[0]?.args).toEqual(
-			expect.arrayContaining(["start", "--name", result.containerName, "--mount-none", "template:ubuntu-26.04"]),
+			expect.arrayContaining(["start", "--name", result.containerName, "--mount-none", "template:docker-rootful"]),
 		);
 		expect(runner.calls[0]?.args.join(" ")).toContain('"mountPoint":"/workspace"');
 		expect(runner.calls[0]?.args.join(" ")).toContain('"location":"/host/project"');
