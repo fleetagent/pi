@@ -6,6 +6,7 @@ type RebindContext = {
 	ui: object;
 	unsubscribe?: () => void;
 	transcriptRendered: boolean;
+	resetHookExecutionActivity: () => void;
 	applyRuntimeSettings: () => void;
 	bindCurrentSessionExtensions: () => Promise<void>;
 	retireAndRenderCurrentTranscript: () => void;
@@ -45,6 +46,7 @@ describe("InteractiveMode Markdown transformer rebind", () => {
 			ui: renderer,
 			unsubscribe: () => calls.push("unsubscribe"),
 			transcriptRendered: true,
+			resetHookExecutionActivity: () => calls.push("reset-hooks"),
 			applyRuntimeSettings: () => calls.push("settings"),
 			bindCurrentSessionExtensions: async () => {
 				calls.push("bind");
@@ -68,7 +70,17 @@ describe("InteractiveMode Markdown transformer rebind", () => {
 		expect(oldTransformer).toHaveBeenCalledTimes(1);
 		expect(replacementTransformer).toHaveBeenCalledTimes(1);
 		expect(context.ui).toBe(renderer);
-		expect(calls).toEqual(["unsubscribe", "settings", "bind", "render", "subscribe", "providers", "border", "title"]);
+		expect(calls).toEqual([
+			"unsubscribe",
+			"reset-hooks",
+			"settings",
+			"bind",
+			"render",
+			"subscribe",
+			"providers",
+			"border",
+			"title",
+		]);
 	});
 
 	it("does not render during the initial bind before startup renders the transcript", async () => {
@@ -76,6 +88,7 @@ describe("InteractiveMode Markdown transformer rebind", () => {
 		const context: RebindContext = {
 			ui: { mode: "fullscreen" },
 			transcriptRendered: false,
+			resetHookExecutionActivity: vi.fn(),
 			applyRuntimeSettings: vi.fn(),
 			bindCurrentSessionExtensions: vi.fn(async () => {}),
 			retireAndRenderCurrentTranscript: render,
