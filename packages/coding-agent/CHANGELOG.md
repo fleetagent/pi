@@ -184,6 +184,7 @@
 ### Fixed
 
 * Clear TUI hook execution cards from compacted history alongside regular chat messages.
+* Show a `Running hooks ...` throbber while configured hooks execute.
 * Keep registered host-local skills, rules, prompts, and their referenced assets readable after remote or sandbox workspace tools switch to canonical remote execution.
 * Keep sandbox backends session-local, allocate non-conflicting daemon ports for concurrent session containers, restore sandboxes when returning to their sessions, stop all process-owned sandbox containers during graceful Pi shutdown, and confine subagents to the parent's active workspace backend.
 * Generate a unique Docker container name for every sandbox start so stale containers from the same session cannot block restart with a name conflict.

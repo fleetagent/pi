@@ -269,3 +269,4 @@ export interface HookExecutionNotice {
 }
 
 export type HookExecutionListener = (notice: HookExecutionNotice) => void;
+export type HookExecutionActivityListener = (active: boolean) => void;

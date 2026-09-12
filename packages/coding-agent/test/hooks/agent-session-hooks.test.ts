@@ -168,12 +168,16 @@ describe("AgentSession Claude-compatible hooks", () => {
 		});
 		harnesses.push(harness);
 		const notices: HookExecutionNotice[] = [];
+		const activity: boolean[] = [];
 		const unsubscribe = harness.session.subscribeToHookExecutions((notice) => notices.push(notice));
+		const unsubscribeActivity = harness.session.subscribeToHookExecutionActivity((active) => activity.push(active));
 		harness.setResponses([fauxAssistantMessage("done")]);
 
 		await harness.session.prompt("hello");
 		unsubscribe();
+		unsubscribeActivity();
 
+		expect(activity).toEqual([true, false]);
 		expect(notices).toHaveLength(1);
 		expect(notices[0].event).toBe("UserPromptSubmit");
 		expect(notices[0].returnedPrompts).toEqual(["visible-to-model"]);

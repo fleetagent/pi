@@ -122,6 +122,7 @@ import type {
 	HookAggregateResult,
 	HookDiagnostic,
 	HookEventName,
+	HookExecutionActivityListener,
 	HookExecutionListener,
 	HookExecutionNotice,
 	HookExecutionResult,
@@ -1113,6 +1114,7 @@ export class AgentSession {
 	private _hooksEnabled = true;
 	private readonly _onHookDiagnostic?: (diagnostic: HookDiagnostic) => void;
 	private readonly _hookExecutionListeners = new Set<HookExecutionListener>();
+	private readonly _hookExecutionActivityListeners = new Set<HookExecutionActivityListener>();
 	private readonly _hookRunOptions: Pick<HookRunOptions, "allowedHttpHookUrls" | "httpHookAllowedEnvVars">;
 	private readonly _hookAbortController = new AbortController();
 	private _hookSessionStartPromise?: Promise<CustomMessage | undefined>;
@@ -1481,9 +1483,18 @@ export class AgentSession {
 			}
 		}
 	}
+	private _emitHookExecutionActivity(active: boolean): void {
+		for (const listener of [...this._hookExecutionActivityListeners]) {
+			try {
+				listener(active);
+			} catch {
+				// UI observers must not affect hook behavior.
+			}
+		}
+	}
 	private async _runHook(input: HookInput, activeSignal?: AbortSignal): Promise<HookAggregateResult> {
 		const loadedHooks = this._loadedHooks;
-		if (!this._hooksEnabled || !loadedHooks || loadedHooks.handlers.length === 0) {
+		if (!this._hooksEnabled || !loadedHooks?.handlers.some((handler) => handler.event === input.hook_event_name)) {
 			return {
 				continue: true,
 				blocked: false,
@@ -1497,24 +1508,29 @@ export class AgentSession {
 			(signal): signal is AbortSignal => signal !== undefined,
 		);
 		const signal = signals.length === 1 ? signals[0] : AbortSignal.any(signals);
-		const aggregate = await runHooks(loadedHooks, input, {
-			...this._hookRunOptions,
-			signal,
-			toolOperations: this.getToolOperations(),
-		});
-		for (const result of aggregate.results) {
-			if (result.diagnostic) this._onHookDiagnostic?.(result.diagnostic);
-		}
-		for (const message of aggregate.systemMessages) {
-			this._reportHookDiagnostic({
-				level: "warning",
-				code: "system-message",
-				event: input.hook_event_name,
-				message: `Hook systemMessage: ${message}`,
+		this._emitHookExecutionActivity(true);
+		try {
+			const aggregate = await runHooks(loadedHooks, input, {
+				...this._hookRunOptions,
+				signal,
+				toolOperations: this.getToolOperations(),
 			});
+			for (const result of aggregate.results) {
+				if (result.diagnostic) this._onHookDiagnostic?.(result.diagnostic);
+			}
+			for (const message of aggregate.systemMessages) {
+				this._reportHookDiagnostic({
+					level: "warning",
+					code: "system-message",
+					event: input.hook_event_name,
+					message: `Hook systemMessage: ${message}`,
+				});
+			}
+			if (aggregate.results.length > 0) this._emitHookExecution(createHookExecutionNotice(input, aggregate));
+			return aggregate;
+		} finally {
+			this._emitHookExecutionActivity(false);
 		}
-		if (aggregate.results.length > 0) this._emitHookExecution(createHookExecutionNotice(input, aggregate));
-		return aggregate;
 	}
 
 	private _hasMatchingToolHook(event: ToolHookEventName, toolName: string): boolean {
@@ -2410,6 +2426,11 @@ export class AgentSession {
 		return () => this._hookExecutionListeners.delete(listener);
 	}
 
+	/** Subscribe to active hook execution changes for host UI rendering. */
+	subscribeToHookExecutionActivity(listener: HookExecutionActivityListener): () => void {
+		this._hookExecutionActivityListeners.add(listener);
+		return () => this._hookExecutionActivityListeners.delete(listener);
+	}
 	/** Whether this session will dispatch subsequent configured hook events. */
 	get hooksEnabled(): boolean {
 		return this._hooksEnabled;
@@ -2495,6 +2516,7 @@ export class AgentSession {
 		this._disconnectFromAgent();
 		this._eventListeners = [];
 		this._hookExecutionListeners.clear();
+		this._hookExecutionActivityListeners.clear();
 		cleanupSessionResources(this.sessionId);
 
 		const localResourceToolOperations = this._localResourceToolOperations;

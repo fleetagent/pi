@@ -196,6 +196,26 @@ type HookNoticeContext = {
 	getMarkdownThemeWithSettings: typeof getMarkdownTheme;
 };
 
+interface HookActivityLoader extends Component {
+	setMessage(message: string): void;
+	stop(): void;
+}
+
+interface HookActivitySession {
+	isStreaming: boolean;
+}
+interface HookActivityContext {
+	hookExecutionActivityDepth: number;
+	hookExecutionActivityOwnsLoader: boolean;
+	loadingAnimation: HookActivityLoader | undefined;
+	statusContainer: Container;
+	session: HookActivitySession;
+	ui: RenderRequestUi;
+	createWorkingLoader(): HookActivityLoader;
+	stopWorkingLoader(): void;
+	getWorkingLoaderMessage(): string;
+}
+
 interface CopyCommandInvocationOptions {
 	flashConfirmation?: boolean;
 }
@@ -228,6 +248,7 @@ type InteractiveModePrototype = {
 	setExtensionHeader(this: HeaderContext, factory: ExtensionHeaderFactory | undefined): void;
 	addHookExecutionNotice(this: HookNoticeContext, notice: HookExecutionNotice): void;
 	renderHookExecutionNotices(this: HookNoticeContext): void;
+	handleHookExecutionActivity(this: HookActivityContext, active: boolean): void;
 	handleCopyCommand(this: CopyCommandContext, options?: CopyCommandInvocationOptions): Promise<void>;
 	handleRightClickPaste(this: RightClickPasteContext): Promise<void>;
 	retireAndRenderCurrentTranscript(this: TranscriptRetirementContext): void;
@@ -402,6 +423,37 @@ describe("createInteractiveTui", () => {
 
 		expect(firstInput).not.toHaveBeenCalled();
 		expect(requestRender).not.toHaveBeenCalled();
+	});
+
+	it("shows a Running hooks throbber while hooks execute", () => {
+		const setMessage = vi.fn<(message: string) => void>();
+		const stop = vi.fn();
+		const loader: HookActivityLoader = { render: () => [], invalidate: () => {}, setMessage, stop };
+		const requestRender = vi.fn();
+		const context: HookActivityContext = {
+			hookExecutionActivityDepth: 0,
+			hookExecutionActivityOwnsLoader: false,
+			loadingAnimation: undefined,
+			statusContainer: new Container(),
+			session: { isStreaming: false },
+			ui: { requestRender },
+			createWorkingLoader: () => loader,
+			stopWorkingLoader() {
+				this.loadingAnimation?.stop();
+				this.loadingAnimation = undefined;
+				this.statusContainer.clear();
+			},
+			getWorkingLoaderMessage: () => "Working...",
+		};
+
+		interactiveModePrototype.handleHookExecutionActivity.call(context, true);
+		expect(context.statusContainer.children).toEqual([loader]);
+		expect(setMessage).toHaveBeenLastCalledWith("Running hooks ...");
+
+		interactiveModePrototype.handleHookExecutionActivity.call(context, false);
+		expect(stop).toHaveBeenCalledOnce();
+		expect(context.statusContainer.children).toEqual([]);
+		expect(requestRender).toHaveBeenCalledTimes(2);
 	});
 
 	it("retains hook cards across transcript rebuilds within the active session", () => {

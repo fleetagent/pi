@@ -620,6 +620,9 @@ export class InteractiveMode {
 	// Agent subscription unsubscribe function
 	private unsubscribe?: () => void;
 	private hookExecutionUnsubscribe?: () => void;
+	private hookExecutionActivityUnsubscribe?: () => void;
+	private hookExecutionActivityDepth = 0;
+	private hookExecutionActivityOwnsLoader = false;
 	private hookExecutionSession?: Session;
 	private hookExecutionNotices: HookExecutionNotice[] = [];
 	private hookExecutionComponents: HookExecutionComponent[] = [];
@@ -2009,6 +2012,9 @@ export class InteractiveMode {
 		this.unsubscribe = undefined;
 		this.hookExecutionUnsubscribe?.();
 		this.hookExecutionUnsubscribe = undefined;
+		this.hookExecutionActivityUnsubscribe?.();
+		this.hookExecutionActivityUnsubscribe = undefined;
+		this.resetHookExecutionActivity();
 		const activeSession = this.activeSession;
 		if (this.hookExecutionSession !== undefined && this.hookExecutionSession !== activeSession) {
 			this.hookExecutionNotices = [];
@@ -2176,6 +2182,37 @@ export class InteractiveMode {
 		this.statusContainer.clear();
 	}
 
+	private resetHookExecutionActivity(): void {
+		if (this.hookExecutionActivityDepth === 0) return;
+		this.hookExecutionActivityDepth = 0;
+		if (this.hookExecutionActivityOwnsLoader) this.stopWorkingLoader();
+		else this.loadingAnimation?.setMessage(this.getWorkingLoaderMessage());
+		this.hookExecutionActivityOwnsLoader = false;
+		this.ui.requestRender();
+	}
+
+	private handleHookExecutionActivity(active: boolean): void {
+		if (active) {
+			this.hookExecutionActivityDepth += 1;
+			if (this.hookExecutionActivityDepth > 1) return;
+			if (!this.loadingAnimation) {
+				this.statusContainer.clear();
+				this.loadingAnimation = this.createWorkingLoader();
+				this.statusContainer.addChild(this.loadingAnimation);
+				this.hookExecutionActivityOwnsLoader = true;
+			}
+			this.loadingAnimation.setMessage("Running hooks ...");
+			this.ui.requestRender();
+			return;
+		}
+		if (this.hookExecutionActivityDepth === 0) return;
+		this.hookExecutionActivityDepth -= 1;
+		if (this.hookExecutionActivityDepth > 0) return;
+		if (this.hookExecutionActivityOwnsLoader && !this.session.isStreaming) this.stopWorkingLoader();
+		else this.loadingAnimation?.setMessage(this.getWorkingLoaderMessage());
+		this.hookExecutionActivityOwnsLoader = false;
+		this.ui.requestRender();
+	}
 	private setWorkingVisible(visible: boolean): void {
 		this.workingVisible = visible;
 		if (!visible) {
@@ -3222,6 +3259,9 @@ export class InteractiveMode {
 		});
 		this.hookExecutionUnsubscribe = this.session.subscribeToHookExecutions((notice) => {
 			this.addHookExecutionNotice(notice);
+		});
+		this.hookExecutionActivityUnsubscribe = this.session.subscribeToHookExecutionActivity((active) => {
+			this.handleHookExecutionActivity(active);
 		});
 	}
 
@@ -6744,6 +6784,8 @@ export class InteractiveMode {
 		}
 		this.hookExecutionUnsubscribe?.();
 		this.hookExecutionUnsubscribe = undefined;
+		this.hookExecutionActivityUnsubscribe?.();
+		this.hookExecutionActivityUnsubscribe = undefined;
 		if (this.isInitialized) {
 			this.stopInteractiveTui(fullscreenExitOutput);
 			this.isInitialized = false;
