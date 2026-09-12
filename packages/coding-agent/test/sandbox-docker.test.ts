@@ -5,6 +5,7 @@ import {
 	allocateSandboxDaemonPort,
 	buildDockerRunInvocation,
 	DEFAULT_SANDBOX_IMAGE,
+	DEFAULT_SANDBOX_LIMA_TEMPLATE,
 	type DockerCommandOptions,
 	type DockerCommandResult,
 	type DockerRunner,
@@ -52,8 +53,11 @@ describe("Docker sandbox core", () => {
 	});
 	it("resolves config with override, environment, settings, and default precedence", () => {
 		const settings: SandboxSettings = {
+			runtime: "docker",
 			image: "settings-image",
 			dockerBinary: "settings-docker",
+			limaBinary: "settings-lima",
+			limaTemplate: "template:settings",
 			workspaceMountPath: "/settings-workspace",
 			containerNamePrefix: "settings-prefix",
 			daemonPort: 9000,
@@ -64,28 +68,40 @@ describe("Docker sandbox core", () => {
 		const config = resolveSandboxConfig(
 			settings,
 			{
+				PI_SANDBOX_RUNTIME: "docker",
 				PI_SANDBOX_IMAGE: "env-image",
 				PI_SANDBOX_DOCKER: "env-docker",
+				PI_SANDBOX_LIMA: "env-lima",
+				PI_SANDBOX_LIMA_TEMPLATE: "template:env",
 				PI_SANDBOX_WORKSPACE_MOUNT: "/env-workspace",
 				PI_SANDBOX_CONTAINER_PREFIX: "env-prefix",
 				PI_SANDBOX_DAEMON_PORT: "9100",
 				PI_SANDBOX_DAEMON_HOST_BIND: "127.0.0.3",
 				PI_SANDBOX_CLEANUP: "stop",
 			},
-			{ image: "override-image", daemonPort: 9200 },
+			{ runtime: "lima", image: "override-image", daemonPort: 9200 },
 		);
 
 		expect(config).toMatchObject({
+			runtime: "lima",
 			image: "override-image",
 			dockerBinary: "env-docker",
+			limaBinary: "env-lima",
+			limaTemplate: "template:env",
 			workspaceMountPath: "/env-workspace",
 			containerNamePrefix: "env-prefix",
 			daemonPort: 9200,
 			daemonHostBind: "127.0.0.3",
 			cleanup: "stop",
 		});
-		expect(resolveSandboxConfig(undefined, {}, {}).image).toBe(DEFAULT_SANDBOX_IMAGE);
+		expect(resolveSandboxConfig(undefined, {}, {})).toMatchObject({
+			image: DEFAULT_SANDBOX_IMAGE,
+			limaTemplate: DEFAULT_SANDBOX_LIMA_TEMPLATE,
+		});
 		expect(() => resolveSandboxConfig(undefined, { PI_SANDBOX_DAEMON_PORT: "nope" }, {})).toThrow("decimal integer");
+		expect(() => resolveSandboxConfig(undefined, { PI_SANDBOX_RUNTIME: "vm" }, {})).toThrow(
+			"expected docker or lima",
+		);
 	});
 
 	it("builds docker run arguments without putting daemon token in argv", () => {

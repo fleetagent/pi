@@ -434,20 +434,29 @@ describe("SettingsManager", () => {
 			writeFileSync(
 				join(agentDir, "settings.json"),
 				JSON.stringify({
-					sandbox: { image: "global-image", dockerBinary: "podman", daemonPort: 9000 },
+					sandbox: {
+						runtime: "docker",
+						image: "global-image",
+						dockerBinary: "podman",
+						limaBinary: "limactl-custom",
+						daemonPort: 9000,
+					},
 				}),
 			);
 			writeFileSync(
 				join(projectDir, ".pi", "settings.json"),
 				JSON.stringify({
-					sandbox: { image: "project-image", cleanup: "remove" },
+					sandbox: { runtime: "lima", image: "project-image", limaTemplate: "template:alpine", cleanup: "remove" },
 				}),
 			);
 			const manager = SettingsManager.create(projectDir, agentDir);
 
 			expect(manager.getSandboxSettings()).toEqual({
+				runtime: "lima",
 				image: "project-image",
 				dockerBinary: "podman",
+				limaBinary: "limactl-custom",
+				limaTemplate: "template:alpine",
 				daemonPort: 9000,
 				cleanup: "remove",
 			});

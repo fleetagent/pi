@@ -11,6 +11,8 @@ export const DEFAULT_SANDBOX_IMAGE = "ghcr.io/fleetagent/pi-sandbox:latest";
 export const DEFAULT_SANDBOX_WORKSPACE_MOUNT = "/workspace";
 export const DEFAULT_SANDBOX_DAEMON_PORT = 8787;
 export const DEFAULT_SANDBOX_DOCKER_BINARY = "docker";
+export const DEFAULT_SANDBOX_LIMA_BINARY = "limactl";
+export const DEFAULT_SANDBOX_LIMA_TEMPLATE = "template:ubuntu-26.04";
 export const SANDBOX_LABEL_PREFIX = "ai.fleetagent.pi";
 export const SANDBOX_LABEL_ENABLED = `${SANDBOX_LABEL_PREFIX}.sandbox`;
 export const SANDBOX_LABEL_WORKSPACE_HASH = `${SANDBOX_LABEL_PREFIX}.workspace-hash`;
@@ -93,10 +95,15 @@ async function withSandboxStartLock<T>(operation: () => Promise<T>): Promise<T> 
 }
 
 export type SandboxCleanupBehavior = "stop" | "remove";
+export type SandboxRuntime = "docker" | "lima";
 
 export interface SandboxConfig {
+	runtime: SandboxRuntime;
 	image: string;
 	dockerBinary: string;
+	limaBinary: string;
+	limaTemplate: string;
+	limaInstanceNamePrefix: string;
 	workspaceMountPath: string;
 	containerNamePrefix: string;
 	daemonPort: number;
@@ -108,8 +115,12 @@ export interface SandboxConfig {
 export type SandboxConfigOverrides = SandboxSettings;
 
 export interface SandboxEnvironment {
+	PI_SANDBOX_RUNTIME?: string;
 	PI_SANDBOX_IMAGE?: string;
 	PI_SANDBOX_DOCKER?: string;
+	PI_SANDBOX_LIMA?: string;
+	PI_SANDBOX_LIMA_TEMPLATE?: string;
+	PI_SANDBOX_LIMA_INSTANCE_PREFIX?: string;
 	PI_SANDBOX_WORKSPACE_MOUNT?: string;
 	PI_SANDBOX_CONTAINER_PREFIX?: string;
 	PI_SANDBOX_DAEMON_PORT?: string;
@@ -120,6 +131,7 @@ export interface SandboxEnvironment {
 export interface SandboxStartOptions extends SandboxConfigOverrides {
 	workspaceRoot: string;
 	sessionId?: string;
+	name?: string;
 }
 
 export interface SandboxListOptions {
@@ -174,6 +186,13 @@ export type SandboxStopResult =
 	| { status: "removed"; container: SandboxContainer }
 	| { status: "already-stopped"; container: SandboxContainer }
 	| { status: "not-found"; message: string };
+
+export interface SandboxService {
+	resolveConfig(overrides?: SandboxConfigOverrides): SandboxConfig;
+	start(options: SandboxStartOptions): Promise<SandboxStartResult>;
+	list(options: SandboxListOptions): Promise<SandboxContainer[]>;
+	stop(options: SandboxStopOptions): Promise<SandboxStopResult>;
+}
 
 export interface DockerCommandResult {
 	exitCode: number | null;
@@ -275,6 +294,12 @@ class ProcessDockerRunner implements DockerRunner {
 function nonEmpty(value: string | undefined): string | undefined {
 	const trimmed = value?.trim();
 	return trimmed ? trimmed : undefined;
+}
+
+function parseRuntime(value: string | undefined, settingName: string): SandboxRuntime | undefined {
+	if (value === undefined) return undefined;
+	if (value === "docker" || value === "lima") return value;
+	throw new Error(`Invalid ${settingName}: expected docker or lima`);
 }
 
 function parsePositiveInteger(value: string | number | undefined, settingName: string): number | undefined {
@@ -417,6 +442,11 @@ export function resolveSandboxConfig(
 	env: SandboxEnvironment = {},
 	overrides: SandboxConfigOverrides = {},
 ): SandboxConfig {
+	const runtime =
+		parseRuntime(overrides.runtime, "sandbox.runtime") ??
+		parseRuntime(env.PI_SANDBOX_RUNTIME, "PI_SANDBOX_RUNTIME") ??
+		parseRuntime(settings?.runtime, "sandbox.runtime") ??
+		"docker";
 	const image =
 		nonEmpty(overrides.image) ?? nonEmpty(env.PI_SANDBOX_IMAGE) ?? nonEmpty(settings?.image) ?? DEFAULT_SANDBOX_IMAGE;
 	const dockerBinary =
@@ -424,6 +454,21 @@ export function resolveSandboxConfig(
 		nonEmpty(env.PI_SANDBOX_DOCKER) ??
 		nonEmpty(settings?.dockerBinary) ??
 		DEFAULT_SANDBOX_DOCKER_BINARY;
+	const limaBinary =
+		nonEmpty(overrides.limaBinary) ??
+		nonEmpty(env.PI_SANDBOX_LIMA) ??
+		nonEmpty(settings?.limaBinary) ??
+		DEFAULT_SANDBOX_LIMA_BINARY;
+	const limaTemplate =
+		nonEmpty(overrides.limaTemplate) ??
+		nonEmpty(env.PI_SANDBOX_LIMA_TEMPLATE) ??
+		nonEmpty(settings?.limaTemplate) ??
+		DEFAULT_SANDBOX_LIMA_TEMPLATE;
+	const limaInstanceNamePrefix =
+		nonEmpty(overrides.limaInstanceNamePrefix) ??
+		nonEmpty(env.PI_SANDBOX_LIMA_INSTANCE_PREFIX) ??
+		nonEmpty(settings?.limaInstanceNamePrefix) ??
+		"pi-sandbox";
 	const workspaceMountPath =
 		nonEmpty(overrides.workspaceMountPath) ??
 		nonEmpty(env.PI_SANDBOX_WORKSPACE_MOUNT) ??
@@ -450,8 +495,12 @@ export function resolveSandboxConfig(
 		parseCleanup(settings?.cleanup, "sandbox.cleanup") ??
 		"stop";
 	return {
+		runtime,
 		image,
 		dockerBinary,
+		limaBinary,
+		limaTemplate,
+		limaInstanceNamePrefix,
 		workspaceMountPath,
 		containerNamePrefix,
 		daemonPort,

@@ -12,7 +12,7 @@ import { CONFIG_DIR_NAME, getAgentDir } from "../config.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
 import { DEFAULT_HTTP_IDLE_TIMEOUT_MS, parseHttpIdleTimeoutMs } from "./http-dispatcher.ts";
 import type { LspConfigurationLayer } from "./lsp/config.ts";
-import type { SandboxCleanupBehavior } from "./sandbox/docker.ts";
+import type { SandboxCleanupBehavior, SandboxRuntime } from "./sandbox/docker.ts";
 
 // pi-ignore noNearIdenticalDataStructures: Persisted overrides permit omitted fields so settings layering can apply defaults independently of the fully resolved harness runtime contract.
 export interface CompactionSettings {
@@ -71,12 +71,16 @@ export interface WarningSettings {
 export type ToolSettings = Record<string, Record<string, unknown> | undefined>;
 
 export interface SandboxSettings {
-	image?: string; // default sandbox image used by /sandbox start
+	runtime?: SandboxRuntime; // default: docker
+	image?: string; // default Docker sandbox image used by /sandbox start
 	dockerBinary?: string; // default: docker
+	limaBinary?: string; // default: limactl
+	limaTemplate?: string; // default: template:ubuntu-26.04
+	limaInstanceNamePrefix?: string; // default: pi-sandbox
 	workspaceMountPath?: string; // default: /workspace
 	containerNamePrefix?: string; // default: pi-sandbox
-	daemonPort?: number; // container daemon port, default: 8787
-	daemonHostBind?: string; // host bind address for published daemon port, default: 127.0.0.1
+	daemonPort?: number; // sandbox daemon port, default: 8787
+	daemonHostBind?: string; // host bind address for daemon forwarding, default: 127.0.0.1
 	cleanup?: SandboxCleanupBehavior; // default: stop
 }
 

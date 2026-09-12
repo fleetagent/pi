@@ -1,11 +1,19 @@
-import type { SandboxContainer, SandboxStartResult, SandboxStopResult } from "./docker.ts";
+import type { SandboxContainer, SandboxRuntime, SandboxStartResult, SandboxStopResult } from "./docker.ts";
+
+export interface SandboxStartUserCommand {
+	subcommand: "start";
+	image?: string;
+	runtime?: SandboxRuntime;
+	name?: string;
+	template?: string;
+}
 
 export type SandboxUserCommand =
 	| { subcommand: "status" }
 	| { subcommand: "clear" }
 	| { subcommand: "attach"; url: string }
-	| { subcommand: "start"; image?: string }
-	| { subcommand: "list" }
+	| SandboxStartUserCommand
+	| { subcommand: "list"; runtime?: SandboxRuntime }
 	| { subcommand: "stop"; target?: string };
 
 function splitCommandLine(input: string): string[] {
@@ -18,17 +26,59 @@ function splitCommandLine(input: string): string[] {
 	});
 }
 
+function parseRuntime(value: string | undefined, usage: string): SandboxRuntime {
+	if (value === "docker" || value === "lima") return value;
+	throw new Error(usage);
+}
+
 function parseSandboxStartCommand(tokens: string[]): SandboxUserCommand {
 	let image: string | undefined;
+	let runtime: SandboxRuntime | undefined;
+	let name: string | undefined;
+	let template: string | undefined;
 	for (let index = 2; index < tokens.length; index++) {
-		const token = tokens[index];
-		if (token !== "--image") throw new Error(`Unsupported /sandbox start argument: ${token}`);
-
+		const option = tokens[index];
 		const value = tokens[++index];
-		if (!value) throw new Error("Usage: /sandbox start --image <image>");
-		image = value;
+		if (!value)
+			throw new Error(
+				"Usage: /sandbox start [--runtime docker|lima] [--image <image>] [--name <lima-instance>] [--template <lima-template>]",
+			);
+		switch (option) {
+			case "--image":
+				image = value;
+				break;
+			case "--runtime":
+				runtime = parseRuntime(value, "Usage: /sandbox start --runtime docker|lima");
+				break;
+			case "--name":
+				name = value;
+				break;
+			case "--template":
+				template = value;
+				break;
+			default:
+				throw new Error(`Unsupported /sandbox start argument: ${option}`);
+		}
 	}
-	return image ? { subcommand: "start", image } : { subcommand: "start" };
+	if ((name || template) && runtime !== "lima") {
+		throw new Error("/sandbox start --name and --template require --runtime lima");
+	}
+	if (image && runtime === "lima") throw new Error("/sandbox start --image is only supported by the Docker runtime");
+	return {
+		subcommand: "start",
+		...(image ? { image } : {}),
+		...(runtime ? { runtime } : {}),
+		...(name ? { name } : {}),
+		...(template ? { template } : {}),
+	};
+}
+
+function parseSandboxListCommand(tokens: string[]): SandboxUserCommand {
+	if (tokens.length === 2) return { subcommand: "list" };
+	if (tokens.length !== 4 || tokens[2] !== "--runtime") {
+		throw new Error("Usage: /sandbox list [--runtime docker|lima]");
+	}
+	return { subcommand: "list", runtime: parseRuntime(tokens[3], "Usage: /sandbox list --runtime docker|lima") };
 }
 
 export function parseSandboxUserCommand(input: string): SandboxUserCommand {
@@ -50,8 +100,7 @@ export function parseSandboxUserCommand(input: string): SandboxUserCommand {
 		case "start":
 			return parseSandboxStartCommand(tokens);
 		case "list":
-			if (tokens.length > 2) throw new Error("Usage: /sandbox list");
-			return { subcommand: "list" };
+			return parseSandboxListCommand(tokens);
 		case "stop":
 			if (tokens.length > 3) throw new Error("Usage: /sandbox stop [container]");
 			return tokens[2] ? { subcommand: "stop", target: tokens[2] } : { subcommand: "stop" };
@@ -67,12 +116,12 @@ export function formatSandboxStartResult(result: SandboxStartResult): string {
 		`Sandbox started: ${result.containerName} (${result.containerId})`,
 		`Workspace: ${result.workspaceRoot} -> ${result.workspaceMountPath}`,
 		`Daemon: ${result.daemonUrlRedacted}`,
-		"Sandbox mode active: workspace tools/resources now route through the container daemon.",
+		"Sandbox mode active: workspace tools/resources now route through the sandbox daemon.",
 	].join("\n");
 }
 
 export function formatSandboxList(containers: SandboxContainer[]): string {
-	if (containers.length === 0) return "No Pi sandbox containers found for this workspace.";
+	if (containers.length === 0) return "No Pi sandboxes found for this workspace.";
 	return containers
 		.map((container) => {
 			const endpoint = container.daemonEndpoint ? ` daemon=${container.daemonEndpoint}` : "";

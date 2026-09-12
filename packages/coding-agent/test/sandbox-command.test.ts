@@ -48,6 +48,7 @@ interface SandboxHandlerContext {
 	activeSandboxContainerId?: string;
 	activeSandboxBackendConnected?: boolean;
 	createDockerSandboxService(): SandboxServiceStub;
+	createLimaSandboxService?(): SandboxServiceStub;
 	refreshUiAfterBackendChange(): void;
 	updateToolBackendStatus(): void;
 	formatToolBackendStatus(info: ToolBackendInfo): string;
@@ -60,13 +61,18 @@ interface RuntimeHostStub {
 	dispose(): Promise<void>;
 }
 
-interface ManagedSandboxCleanupServiceStub {
+interface ManagedDockerSandboxCleanupServiceStub {
 	stopManagedContainers(): Promise<void>;
+}
+
+interface ManagedLimaSandboxCleanupServiceStub {
+	stopManagedInstances(): Promise<void>;
 }
 
 interface RuntimeResourceDisposalContext {
 	runtimeHost: RuntimeHostStub;
-	createDockerSandboxService(): ManagedSandboxCleanupServiceStub;
+	createDockerSandboxService(): ManagedDockerSandboxCleanupServiceStub;
+	createLimaSandboxService(): ManagedLimaSandboxCleanupServiceStub;
 }
 
 interface InteractiveModePrivate {
@@ -171,7 +177,16 @@ describe("hidden sandbox command", () => {
 			subcommand: "start",
 			image: "pi sandbox:test",
 		});
+		expect(
+			parseSandboxUserCommand("/sandbox start --runtime lima --name existing --template template:alpine"),
+		).toEqual({
+			subcommand: "start",
+			runtime: "lima",
+			name: "existing",
+			template: "template:alpine",
+		});
 		expect(parseSandboxUserCommand("/sandbox list")).toEqual({ subcommand: "list" });
+		expect(parseSandboxUserCommand("/sandbox list --runtime lima")).toEqual({ subcommand: "list", runtime: "lima" });
 		expect(parseSandboxUserCommand("/sandbox stop abc123")).toEqual({ subcommand: "stop", target: "abc123" });
 		expect(() => parseSandboxUserCommand("/sandbox --attach")).toThrow("Usage: /sandbox --attach");
 		expect(() => parseSandboxUserCommand("/sandbox --attach one two")).toThrow("Usage: /sandbox --attach");
@@ -179,6 +194,13 @@ describe("hidden sandbox command", () => {
 		expect(() => parseSandboxUserCommand("/sandbox status extra")).toThrow("Usage: /sandbox status");
 		expect(() => parseSandboxUserCommand("/sandbox start --token secret")).toThrow(
 			"Unsupported /sandbox start argument",
+		);
+		expect(() => parseSandboxUserCommand("/sandbox start --name existing")).toThrow("require --runtime lima");
+		expect(() => parseSandboxUserCommand("/sandbox start --template template:alpine")).toThrow(
+			"require --runtime lima",
+		);
+		expect(() => parseSandboxUserCommand("/sandbox start --runtime lima --image image")).toThrow(
+			"only supported by the Docker runtime",
 		);
 		expect(() => parseSandboxUserCommand("/sandbox rm abc123")).toThrow("Unsupported /sandbox subcommand");
 		expect(() => parseSandboxUserCommand("/sandbox stop one two")).toThrow("Usage: /sandbox stop");
@@ -214,7 +236,7 @@ describe("hidden sandbox command", () => {
 				},
 			]),
 		).toContain("abc123\tpi-sandbox-project-hash\trunning\tpi-sandbox:test");
-		expect(formatSandboxList([])).toBe("No Pi sandbox containers found for this workspace.");
+		expect(formatSandboxList([])).toBe("No Pi sandboxes found for this workspace.");
 		expect(
 			formatSandboxStopResult({
 				status: "already-stopped",
@@ -477,6 +499,45 @@ describe("hidden sandbox command", () => {
 		expect(clearRemoteSandbox).toHaveBeenCalledOnce();
 	});
 
+	it("routes runtime-specific Lima listing to the Lima sandbox service", async () => {
+		const dockerList = vi.fn(async () => []);
+		const limaList = vi.fn(async () => [createContainer()]);
+		const context: SandboxHandlerContext = {
+			session: {
+				activateSandboxDaemon: vi.fn(),
+				getToolBackendInfo: () => ({ type: "local", cwd: "/host/project" }),
+				clearRemoteSandbox: vi.fn(),
+			},
+			activeSession: { getCwd: () => "/host/project", getSessionId: () => "session-a" },
+			sessionSandboxStates: new Map(),
+			managedSandboxContainers: new Map(),
+			createDockerSandboxService: () => ({
+				resolveConfig: () => ({ workspaceMountPath: "/workspace" }),
+				start: vi.fn(),
+				list: dockerList,
+				stop: vi.fn(),
+			}),
+			createLimaSandboxService: () => ({
+				resolveConfig: () => ({ workspaceMountPath: "/workspace" }),
+				start: vi.fn(),
+				list: limaList,
+				stop: vi.fn(),
+			}),
+			refreshUiAfterBackendChange: vi.fn(),
+			updateToolBackendStatus: vi.fn(),
+			formatToolBackendStatus: vi.fn(),
+			showStatus: vi.fn(),
+			showWarning: vi.fn(),
+			showError: vi.fn(),
+		};
+		Object.setPrototypeOf(context, InteractiveMode.prototype);
+
+		await interactiveModePrototype.handleSandboxCommand.call(context, "/sandbox list --runtime lima");
+
+		expect(limaList).toHaveBeenCalledWith({ workspaceRoot: "/host/project" });
+		expect(dockerList).not.toHaveBeenCalled();
+	});
+
 	it("attaches and detaches an existing sandbox daemon without using Docker lifecycle commands", async () => {
 		const start = vi.fn(async () => createStartResult());
 		const list = vi.fn(async () => [createContainer()]);
@@ -554,15 +615,18 @@ describe("hidden sandbox command", () => {
 	it("disposes the runtime and every managed sandbox during shutdown cleanup", async () => {
 		const dispose = vi.fn(async () => {});
 		const stopManagedContainers = vi.fn(async () => {});
+		const stopManagedInstances = vi.fn(async () => {});
 
 		await expect(
 			interactiveModePrototype.disposeRuntimeResources.call({
 				runtimeHost: { dispose },
 				createDockerSandboxService: () => ({ stopManagedContainers }),
+				createLimaSandboxService: () => ({ stopManagedInstances }),
 			}),
 		).resolves.toEqual([]);
 		expect(dispose).toHaveBeenCalledOnce();
 		expect(stopManagedContainers).toHaveBeenCalledOnce();
+		expect(stopManagedInstances).toHaveBeenCalledOnce();
 		expect(dispose.mock.invocationCallOrder[0]).toBeLessThan(stopManagedContainers.mock.invocationCallOrder[0]);
 	});
 });
