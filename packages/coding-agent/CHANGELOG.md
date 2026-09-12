@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.2.4](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.2.3...@fleetagent/pi-coding-agent-v0.2.4) (2026-09-12)
+
+
+### Features
+
+* **coding-agent:** add Lima sandbox runtime ([3f19391](https://github.com/fleetagent/pi/commit/3f19391e8b068b59438c29a7444b80c32329b06f))
+* **coding-agent:** show hook execution throbber ([df500a1](https://github.com/fleetagent/pi/commit/df500a196dcf12c31a5db34df411a7ed329f27d2))
+* **coding-agent:** use rootful Docker Lima template ([ea530be](https://github.com/fleetagent/pi/commit/ea530be7fe31b31a960657bc3972ded5a0e099c9))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @fleetagent/pi-agent-core bumped from ^0.2.3 to ^0.2.4
+    * @fleetagent/pi-ai bumped from ^0.2.3 to ^0.2.4
+    * @fleetagent/pi-tui bumped from ^0.2.3 to ^0.2.4
+
 ## [0.2.3](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.2.2...@fleetagent/pi-coding-agent-v0.2.3) (2026-09-10)
 
 
