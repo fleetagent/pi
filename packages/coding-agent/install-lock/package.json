@@ -1,10 +1,10 @@
 {
 	"name": "@fleetagent/pi-coding-agent-install",
-	"version": "0.2.3",
+	"version": "0.2.4",
 	"private": true,
 	"description": "Lockfile root used by the Pi installer and updater.",
 	"dependencies": {
-		"@fleetagent/pi-coding-agent": "0.2.3"
+		"@fleetagent/pi-coding-agent": "0.2.4"
 	},
 	"overrides": {
 		"rimraf": "6.1.2",
