@@ -103,7 +103,11 @@ import type {
 	TerminalInputHandler,
 } from "../../core/extensions/types.ts";
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
-import type { HookExecutionNotice } from "../../core/hooks/types.ts";
+import {
+	HOOK_EXECUTION_CUSTOM_TYPE,
+	type HookExecutionNotice,
+	parseHookExecutionNotice,
+} from "../../core/hooks/types.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
 import { createCompactionSummaryMessage } from "../../core/messages.ts";
 import { defaultModelPerProvider, findExactModelReferenceMatch, resolveModelScope } from "../../core/model-resolver.ts";
@@ -3279,17 +3283,6 @@ export class InteractiveMode {
 		if (oldestComponent) this.chatContainer.removeChild(oldestComponent);
 	}
 
-	private renderHookExecutionNotices(): void {
-		this.hookExecutionComponents = [];
-		for (const notices of this.hookExecutionNotices) {
-			const [firstNotice, ...additionalNotices] = notices;
-			const component = new HookExecutionComponent(firstNotice, this.getMarkdownThemeWithSettings());
-			for (const notice of additionalNotices) component.appendNotice(notice);
-			this.hookExecutionComponents.push(component);
-			this.chatContainer.addChild(component);
-		}
-	}
-
 	private resetHookExecutionGrouping(): void {
 		this.hookExecutionTurnActive = false;
 		this.activeToolHookExecutionGroups.clear();
@@ -3772,6 +3765,12 @@ export class InteractiveMode {
 
 	private addCustomMessage(message: CustomMessage): void {
 		if (!message.display) return;
+		if (message.customType === HOOK_EXECUTION_CUSTOM_TYPE) {
+			const notice = parseHookExecutionNotice(message.content);
+			if (!notice) return;
+			if (!this.appendHookExecutionNoticeToActiveGroup(notice)) this.addHookExecutionNoticeCard(notice);
+			return;
+		}
 		const renderer = this.session.extensionRunner.getMessageRenderer(message.customType);
 		const component = new CustomMessageComponent(message, renderer, this.getMarkdownThemeWithSettings());
 		component.setExpanded(this.toolOutputExpanded);
@@ -3947,8 +3946,11 @@ export class InteractiveMode {
 			this.updateEditorBorderColor();
 		}
 		for (const message of sessionContext.messages) {
+			if (message.role === "user" || message.role === "assistant") this.resetHookExecutionGrouping();
 			this.renderTranscriptMessage(message, renderedPendingTools, options);
+			if (message.role === "assistant") this.hookExecutionTurnActive = true;
 		}
+		this.resetHookExecutionGrouping();
 		for (const [toolCallId, component] of renderedPendingTools) {
 			this.pendingTools.set(toolCallId, component);
 		}
@@ -3957,13 +3959,16 @@ export class InteractiveMode {
 
 	renderInitialMessages(): void {
 		this.transcriptRendered = true;
+		this.hookExecutionSession = this.activeSession;
+		this.hookExecutionNotices = [];
+		this.hookExecutionComponents = [];
+		this.resetHookExecutionGrouping();
 		// Get aligned messages and entries from session context
 		const context = this.activeSession.buildSessionContext();
 		this.renderSessionContext(context, {
 			updateFooter: true,
 			populateHistory: true,
 		});
-		this.renderHookExecutionNotices();
 
 		// Show compaction info if session was compacted
 		const allEntries = this.activeSession.getEntries();
@@ -3990,9 +3995,12 @@ export class InteractiveMode {
 
 	private rebuildChatFromMessages(): void {
 		this.chatContainer.clear();
+		this.hookExecutionSession = this.activeSession;
+		this.hookExecutionNotices = [];
+		this.hookExecutionComponents = [];
+		this.resetHookExecutionGrouping();
 		const context = this.activeSession.buildSessionContext();
 		this.renderSessionContext(context);
-		this.renderHookExecutionNotices();
 	}
 
 	// =========================================================================

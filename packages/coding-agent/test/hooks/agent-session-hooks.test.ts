@@ -10,12 +10,14 @@ import {
 	adaptFileToolUpdatedInputFromClaudeHook,
 	classifyStopFailure,
 } from "../../src/core/agent-session.ts";
-import type {
-	HookEventName,
-	HookExecutionNotice,
-	HookInput,
-	HookSettingsSource,
-	LoadedHooks,
+import {
+	HOOK_EXECUTION_CUSTOM_TYPE,
+	type HookEventName,
+	type HookExecutionNotice,
+	type HookInput,
+	type HookSettingsSource,
+	type LoadedHooks,
+	parseHookExecutionNotice,
 } from "../../src/core/hooks/types.ts";
 import type { ToolExecOptions, ToolOperations } from "../../src/core/tools/operations.ts";
 import { createHarness, getMessageText, type Harness } from "../suite/harness.ts";
@@ -128,7 +130,9 @@ describe("AgentSession Claude-compatible hooks", () => {
 		blocked.setResponses([fauxAssistantMessage("unused")]);
 		await expect(blocked.session.prompt("secret")).rejects.toThrow("policy");
 		expect(blocked.session.messages).toHaveLength(0);
-		expect(blocked.sessionManager.getEntries()).toHaveLength(0);
+		expect(blocked.sessionManager.getEntries()).toEqual([
+			expect.objectContaining({ type: "custom_message", customType: HOOK_EXECUTION_CUSTOM_TYPE }),
+		]);
 		expect(blocked.getPendingResponseCount()).toBe(1);
 
 		let contextCount = 0;
@@ -154,7 +158,7 @@ describe("AgentSession Claude-compatible hooks", () => {
 		expect(accepted.session.messages.filter((message) => getMessageText(message) === "hook-context")).toHaveLength(1);
 	});
 
-	it("publishes matching hook executions to UI observers without creating display messages", async () => {
+	it("persists matching hook executions as context-excluded audit messages and publishes them to UI observers", async () => {
 		const harness = await createHarness({
 			loadedHooks: hooks([
 				{
@@ -171,7 +175,15 @@ describe("AgentSession Claude-compatible hooks", () => {
 		const activity: boolean[] = [];
 		const unsubscribe = harness.session.subscribeToHookExecutions((notice) => notices.push(notice));
 		const unsubscribeActivity = harness.session.subscribeToHookExecutionActivity((active) => activity.push(active));
-		harness.setResponses([fauxAssistantMessage("done")]);
+		let modelSawAuditMessage = false;
+		harness.setResponses([
+			(context) => {
+				modelSawAuditMessage = context.messages.some((message) =>
+					getMessageText(message).includes('"event":"UserPromptSubmit"'),
+				);
+				return fauxAssistantMessage("done");
+			},
+		]);
 
 		await harness.session.prompt("hello");
 		unsubscribe();
@@ -183,6 +195,23 @@ describe("AgentSession Claude-compatible hooks", () => {
 		expect(notices[0].returnedPrompts).toEqual(["visible-to-model"]);
 		expect(notices[0].calls).toHaveLength(1);
 		expect(notices[0].calls[0]).not.toHaveProperty("stdout");
+		const auditEntry = harness.sessionManager
+			.getEntries()
+			.find((entry) => entry.type === "custom_message" && entry.customType === HOOK_EXECUTION_CUSTOM_TYPE);
+		expect(auditEntry).toMatchObject({ type: "custom_message", display: true });
+		expect(auditEntry?.type === "custom_message" ? parseHookExecutionNotice(auditEntry.content) : undefined).toEqual(
+			notices[0],
+		);
+		const persistedMessages = harness.sessionManager.buildSessionContext().messages;
+		const auditIndex = persistedMessages.findIndex(
+			(message) => message.role === "custom" && message.customType === HOOK_EXECUTION_CUSTOM_TYPE,
+		);
+		const userIndex = persistedMessages.findIndex(
+			(message) => message.role === "user" && getMessageText(message) === "hello",
+		);
+		expect(auditIndex).toBeGreaterThanOrEqual(0);
+		expect(auditIndex).toBeLessThan(userIndex);
+		expect(modelSawAuditMessage).toBe(false);
 		expect(harness.session.messages.some((message) => message.role === "custom" && message.display)).toBe(false);
 	});
 

@@ -12,6 +12,7 @@ export const HOOK_EVENT_NAMES = [
 	"PostCompact",
 	"SessionEnd",
 ] as const;
+export const HOOK_EXECUTION_CUSTOM_TYPE = "hook_execution";
 
 export type HookEventName = (typeof HOOK_EVENT_NAMES)[number];
 export type JsonPrimitive = string | number | boolean | null;
@@ -260,12 +261,50 @@ export interface HookExecutionCallNotice {
 	durationMs: number;
 }
 
-/** One completed hook event execution, exposed to host UI observers without session persistence. */
+/** One completed hook event execution persisted as audit-only session data and exposed to host UI observers. */
 export interface HookExecutionNotice {
 	event: HookEventName;
 	subject?: string;
 	calls: HookExecutionCallNotice[];
 	returnedPrompts: string[];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null;
+}
+
+export function parseHookExecutionNotice(value: unknown): HookExecutionNotice | undefined {
+	if (typeof value !== "string") return undefined;
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(value);
+	} catch {
+		return undefined;
+	}
+	if (!isRecord(parsed) || typeof parsed.event !== "string") return undefined;
+	if (!HOOK_EVENT_NAMES.includes(parsed.event as HookEventName)) return undefined;
+	if (parsed.subject !== undefined && typeof parsed.subject !== "string") return undefined;
+	if (
+		!Array.isArray(parsed.returnedPrompts) ||
+		!parsed.returnedPrompts.every((prompt) => typeof prompt === "string")
+	) {
+		return undefined;
+	}
+	if (!Array.isArray(parsed.calls) || !parsed.calls.every(isHookExecutionCallNotice)) return undefined;
+	return parsed as unknown as HookExecutionNotice;
+}
+
+function isHookExecutionCallNotice(value: unknown): value is HookExecutionCallNotice {
+	if (!isRecord(value) || !isRecord(value.source)) return false;
+	return (
+		typeof value.type === "string" &&
+		typeof value.label === "string" &&
+		typeof value.source.kind === "string" &&
+		typeof value.source.path === "string" &&
+		typeof value.status === "string" &&
+		(value.exitCode === null || typeof value.exitCode === "number") &&
+		typeof value.durationMs === "number"
+	);
 }
 
 export type HookExecutionListener = (notice: HookExecutionNotice) => void;

@@ -133,6 +133,7 @@ import type {
 	LoadedHooks,
 	SessionEndReason,
 } from "./hooks/types.ts";
+import { HOOK_EXECUTION_CUSTOM_TYPE } from "./hooks/types.ts";
 import type { InstructionResource } from "./instruction-resource-loader.ts";
 import {
 	type LspConfigurationLayer,
@@ -1475,6 +1476,7 @@ export class AgentSession {
 		};
 	}
 	private _emitHookExecution(notice: HookExecutionNotice): void {
+		this.session.appendCustomMessageEntry(HOOK_EXECUTION_CUSTOM_TYPE, JSON.stringify(notice), true);
 		for (const listener of [...this._hookExecutionListeners]) {
 			try {
 				listener(notice);

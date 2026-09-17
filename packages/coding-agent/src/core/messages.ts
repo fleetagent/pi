@@ -13,6 +13,8 @@ import type {
 	CustomMessage,
 } from "@fleetagent/pi-agent-core";
 
+import { HOOK_EXECUTION_CUSTOM_TYPE } from "./hooks/types.ts";
+
 export type {
 	BashExecutionMessage,
 	BranchSummaryMessage,
@@ -137,7 +139,10 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 						timestamp: m.timestamp,
 					};
 				case "custom": {
-					if (m.customType === STRUCTURED_RESPONSE_INTERNAL_CUSTOM_TYPE) {
+					if (
+						m.customType === STRUCTURED_RESPONSE_INTERNAL_CUSTOM_TYPE ||
+						m.customType === HOOK_EXECUTION_CUSTOM_TYPE
+					) {
 						return undefined;
 					}
 					const content = typeof m.content === "string" ? [{ type: "text" as const, text: m.content }] : m.content;

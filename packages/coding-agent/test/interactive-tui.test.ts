@@ -1,3 +1,4 @@
+import type { CustomMessage } from "@fleetagent/pi-agent-core";
 import type {
 	Component,
 	ScrollViewScrollbar,
@@ -25,7 +26,7 @@ import type {
 	ExtensionHeaderFactory,
 	TerminalInputHandler,
 } from "../src/core/extensions/types.ts";
-import type { HookEventName, HookExecutionNotice } from "../src/core/hooks/types.ts";
+import { HOOK_EXECUTION_CUSTOM_TYPE, type HookEventName, type HookExecutionNotice } from "../src/core/hooks/types.ts";
 import type { FullscreenExitOutput } from "../src/core/settings-manager.ts";
 import type { HookExecutionComponent } from "../src/modes/interactive/components/hook-execution.ts";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
@@ -265,10 +266,10 @@ type InteractiveModePrototype = {
 	setExtensionFooter(this: SetFooterContext, factory: ExtensionFooterFactory | undefined): void;
 	setExtensionHeader(this: HeaderContext, factory: ExtensionHeaderFactory | undefined): void;
 	addHookExecutionNotice(this: HookNoticeContext, notice: HookExecutionNotice): void;
+	addCustomMessage(this: HookNoticeContext, message: CustomMessage): void;
 	appendHookExecutionNoticeToActiveGroup(this: HookNoticeContext, notice: HookExecutionNotice): boolean;
 	addHookExecutionNoticeCard(this: HookNoticeContext, notice: HookExecutionNotice): void;
 	trimHookExecutionNotices(this: HookNoticeContext): void;
-	renderHookExecutionNotices(this: HookNoticeContext): void;
 	handleEvent(this: HookTurnContext, event: AgentSessionEvent): Promise<void>;
 	handleHookExecutionActivity(this: HookActivityContext, active: boolean): void;
 	handleCopyCommand(this: CopyCommandContext, options?: CopyCommandInvocationOptions): Promise<void>;
@@ -551,7 +552,41 @@ describe("createInteractiveTui", () => {
 		expect(requestRender).toHaveBeenCalledTimes(2);
 	});
 
-	it("retains hook cards across transcript rebuilds within the active session", () => {
+	it("renders persisted hook audit messages at their transcript position", () => {
+		initTheme("dark");
+		const context = createHookNoticeContext();
+		const notice: HookExecutionNotice = {
+			event: "Stop",
+			calls: [
+				{
+					type: "command",
+					label: "node check.mjs",
+					source: { kind: "project", path: "/workspace/.pi/settings.json" },
+					status: "completed",
+					exitCode: 0,
+					durationMs: 10,
+				},
+			],
+			returnedPrompts: ["hook feedback"],
+		};
+		const auditMessage: CustomMessage = {
+			role: "custom",
+			customType: HOOK_EXECUTION_CUSTOM_TYPE,
+			content: JSON.stringify(notice),
+			display: true,
+			timestamp: Date.now(),
+		};
+		context.chatContainer.addChild(new Text("before hook", 0, 0));
+		interactiveModePrototype.addCustomMessage.call(context, auditMessage);
+		context.chatContainer.addChild(new Text("after hook", 0, 0));
+
+		const replay = stripTerminalSequences(context.chatContainer.render(100).join("\n"));
+		expect(replay.indexOf("before hook")).toBeLessThan(replay.indexOf("Hook · Stop"));
+		expect(replay.indexOf("Hook · Stop")).toBeLessThan(replay.indexOf("after hook"));
+		expect(replay).toContain("hook feedback");
+	});
+
+	it("bounds live hook cards and retains active-turn grouping", () => {
 		initTheme("dark");
 		const context = createHookNoticeContext();
 		const notice: HookExecutionNotice = {
@@ -574,13 +609,6 @@ describe("createInteractiveTui", () => {
 		const toolNotice: HookExecutionNotice = { ...notice, event: "PreToolUse", subject: "Read" };
 		interactiveModePrototype.addHookExecutionNotice.call(context, toolNotice);
 		interactiveModePrototype.addHookExecutionNotice.call(context, { ...toolNotice, subject: "Bash" });
-		const beforeReplay = stripTerminalSequences(context.chatContainer.render(100).join("\n"));
-		expect(beforeReplay).toContain("Hook · PreToolUse");
-		context.chatContainer.clear();
-		interactiveModePrototype.renderHookExecutionNotices.call(context);
-		const afterReplay = stripTerminalSequences(context.chatContainer.render(100).join("\n"));
-		expect(afterReplay).toBe(beforeReplay);
-
 		interactiveModePrototype.addHookExecutionNotice.call(context, { ...toolNotice, subject: "Write" });
 		expect(context.hookExecutionNotices[0]).toHaveLength(3);
 		expect(context.hookExecutionComponents).toHaveLength(1);
