@@ -14,6 +14,8 @@ describe("InteractiveMode compaction events", () => {
 			chatContainer: { clear: vi.fn() },
 			hookExecutionNotices: [{ event: "PreToolUse" }],
 			hookExecutionComponents: [{ render: vi.fn() }],
+			activeToolHookExecutionGroups: new Map(),
+			hookExecutionTurnActive: true,
 			rebuildChatFromMessages: vi.fn(),
 			addMessageToChat: vi.fn(),
 			showError: vi.fn(),
@@ -44,6 +46,8 @@ describe("InteractiveMode compaction events", () => {
 		expect(fakeThis.chatContainer.clear).toHaveBeenCalledTimes(1);
 		expect(fakeThis.hookExecutionNotices).toEqual([]);
 		expect(fakeThis.hookExecutionComponents).toEqual([]);
+		expect(fakeThis.activeToolHookExecutionGroups.size).toBe(0);
+		expect(fakeThis.hookExecutionTurnActive).toBe(false);
 		expect(fakeThis.rebuildChatFromMessages).toHaveBeenCalledTimes(1);
 		expect(fakeThis.addMessageToChat).toHaveBeenCalledTimes(1);
 		expect(fakeThis.addMessageToChat).toHaveBeenCalledWith(
