@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.2.6](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.2.5...@fleetagent/pi-coding-agent-v0.2.6) (2026-09-17)
+
+
+### Features
+
+* **coding-agent:** load sandbox user instructions ([5db2052](https://github.com/fleetagent/pi/commit/5db2052a7f6365288556d5160e10a3ce58158407))
+
+
+### Bug Fixes
+
+* **coding-agent:** preserve hook audit positions ([acefe3a](https://github.com/fleetagent/pi/commit/acefe3a63d138d15dfa6e482cd17513bb68ee0e3))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @fleetagent/pi-agent-core bumped from ^0.2.5 to ^0.2.6
+    * @fleetagent/pi-ai bumped from ^0.2.5 to ^0.2.6
+    * @fleetagent/pi-tui bumped from ^0.2.5 to ^0.2.6
+
 ## [0.2.5](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.2.4...@fleetagent/pi-coding-agent-v0.2.5) (2026-09-17)
 
 
