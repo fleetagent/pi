@@ -1,6 +1,6 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer as createHttpServer } from "node:http";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
@@ -18,6 +18,7 @@ import {
 } from "../src/core/remote-workspace-protocol/contract.ts";
 import { LocalSessionManager } from "../src/core/session/local-session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
+import { createRemoteToolOperations } from "../src/core/tools/operations.ts";
 import { runDaemonCommand } from "../src/daemon/command.ts";
 import { DAEMON_WEBSOCKET_PROTOCOL, type DaemonConfiguration, parseDaemonCommand } from "../src/daemon/config.ts";
 import { printDaemonHelp } from "../src/daemon/help.ts";
@@ -177,6 +178,7 @@ describe.sequential("pi --daemon CLI and lifecycle", () => {
 	it("validates dedicated CLI and environment configuration without HOST/PORT aliases", async () => {
 		const workspaceRoot = await createTemporaryDirectory();
 		const temporaryRoot = await createTemporaryDirectory();
+		const sandboxHome = await createTemporaryDirectory();
 		const command = await parseDaemonCommand(
 			[
 				"--daemon",
@@ -190,7 +192,13 @@ describe.sequential("pi --daemon CLI and lifecycle", () => {
 				"https://example.test",
 				...(process.getuid?.() === 0 ? ["--daemon-allow-root"] : []),
 			],
-			{ HOST: "0.0.0.0", PORT: "1", PI_DAEMON_PORT: "8123", PI_DAEMON_TEMP_ROOT: temporaryRoot },
+			{
+				HOST: "0.0.0.0",
+				PORT: "1",
+				HOME: sandboxHome,
+				PI_DAEMON_PORT: "8123",
+				PI_DAEMON_TEMP_ROOT: temporaryRoot,
+			},
 			workspaceRoot,
 		);
 		expect(command.configuration).toMatchObject({
@@ -199,6 +207,7 @@ describe.sequential("pi --daemon CLI and lifecycle", () => {
 			workspaceRoot,
 			temporaryRoot,
 			allowedOrigins: ["https://example.test"],
+			userAgentsPath: join(sandboxHome, ".pi", "AGENTS.md"),
 		});
 		await expect(parseDaemonCommand(["--daemon", "--provider", "x"], {}, workspaceRoot)).rejects.toThrow(
 			"Unknown or incompatible option",
@@ -375,6 +384,25 @@ describe.sequential("pi --daemon CLI and lifecycle", () => {
 		});
 		await server.close();
 		expect(socket.readyState).toBe(WebSocket.CLOSED);
+	});
+
+	it("exposes the daemon user's ~/.pi/AGENTS.md as a remote context resource", async () => {
+		const workspaceRoot = await createTemporaryDirectory();
+		const sandboxHome = await createTemporaryDirectory();
+		const userAgentsPath = join(sandboxHome, ".pi", "AGENTS.md");
+		await mkdir(join(sandboxHome, ".pi"), { recursive: true });
+		await writeFile(userAgentsPath, "Sandbox-only user instructions.", "utf8");
+		const server = createDaemonServer(await createConfiguration(workspaceRoot, { userAgentsPath }));
+		const address = await server.listen();
+		const operations = await createRemoteToolOperations(address.url);
+		try {
+			await expect(operations.readResource("AGENTS.md")).resolves.toEqual(
+				Buffer.from("Sandbox-only user instructions.", "utf8"),
+			);
+		} finally {
+			await operations.dispose();
+			await server.close();
+		}
 	});
 
 	it("enforces fixed path, bearer authentication, and exact Origin before allocating a connection", async () => {

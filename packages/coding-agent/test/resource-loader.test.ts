@@ -75,8 +75,9 @@ class FakeRemoteToolOperations implements ToolOperations {
 
 class FakeDaemonToolOperations extends FakeRemoteToolOperations {
 	async readResource(path: string): Promise<Buffer> {
-		if (path !== "SANDBOX.md") throw new Error(`missing resource: ${path}`);
-		return Buffer.from("Sandbox instructions from daemon.", "utf8");
+		if (path === "AGENTS.md") return Buffer.from("Sandbox user instructions.", "utf8");
+		if (path === "SANDBOX.md") return Buffer.from("Sandbox instructions from daemon.", "utf8");
+		throw new Error(`missing resource: ${path}`);
 	}
 
 	override getBackendInfo(): ToolBackendInfo {
@@ -118,7 +119,7 @@ describe("DefaultResourceLoader", () => {
 			expect(loader.getThemes().themes).toEqual([]);
 		});
 
-		it("loads daemon sandbox instructions as a project context file", async () => {
+		it("loads daemon user and sandbox instructions as context files", async () => {
 			const loader = new DefaultResourceLoader({
 				cwd,
 				agentDir,
@@ -127,11 +128,18 @@ describe("DefaultResourceLoader", () => {
 
 			await loader.reload();
 
-			expect(loader.getAgentsFiles().agentsFiles).toContainEqual(
-				expect.objectContaining({
-					path: "SANDBOX.md",
-					content: "Sandbox instructions from daemon.",
-				}),
+			expect(loader.getAgentsFiles().agentsFiles).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({
+						path: "~/.pi/AGENTS.md",
+						content: "Sandbox user instructions.",
+						sourceInfo: expect.objectContaining({ source: "remote", scope: "user" }),
+					}),
+					expect.objectContaining({
+						path: "SANDBOX.md",
+						content: "Sandbox instructions from daemon.",
+					}),
+				]),
 			);
 		});
 

@@ -42,6 +42,7 @@ The image sets:
 - daemon port inside the container: `8787`
 - process execution: enabled for Pi shell/tool execution inside the container
 - user: unprivileged `pi` user with uid `1000`
+- sandbox-only user instructions: `/home/pi/.pi/AGENTS.md` (loaded when present; run `/reload` after changing it)
 
 `PI_DAEMON_TOKEN` is intentionally not baked into the image. `/sandbox start` generates a token and passes it through the container environment. For manual runs, provide a long random token yourself:
 

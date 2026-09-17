@@ -1,5 +1,5 @@
 import { readFile, realpath, stat } from "node:fs/promises";
-import { isAbsolute, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import {
 	DEFAULT_REMOTE_WORKSPACE_PROTOCOL_LIMITS,
 	type RemoteWorkspaceProtocolLimits,
@@ -29,6 +29,7 @@ export interface DaemonConfiguration {
 	readonly forwardedEnvironment: readonly string[];
 	readonly lspConfigPath?: string;
 	readonly sandboxInstructionsPath?: string;
+	readonly userAgentsPath?: string;
 	readonly trustProjectLsp: boolean;
 	readonly maxConnections: number;
 	readonly maxGlobalRequests: number;
@@ -506,6 +507,7 @@ export async function parseDaemonCommand(
 			sandboxInstructionsPath: environment.PI_DAEMON_SANDBOX_INSTRUCTIONS
 				? resolve(startupCwd, environment.PI_DAEMON_SANDBOX_INSTRUCTIONS)
 				: undefined,
+			userAgentsPath: environment.HOME ? join(environment.HOME, ".pi", "AGENTS.md") : undefined,
 			maxConnections,
 			maxGlobalRequests,
 			maxGlobalTransfers,

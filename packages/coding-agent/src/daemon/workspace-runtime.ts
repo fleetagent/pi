@@ -559,7 +559,13 @@ async function readDaemonResource(
 	runtime: DaemonRequestRuntime,
 ): Promise<Record<string, unknown>> {
 	const path = params.path as string;
-	if (path !== "SANDBOX.md" || !runtime.configuration.sandboxInstructionsPath) {
+	const resourcePath =
+		path === "SANDBOX.md"
+			? runtime.configuration.sandboxInstructionsPath
+			: path === "AGENTS.md"
+				? runtime.configuration.userAgentsPath
+				: undefined;
+	if (!resourcePath) {
 		throw new RemoteWorkspaceRequestError({
 			code: "not_available",
 			message: "Requested daemon resource is not available",
@@ -567,10 +573,7 @@ async function readDaemonResource(
 			retryable: false,
 		});
 	}
-	return withDaemonWorkspace(
-		{ contentBase64: (await readFile(runtime.configuration.sandboxInstructionsPath)).toString("base64") },
-		runtime.workspace,
-	);
+	return withDaemonWorkspace({ contentBase64: (await readFile(resourcePath)).toString("base64") }, runtime.workspace);
 }
 
 function getDaemonLspStatus(runtime: DaemonRequestRuntime): Record<string, unknown> {
@@ -709,7 +712,7 @@ export function createDaemonWorkspaceRuntime(configuration: DaemonConfiguration)
 		})),
 		operations: [
 			...PRIMITIVE_OPERATIONS.filter((method) => method !== "workspace.exec" || configuration.allowProcessExec),
-			...(configuration.sandboxInstructionsPath ? (["resource.read"] as const) : []),
+			...(configuration.sandboxInstructionsPath || configuration.userAgentsPath ? (["resource.read"] as const) : []),
 			...(lspRuntime ? (["lsp.status"] as const) : []),
 		],
 	};

@@ -47,6 +47,7 @@ ENV PATH=/home/pi/.local/share/mise/shims:/home/pi/.npm-global/bin:/usr/local/sb
 RUN mkdir -p \
 		/home/pi/.cache \
 		/home/pi/.config \
+		/home/pi/.pi \
 		/home/pi/.local/share \
 		/home/pi/.npm-global \
 	&& mise install "node@${NODE_VERSION}" \

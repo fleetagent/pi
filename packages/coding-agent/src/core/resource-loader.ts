@@ -25,7 +25,7 @@ import { loadRules, loadRulesWithOperations } from "./rules.ts";
 import { SettingsManager } from "./settings-manager.ts";
 import type { LoadSkillsResult, Skill } from "./skills.ts";
 import { loadSkills, loadSkillsWithOperations } from "./skills.ts";
-import { createSourceInfo, createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
+import { createSourceInfo, createSyntheticSourceInfo, type SourceInfo, type SourceScope } from "./source-info.ts";
 import { resetTimings } from "./timings.ts";
 import type { ToolBackendInfo, ToolOperations } from "./tools/operations.ts";
 import type { WorkspaceIdentity } from "./workspace-identity.ts";
@@ -279,7 +279,18 @@ async function loadProjectContextFilesWithOperations(
 		contextFiles.push(globalContext);
 		seenPaths.add(globalContext.path);
 	}
-
+	const sandboxUserContext = await loadDaemonContextFileWithOperations(
+		options.operations,
+		options.workspace,
+		"AGENTS.md",
+		"~/.pi/AGENTS.md",
+		"user",
+		"~/.pi",
+	);
+	if (sandboxUserContext && !seenPaths.has(sandboxUserContext.path)) {
+		contextFiles.push(sandboxUserContext);
+		seenPaths.add(sandboxUserContext.path);
+	}
 	const ancestorContextFiles: ProjectContextFile[] = [];
 	let currentDir = options.cwd;
 	while (true) {
@@ -299,26 +310,37 @@ async function loadProjectContextFilesWithOperations(
 		currentDir = parentDir;
 	}
 	contextFiles.push(...ancestorContextFiles);
-	const sandboxContext = await loadSandboxContextFileWithOperations(options.operations, options.workspace);
+	const sandboxContext = await loadDaemonContextFileWithOperations(
+		options.operations,
+		options.workspace,
+		"SANDBOX.md",
+		"SANDBOX.md",
+		"project",
+		options.workspace?.root,
+	);
 	if (sandboxContext && !seenPaths.has(sandboxContext.path)) contextFiles.push(sandboxContext);
 	return contextFiles;
 }
 
-async function loadSandboxContextFileWithOperations(
+async function loadDaemonContextFileWithOperations(
 	operations: ToolOperations,
-	workspace?: WorkspaceIdentity,
+	workspace: WorkspaceIdentity | undefined,
+	resourcePath: string,
+	displayPath: string,
+	scope: SourceScope,
+	baseDir: string | undefined,
 ): Promise<ProjectContextFile | null> {
 	if (!workspace || !operations.readResource) return null;
 	try {
-		const content = (await operations.readResource("SANDBOX.md")).toString("utf-8");
+		const content = (await operations.readResource(resourcePath)).toString("utf-8");
 		return {
-			path: "SANDBOX.md",
+			path: displayPath,
 			content,
-			sourceInfo: createSyntheticSourceInfo("SANDBOX.md", {
+			sourceInfo: createSyntheticSourceInfo(displayPath, {
 				source: "remote",
-				scope: "project",
+				scope,
 				origin: "top-level",
-				baseDir: workspace.root,
+				baseDir,
 				workspace,
 			}),
 		};

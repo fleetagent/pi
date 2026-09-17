@@ -186,6 +186,7 @@
 * Add authenticated remote project-resource provenance, remote subagent preset discovery, and operator-owned colocated LSP tools/status for daemon workspaces.
 * Add integrated `pi --daemon` documentation and a Docker example that runs the packaged Pi CLI.
 * Add hidden user-only `/sandbox start|list|stop` documentation, settings references, and a Docker base-image guide for `pi --daemon` sandbox containers.
+* Load the sandbox daemon user's `~/.pi/AGENTS.md` as user-scoped context, allowing instructions that apply only inside Docker or Lima sandboxes.
 * Add managed Lima VM sandboxes, command-level template overrides, named-instance reuse, writable `/workspace` mounts, guest daemon startup, and runtime-specific listing.
 * Add host-owned `session_search` and `session_entry_get` tools for bounded regex searching of finalized active-session history across compaction boundaries and fetching exact model-visible entries by ID without routing session data through workspace backends.
 * Allow extension `tool_call` policies to mark blocked calls as terminating, skipping the follow-up model call when every finalized batch result terminates ([upstream `1eb988cfe`](https://github.com/fleetagent/pi/commit/1eb988cfe88fb0ff740ff62583d2f16359f7b6b0)).

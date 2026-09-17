@@ -68,6 +68,7 @@ The mounted workspace is read/write. Any process in the container can modify fil
 
 The default image is `ghcr.io/fleetagent/pi-sandbox:latest`. The sandbox image uses the integrated `pi --daemon` command from `@fleetagent/pi-coding-agent`; the retired `@fleetagent/pi-daemon` package and `pi-daemon` binary are not used or supported.
 
+When a sandbox daemon connects, Pi also loads `~/.pi/AGENTS.md` from the daemon user's home directory as user-scoped context. This is separate from the orchestrator's global instructions and lets custom Docker images or Lima users define instructions that apply only inside the sandbox. Create or update the file inside the sandbox, then run `/reload` to refresh context.
 Configuration precedence for a start is:
 
 1. command flags: `/sandbox start --runtime <runtime>`, `--image <image>`, `--name <lima-instance>`, and `--template <lima-template>`;

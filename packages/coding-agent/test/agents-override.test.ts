@@ -65,8 +65,9 @@ class PermissiveDirectoryRemoteOperations extends FilesystemRemoteOperations {
 
 class FilesystemDaemonOperations extends FilesystemRemoteOperations {
 	async readResource(path: string): Promise<Buffer> {
-		if (path !== "SANDBOX.md") throw new Error(`missing resource: ${path}`);
-		return Buffer.from("Sandbox instructions.", "utf8");
+		if (path === "AGENTS.md") return Buffer.from("Sandbox user instructions.", "utf8");
+		if (path === "SANDBOX.md") return Buffer.from("Sandbox instructions.", "utf8");
+		throw new Error(`missing resource: ${path}`);
 	}
 
 	override getBackendInfo(): ToolBackendInfo {
@@ -164,10 +165,16 @@ describe("AGENTS.override.md", () => {
 		await loader.reload();
 
 		expect(loader.getAgentsFiles().agentsFiles.map((file) => file.content)).toEqual([
+			"Sandbox user instructions.",
 			"daemon override",
 			"Sandbox instructions.",
 		]);
 		expect(loader.getAgentsFiles().agentsFiles[0]?.sourceInfo).toMatchObject({
+			source: "remote",
+			scope: "user",
+			workspace: { id: "workspace", root: daemonRoot },
+		});
+		expect(loader.getAgentsFiles().agentsFiles[1]?.sourceInfo).toMatchObject({
 			source: "remote",
 			workspace: { id: "workspace", root: daemonRoot },
 		});
