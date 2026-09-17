@@ -19,12 +19,13 @@ import {
 } from "@fleetagent/pi-tui";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
+import type { AgentSessionEvent } from "../src/core/agent-session.ts";
 import type {
 	ExtensionFooterFactory,
 	ExtensionHeaderFactory,
 	TerminalInputHandler,
 } from "../src/core/extensions/types.ts";
-import type { HookExecutionNotice } from "../src/core/hooks/types.ts";
+import type { HookEventName, HookExecutionNotice } from "../src/core/hooks/types.ts";
 import type { FullscreenExitOutput } from "../src/core/settings-manager.ts";
 import type { HookExecutionComponent } from "../src/modes/interactive/components/hook-execution.ts";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
@@ -186,14 +187,31 @@ type CopyCommandContext = {
 	showError: (message: string) => void;
 };
 
+type ToolHookEvent = "PreToolUse" | "PostToolUse" | "PostToolUseFailure";
+
 type HookNoticeContext = {
 	activeSession: HookNoticeSession;
 	hookExecutionSession: object | undefined;
-	hookExecutionNotices: HookExecutionNotice[];
+	hookExecutionNotices: HookExecutionNotice[][];
 	hookExecutionComponents: HookExecutionComponent[];
+	activeToolHookExecutionGroups: Map<ToolHookEvent, HookExecutionNotice[]>;
+	hookExecutionTurnActive: boolean;
 	chatContainer: Container;
 	ui: RenderRequestUi;
 	getMarkdownThemeWithSettings: typeof getMarkdownTheme;
+	resetHookExecutionGrouping(): void;
+	appendHookExecutionNoticeToActiveGroup(notice: HookExecutionNotice): boolean;
+	addHookExecutionNoticeCard(notice: HookExecutionNotice): void;
+	trimHookExecutionNotices(): void;
+};
+
+interface HookTurnFooter {
+	invalidate(): void;
+}
+
+type HookTurnContext = HookNoticeContext & {
+	isInitialized: boolean;
+	footer: HookTurnFooter;
 };
 
 interface HookActivityLoader extends Component {
@@ -247,7 +265,11 @@ type InteractiveModePrototype = {
 	setExtensionFooter(this: SetFooterContext, factory: ExtensionFooterFactory | undefined): void;
 	setExtensionHeader(this: HeaderContext, factory: ExtensionHeaderFactory | undefined): void;
 	addHookExecutionNotice(this: HookNoticeContext, notice: HookExecutionNotice): void;
+	appendHookExecutionNoticeToActiveGroup(this: HookNoticeContext, notice: HookExecutionNotice): boolean;
+	addHookExecutionNoticeCard(this: HookNoticeContext, notice: HookExecutionNotice): void;
+	trimHookExecutionNotices(this: HookNoticeContext): void;
 	renderHookExecutionNotices(this: HookNoticeContext): void;
+	handleEvent(this: HookTurnContext, event: AgentSessionEvent): Promise<void>;
 	handleHookExecutionActivity(this: HookActivityContext, active: boolean): void;
 	handleCopyCommand(this: CopyCommandContext, options?: CopyCommandInvocationOptions): Promise<void>;
 	handleRightClickPaste(this: RightClickPasteContext): Promise<void>;
@@ -256,6 +278,26 @@ type InteractiveModePrototype = {
 
 const interactiveModePrototype = InteractiveMode.prototype as unknown as InteractiveModePrototype;
 
+function createHookNoticeContext(): HookNoticeContext {
+	return {
+		activeSession: { getSessionId: () => "shared-session-id" },
+		hookExecutionSession: undefined,
+		hookExecutionNotices: [],
+		hookExecutionComponents: [],
+		activeToolHookExecutionGroups: new Map<ToolHookEvent, HookExecutionNotice[]>(),
+		hookExecutionTurnActive: false,
+		chatContainer: new Container(),
+		ui: { requestRender: vi.fn() },
+		getMarkdownThemeWithSettings: getMarkdownTheme,
+		resetHookExecutionGrouping() {
+			this.hookExecutionTurnActive = false;
+			this.activeToolHookExecutionGroups.clear();
+		},
+		appendHookExecutionNoticeToActiveGroup: interactiveModePrototype.appendHookExecutionNoticeToActiveGroup,
+		addHookExecutionNoticeCard: interactiveModePrototype.addHookExecutionNoticeCard,
+		trimHookExecutionNotices: interactiveModePrototype.trimHookExecutionNotices,
+	};
+}
 describe("createInteractiveTuiReference", () => {
 	it("calls the method captured before a custom wrapper replaces it", () => {
 		const renderer = {
@@ -425,6 +467,59 @@ describe("createInteractiveTui", () => {
 		expect(requestRender).not.toHaveBeenCalled();
 	});
 
+	it("groups tool-hook notices by event only within the active turn", async () => {
+		initTheme("dark");
+		const context = Object.assign(createHookNoticeContext(), {
+			isInitialized: true,
+			footer: { invalidate: vi.fn() },
+		}) as HookTurnContext;
+		context.hookExecutionSession = context.activeSession;
+		const hookNotice = (event: HookEventName, subject: string): HookExecutionNotice => ({
+			event,
+			subject,
+			calls: [
+				{
+					type: "command",
+					label: "node check.mjs",
+					source: { kind: "project", path: "/workspace/.pi/settings.json" },
+					status: "completed",
+					exitCode: 0,
+					durationMs: 10,
+				},
+			],
+			returnedPrompts: [],
+		});
+
+		await interactiveModePrototype.handleEvent.call(context, { type: "turn_start" });
+		interactiveModePrototype.addHookExecutionNotice.call(context, hookNotice("PreToolUse", "Read"));
+		interactiveModePrototype.addHookExecutionNotice.call(context, hookNotice("PreToolUse", "Bash"));
+		interactiveModePrototype.addHookExecutionNotice.call(context, hookNotice("PostToolUse", "Read"));
+		interactiveModePrototype.addHookExecutionNotice.call(context, hookNotice("PostToolUse", "Bash"));
+		interactiveModePrototype.addHookExecutionNotice.call(context, hookNotice("PostToolUseFailure", "Write"));
+		interactiveModePrototype.addHookExecutionNotice.call(context, hookNotice("Stop", "lifecycle"));
+		interactiveModePrototype.addHookExecutionNotice.call(context, hookNotice("Stop", "lifecycle"));
+
+		expect(context.hookExecutionNotices.map((group) => group.length)).toEqual([2, 2, 1, 1, 1]);
+		expect(context.hookExecutionComponents).toHaveLength(5);
+		const activeTurnRender = stripTerminalSequences(context.chatContainer.render(100).join("\n"));
+		expect(activeTurnRender).toContain("Hook · PreToolUse");
+		expect(activeTurnRender).toContain("Hook · PostToolUse");
+		expect(activeTurnRender.match(/Hook · Stop/g)).toHaveLength(2);
+
+		await interactiveModePrototype.handleEvent.call(context, {
+			type: "turn_end",
+			message: undefined as never,
+			toolResults: [],
+		});
+		interactiveModePrototype.addHookExecutionNotice.call(context, hookNotice("PreToolUse", "Read"));
+		await interactiveModePrototype.handleEvent.call(context, { type: "turn_start" });
+		interactiveModePrototype.addHookExecutionNotice.call(context, hookNotice("PreToolUse", "Read"));
+		interactiveModePrototype.addHookExecutionNotice.call(context, hookNotice("PreToolUse", "Read"));
+
+		expect(context.hookExecutionNotices.map((group) => group.length)).toEqual([2, 2, 1, 1, 1, 1, 2]);
+		expect(context.hookExecutionComponents).toHaveLength(7);
+	});
+
 	it("shows a Running hooks throbber while hooks execute", () => {
 		const setMessage = vi.fn<(message: string) => void>();
 		const stop = vi.fn();
@@ -458,15 +553,7 @@ describe("createInteractiveTui", () => {
 
 	it("retains hook cards across transcript rebuilds within the active session", () => {
 		initTheme("dark");
-		const context: HookNoticeContext = {
-			activeSession: { getSessionId: () => "shared-session-id" },
-			hookExecutionSession: undefined,
-			hookExecutionNotices: [],
-			hookExecutionComponents: [],
-			chatContainer: new Container(),
-			ui: { requestRender: vi.fn() },
-			getMarkdownThemeWithSettings: getMarkdownTheme,
-		};
+		const context = createHookNoticeContext();
 		const notice: HookExecutionNotice = {
 			event: "Stop",
 			calls: [
@@ -482,12 +569,22 @@ describe("createInteractiveTui", () => {
 			returnedPrompts: ["hook feedback"],
 		};
 
-		interactiveModePrototype.addHookExecutionNotice.call(context, notice);
-		expect(stripTerminalSequences(context.chatContainer.render(100).join("\n"))).toContain("hook feedback");
+		context.hookExecutionSession = context.activeSession;
+		context.hookExecutionTurnActive = true;
+		const toolNotice: HookExecutionNotice = { ...notice, event: "PreToolUse", subject: "Read" };
+		interactiveModePrototype.addHookExecutionNotice.call(context, toolNotice);
+		interactiveModePrototype.addHookExecutionNotice.call(context, { ...toolNotice, subject: "Bash" });
+		const beforeReplay = stripTerminalSequences(context.chatContainer.render(100).join("\n"));
+		expect(beforeReplay).toContain("Hook · PreToolUse");
 		context.chatContainer.clear();
 		interactiveModePrototype.renderHookExecutionNotices.call(context);
-		expect(stripTerminalSequences(context.chatContainer.render(100).join("\n"))).toContain("hook feedback");
+		const afterReplay = stripTerminalSequences(context.chatContainer.render(100).join("\n"));
+		expect(afterReplay).toBe(beforeReplay);
 
+		interactiveModePrototype.addHookExecutionNotice.call(context, { ...toolNotice, subject: "Write" });
+		expect(context.hookExecutionNotices[0]).toHaveLength(3);
+		expect(context.hookExecutionComponents).toHaveLength(1);
+		expect(stripTerminalSequences(context.chatContainer.render(100).join("\n"))).toContain("Hook · PreToolUse");
 		for (let index = 1; index <= 200; index++) {
 			interactiveModePrototype.addHookExecutionNotice.call(context, {
 				...notice,
@@ -506,7 +603,7 @@ describe("createInteractiveTui", () => {
 		expect(context.hookExecutionNotices).toHaveLength(1);
 		expect(context.hookExecutionComponents).toHaveLength(1);
 		expect(context.chatContainer.children).toHaveLength(1);
-		expect(context.hookExecutionNotices[0].event).toBe("SessionEnd");
+		expect(context.hookExecutionNotices[0][0].event).toBe("SessionEnd");
 	});
 
 	it("replaces the renderer while preserving state and prints transcript output on shutdown", async () => {

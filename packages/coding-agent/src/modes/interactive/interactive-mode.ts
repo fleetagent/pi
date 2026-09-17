@@ -290,7 +290,11 @@ function hasDefaultModelProvider(providerId: string): providerId is keyof typeof
 }
 
 const MAX_TUI_HOOK_EXECUTION_NOTICES = 200;
+type ToolHookEvent = "PreToolUse" | "PostToolUse" | "PostToolUseFailure";
 
+function isToolHookEvent(event: string): event is ToolHookEvent {
+	return event === "PreToolUse" || event === "PostToolUse" || event === "PostToolUseFailure";
+}
 const BEDROCK_PROVIDER_ID = "amazon-bedrock";
 
 const BUILT_IN_MODEL_PROVIDERS = new Set<string>(getProviders());
@@ -624,8 +628,10 @@ export class InteractiveMode {
 	private hookExecutionActivityDepth = 0;
 	private hookExecutionActivityOwnsLoader = false;
 	private hookExecutionSession?: Session;
-	private hookExecutionNotices: HookExecutionNotice[] = [];
+	private hookExecutionNotices: HookExecutionNotice[][] = [];
 	private hookExecutionComponents: HookExecutionComponent[] = [];
+	private activeToolHookExecutionGroups = new Map<ToolHookEvent, HookExecutionNotice[]>();
+	private hookExecutionTurnActive = false;
 	private signalCleanupHandlers: Array<() => void> = [];
 
 	// Track if editor is in bash mode (text starts with !)
@@ -2019,6 +2025,7 @@ export class InteractiveMode {
 		if (this.hookExecutionSession !== undefined && this.hookExecutionSession !== activeSession) {
 			this.hookExecutionNotices = [];
 			this.hookExecutionComponents = [];
+			this.resetHookExecutionGrouping();
 		}
 		this.hookExecutionSession = activeSession;
 		this.applyRuntimeSettings();
@@ -3231,26 +3238,61 @@ export class InteractiveMode {
 			this.hookExecutionNotices = [];
 			for (const component of this.hookExecutionComponents) this.chatContainer.removeChild(component);
 			this.hookExecutionComponents = [];
+			this.resetHookExecutionGrouping();
 		}
-		this.hookExecutionNotices.push(notice);
+		if (!this.appendHookExecutionNoticeToActiveGroup(notice)) this.addHookExecutionNoticeCard(notice);
+		this.ui.requestRender();
+	}
+
+	private appendHookExecutionNoticeToActiveGroup(notice: HookExecutionNotice): boolean {
+		if (!this.hookExecutionTurnActive || !isToolHookEvent(notice.event)) return false;
+		const activeGroup = this.activeToolHookExecutionGroups.get(notice.event);
+		if (!activeGroup) return false;
+		const component = this.hookExecutionComponents[this.hookExecutionNotices.indexOf(activeGroup)];
+		if (!component) return false;
+		activeGroup.push(notice);
+		component.appendNotice(notice);
+		return true;
+	}
+
+	private addHookExecutionNoticeCard(notice: HookExecutionNotice): void {
+		const group = [notice];
+		this.hookExecutionNotices.push(group);
 		const component = new HookExecutionComponent(notice, this.getMarkdownThemeWithSettings());
 		this.hookExecutionComponents.push(component);
 		this.chatContainer.addChild(component);
-		if (this.hookExecutionNotices.length > MAX_TUI_HOOK_EXECUTION_NOTICES) {
-			this.hookExecutionNotices.shift();
-			const oldestComponent = this.hookExecutionComponents.shift();
-			if (oldestComponent) this.chatContainer.removeChild(oldestComponent);
+		if (this.hookExecutionTurnActive && isToolHookEvent(notice.event)) {
+			this.activeToolHookExecutionGroups.set(notice.event, group);
 		}
-		this.ui.requestRender();
+		this.trimHookExecutionNotices();
+	}
+
+	private trimHookExecutionNotices(): void {
+		if (this.hookExecutionNotices.length <= MAX_TUI_HOOK_EXECUTION_NOTICES) return;
+		const oldestGroup = this.hookExecutionNotices.shift();
+		if (oldestGroup) {
+			for (const [event, active] of this.activeToolHookExecutionGroups) {
+				if (active === oldestGroup) this.activeToolHookExecutionGroups.delete(event);
+			}
+		}
+		const oldestComponent = this.hookExecutionComponents.shift();
+		if (oldestComponent) this.chatContainer.removeChild(oldestComponent);
 	}
 
 	private renderHookExecutionNotices(): void {
 		this.hookExecutionComponents = [];
-		for (const notice of this.hookExecutionNotices) {
-			const component = new HookExecutionComponent(notice, this.getMarkdownThemeWithSettings());
+		for (const notices of this.hookExecutionNotices) {
+			const [firstNotice, ...additionalNotices] = notices;
+			const component = new HookExecutionComponent(firstNotice, this.getMarkdownThemeWithSettings());
+			for (const notice of additionalNotices) component.appendNotice(notice);
 			this.hookExecutionComponents.push(component);
 			this.chatContainer.addChild(component);
 		}
+	}
+
+	private resetHookExecutionGrouping(): void {
+		this.hookExecutionTurnActive = false;
+		this.activeToolHookExecutionGroups.clear();
 	}
 
 	private subscribeToAgent(): void {
@@ -3458,6 +3500,7 @@ export class InteractiveMode {
 			this.chatContainer.clear();
 			this.hookExecutionNotices = [];
 			this.hookExecutionComponents = [];
+			this.resetHookExecutionGrouping();
 			this.rebuildChatFromMessages();
 			this.addMessageToChat(
 				createCompactionSummaryMessage(event.result.summary, event.result.tokensBefore, new Date().toISOString()),
@@ -3590,7 +3633,15 @@ export class InteractiveMode {
 		this.footer.invalidate();
 		switch (event.type) {
 			case "agent_start":
+				this.resetHookExecutionGrouping();
 				this.handleAgentStart();
+				break;
+			case "turn_start":
+				this.hookExecutionTurnActive = true;
+				this.activeToolHookExecutionGroups.clear();
+				break;
+			case "turn_end":
+				this.resetHookExecutionGrouping();
 				break;
 			case "queue_update":
 				this.updatePendingMessagesDisplay();
@@ -3640,6 +3691,7 @@ export class InteractiveMode {
 				break;
 			}
 			case "agent_end":
+				this.resetHookExecutionGrouping();
 				this.handleAgentEnd();
 				break;
 			case "agent_settled":
@@ -3647,6 +3699,7 @@ export class InteractiveMode {
 				this.ui.requestRender();
 				break;
 			case "compaction_start":
+				this.resetHookExecutionGrouping();
 				this.handleCompactionStart(event);
 				break;
 			case "compaction_end":

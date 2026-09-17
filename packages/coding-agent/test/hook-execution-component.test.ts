@@ -35,4 +35,55 @@ describe("HookExecutionComponent", () => {
 		expect(notice.calls[0]).not.toHaveProperty("stdout");
 		expect(rendered).toMatch(/\u001b\[48;(?:2|5);/);
 	});
+
+	it("groups repeated hook calls, subjects, statuses, prompts, and average duration", () => {
+		const component = new HookExecutionComponent({
+			event: "PreToolUse",
+			subject: "Read",
+			calls: [{ ...notice.calls[0], durationMs: 40 }],
+			returnedPrompts: ["Shared feedback."],
+		});
+		component.appendNotice({
+			event: "PreToolUse",
+			subject: "Bash",
+			calls: [{ ...notice.calls[0], durationMs: 41 }],
+			returnedPrompts: ["Shared feedback.", "Bash feedback."],
+		});
+		component.appendNotice({
+			event: "PreToolUse",
+			subject: "Read",
+			calls: [{ ...notice.calls[0], status: "error", exitCode: 1, durationMs: 43 }],
+			returnedPrompts: ["Shared feedback."],
+		});
+
+		const text = stripAnsi(component.render(120).join("\n"));
+
+		expect(text).toContain("Hook · PreToolUse");
+		expect(text).not.toContain("PreToolUse (x3)");
+		expect(text).toContain("Tools: Read ×2, Bash");
+		expect(text.match(/command node \.pi\/hooks\/check\.mjs/g)).toHaveLength(1);
+		expect(text).toContain("completed (exit 0) ×2; error (exit 1), ~41.3ms");
+		expect(text).toContain("Returned prompts");
+		expect(text).toContain("Prompt 1 ×3");
+		expect(text.match(/Shared feedback\./g)).toHaveLength(1);
+		expect(text).toContain("Prompt 2");
+		expect(text.match(/Bash feedback\./g)).toHaveLength(1);
+	});
+
+	it("uses the displayed label when grouping handler rows", () => {
+		const sharedPrefix = "a".repeat(310);
+		const component = new HookExecutionComponent({
+			event: "PreToolUse",
+			calls: [{ ...notice.calls[0], label: `${sharedPrefix}first`, durationMs: 1 }],
+			returnedPrompts: [],
+		});
+		component.appendNotice({
+			event: "PreToolUse",
+			calls: [{ ...notice.calls[0], label: `${sharedPrefix}second`, durationMs: 2 }],
+			returnedPrompts: [],
+		});
+
+		const text = stripAnsi(component.render(500).join("\n"));
+		expect(text).toContain("completed (exit 0) ×2, ~1.5ms");
+	});
 });

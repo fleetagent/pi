@@ -202,6 +202,7 @@
 * Retire daemon file-transfer and resource-limit work from the separate package into the integrated, bounded `pi --daemon` protocol.
 ### Fixed
 
+* Group repeated tool-hook activity into per-event, per-turn TUI cards with handler counts and average execution time.
 * Clear TUI hook execution cards from compacted history alongside regular chat messages.
 * Show a `Running hooks ...` throbber while configured hooks execute.
 * Keep registered host-local skills, rules, prompts, and their referenced assets readable after remote or sandbox workspace tools switch to canonical remote execution.
