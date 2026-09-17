@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.2.5](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.2.4...@fleetagent/pi-coding-agent-v0.2.5) (2026-09-17)
+
+
+### Features
+
+* **coding-agent:** feat/group-hook-cards-by-turn - group hook cards ([57e3dba](https://github.com/fleetagent/pi/commit/57e3dbaa78ac4fca22fb8a04fee5b809dd10dcec))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @fleetagent/pi-agent-core bumped from ^0.2.4 to ^0.2.5
+    * @fleetagent/pi-ai bumped from ^0.2.4 to ^0.2.5
+    * @fleetagent/pi-tui bumped from ^0.2.4 to ^0.2.5
+
 ## [0.2.4](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.2.3...@fleetagent/pi-coding-agent-v0.2.4) (2026-09-12)
 
 
