@@ -66,7 +66,7 @@ Exit status 2 blocks only events with compatible preflight semantics. Timeouts, 
 
 ## Interactive visibility
 
-The interactive TUI adds a dedicated, distinctly colored card after each hook event that executed at least one matching handler. The card shows the invoked command or HTTP target, source, completion status, duration, and explicit returned model-visible prompts. Non-actionable raw stdout and stderr are not rendered; successful plain command output accepted as model context is shown as a returned prompt.
+The interactive TUI adds distinctly colored cards for hook events that execute at least one matching handler. Within one agent turn, tool-hook activity is grouped into separate `PreToolUse`, `PostToolUse`, and `PostToolUseFailure` cards; non-tool lifecycle events remain standalone. Each unique handler is shown on its own line, while repeated handlers with the same type, displayed target, and exact source are aggregated with invocation/status counts and an approximate average execution time to one decimal place. Cards also summarize tool-name counts and deduplicate explicit returned model-visible prompts while preserving occurrence counts. Non-actionable raw stdout and stderr are not rendered; successful plain command output accepted as model context is shown as a returned prompt.
 
 Hook cards are UI-only activity records. A bounded history is retained for the active interactive session and replayed after in-process transcript rebuilds, but it is not persisted, added to model context, emitted as ordinary conversation messages, or carried to another session. Print, JSON, and RPC modes do not render hook cards.
 
