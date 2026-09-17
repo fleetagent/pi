@@ -50,6 +50,8 @@ interface RenderSessionRuntimeState {
 
 interface RenderSessionContextThis {
 	pendingTools: Map<string, ToolExecutionComponent>;
+	activeToolHookExecutionGroups: Map<never, never>;
+	hookExecutionTurnActive: boolean;
 	chatContainer: Container;
 	footer: RenderSessionFooter;
 	ui: TUI;
@@ -75,6 +77,8 @@ function createFakeInteractiveModeThis(): RenderSessionContextThis {
 	const chatContainer = new Container();
 	const context: RenderSessionContextThis = {
 		pendingTools: new Map<string, ToolExecutionComponent>(),
+		activeToolHookExecutionGroups: new Map<never, never>(),
+		hookExecutionTurnActive: false,
 		chatContainer,
 		footer: { invalidate: vi.fn() },
 		ui: { requestRender: vi.fn() } as unknown as TUI,
