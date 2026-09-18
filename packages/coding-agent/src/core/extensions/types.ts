@@ -419,7 +419,7 @@ export interface ExtensionCommandContext extends ExtensionContext {
 	/** Switch to a different session file. */
 	switchSession(sessionPath: string, options?: ExtensionSwitchSessionOptions): Promise<ExtensionSessionActionResult>;
 
-	/** Reload extensions, skills, rules, prompts, and themes. */
+	/** Reload hooks, extensions, skills, rules, prompts, and themes. */
 	reload(): Promise<void>;
 }
 
