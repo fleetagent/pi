@@ -248,6 +248,45 @@ describe("AgentSession Claude-compatible hooks", () => {
 		rmSync(cwd, { recursive: true, force: true });
 	});
 
+	it("keeps prior hooks when resolution fails and preserves disabled state across reload", async () => {
+		const cwd = mkdtempSync(join(tmpdir(), "pi-hook-reload-"));
+		const runs = join(cwd, "runs");
+		const script = (label: string) =>
+			`process.stdin.resume();process.stdin.on('end',()=>require('fs').appendFileSync(${JSON.stringify(runs)},${JSON.stringify(`${label}\n`)}))`;
+		let failResolution = true;
+		const harness = await createHarness({
+			loadedHooks: hooks([{ event: "UserPromptSubmit", script: script("old") }]),
+			resolveHooks: async () => {
+				if (failResolution) throw new Error("hook resolution failed");
+				return hooks([{ event: "UserPromptSubmit", script: script("new") }]);
+			},
+		});
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage("first"),
+			fauxAssistantMessage("second"),
+			fauxAssistantMessage("third"),
+			fauxAssistantMessage("fourth"),
+		]);
+
+		await harness.session.prompt("first");
+		await expect(harness.session.reload()).rejects.toThrow("hook resolution failed");
+		await harness.session.prompt("second");
+		expect(readFileSync(runs, "utf8")).toBe("old\nold\n");
+
+		harness.session.setHooksEnabled(false);
+		failResolution = false;
+		await harness.session.reload();
+		expect(harness.session.hooksEnabled).toBe(false);
+		await harness.session.prompt("third");
+		expect(readFileSync(runs, "utf8")).toBe("old\nold\n");
+
+		harness.session.setHooksEnabled(true);
+		await harness.session.prompt("fourth");
+		expect(readFileSync(runs, "utf8")).toBe("old\nold\nnew\n");
+		rmSync(cwd, { recursive: true, force: true });
+	});
+
 	it("does not expose raw blocking stderr in hook execution notices", async () => {
 		const harness = await createHarness({
 			loadedHooks: hooks([

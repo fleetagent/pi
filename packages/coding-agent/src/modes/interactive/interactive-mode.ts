@@ -5824,7 +5824,11 @@ export class InteractiveMode {
 		reloadBox.addChild(new DynamicBorder(borderColor));
 		reloadBox.addChild(new Spacer(1));
 		reloadBox.addChild(
-			new Text(theme.fg("muted", "Reloading keybindings, extensions, skills, rules, prompts, themes..."), 1, 0),
+			new Text(
+				theme.fg("muted", "Reloading keybindings, hooks, extensions, skills, rules, prompts, themes..."),
+				1,
+				0,
+			),
 		);
 		reloadBox.addChild(new Spacer(1));
 		reloadBox.addChild(new DynamicBorder(borderColor));
@@ -5882,7 +5886,7 @@ export class InteractiveMode {
 			if (modelsJsonError) {
 				this.showError(`models.json error: ${modelsJsonError}`);
 			}
-			this.showStatus("Reloaded keybindings, extensions, skills, rules, prompts, themes");
+			this.showStatus("Reloaded keybindings, hooks, extensions, skills, rules, prompts, themes");
 		} catch (error) {
 			dismissReloadBox(previousEditor as Component);
 			this.showError(`Reload failed: ${error instanceof Error ? error.message : String(error)}`);

@@ -80,6 +80,7 @@ export interface HarnessOptions {
 	toolOperations?: ToolOperations;
 	subagentRunner?: SubagentRunner;
 	loadedHooks?: LoadedHooks;
+	resolveHooks?: () => Promise<LoadedHooks | undefined>;
 	onHookDiagnostic?: (diagnostic: HookDiagnostic) => void;
 }
 
@@ -195,6 +196,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		baseToolsOverride: toolMap,
 		extensionRunnerRef,
 		loadedHooks: options.loadedHooks,
+		resolveHooks: options.resolveHooks,
 		onHookDiagnostic: options.onHookDiagnostic,
 	});
 

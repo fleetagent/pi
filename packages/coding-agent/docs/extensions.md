@@ -1265,7 +1265,7 @@ Run the same reload flow as `/reload`.
 
 ```typescript
 pi.registerCommand("reload-runtime", {
-  description: "Reload extensions, skills, rules, prompts, and themes",
+  description: "Reload hooks, extensions, skills, rules, prompts, and themes",
   handler: async (_args, ctx) => {
     await ctx.reload();
     return;
@@ -1275,7 +1275,7 @@ pi.registerCommand("reload-runtime", {
 
 Important behavior:
 - `await ctx.reload()` emits `session_shutdown` for the current extension runtime
-- It then reloads resources and emits `session_start` with `reason: "reload"` and `resources_discover` with reason `"reload"`
+- It refreshes file-backed hook configuration without emitting hook `SessionEnd` or `SessionStart` events, then reloads resources and emits extension `session_start` with `reason: "reload"` and `resources_discover` with reason `"reload"`
 - The currently running command handler still continues in the old call frame
 - Code after `await ctx.reload()` still runs from the pre-reload version
 - Code after `await ctx.reload()` must not assume old in-memory extension state is still valid
@@ -1293,7 +1293,7 @@ import { Type } from "typebox";
 
 export default function (pi: ExtensionAPI) {
   pi.registerCommand("reload-runtime", {
-    description: "Reload extensions, skills, rules, prompts, and themes",
+    description: "Reload hooks, extensions, skills, rules, prompts, and themes",
     handler: async (_args, ctx) => {
       await ctx.reload();
       return;

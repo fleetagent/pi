@@ -4,12 +4,12 @@ Pi supports host-local automation with a Phase 0 Claude Code-compatible hook sch
 
 ## Configuration and precedence
 
-For every new session, `PiAgent` captures an immutable snapshot. Trusted user sources are discovered in this order:
+For every new session, `PiAgent` captures an immutable active hook snapshot. `/reload` rereads the same trusted file-backed sources and replaces that snapshot after resolution succeeds. Trusted user sources are discovered in this order:
 
 1. `<agentDir>/settings.json` (native Pi settings; normally `~/.pi/agent/settings.json`)
 2. `~/.claude/settings.json` (Claude compatibility)
 
-Project sources are disabled by default. When the interactive CLI starts in a local repository containing project hooks, it asks whether to **Don't trust**, **Trust once**, or **Trust always**. Trust once applies only to the initial session snapshot. Trust always stores the canonical repository location in `<agentDir>/trusted-project-hooks.json` (normally `~/.pi/agent/trusted-project-hooks.json`) and trusts all future hook changes at that location without prompting again. `--trust-project-hooks` bypasses the prompt. Embedding hosts must explicitly set `trustProjectHooks: true`. Trusted project sources are appended in this order:
+Project sources are disabled by default. When the interactive CLI starts in a local repository containing project hooks, it asks whether to **Don't trust**, **Trust once**, or **Trust always**. Trust once applies to the current session, including `/reload`. Trust always stores the canonical repository location in `<agentDir>/trusted-project-hooks.json` (normally `~/.pi/agent/trusted-project-hooks.json`) and trusts all future hook changes at that location without prompting again. `--trust-project-hooks` bypasses the prompt. Embedding hosts must explicitly set `trustProjectHooks: true`. Trusted project sources are appended in this order:
 
 1. `<cwd>/.pi/settings.json` (native Pi settings)
 2. `<cwd>/.claude/settings.json` (Claude compatibility)
@@ -17,7 +17,7 @@ Project sources are disabled by default. When the interactive CLI starts in a lo
 
 Handlers are additive in source order. Exact duplicate event/matcher/handler combinations execute once, with the earlier native Pi source preferred over its Claude compatibility counterpart. `disableAllHooks` retains final-included-source precedence. Initial project discovery requires local built-in operations or a custom backend identity explicitly reporting `local`; unknown and remote startup backends fail closed. After an approved local snapshot is loaded, project/local command hooks follow the active workspace backend: host-local while local, and container/remote-local after a Docker daemon or sandbox transition. Host-injected snapshots are trusted host configuration and do not use discovery.
 
-SDK hosts can use `CreatePiAgentOptions.hooks` to disable discovery, override the home directory used for Claude compatibility, inject a snapshot, or impose HTTP URL/environment ceilings. Native user hooks follow the active Pi `agentDir`. Injected snapshots are cloned and recursively frozen. `loadHooks()` likewise defaults to user-only discovery; callers must explicitly select project/local sources. The complete parsing/execution types and helpers are exported from `@fleetagent/pi-coding-agent/hooks`; only stable host options are exported at the package root.
+SDK hosts can use `CreatePiAgentOptions.hooks` to disable discovery, override the home directory used for Claude compatibility, inject a snapshot, or impose HTTP URL/environment ceilings. Native user hooks follow the active Pi `agentDir`. Injected snapshots are cloned and recursively frozen; `/reload` retains the injected snapshot rather than reading settings files. `loadHooks()` likewise defaults to user-only discovery; callers must explicitly select project/local sources. The complete parsing/execution types and helpers are exported from `@fleetagent/pi-coding-agent/hooks`; only stable host options are exported at the package root.
 Example:
 
 ```json
@@ -70,7 +70,7 @@ The interactive TUI adds distinctly colored cards for hook events that execute a
 
 Hook cards are persisted in JSONL as displayable, context-excluded audit messages. This preserves their original transcript positions across `/reload`, resume, and process restarts without adding them to model context. The interactive TUI renders at most the latest 200 hook cards from the active context; older audit entries remain in session storage. Print, JSON, and RPC modes do not render hook cards.
 
-Use `/hooks disable` to skip subsequent hook events for the current interactive session and `/hooks enable` to resume dispatch. Disabling hooks does not cancel a handler already executing, skipped events are not replayed, and each newly created or resumed session starts enabled. The command is user-only and excluded from model-visible slash-command catalogs.
+Use `/hooks disable` to skip subsequent hook events for the current interactive session and `/hooks enable` to resume dispatch. Disabling hooks does not cancel a handler already executing, skipped events are not replayed, and each newly created or resumed session starts enabled. `/reload` preserves the current enabled/disabled state, refreshes hook diagnostics, and does not synthesize hook `SessionEnd` or `SessionStart` events. If hook resolution throws, the previous active snapshot remains in use. The command is user-only and excluded from model-visible slash-command catalogs.
 
 Not implemented in Phase 0: `prompt`, `agent`, and `mcp_tool` handlers; asynchronous/background handlers; prompt/agent/MCP lifecycle events; and permission events. Unsupported handlers are diagnosed and never executed.
 

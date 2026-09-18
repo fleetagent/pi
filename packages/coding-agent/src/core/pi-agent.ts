@@ -107,6 +107,11 @@ interface HookDiscoveryResolution {
 	discoverProjectHooks: boolean;
 }
 
+interface SessionHookResolution {
+	loadedHooks: LoadedHooks | undefined;
+	diagnostics: PiAgentDiagnostic[];
+}
+
 interface SessionModelResolution {
 	model: Model<any> | undefined;
 	fallbackMessage: string | undefined;
@@ -120,6 +125,7 @@ interface BuiltAgentSession {
 	session: AgentSession;
 	services: PiAgentServices;
 	baseDiagnostics: PiAgentDiagnostic[];
+	hookDiagnostics: PiAgentDiagnostic[];
 	lspDiagnostics: PiAgentDiagnostic[];
 	modelFallbackMessage?: string;
 }
@@ -529,6 +535,8 @@ export class PiAgent {
 	private _services?: PiAgentServices;
 	private _diagnostics: PiAgentDiagnostic[] = [];
 	private _baseDiagnostics: PiAgentDiagnostic[] = [];
+	private _hookConfigurationDiagnostics: PiAgentDiagnostic[] = [];
+	private _hookRuntimeDiagnostics: PiAgentDiagnostic[] = [];
 	private _lspDiagnostics: PiAgentDiagnostic[] = [];
 	private _modelFallbackMessage?: string;
 	private rebindSession?: (session: AgentSession) => Promise<void>;
@@ -982,20 +990,23 @@ export class PiAgent {
 		return (request) => this.runEmbeddedSubagent(request, runnerContext);
 	}
 
-	private resolveHookDiscovery(
-		services: PiAgentServices,
-		resolvedOptions: ResolvePiAgentSessionOptionsResult,
-		diagnostics: PiAgentDiagnostic[],
-	): HookDiscoveryResolution {
+	private shouldDiscoverProjectHooks(resolvedOptions: ResolvePiAgentSessionOptionsResult): boolean {
 		const hookOperations = resolvedOptions.toolOperations ?? this.borrowedToolOperations;
 		const customHookOperationsSupplied =
 			resolvedOptions.toolOperations !== undefined || this.borrowedToolOperations !== undefined;
 		const hookBackend = hookOperations?.getBackendInfo?.();
 		const trustProjectHooks = resolvedOptions.trustProjectHooks ?? this.options.trustProjectHooks;
+		return trustProjectHooks === true && (!customHookOperationsSupplied || hookBackend?.type === "local");
+	}
+
+	private resolveHookDiscovery(
+		services: PiAgentServices,
+		resolvedOptions: ResolvePiAgentSessionOptionsResult,
+		diagnostics: PiAgentDiagnostic[],
+		discoverProjectHooks: boolean,
+	): HookDiscoveryResolution {
 		const trustedIdentity = resolvedOptions.trustedProjectHooksIdentity ?? this.options.trustedProjectHooksIdentity;
 		let cwd = services.cwd;
-		let discoverProjectHooks =
-			trustProjectHooks === true && (!customHookOperationsSupplied || hookBackend?.type === "local");
 		if (!discoverProjectHooks) return { cwd, discoverProjectHooks };
 		try {
 			cwd = canonicalProjectHookCwd(services.cwd);
@@ -1019,11 +1030,14 @@ export class PiAgent {
 	private async loadSessionHooks(
 		services: PiAgentServices,
 		resolvedOptions: ResolvePiAgentSessionOptionsResult,
-		diagnostics: PiAgentDiagnostic[],
-	): Promise<LoadedHooks | undefined> {
+		discoverProjectHooks: boolean,
+	): Promise<SessionHookResolution> {
+		const diagnostics: PiAgentDiagnostic[] = [];
 		const hookOptions = this.options.hooks;
-		const discovery = this.resolveHookDiscovery(services, resolvedOptions, diagnostics);
-		if (hookOptions === false || hookOptions?.enabled === false) return undefined;
+		const discovery = this.resolveHookDiscovery(services, resolvedOptions, diagnostics, discoverProjectHooks);
+		if (hookOptions === false || hookOptions?.enabled === false) {
+			return { loadedHooks: undefined, diagnostics };
+		}
 		const loadedHooks = hookOptions?.snapshot
 			? freezeLoadedHooks(hookOptions.snapshot)
 			: await loadHooks({
@@ -1033,7 +1047,7 @@ export class PiAgent {
 					sources: discovery.discoverProjectHooks ? ["user", "project", "local"] : ["user"],
 				});
 		diagnostics.push(...loadedHooks.diagnostics.map(formatHookDiagnostic));
-		return loadedHooks;
+		return { loadedHooks, diagnostics };
 	}
 
 	private mergeSessionOptions(resolvedOptions: ResolvePiAgentSessionOptionsResult): PiAgentSessionOptions {
@@ -1204,7 +1218,8 @@ export class PiAgent {
 		const resolvedOptions =
 			(await this.options.resolveSessionOptions?.({ services, session: activeSession, sessionStartEvent })) ?? {};
 		diagnostics.push(...(resolvedOptions.diagnostics ?? []));
-		const loadedHooks = await this.loadSessionHooks(services, resolvedOptions, diagnostics);
+		const discoverProjectHooks = this.shouldDiscoverProjectHooks(resolvedOptions);
+		const hookResolution = await this.loadSessionHooks(services, resolvedOptions, discoverProjectHooks);
 		const sessionOptions = this.mergeSessionOptions(resolvedOptions);
 		const lspInputs = [...asLspInputs(this.options.lsp), ...asLspInputs(resolvedOptions.lsp)];
 		const resolveSessionLspConfiguration = () =>
@@ -1277,7 +1292,12 @@ export class PiAgent {
 				},
 				extensionRunnerRef,
 				sessionStartEvent,
-				loadedHooks,
+				loadedHooks: hookResolution.loadedHooks,
+				resolveHooks: async () => {
+					const nextResolution = await this.loadSessionHooks(services, resolvedOptions, discoverProjectHooks);
+					this.setHookConfigurationDiagnostics(nextResolution.diagnostics);
+					return nextResolution.loadedHooks;
+				},
 				hookRunOptions: hookOptions
 					? {
 							allowedHttpHookUrls: hookOptions.allowedHttpHookUrls,
@@ -1288,6 +1308,7 @@ export class PiAgent {
 			}),
 			services,
 			baseDiagnostics,
+			hookDiagnostics: hookResolution.diagnostics,
 			lspDiagnostics,
 			modelFallbackMessage: modelResolution.fallbackMessage,
 		};
@@ -1297,20 +1318,35 @@ export class PiAgent {
 		this._session = result.session;
 		this._services = result.services;
 		this._baseDiagnostics = result.baseDiagnostics;
+		this._hookConfigurationDiagnostics = result.hookDiagnostics;
+		this._hookRuntimeDiagnostics = [];
 		this._lspDiagnostics = result.lspDiagnostics;
-		this._diagnostics = [...this._baseDiagnostics, ...this._lspDiagnostics];
+		this.refreshDiagnostics();
 		this._modelFallbackMessage = result.modelFallbackMessage;
+	}
+
+	private refreshDiagnostics(): void {
+		this._diagnostics = [
+			...this._baseDiagnostics,
+			...this._hookConfigurationDiagnostics,
+			...this._hookRuntimeDiagnostics,
+			...this._lspDiagnostics,
+		];
 	}
 
 	private setLspConfigurationDiagnostics(diagnostics: readonly LspConfigurationSourceDiagnostic[]): void {
 		this._lspDiagnostics = formatLspConfigurationDiagnostics(diagnostics);
-		this._diagnostics = [...this._baseDiagnostics, ...this._lspDiagnostics];
+		this.refreshDiagnostics();
+	}
+
+	private setHookConfigurationDiagnostics(diagnostics: readonly PiAgentDiagnostic[]): void {
+		this._hookConfigurationDiagnostics = [...diagnostics];
+		this.refreshDiagnostics();
 	}
 
 	private addHookDiagnostic(diagnostic: HookDiagnostic): void {
-		const formatted = formatHookDiagnostic(diagnostic);
-		this._baseDiagnostics = [...this._baseDiagnostics, formatted];
-		this._diagnostics = [...this._baseDiagnostics, ...this._lspDiagnostics];
+		this._hookRuntimeDiagnostics.push(formatHookDiagnostic(diagnostic));
+		this.refreshDiagnostics();
 	}
 
 	private shouldValidateSessionCwdOnHost(): boolean {

@@ -349,6 +349,8 @@ export interface AgentSessionConfig {
 	sessionStartEvent?: SessionStartEvent;
 	/** Immutable Claude-compatible hook configuration snapshot for this session. */
 	loadedHooks?: LoadedHooks;
+	/** Re-resolves file-backed hook configuration after settings reload. */
+	resolveHooks?: () => Promise<LoadedHooks | undefined>;
 	/** Receives nonfatal hook execution/runtime diagnostics. */
 	onHookDiagnostic?: (diagnostic: HookDiagnostic) => void;
 	/** Host restrictions applied to hook execution. */
@@ -1111,7 +1113,8 @@ export class AgentSession {
 	private _extensionShutdownHandler?: ShutdownHandler;
 	private _extensionErrorListener?: ExtensionErrorListener;
 	private _extensionErrorUnsubscriber?: () => void;
-	private readonly _loadedHooks?: LoadedHooks;
+	private _loadedHooks?: LoadedHooks;
+	private readonly _resolveHooks?: () => Promise<LoadedHooks | undefined>;
 	private _hooksEnabled = true;
 	private readonly _onHookDiagnostic?: (diagnostic: HookDiagnostic) => void;
 	private readonly _hookExecutionListeners = new Set<HookExecutionListener>();
@@ -1176,6 +1179,7 @@ export class AgentSession {
 		this._onLspConfigurationDiagnostics = config.onLspConfigurationDiagnostics;
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
 		this._loadedHooks = config.loadedHooks;
+		this._resolveHooks = config.resolveHooks;
 		this._onHookDiagnostic = config.onHookDiagnostic;
 		this._hookRunOptions = config.hookRunOptions ?? {};
 
@@ -5474,6 +5478,7 @@ export class AgentSession {
 			this._lspConfiguration = structuredClone(lspResult.configuration);
 			this._onLspConfigurationDiagnostics?.(structuredClone(lspResult.diagnostics));
 		}
+		if (this._resolveHooks) this._loadedHooks = await this._resolveHooks();
 		await this._resourceLoader.reload();
 		resetApiProviders();
 		const activeToolNames = this._withCurrentDefaultTools(this.getActiveToolNames());

@@ -51,13 +51,13 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/copy` | Copy last assistant message to clipboard |
 | `/export [file]` | Export session to HTML |
 | `/share` | Upload as private GitHub gist with shareable HTML link |
-| `/reload` | Reload keybindings, extensions, skills, rules, prompts, and context files |
+| `/reload` | Reload keybindings, hooks, extensions, skills, rules, prompts, and context files |
 | `/hooks <enable|disable>` | Enable or disable subsequent hooks for the current session |
 | `/hotkeys` | Show all keyboard shortcuts |
 | `/changelog` | Display version history |
 | `/quit` | Quit pi |
 
-`/hooks disable` immediately prevents subsequent hook events in the current session; a hook execution already in progress is allowed to finish. `/hooks enable` resumes dispatch. Skipped events are not replayed, and a newly created or resumed session starts with hooks enabled.
+`/hooks disable` immediately prevents subsequent hook events in the current session; a hook execution already in progress is allowed to finish. `/hooks enable` resumes dispatch. Skipped events are not replayed, and a newly created or resumed session starts with hooks enabled. `/reload` preserves this enabled/disabled state while refreshing file-backed hook configuration.
 
 `/hooks` and `/sandbox` are user-only interactive commands hidden from model-visible command catalogs. `/sandbox` shows or clears the current backend, attaches a sandbox daemon, and manages local Docker sandbox containers; see [Workspace Sandbox](sandbox.md).
 
