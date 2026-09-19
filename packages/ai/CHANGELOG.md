@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Kept generated model lookup types valid when a known provider is absent from the generated catalog.
+
 ## [0.2.6](https://github.com/fleetagent/pi/compare/@fleetagent/pi-ai-v0.2.5...@fleetagent/pi-ai-v0.2.6) (2026-09-17)
 
 
