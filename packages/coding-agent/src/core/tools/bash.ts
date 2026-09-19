@@ -56,7 +56,7 @@ export type BashSpawnHook = (context: BashSpawnContext) => BashSpawnContext;
 export type BashSessionEnvironment = PiSessionEnvironment;
 
 export function getBashSessionEnvironment(ctx: ExtensionContext | undefined): BashSessionEnvironment {
-	if (!ctx) return {};
+	if (!ctx?.session) return {};
 	const environment: BashSessionEnvironment = {
 		PI_SESSION_ID: ctx.session.getSessionId(),
 	};
