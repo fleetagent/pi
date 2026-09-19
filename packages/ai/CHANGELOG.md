@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.7](https://github.com/fleetagent/pi/compare/@fleetagent/pi-ai-v0.2.6...@fleetagent/pi-ai-v0.2.7) (2026-09-19)
+
+
+### Bug Fixes
+
+* **ai:** constrain generated model provider types ([7302ef1](https://github.com/fleetagent/pi/commit/7302ef118dacff9ea3fdafe2f5377d0daf423ec9))
+* **ai:** preserve broad provider model lookups ([fab1f91](https://github.com/fleetagent/pi/commit/fab1f91cf7db6fa1fa149b3918b6b83b39683621))
+
 ## [Unreleased]
 
 ### Fixed

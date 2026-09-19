@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.2.7](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.2.6...@fleetagent/pi-coding-agent-v0.2.7) (2026-09-19)
+
+
+### Features
+
+* **coding-agent:** reload-hooks - refresh hooks on reload ([93d0c01](https://github.com/fleetagent/pi/commit/93d0c01e26cec9c40eb50a879fc80d2015989645))
+
+
+### Bug Fixes
+
+* **coding-agent:** forward session metadata to sandbox bash ([3fd5e2d](https://github.com/fleetagent/pi/commit/3fd5e2d851724b399e3b7f9c2023777b36e19d32))
+* **coding-agent:** tolerate partial bash contexts ([e8a20ba](https://github.com/fleetagent/pi/commit/e8a20ba65408fa35b75e25e8ebb3c91fa31c89a0))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @fleetagent/pi-agent-core bumped from ^0.2.6 to ^0.2.7
+    * @fleetagent/pi-ai bumped from ^0.2.6 to ^0.2.7
+    * @fleetagent/pi-tui bumped from ^0.2.6 to ^0.2.7
+
 ## [Unreleased]
 
 ### Fixed
