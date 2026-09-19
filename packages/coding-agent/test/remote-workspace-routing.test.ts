@@ -150,6 +150,50 @@ describe("remote canonical workspace tool routing", () => {
 		await server.close();
 	});
 
+	it("injects current session metadata into sandbox bash calls", async () => {
+		const workspaceRoot = await createTemporaryDirectory();
+		const { server, address } = await createServer(workspaceRoot);
+		const operations = await createRemoteToolOperations(address.url);
+		const harness = await createHarness({ toolOperations: operations });
+		try {
+			harness.setResponses([
+				fauxAssistantMessage(
+					[
+						fauxToolCall("bash", {
+							command:
+								'printf \'%s\\n\' "$PI_SESSION_ID" "$PI_SESSION_FILE" "$PI_PROVIDER" "$PI_MODEL" "$PI_REASONING_LEVEL"',
+						}),
+					],
+					{ stopReason: "toolUse" },
+				),
+				fauxAssistantMessage("done"),
+			]);
+			await harness.session.prompt("inspect sandbox metadata");
+			const result = harness.session.messages.find(
+				(message) => message.role === "toolResult" && message.toolName === "bash",
+			);
+			const output =
+				result?.role === "toolResult"
+					? result.content
+							.find((entry) => entry.type === "text")
+							?.text?.trimEnd()
+							.split("\n")
+					: undefined;
+			expect(output).toEqual([
+				harness.session.sessionId,
+				harness.session.sessionReference,
+				harness.session.model?.provider,
+				harness.session.model?.id,
+				harness.session.thinkingLevel,
+			]);
+		} finally {
+			await harness.session.dispose();
+			await operations.dispose();
+			await server.close();
+			harness.cleanup();
+		}
+	});
+
 	it("hosts configured LSP beside the daemon workspace without a local AgentSession manager", async () => {
 		const workspaceRoot = await createTemporaryDirectory();
 		const configPath = join(workspaceRoot, "daemon-lsp.json");

@@ -110,9 +110,26 @@ export interface WorkspaceToolRemoteInvocation {
 	executionOptions: WorkspaceToolExecutionOptions;
 }
 
+export interface PiSessionEnvironment {
+	PI_SESSION_ID?: string;
+	PI_SESSION_FILE?: string;
+	PI_PROVIDER?: string;
+	PI_MODEL?: string;
+	PI_REASONING_LEVEL?: string;
+}
+
+export const PI_SESSION_ENVIRONMENT_NAMES = Object.freeze([
+	"PI_SESSION_ID",
+	"PI_SESSION_FILE",
+	"PI_PROVIDER",
+	"PI_MODEL",
+	"PI_REASONING_LEVEL",
+] as const);
+
 export interface WorkspaceToolExecutionOptions {
 	imageAutoResize?: boolean;
 	shellCommandPrefix?: string;
+	sessionEnvironment?: PiSessionEnvironment;
 }
 
 interface NormalizedRemoteWorkspaceUrl {

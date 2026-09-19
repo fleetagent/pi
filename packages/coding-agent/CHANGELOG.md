@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Forwarded current `PI_*` session metadata to sandbox bash calls.
+
 ## [0.2.6](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.2.5...@fleetagent/pi-coding-agent-v0.2.6) (2026-09-17)
 
 

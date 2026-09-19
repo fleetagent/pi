@@ -62,6 +62,8 @@ Defaults:
 
 The mounted workspace is read/write. Any process in the container can modify files in the mounted host directory. Paths reported by the daemon use the container workspace root (`/workspace`), while local Pi keeps session and UI state on the host. The container uses Docker bridge networking and publishes only the authenticated daemon port to the configured host bind address (`127.0.0.1` by default), so sandbox processes cannot directly access host loopback services. Pi uses the configured daemon port when available and otherwise selects an available host port, allowing separate sessions to keep concurrent sandbox containers. The default image also configures `/tmp` as an additional confined temporary root, so workspace tools can use disposable scratch files without exposing another host mount.
 
+Sandbox bash calls receive the current `PI_SESSION_ID`, `PI_SESSION_FILE`, `PI_PROVIDER`, `PI_MODEL`, and `PI_REASONING_LEVEL` values per invocation. This metadata follows the active session rather than the daemon process environment; other host environment variables are not forwarded automatically.
+
 `/sandbox start` uses a fresh bearer token for every daemon. Docker receives it through the container environment. Lima generates it inside the guest and returns it directly to the host launcher. Pi keeps the token in memory and uses it to connect to the daemon. Tokens are not put in Docker or Lima command arguments, image layers, container or instance names, labels, URLs, or user-facing status. Status, list output, and errors redact secrets.
 
 ## Image and configuration

@@ -23,6 +23,7 @@ import {
 import { withFileMutationQueue } from "../core/tools/file-mutation-queue.ts";
 import {
 	LocalToolOperations,
+	PI_SESSION_ENVIRONMENT_NAMES,
 	type ToolAccessMode,
 	type ToolBackendInfo,
 	type ToolExecOptions,
@@ -339,7 +340,12 @@ export class ConfinedDaemonToolOperations implements ToolOperations {
 	async exec(command: string, options: ToolExecOptions): Promise<ToolExecResult> {
 		if (!this.allowProcessExec) throw new Error("Process execution is disabled by daemon policy");
 		const cwd = await this.existingPath(options.cwd ?? this.cwd);
-		return this.local.exec(command, { ...options, cwd, env: { ...this.environment } });
+		const environment = { ...this.environment };
+		for (const name of PI_SESSION_ENVIRONMENT_NAMES) {
+			const value = options.env?.[name];
+			if (value !== undefined) environment[name] = value;
+		}
+		return this.local.exec(command, { ...options, cwd, env: environment });
 	}
 
 	async access(path: string, mode?: ToolAccessMode): Promise<void> {

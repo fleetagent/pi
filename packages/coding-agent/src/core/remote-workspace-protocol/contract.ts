@@ -415,6 +415,16 @@ export type RemoteWorkspaceServerMessage = Static<typeof RemoteWorkspaceServerMe
 const EmptyParamsSchema = Type.Object({}, closedObject);
 const PathParamsSchema = Type.Object({ path: Type.String({ minLength: 1, maxLength: 32_768 }) }, closedObject);
 const CatalogGetParamsSchema = EmptyParamsSchema;
+const SessionEnvironmentSchema = Type.Object(
+	{
+		PI_SESSION_ID: Type.Optional(Type.String({ maxLength: 32_768 })),
+		PI_SESSION_FILE: Type.Optional(Type.String({ maxLength: 32_768 })),
+		PI_PROVIDER: Type.Optional(Type.String({ maxLength: 32_768 })),
+		PI_MODEL: Type.Optional(Type.String({ maxLength: 32_768 })),
+		PI_REASONING_LEVEL: Type.Optional(Type.String({ maxLength: 32_768 })),
+	},
+	closedObject,
+);
 const ToolInvokeParamsSchema = Type.Object(
 	{
 		generation: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
@@ -427,6 +437,7 @@ const ToolInvokeParamsSchema = Type.Object(
 			{
 				imageAutoResize: Type.Optional(Type.Boolean()),
 				shellCommandPrefix: Type.Optional(Type.String({ maxLength: 32_768 })),
+				sessionEnvironment: Type.Optional(SessionEnvironmentSchema),
 			},
 			closedObject,
 		),

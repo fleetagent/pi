@@ -3,7 +3,12 @@ import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@fleet
 import { validateToolArguments } from "@fleetagent/pi-ai";
 import type { Static, TSchema } from "typebox";
 import type { ExtensionContext, ToolDefinition } from "../extensions/types.ts";
-import { type BashToolDefinition, type BashToolOptions, createBashToolDefinition } from "./bash.ts";
+import {
+	type BashToolDefinition,
+	type BashToolOptions,
+	createBashToolDefinition,
+	getBashSessionEnvironment,
+} from "./bash.ts";
 import { createEditToolDefinition, type EditToolDefinition, type EditToolOptions } from "./edit.ts";
 import { createFindToolDefinition, type FindToolDefinition, type FindToolOptions } from "./find.ts";
 import { createGrepToolDefinition, type GrepToolDefinition, type GrepToolOptions } from "./grep.ts";
@@ -311,10 +316,23 @@ export class WorkspaceToolHost {
 				...(readOperations ? { operationsForPath: () => readOperations } : {}),
 			}) as unknown as ToolDefinition<TParams, TDetails>;
 		}
-		if (request.executionOptions?.shellCommandPrefix !== undefined && request.name === "bash") {
+		if (
+			request.name === "bash" &&
+			(request.executionOptions?.shellCommandPrefix !== undefined ||
+				request.executionOptions?.sessionEnvironment !== undefined)
+		) {
+			const sessionEnvironment = request.executionOptions.sessionEnvironment;
+			const configuredSpawnHook = this.toolOptions?.bash?.spawnHook;
 			return createBashToolDefinition(this.operations, {
 				...this.toolOptions?.bash,
 				commandPrefix: request.executionOptions.shellCommandPrefix,
+				exposeSessionEnvironment: false,
+				spawnHook: sessionEnvironment
+					? (spawnContext) => {
+							const resolved = configuredSpawnHook?.(spawnContext) ?? spawnContext;
+							return { ...resolved, env: { ...resolved.env, ...sessionEnvironment } };
+						}
+					: configuredSpawnHook,
 			}) as unknown as ToolDefinition<TParams, TDetails>;
 		}
 		return definition;
@@ -407,6 +425,7 @@ export class WorkspaceToolHost {
 			: this.disposeController.signal;
 		if (combinedSignal.aborted) throw new Error("Operation aborted");
 		const selection = this.selectWorkspaceExecution(name, params);
+		const resolvedExecutionOptions = executionOptions ?? this.remoteExecutionOptions;
 		const request: HostedToolExecution<TParams, TDetails> = {
 			name,
 			toolCallId,
@@ -414,7 +433,10 @@ export class WorkspaceToolHost {
 			signal: combinedSignal,
 			onUpdate,
 			context,
-			executionOptions,
+			executionOptions:
+				name === "bash" && context && this.toolOptions?.bash?.exposeSessionEnvironment !== false
+					? { ...resolvedExecutionOptions, sessionEnvironment: getBashSessionEnvironment(context) }
+					: executionOptions,
 		};
 		const execution = selection.executeRemotely
 			? this.startRemoteExecution(request)
