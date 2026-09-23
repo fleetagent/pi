@@ -114,7 +114,7 @@ describe("direct Anthropic Fable 5.1", () => {
 		const { requests } = mockTransport();
 		await streamAnthropic(model, context, { apiKey: "sk-ant-oat-test" }).result();
 		expect(requests[0].headers.get("authorization")).toBe("Bearer sk-ant-oat-test");
-		expect(requests[0].headers.get("user-agent")).toBe("claude-cli/2.1.251");
+		expect(requests[0].headers.get("user-agent")).toBe("claude-cli/2.1.280");
 		expect(requests[0].headers.get("anthropic-beta")).toContain("oauth-2025-04-20");
 		expect(requests[0].headers.get("anthropic-beta")).toContain(bindingBeta);
 		await streamAnthropic(model, context, {
@@ -245,5 +245,21 @@ describe("direct Anthropic Fable 5.1", () => {
 		expect(requests[0].body.thinking).toEqual({ type: "disabled" });
 		expect(requests[0].body.temperature).toBe(0);
 		expect(requests[0].headers.get("anthropic-beta")).not.toContain(bindingBeta);
+	});
+});
+
+describe("Claude Opus 5.5 OAuth", () => {
+	it("sends a supported Claude Code version and adaptive thinking", async () => {
+		const { requests } = mockTransport();
+		const opus55 = { ...model, id: "claude-opus-5-5", name: "Claude Opus 5.5" };
+		const result = await streamSimpleAnthropic(opus55, context, {
+			apiKey: "sk-ant-oat-test",
+			reasoning: "high",
+		}).result();
+		expect(result.stopReason).toBe("toolUse");
+		expect(requests[0].headers.get("user-agent")).toBe("claude-cli/2.1.280");
+		expect(requests[0].body.model).toBe("claude-opus-5-5");
+		expect(requests[0].body.thinking?.type).toBe("adaptive");
+		expect(requests[0].body.output_config?.effort).toBe("high");
 	});
 });
