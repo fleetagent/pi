@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.2.8](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.2.7...@fleetagent/pi-coding-agent-v0.2.8) (2026-09-23)
+
+
+### Miscellaneous Chores
+
+* **@fleetagent/pi-coding-agent:** Synchronize pi versions
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @fleetagent/pi-agent-core bumped from ^0.2.7 to ^0.2.8
+    * @fleetagent/pi-ai bumped from ^0.2.7 to ^0.2.8
+    * @fleetagent/pi-tui bumped from ^0.2.7 to ^0.2.8
+
 ## [0.2.7](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.2.6...@fleetagent/pi-coding-agent-v0.2.7) (2026-09-19)
 
 
