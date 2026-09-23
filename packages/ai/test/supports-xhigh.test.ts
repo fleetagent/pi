@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { getModel, getSupportedThinkingLevels } from "../src/models.ts";
 
 const GPT_5_6_CODEX_MODELS = ["gpt-5.6", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"] as const;
+const GPT_6_CODEX_MODELS = ["gpt-6-astra", "gpt-6-luna", "gpt-6-sol"] as const;
 
 describe("getSupportedThinkingLevels", () => {
 	it("includes xhigh for Anthropic Opus 4.6 on anthropic-messages API", () => {
@@ -22,7 +23,7 @@ describe("getSupportedThinkingLevels", () => {
 		expect(getSupportedThinkingLevels(model!)).not.toContain("xhigh");
 	});
 
-	it.each(["gpt-5.4", "gpt-5.5", ...GPT_5_6_CODEX_MODELS, "gpt-6-astra"] as const)(
+	it.each(["gpt-5.4", "gpt-5.5", ...GPT_5_6_CODEX_MODELS, ...GPT_6_CODEX_MODELS] as const)(
 		"includes xhigh for %s models",
 		(modelId) => {
 			const model = getModel("openai-codex", modelId);
@@ -31,15 +32,18 @@ describe("getSupportedThinkingLevels", () => {
 		},
 	);
 
-	it.each([...GPT_5_6_CODEX_MODELS, "gpt-6-astra"] as const)("uses the 272k context window for %s", (modelId) => {
-		const model = getModel("openai-codex", modelId);
-		expect(model).toBeDefined();
-		expect(model!.contextWindow).toBe(272000);
-	});
+	it.each([...GPT_5_6_CODEX_MODELS, ...GPT_6_CODEX_MODELS] as const)(
+		"uses the 272k context window for %s",
+		(modelId) => {
+			const model = getModel("openai-codex", modelId);
+			expect(model).toBeDefined();
+			expect(model!.contextWindow).toBe(272000);
+		},
+	);
 
-	it("configures GPT-6 Astra reasoning levels across OpenAI providers", () => {
+	it.each(GPT_6_CODEX_MODELS)("configures %s reasoning levels across OpenAI providers", (modelId) => {
 		for (const provider of ["openai", "azure-openai-responses", "github-copilot"] as const) {
-			const model = getModel(provider, "gpt-6-astra");
+			const model = getModel(provider, modelId);
 			expect(model).toBeDefined();
 			expect(model!.api).not.toBe("openai-completions");
 			expect(getSupportedThinkingLevels(model!)).toContain("xhigh");

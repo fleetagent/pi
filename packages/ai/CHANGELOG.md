@@ -10,6 +10,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added GPT-6 Sol and GPT-6 Luna model metadata and OpenAI Codex support.
+
 ### Fixed
 
 - Kept generated model lookup types valid when a known provider is absent from the generated catalog.
