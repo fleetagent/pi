@@ -532,6 +532,42 @@ describe("background compression detection", () => {
 		await detector.waitForIdle();
 		expect(detector.counts.keep).toBe(3);
 	});
+	it("uses the rebuilt context percentage as the post-compression threshold baseline", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const model = harness.getModel();
+		harness.settingsManager.setCompressionDetectionModel(`${model.provider}/${model.id}`);
+		const detector = new CompressionDetector(harness.settingsManager, harness.session.modelRegistry);
+		harness.setResponses([
+			fauxAssistantMessage("CONTINUE"),
+			fauxAssistantMessage("CONTINUE"),
+			fauxAssistantMessage("CONTINUE"),
+		]);
+		detector.check(5, []);
+		await detector.waitForIdle();
+		detector.reset([], 40);
+		detector.check(40, []);
+		detector.check(44.9, []);
+		expect(harness.getPendingResponseCount()).toBe(2);
+		detector.check(45, []);
+		await detector.waitForIdle();
+		expect(harness.getPendingResponseCount()).toBe(1);
+
+		// Standard compaction reports unknown usage until a post-compaction response arrives.
+		detector.reset([], null);
+		detector.check(null, []);
+		detector.check(32, []);
+		detector.check(36.9, []);
+		expect(harness.getPendingResponseCount()).toBe(1);
+		detector.check(37, []);
+		await detector.waitForIdle();
+		expect(harness.getPendingResponseCount()).toBe(0);
+		expect(detector.counts).toEqual({ keep: 3, compress: 0 });
+		const coldDetector = new CompressionDetector(harness.settingsManager, harness.session.modelRegistry);
+		coldDetector.reset([], 40);
+		coldDetector.check(40, []);
+		expect(harness.getPendingResponseCount()).toBe(0);
+	});
 	it("coalesces progress during an in-flight request and rechecks latest context after it finishes", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);

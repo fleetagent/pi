@@ -56,6 +56,7 @@ function countIncomingResponses(messages: AgentMessage[]): number {
 /** Runs optional compression checks without changing the primary agent's history. */
 export class CompressionDetector {
 	private lastPercent = 0;
+	private awaitingPostCompressionPercent = false;
 	private lastResponseCount = 0;
 	private running = false;
 	private generation = 0;
@@ -133,17 +134,31 @@ export class CompressionDetector {
 	get suggestedRange(): CompressionRangeSuggestion | undefined {
 		return this.shouldCompress ? this.rangeSuggestion : undefined;
 	}
-	reset(messages: AgentMessage[] = []): void {
+	reset(messages: AgentMessage[] = [], postCompressionPercent?: number | null): void {
 		this.controller?.abort();
 		if (this.running) this.reportActivity(false);
 		this.controller = undefined;
 		this.running = false;
 		this.pending = undefined;
 		this.generation++;
-		this.lastPercent = 0;
+		this.lastPercent =
+			postCompressionPercent != null && Number.isFinite(postCompressionPercent) ? postCompressionPercent : 0;
+		this.awaitingPostCompressionPercent = postCompressionPercent === null;
 		this.lastResponseCount = countIncomingResponses(messages);
+		// Preserve this baseline even if compression precedes the first detector check.
+		if (postCompressionPercent !== undefined) this.lastModel = this.settings.getCompressionDetectionModel();
 		this.recommendation = false;
 		this.rangeSuggestion = undefined;
+	}
+	private updatePercentBaseline(percent: number | undefined): void {
+		if (percent == null) return;
+		if (this.awaitingPostCompressionPercent) {
+			this.lastPercent = percent;
+			this.awaitingPostCompressionPercent = false;
+		} else if (percent < this.lastPercent) {
+			this.lastPercent = percent;
+			this.recommendation = false;
+		}
 	}
 	check(
 		percent: number | null | undefined,
@@ -162,10 +177,7 @@ export class CompressionDetector {
 			this.lastModel = reference;
 		}
 		const currentPercent = percent != null && Number.isFinite(percent) ? percent : undefined;
-		if (currentPercent != null && currentPercent < this.lastPercent) {
-			this.lastPercent = currentPercent;
-			this.recommendation = false;
-		}
+		this.updatePercentBaseline(currentPercent);
 		const responseCount = countIncomingResponses(messages);
 		if (responseCount < this.lastResponseCount) {
 			this.lastResponseCount = responseCount;
