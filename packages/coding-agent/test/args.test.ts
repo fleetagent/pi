@@ -174,9 +174,11 @@ describe("parseArgs", () => {
 	});
 
 	describe("LSP flags", () => {
-		test("parses --lsp-config and --no-lsp without treating them as extension flags", () => {
-			const result = parseArgs(["--lsp-config", "./lsp.json", "--no-lsp"]);
+		test("parses LSP configuration, runtime disable, and tool enablement separately", () => {
+			expect(parseArgs([]).enableLspTools).toBeUndefined();
+			const result = parseArgs(["--lsp-config", "./lsp.json", "--enable-lsp-tools", "--no-lsp"]);
 			expect(result.lspConfig).toBe("./lsp.json");
+			expect(result.enableLspTools).toBe(true);
 			expect(result.noLsp).toBe(true);
 			expect(result.unknownFlags.size).toBe(0);
 		});
@@ -193,7 +195,8 @@ describe("parseArgs", () => {
 		try {
 			printHelp();
 			const help = String(log.mock.calls[0]?.[0]);
-			expect(help).toContain("Requires a valid LSP configuration");
+			expect(help).toContain("Requires LSP configuration");
+			expect(help).toContain("--enable-lsp-tools");
 			for (const name of [
 				"lsp_diagnostics",
 				"lsp_hover",

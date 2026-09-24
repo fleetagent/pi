@@ -247,7 +247,7 @@ const pi = await PiAgent.create({
 await pi.createAgentSession();
 ```
 
-Built-in tool names include `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`, `subagent`, `subagent_runs`, `create_subagent`, and the `lsp_*` navigation/refactoring tools. The subagent family is inactive by default. Set `enableSubagents: true` to activate all three by default, or use the explicit `tools` option to select any subset. Explicit `tools` selection overrides the setting; `noTools: "all"` and `noTools: "builtin"` remain authoritative.
+Built-in tool names include `read`, `bash`, `edit`, `write`, `websearch`, `session_search`, `session_entry_get`, `compress_context`, `grep`, `find`, `ls`, `subagent`, `subagent_runs`, `create_subagent`, and the `lsp_*` navigation/refactoring tools. The subagent and LSP tool families are inactive by default. Set `enableSubagents: true` in settings to activate subagents or `enableLspTools: true` in settings or `PiAgent.create()` to expose configured LSP tools. An explicit `tools` option selects any subset regardless of these defaults; `noTools: "all"` and `noTools: "builtin"` remain authoritative.
 
 ### Settings
 
@@ -274,6 +274,7 @@ import { InMemorySessionManager, PiAgent } from "@fleetagent/pi-coding-agent";
 const pi = await PiAgent.create({
   cwd: process.cwd(),
   sessionManager: new InMemorySessionManager(process.cwd()),
+  enableLspTools: true,
   lsp: {
     type: "configuration",
     configuration: {

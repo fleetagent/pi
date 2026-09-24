@@ -167,6 +167,8 @@ export interface PiAgentSessionOptions {
 	thinkingLevel?: ThinkingLevel;
 	scopedModels?: ScopedModel[];
 	tools?: string[];
+	/** Expose configured LSP tools by default; overrides enableLspTools in settings for this session. */
+	enableLspTools?: boolean;
 	excludedTools?: string[];
 	/** Trust project-local subagent presets without an interactive host prompt. */
 	trustProjectAgents?: boolean;
@@ -1056,6 +1058,7 @@ export class PiAgent {
 			thinkingLevel: resolvedOptions.thinkingLevel ?? this.options.thinkingLevel,
 			scopedModels: resolvedOptions.scopedModels ?? this.options.scopedModels,
 			tools: resolvedOptions.tools ?? this.options.tools,
+			enableLspTools: resolvedOptions.enableLspTools ?? this.options.enableLspTools,
 			excludedTools: resolvedOptions.excludedTools ?? this.options.excludedTools,
 			noTools: resolvedOptions.noTools ?? this.options.noTools,
 			customTools: resolvedOptions.customTools ?? this.options.customTools,
@@ -1241,13 +1244,14 @@ export class PiAgent {
 			model,
 		);
 
-		const defaultActiveToolNames = getDefaultActiveToolNames(services.settingsManager.getEnableSubagents());
+		const defaultActiveToolNames = getDefaultActiveToolNames(
+			services.settingsManager.getEnableSubagents(),
+			sessionOptions.enableLspTools ?? services.settingsManager.getEnableLspTools(),
+		);
 		const allowedToolNames = sessionOptions.tools ?? (sessionOptions.noTools === "all" ? [] : undefined);
-		const initialActiveToolNames: string[] = sessionOptions.tools
-			? [...sessionOptions.tools]
-			: sessionOptions.noTools
-				? []
-				: defaultActiveToolNames;
+		const initialActiveToolNames = [
+			...(sessionOptions.tools ?? (sessionOptions.noTools ? [] : defaultActiveToolNames)),
+		];
 		const extensionRunnerRef: ExtensionRunnerReference = {};
 		const agent = this.createCoreAgent(services, activeSession, model, thinkingLevel, extensionRunnerRef);
 
@@ -1274,6 +1278,7 @@ export class PiAgent {
 				toolOperations: sessionOptions.toolOperations,
 				modelRegistry: services.modelRegistry,
 				initialActiveToolNames,
+				enableLspTools: sessionOptions.enableLspTools,
 				excludedToolNames: sessionOptions.excludedTools,
 				allowedToolNames,
 				subagentRunner: this.createEmbeddedSubagentRunner(

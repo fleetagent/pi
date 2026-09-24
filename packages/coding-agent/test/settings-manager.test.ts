@@ -24,7 +24,26 @@ describe("SettingsManager", () => {
 			rmSync(testDir, { recursive: true });
 		}
 	});
-
+	it("keeps compression detection opt-in global and clears its persisted model", async () => {
+		writeFileSync(
+			join(projectDir, ".pi", "settings.json"),
+			JSON.stringify({ compressionDetectionModel: "untrusted/model" }),
+		);
+		const manager = SettingsManager.create(projectDir, agentDir);
+		expect(manager.getCompressionDetectionModel()).toBeUndefined();
+		manager.setCompressionDetectionModel("trusted/small-model");
+		await manager.flush();
+		expect(manager.getCompressionDetectionModel()).toBe("trusted/small-model");
+		expect(JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf8")).compressionDetectionModel).toBe(
+			"trusted/small-model",
+		);
+		manager.setCompressionDetectionModel(undefined);
+		await manager.flush();
+		expect(manager.getCompressionDetectionModel()).toBeUndefined();
+		expect(JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf8"))).not.toHaveProperty(
+			"compressionDetectionModel",
+		);
+	});
 	describe("preserves externally added settings", () => {
 		it("should preserve enabledModels when changing thinking level", async () => {
 			// Create initial settings file
@@ -542,6 +561,18 @@ describe("SettingsManager", () => {
 				baseUrl: "https://search.example.test",
 			});
 			expect(manager.getToolSettings("custom")).toEqual({ enabled: true });
+		});
+	});
+	describe("enableLspTools", () => {
+		it("defaults off and respects settings precedence and runtime overrides", () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getEnableLspTools()).toBe(false);
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ enableLspTools: true }));
+			writeFileSync(join(projectDir, ".pi", "settings.json"), JSON.stringify({ enableLspTools: false }));
+			const layered = SettingsManager.create(projectDir, agentDir);
+			expect(layered.getEnableLspTools()).toBe(false);
+			layered.applyOverrides({ enableLspTools: true });
+			expect(layered.getEnableLspTools()).toBe(true);
 		});
 	});
 	describe("LSP settings", () => {

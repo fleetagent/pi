@@ -586,6 +586,8 @@ export class InteractiveMode {
 	private pendingUserInputs: string[] = [];
 	private loadingAnimation: Loader | undefined = undefined;
 	private workingMessage: string | undefined = undefined;
+	private compressionDetectionActive = false;
+	private compressionDetectionOwnsLoader = false;
 	private workingVisible = true;
 	private workingIndicatorOptions: LoaderIndicatorOptions | undefined = undefined;
 	private readonly defaultWorkingMessage = "Working...";
@@ -2172,7 +2174,8 @@ export class InteractiveMode {
 	}
 
 	private getWorkingLoaderMessage(): string {
-		return this.workingMessage ?? this.defaultWorkingMessage;
+		const message = this.workingMessage ?? this.defaultWorkingMessage;
+		return this.compressionDetectionActive ? `${message} [Evaluating compression possibility]` : message;
 	}
 
 	private createWorkingLoader(): Loader {
@@ -2190,13 +2193,14 @@ export class InteractiveMode {
 			this.loadingAnimation.stop();
 			this.loadingAnimation = undefined;
 		}
+		this.compressionDetectionOwnsLoader = false;
 		this.statusContainer.clear();
 	}
 
 	private resetHookExecutionActivity(): void {
 		if (this.hookExecutionActivityDepth === 0) return;
 		this.hookExecutionActivityDepth = 0;
-		if (this.hookExecutionActivityOwnsLoader) this.stopWorkingLoader();
+		if (this.hookExecutionActivityOwnsLoader && !this.compressionDetectionActive) this.stopWorkingLoader();
 		else this.loadingAnimation?.setMessage(this.getWorkingLoaderMessage());
 		this.hookExecutionActivityOwnsLoader = false;
 		this.ui.requestRender();
@@ -2219,11 +2223,43 @@ export class InteractiveMode {
 		if (this.hookExecutionActivityDepth === 0) return;
 		this.hookExecutionActivityDepth -= 1;
 		if (this.hookExecutionActivityDepth > 0) return;
-		if (this.hookExecutionActivityOwnsLoader && !this.session.isStreaming) this.stopWorkingLoader();
+		if (this.hookExecutionActivityOwnsLoader && !this.session.isStreaming && !this.compressionDetectionActive)
+			this.stopWorkingLoader();
 		else this.loadingAnimation?.setMessage(this.getWorkingLoaderMessage());
 		this.hookExecutionActivityOwnsLoader = false;
 		this.ui.requestRender();
 	}
+	private releaseCompressionDetectionLoader(): void {
+		if (!this.compressionDetectionOwnsLoader) return;
+		this.compressionDetectionOwnsLoader = false;
+		if (this.hookExecutionActivityDepth > 0) {
+			this.hookExecutionActivityOwnsLoader = true;
+			return;
+		}
+		if (this.session.isStreaming) return;
+		if (this.loadingAnimation && !this.statusContainer.children.includes(this.loadingAnimation)) {
+			this.loadingAnimation.stop();
+			this.loadingAnimation = undefined;
+			return;
+		}
+		this.stopWorkingLoader();
+	}
+
+	private handleCompressionDetectionActivity(active: boolean): void {
+		this.compressionDetectionActive = active;
+		if (active && this.workingVisible && !this.loadingAnimation && this.statusContainer.children.length === 0) {
+			this.loadingAnimation = this.createWorkingLoader();
+			this.statusContainer.addChild(this.loadingAnimation);
+			this.compressionDetectionOwnsLoader = true;
+		} else if (!active) {
+			this.releaseCompressionDetectionLoader();
+			if (this.hookExecutionActivityDepth === 0) this.loadingAnimation?.setMessage(this.getWorkingLoaderMessage());
+		} else if (this.hookExecutionActivityDepth === 0) {
+			this.loadingAnimation?.setMessage(this.getWorkingLoaderMessage());
+		}
+		this.ui.requestRender();
+	}
+
 	private setWorkingVisible(visible: boolean): void {
 		this.workingVisible = visible;
 		if (!visible) {
@@ -2231,9 +2267,13 @@ export class InteractiveMode {
 			this.ui.requestRender();
 			return;
 		}
-		if (this.session.isStreaming && !this.loadingAnimation) {
-			this.statusContainer.clear();
+		if (
+			(this.session.isStreaming || this.compressionDetectionActive) &&
+			!this.loadingAnimation &&
+			this.statusContainer.children.length === 0
+		) {
 			this.loadingAnimation = this.createWorkingLoader();
+			if (this.compressionDetectionActive && !this.session.isStreaming) this.compressionDetectionOwnsLoader = true;
 			this.statusContainer.addChild(this.loadingAnimation);
 		}
 		this.ui.requestRender();
@@ -2483,8 +2523,8 @@ export class InteractiveMode {
 			setStatus: (key, text) => this.setExtensionStatus(key, text),
 			setWorkingMessage: (message) => {
 				this.workingMessage = message;
-				if (this.loadingAnimation) {
-					this.loadingAnimation.setMessage(message ?? this.defaultWorkingMessage);
+				if (this.loadingAnimation && this.hookExecutionActivityDepth === 0) {
+					this.loadingAnimation.setMessage(this.getWorkingLoaderMessage());
 				}
 			},
 			setWorkingVisible: (visible) => this.setWorkingVisible(visible),
@@ -3008,6 +3048,15 @@ export class InteractiveMode {
 				},
 			};
 		}
+		if (this.matchesEditorCommand(text, "/compress-detection-model")) {
+			const searchTerm = text.slice("/compress-detection-model".length).trim();
+			return {
+				run: async () => {
+					this.editor.setText("");
+					await this.handleCompressionDetectionModelCommand(searchTerm);
+				},
+			};
+		}
 		if (this.matchesEditorCommand(text, "/export")) {
 			return {
 				run: async () => {
@@ -3424,17 +3473,14 @@ export class InteractiveMode {
 
 	private handleAgentEnd(): void {
 		if (this.settingsManager.getShowTerminalProgress()) this.ui.terminal.setProgress(false);
-		if (this.loadingAnimation) {
-			this.loadingAnimation.stop();
-			this.loadingAnimation = undefined;
-			this.statusContainer.clear();
-		}
+		if (this.loadingAnimation) this.stopWorkingLoader();
 		if (this.streamingComponent) {
 			this.chatContainer.removeChild(this.streamingComponent);
 			this.streamingComponent = undefined;
 			this.streamingMessage = undefined;
 		}
 		this.pendingTools.clear();
+		if (this.compressionDetectionActive) this.handleCompressionDetectionActivity(true);
 		this.ui.requestRender();
 	}
 
@@ -3638,6 +3684,18 @@ export class InteractiveMode {
 				break;
 			case "queue_update":
 				this.updatePendingMessagesDisplay();
+				this.ui.requestRender();
+				break;
+			case "compression_detection_activity":
+				this.handleCompressionDetectionActivity(event.active);
+				break;
+			case "compression_detection_result":
+				this.footer.invalidate();
+				this.ui.requestRender();
+				break;
+			case "state_compressed":
+				this.rebuildChatFromMessages();
+				this.footer.invalidate();
 				this.ui.requestRender();
 				break;
 			case "session_info_changed":
@@ -4849,6 +4907,45 @@ export class InteractiveMode {
 		}
 
 		this.showModelSelector(searchTerm);
+	}
+	private async handleCompressionDetectionModelCommand(searchTerm: string): Promise<void> {
+		if (["clear", "off", "none"].includes(searchTerm.toLowerCase())) {
+			this.session.setCompressionDetectionModel(undefined);
+			this.showStatus("Background compression detection disabled");
+			return;
+		}
+		if (searchTerm) {
+			this.session.modelRegistry.refresh();
+			const model = findExactModelReferenceMatch(searchTerm, this.session.modelRegistry.getAvailable());
+			if (model) {
+				this.session.setCompressionDetectionModel(`${model.provider}/${model.id}`);
+				this.showStatus(`Compression detection model: ${model.provider}/${model.id}`);
+				return;
+			}
+		}
+		const reference = this.settingsManager.getCompressionDetectionModel();
+		const [provider, ...idParts] = reference?.split("/") ?? [];
+		this.showSelector((done) => {
+			const selector = new ModelSelectorComponent(
+				this.ui,
+				this.session.modelRegistry.find(provider, idParts.join("/")),
+				this.settingsManager,
+				this.session.modelRegistry,
+				[],
+				(model) => {
+					this.session.setCompressionDetectionModel(`${model.provider}/${model.id}`);
+					done();
+					this.showStatus(`Compression detection model: ${model.provider}/${model.id}`);
+				},
+				() => {
+					done();
+					this.ui.requestRender();
+				},
+				searchTerm || undefined,
+				false,
+			);
+			return { component: selector, focus: selector };
+		});
 	}
 
 	private async findExactModelMatch(searchTerm: string): Promise<Model<any> | undefined> {

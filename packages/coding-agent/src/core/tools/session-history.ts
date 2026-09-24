@@ -5,6 +5,7 @@ import type { Static } from "typebox";
 import { Type } from "typebox";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { STRUCTURED_RESPONSE_INTERNAL_CUSTOM_TYPE } from "../messages.ts";
+import { getLatestCompactionEntry } from "../session/context.ts";
 import type { ReadonlySession } from "../session/session.ts";
 import type { SessionEntry } from "../session/types.ts";
 import { abortIf } from "./runtime.ts";
@@ -68,8 +69,8 @@ const sessionSearchSchema = Type.Object({
 		}),
 	),
 	scope: Type.Optional(
-		StringEnum(["branch", "all"] as const, {
-			description: "Search the current branch ancestry (default) or every branch in the active session",
+		StringEnum(["context", "branch", "all"] as const, {
+			description: "Search entries in the current model context (default), current branch ancestry, or every branch",
 		}),
 	),
 });
@@ -84,7 +85,7 @@ const sessionEntryGetSchema = Type.Object({
 export type SessionHistoryToolName = "session_search" | "session_entry_get";
 export type SessionSearchToolInput = Static<typeof sessionSearchSchema>;
 export type SessionEntryGetToolInput = Static<typeof sessionEntryGetSchema>;
-export type SessionSearchScope = "branch" | "all";
+export type SessionSearchScope = "context" | "branch" | "all";
 
 export interface SessionSearchMatch {
 	entryId: string;
@@ -685,6 +686,29 @@ function projectEntryForModel(entry: SessionEntry): unknown | undefined {
 	return entry;
 }
 
+function getContextSearchEntries(path: SessionEntry[]): SessionEntry[] {
+	const compaction = getLatestCompactionEntry(path);
+	let entries = path;
+	if (compaction) {
+		const compactionIndex = path.findIndex((entry) => entry.id === compaction.id);
+		const firstKeptIndex = path.findIndex(
+			(entry, index) => index < compactionIndex && entry.id === compaction.firstKeptEntryId,
+		);
+		entries = [
+			path[compactionIndex],
+			...(firstKeptIndex < 0 ? [] : path.slice(firstKeptIndex, compactionIndex)),
+			...path.slice(compactionIndex + 1),
+		];
+	}
+	return entries.filter(
+		(entry) =>
+			entry.type === "message" ||
+			entry.type === "custom_message" ||
+			entry.type === "branch_summary" ||
+			(entry.type === "compaction" && entry.id === compaction?.id),
+	);
+}
+
 export function createSessionSearchToolDefinition(
 	session: ReadonlySession,
 ): ToolDefinition<typeof sessionSearchSchema, SessionSearchToolDetails> {
@@ -692,10 +716,10 @@ export function createSessionSearchToolDefinition(
 		name: "session_search",
 		label: "session_search",
 		description:
-			"Search finalized entries in the active session using a JavaScript regular expression by default, with grep-like case, fixed-string, context, result-limit, and branch-scope options. Searches the current branch by default, including history omitted from model context by compaction. Hidden extension state and context-excluded bash output are not searched. Input and output are bounded.",
+			"Search finalized entries in the active session using a JavaScript regular expression by default, with grep-like case, fixed-string, context, result-limit, and scope options. Searches entries in the current model context by default; use scope: branch for older current-branch history or scope: all for archived branches. Hidden extension state and context-excluded bash output are not searched. Input and output are bounded.",
 		promptSnippet: "Search finalized entries in the active session history with a regular expression",
 		promptGuidelines: [
-			"Use session_search when exact earlier messages, decisions, identifiers, or tool output may have been omitted by compaction; use session_entry_get with a returned entry ID when the exact model-visible entry is needed.",
+			"Default searches cover current model context. Use scope: branch or scope: all to recover history omitted by compaction; use session_entry_get with a returned entry ID when the exact model-visible entry is needed.",
 		],
 		parameters: sessionSearchSchema,
 		executionMode: "sequential",
@@ -708,12 +732,17 @@ export function createSessionSearchToolDefinition(
 				beforeContext = 0,
 				afterContext = 0,
 				maxResults = DEFAULT_SEARCH_RESULTS,
-				scope = "branch",
+				scope = "context",
 			}: SessionSearchToolInput,
 			signal,
 		) {
 			abortIf(signal);
-			const entries = scope === "all" ? session.getEntries() : session.getBranch();
+			const entries =
+				scope === "all"
+					? session.getEntries()
+					: scope === "branch"
+						? session.getBranch()
+						: getContextSearchEntries(session.getBranch());
 			const corpus = buildSearchCorpus(entries, toolCallId, signal);
 			const lines = corpus.lines.map(({ document, lineIndex }) => document.lines[lineIndex]);
 			const matchIndexes = fixedStrings

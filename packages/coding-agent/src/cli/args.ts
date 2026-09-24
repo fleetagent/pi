@@ -43,6 +43,7 @@ export interface Args {
 	sessionDir?: string;
 	lspConfig?: string;
 	noLsp?: boolean;
+	enableLspTools?: boolean;
 	remoteSessionBaseUrl?: string;
 	remoteSessionToken?: string;
 	remoteProjectId?: string;
@@ -114,6 +115,7 @@ const BOOLEAN_FLAG_HANDLERS = new Map<string, CliBooleanFlagHandler>([
 	["-r", (result) => (result.resume = true)],
 	["--no-session", (result) => (result.noSession = true)],
 	["--no-lsp", (result) => (result.noLsp = true)],
+	["--enable-lsp-tools", (result) => (result.enableLspTools = true)],
 	["--no-tools", (result) => (result.noTools = true)],
 	["-nt", (result) => (result.noTools = true)],
 	["--no-builtin-tools", (result) => (result.noBuiltinTools = true)],
@@ -381,6 +383,7 @@ ${chalk.bold("Options:")}
   --session-dir <dir>            Directory for session storage and lookup
   --lsp-config <file>            Load an explicit LSP configuration file
   --no-lsp                      Disable the LSP runtime regardless of tool selection
+  --enable-lsp-tools            Expose configured LSP tools by default
   --remote-session-base-url <url> Use remote session service for persistence
   --remote-session-token <token> Bearer token for remote session service
   --remote-project-id <id>       Project id sent to remote session service
@@ -524,10 +527,13 @@ ${chalk.bold("Built-in Tool Names:")}
   grep   - Search file contents (read-only, off by default)
   find   - Find files by glob pattern (read-only, off by default)
   ls     - List directory contents (read-only, off by default)
-  websearch - Search the web for relevant links using DuckDuckGo, Brave Search, or Firecrawl
+  websearch         - Search the web for relevant links
+  session_search    - Search finalized session history
+  session_entry_get - Fetch an exact session entry by ID
+  compress_context    - Replace an active session range or tail with a summary
 
 ${chalk.bold("Conditional LSP Tool Names:")}
-  Requires a valid LSP configuration; unavailable when LSP is disabled or unconfigured.
+  Requires LSP configuration; opt in with --enable-lsp-tools, enableLspTools in settings, or --tools.
   lsp_diagnostics   - Get diagnostics for a file
   lsp_hover         - Get hover information for a symbol
   lsp_definition    - Find a symbol definition

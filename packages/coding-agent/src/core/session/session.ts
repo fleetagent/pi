@@ -173,6 +173,23 @@ export abstract class Session {
 		this.store.appendEntry(entry);
 	}
 
+	/** Copy a preserved suffix onto a new branch without mutating the archived entries. */
+	appendReplayedEntry(entry: SessionEntry, ids: ReadonlyMap<string, string>): string {
+		if (entry.type === "compaction") throw new Error("Cannot replay a compaction boundary");
+		const id = generateId(this.store);
+		const base = { id, parentId: this.store.getLeafId(), timestamp: new Date().toISOString() };
+		const replayed: SessionEntry =
+			entry.type === "label"
+				? { ...entry, ...base, targetId: ids.get(entry.targetId) ?? entry.targetId }
+				: entry.type === "branch_summary"
+					? { ...entry, ...base, fromId: ids.get(entry.fromId) ?? entry.fromId }
+					: entry.type === "message"
+						? { ...entry, ...base, replayedFromId: entry.replayedFromId ?? entry.id }
+						: { ...entry, ...base };
+		this._appendEntry(replayed);
+		return id;
+	}
+
 	/** Append a message as child of current leaf, then advance leaf. Returns entry id.
 	 * Does not allow writing CompactionSummaryMessage and BranchSummaryMessage directly.
 	 * Reason: we want these to be top-level entries in the session, not message session entries,

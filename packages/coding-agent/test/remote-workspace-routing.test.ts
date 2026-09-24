@@ -216,7 +216,7 @@ describe("remote canonical workspace tool routing", () => {
 		await writeFile(join(workspaceRoot, "sample.ts"), "const value = 1;\n");
 		const { server, address } = await createServer(workspaceRoot, true, undefined, configPath);
 		const operations = await createRemoteToolOperations(address.url);
-		const harness = await createHarness({ toolOperations: operations });
+		const harness = await createHarness({ toolOperations: operations, settings: { enableLspTools: true } });
 		expect(harness.session.getLspStatus()).toMatchObject({
 			owner: "daemon",
 			enabled: true,

@@ -47,12 +47,12 @@ async function writeAttachedConfiguration(directory: string, id: string): Promis
 	return path;
 }
 
-function expectLspToolAvailability(runtime: PiAgent, available: boolean): void {
+function expectLspToolAvailability(runtime: PiAgent, available: boolean, registered = available): void {
 	const activeTools = new Set(runtime.session.getActiveToolNames());
 	const allTools = new Set(runtime.session.getAllTools().map((tool) => tool.name));
 	for (const name of LSP_TOOL_NAMES) {
 		expect(activeTools.has(name), `${name} active`).toBe(available);
-		expect(allTools.has(name), `${name} registered`).toBe(available);
+		expect(allTools.has(name), `${name} registered`).toBe(registered);
 	}
 }
 
@@ -87,7 +87,7 @@ afterEach(async () => {
 });
 
 describe.sequential("main LSP wiring", () => {
-	it("resolves --lsp-config from the startup cwd and registers conditional LSP tools", async () => {
+	it("resolves --lsp-config from the startup cwd but leaves LSP tools off by default", async () => {
 		const startupCwd = await createTempDir();
 		const configDir = join(startupCwd, "config");
 		await mkdir(configDir, { recursive: true });
@@ -106,7 +106,11 @@ describe.sequential("main LSP wiring", () => {
 			},
 			servers: [{ serverId: "cli-relative" }],
 		});
-		expectLspToolAvailability(runtime, true);
+		expectLspToolAvailability(runtime, false, true);
+		await main(["--offline", "--print", "--no-session", "--lsp-config", "config/lsp.json", "--enable-lsp-tools"]);
+		const enabledRuntime = runtimes.at(-1);
+		if (!enabledRuntime) throw new Error("Expected enabled main runtime");
+		expectLspToolAvailability(enabledRuntime, true);
 	});
 
 	it("does not expand an explicit CLI tool allowlist when LSP is configured", async () => {
@@ -120,6 +124,7 @@ describe.sequential("main LSP wiring", () => {
 			"--no-session",
 			"--lsp-config",
 			"lsp.json",
+			"--enable-lsp-tools",
 			"--tools",
 			"read,bash,edit,write",
 		]);
@@ -205,7 +210,15 @@ describe.sequential("main LSP wiring", () => {
 		await writeAttachedConfiguration(startupCwd, "disabled-by-flag");
 		process.chdir(startupCwd);
 
-		await main(["--offline", "--print", "--no-session", "--lsp-config", "lsp.json", "--no-lsp"]);
+		await main([
+			"--offline",
+			"--print",
+			"--no-session",
+			"--lsp-config",
+			"lsp.json",
+			"--enable-lsp-tools",
+			"--no-lsp",
+		]);
 		const runtime = runtimes.at(-1);
 		if (!runtime) throw new Error("Expected main runtime");
 
@@ -261,6 +274,7 @@ describe.sequential("main LSP wiring", () => {
 			sessionDir,
 			"--lsp-config",
 			"cli-config/lsp.json",
+			"--enable-lsp-tools",
 		]);
 		const runtime = runtimes.at(-1);
 		if (!runtime) throw new Error("Expected main runtime");

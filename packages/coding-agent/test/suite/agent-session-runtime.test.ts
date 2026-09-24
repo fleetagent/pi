@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, registerFauxProvider, type TextContent } from "@fleetagent/pi-ai";
@@ -53,6 +53,7 @@ interface RuntimeTestOptions {
 	bootstrapThinkingLevel?: boolean;
 	failReplacementBuild?: ReplacementBuildFailureControl;
 	lsp?: PiAgentSessionOptions["lsp"];
+	enableLspTools?: boolean;
 	lspConnectionFactories?: PiAgentSessionOptions["lspConnectionFactories"];
 }
 
@@ -89,6 +90,7 @@ describe("PiAgent session replacement characterization", () => {
 			authStorage,
 			sessionManager: new LocalSessionManager({ cwd: tempDir }),
 			lsp: options?.lsp,
+			enableLspTools: options?.enableLspTools,
 			lspConnectionFactories: options?.lspConnectionFactories,
 			resourceLoaderOptions: {
 				extensionFactories: [
@@ -595,6 +597,58 @@ describe("PiAgent session replacement characterization", () => {
 	it("throws when forking with an invalid entry id", async () => {
 		const { runtime } = await createRuntimeForTest(() => {});
 		await expect(runtime.fork("missing-entry")).rejects.toThrow("Invalid entry ID for forking");
+	});
+
+	it("keeps configured LSP tools opt-in across reload and session replacement", async () => {
+		const lsp = {
+			type: "configuration" as const,
+			configuration: {
+				servers: [
+					{
+						id: "fixture",
+						selectors: [{ languageId: "typescript", pattern: "**/*.ts" }],
+						transport: { type: "tcp" as const, host: "127.0.0.1", port: 2087 },
+						lifecycle: { type: "attached" as const },
+						workspace: { type: "session" as const },
+					},
+				],
+			},
+		};
+		const { runtime } = await createRuntimeForTest(() => {}, { lsp });
+		const session = runtime.session;
+		expect(session.getLspStatus().enabled).toBe(true);
+		expect(session.getActiveToolNames()).not.toContain("lsp_hover");
+		expect(session.getActiveToolNames()).toContain("compress_context");
+		await session.reload();
+		expect(session.getActiveToolNames()).not.toContain("lsp_hover");
+		writeFileSync(join(runtime.agentDir, "settings.json"), JSON.stringify({ enableLspTools: true }));
+		await session.reload();
+		expect(session.getActiveToolNames()).toContain("lsp_hover");
+		await runtime.newSession();
+		expect(runtime.session.getActiveToolNames()).toContain("lsp_hover");
+	});
+
+	it("lets an SDK LSP tool flag override settings for the session", async () => {
+		const { runtime } = await createRuntimeForTest(() => {}, {
+			enableLspTools: true,
+			lsp: {
+				type: "configuration",
+				configuration: {
+					servers: [
+						{
+							id: "fixture",
+							selectors: [{ languageId: "typescript", pattern: "**/*.ts" }],
+							transport: { type: "tcp", host: "127.0.0.1", port: 2087 },
+							lifecycle: { type: "attached" },
+							workspace: { type: "session" },
+						},
+					],
+				},
+			},
+		});
+		expect(runtime.session.getActiveToolNames()).toContain("lsp_hover");
+		await runtime.session.reload();
+		expect(runtime.session.getActiveToolNames()).toContain("lsp_hover");
 	});
 
 	it("preserves the single lazy LSP runtime across same- and cross-cwd session replacement", async () => {

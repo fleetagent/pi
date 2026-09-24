@@ -89,7 +89,7 @@ export class FooterComponent implements Component {
 	private collectUsageTotals(): FooterUsageTotals {
 		const totals: FooterUsageTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
 		for (const entry of this.session.session.getEntries()) {
-			if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+			if (entry.type !== "message" || entry.message.role !== "assistant" || entry.replayedFromId) continue;
 			totals.input += entry.message.usage.input;
 			totals.output += entry.message.usage.output;
 			totals.cacheRead += entry.message.usage.cacheRead;
@@ -132,9 +132,20 @@ export class FooterComponent implements Component {
 		if (totals.cacheWrite) parts.push(`W${formatTokens(totals.cacheWrite)}`);
 		const state = this.session.state;
 		const usingSubscription = state.model ? this.session.modelRegistry.isUsingOAuth(state.model) : false;
-		if (totals.cost || usingSubscription) {
-			parts.push(`$${totals.cost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`);
+		const counts = this.session.getCompressionDetectionCounts();
+		const detectionCost = this.session.getCompressionDetectionCost();
+		const showDetection = !!(
+			this.session.settingsManager.getCompressionDetectionModel() ||
+			counts.keep ||
+			counts.compress ||
+			detectionCost
+		);
+		if (totals.cost || usingSubscription || showDetection) {
+			parts.push(
+				`$${totals.cost.toFixed(3)}${usingSubscription ? " (sub)" : ""}${showDetection ? ` (detect $${detectionCost.toFixed(4)})` : ""}`,
+			);
 		}
+		if (showDetection) parts.push(`K${counts.keep} C${counts.compress}`);
 		parts.push(this.formatContextUsage(contextWindow, contextPercentValue, contextPercent));
 		return parts.join(" ");
 	}
@@ -182,7 +193,7 @@ export class FooterComponent implements Component {
 		const contextUsage = this.session.getContextUsage();
 		const contextWindow = contextUsage?.contextWindow ?? state.model?.contextWindow ?? 0;
 		const contextPercentValue = contextUsage?.percent ?? 0;
-		const contextPercent = contextUsage?.percent !== null ? contextPercentValue.toFixed(1) : "?";
+		const contextPercent = contextUsage?.percent != null ? contextPercentValue.toFixed(1) : "?";
 		const locationText = this.formatLocation();
 
 		let stats = this.formatUsageSummary(totals, contextWindow, contextPercentValue, contextPercent);

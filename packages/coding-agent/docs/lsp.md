@@ -2,7 +2,7 @@
 
 Pi can connect its `lsp_*` tools to explicitly configured Language Server Protocol (LSP) servers. Configuration controls document selection, workspace roots, transport, lifecycle, path mapping, initialization, settings, feature selection, priority, and timeouts.
 
-Pi does not include or automatically select a TypeScript language server. Without LSP configuration, the LSP runtime and tools are disabled. Install and run the servers you configure yourself.
+Pi does not include or automatically select a TypeScript language server. Without LSP configuration, the LSP runtime and tools are disabled. Even when a server is configured, LSP tools are not exposed to the model by default; opt in with `--enable-lsp-tools`, `"enableLspTools": true` in settings, or an explicit `--tools` allowlist. Install and run the servers you configure yourself.
 
 ## Quick start: spawned TypeScript server
 
@@ -50,7 +50,7 @@ Create `.pi/lsp.json`:
 Start Pi with the reviewed configuration file:
 
 ```bash
-pi --lsp-config .pi/lsp.json
+pi --lsp-config .pi/lsp.json --enable-lsp-tools
 ```
 
 Paths containing a slash, such as the command above, resolve relative to the configuration file. A bare command such as `typescript-language-server` is resolved through `PATH`.
@@ -345,7 +345,7 @@ Several servers may match one document:
 
 Document synchronization is per client. Pi respects each server's advertised open/change/save/close capabilities, tracks independent versions, and replays current open documents after reconnect. Changed content observed by either a read or write advances only the successfully notified client's version; saves remain write-only. A rejected, timed-out, or cancelled synchronization notification leaves remote state indeterminate, so Pi invalidates only that exact client, discards its document versions, and performs one bounded replacement replay starting at client-local version 1. A failed save is replayed after the replacement `didOpen`; replay failure does not reconnect recursively. Other providers continue independently, and normal read/write hooks synchronize only already-running clients without starting inactive servers.
 
-LSP enablement and model tool allowlisting are separate. An enabled runtime can synchronize a running client even when `lsp_*` tools are not exposed to the model. A disabled runtime allocates no manager or synchronization hooks.
+LSP runtime enablement and model tool exposure are separate. An enabled runtime can synchronize a running client even when `lsp_*` tools are not exposed to the model. A disabled runtime allocates no manager or synchronization hooks. The `--enable-lsp-tools` flag or `enableLspTools` setting enables all configured LSP tools by default; an explicit `--tools` allowlist can select any subset without the flag. Neither option enables a disabled or unconfigured LSP runtime.
 
 ## SDK and host configuration
 
@@ -462,9 +462,9 @@ const configuration = {
 
 ### No LSP tools appear
 
-- No configuration means LSP is disabled.
+- No configuration means LSP is disabled. A configured runtime still leaves model-facing LSP tools off unless `--enable-lsp-tools`, `enableLspTools: true`, or an explicit `--tools` allowlist selects them.
 - Check for top-level `enabled: false`, `--no-lsp`, or a higher-precedence replacement/removal.
-- Tool allowlisting is separate: `--tools` must include the desired `lsp_*` names if an allowlist is used.
+- With `--tools`, include the desired `lsp_*` names; an explicit allowlist overrides the default enable flag.
 - Read startup diagnostics for the source and JSON path that failed validation. LSP configuration diagnostics do not terminate Pi; use `--no-lsp` to recover while correcting malformed or unreadable lower-precedence sources.
 ### A project server is missing
 

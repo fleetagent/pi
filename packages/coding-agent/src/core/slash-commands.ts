@@ -23,6 +23,7 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "cd", description: "Change the working directory" },
 	{ name: "settings", description: "Open settings menu" },
 	{ name: "model", description: "Switch models" },
+	{ name: "compress-detection-model", description: "Choose or clear the background compression detection model" },
 	{ name: "scoped-models", description: "Enable/disable models for Ctrl+P cycling" },
 	{ name: "profile", description: "Create or use a scoped-model profile" },
 	{ name: "export", description: "Export session (HTML default, or specify path: .html/.jsonl)" },

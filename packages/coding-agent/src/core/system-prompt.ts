@@ -106,6 +106,18 @@ function buildDefaultSystemPrompt(options: BuildSystemPromptOptions, tools: stri
 	const toolsList = formatAvailableTools(tools, options.toolSnippets);
 	const guidelines = formatPromptGuidelines(tools, options.promptGuidelines);
 	const orchestrationSection = buildOrchestrationSection(tools.includes("subagent"));
+	const stateCompressionSection = tools.includes("compress_context")
+		? `## State compression
+Proactively use compress_context at useful checkpoints after finishing a substantial slice of work (such as investigation, implementation, or validation), when the detailed tool calls are no longer needed for the next steps. Do not wait for the context window to fill or for the user to ask. Avoid compressing during active work or when the raw details are still needed.
+
+When current context utilization is known, treat about 35% as a soft threshold: compress at the next completed work slice if there is redundant history. At about 50%, prioritize compression at the next safe checkpoint. These are guidelines, not reasons to interrupt active work, compress trivial exchanges, or repeatedly check utilization just to hit a number.
+
+You receive model-only context metadata after user messages and completed tool-call batches, with session entry IDs and approximate utilization at those points. Use a user or assistant tool-call entry ID as a compression cut point; tool-result IDs are for lookup, not cuts. Do not repeat this metadata to the user.
+
+Turn batches of reads, searches, builds, and tests into concise state: findings and decisions, changed files, what passed or failed (including relevant errors), unresolved issues, and concrete next steps. Preserve important user instructions and constraints. Omit redundant tool output rather than carrying it forward.
+
+Choose a cut point from the entry IDs already visible in context metadata. Pass startEntryId and a summary to replace through the current tail, or add inclusive endEntryId to replace an older bounded range while retaining later messages. Never split a tool call from its results. Detector-suggested IDs are advisory; verify the range yourself before acting. Do not send a list of IDs. Call compress_context alone, not alongside other tools. session_search defaults to current model context; scope: branch/all retrieves historical entries for reference, not necessarily valid compression cut points.`
+		: "";
 	const readmePath = getReadmePath();
 	const docsPath = getDocsPath();
 	const examplesPath = getExamplesPath();
@@ -114,7 +126,7 @@ Available tools:
 ${toolsList}
 
 In addition to the tools above, you may have access to other custom tools depending on the project.
-${orchestrationSection ? `\n${orchestrationSection}\n` : ""}
+${orchestrationSection ? `\n${orchestrationSection}\n` : ""}${stateCompressionSection ? `\n${stateCompressionSection}\n` : ""}
 Guidelines:
 ${guidelines}
 

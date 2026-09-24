@@ -114,6 +114,37 @@ describe("buildSystemPrompt", () => {
 		});
 	});
 
+	describe("state compression", () => {
+		test("instructs the agent to send only the starting ID and summary when the tool is active", () => {
+			const prompt = buildSystemPrompt({
+				selectedTools: ["read", "compress_context"],
+				cwd: process.cwd(),
+			});
+
+			expect(prompt).toContain("## State compression");
+			expect(prompt).toContain("Proactively use compress_context at useful checkpoints");
+			expect(prompt).toContain("Do not wait for the context window to fill or for the user to ask.");
+			expect(prompt).toContain("about 35% as a soft threshold");
+			expect(prompt).toContain("At about 50%, prioritize compression at the next safe checkpoint");
+			expect(prompt).toContain("repeatedly check utilization just to hit a number");
+			expect(prompt).toContain("model-only context metadata after user messages and completed tool-call batches");
+			expect(prompt).toContain("tool-result IDs are for lookup, not cuts");
+			expect(prompt).toContain("Turn batches of reads, searches, builds, and tests into concise state");
+			expect(prompt).toContain("what passed or failed (including relevant errors)");
+			expect(prompt).toContain("Choose a cut point from the entry IDs already visible in context metadata");
+			expect(prompt).toContain("Pass startEntryId and a summary");
+			expect(prompt).toContain("inclusive endEntryId");
+			expect(prompt).toContain("Detector-suggested IDs are advisory");
+			expect(prompt).toContain("Do not send a list of IDs.");
+			expect(prompt).toContain("Call compress_context alone");
+		});
+
+		test("omits compression guidance when the tool is unavailable", () => {
+			const prompt = buildSystemPrompt({ selectedTools: ["read"], cwd: process.cwd() });
+			expect(prompt).not.toContain("## State compression");
+		});
+	});
+
 	describe("prompt guidelines", () => {
 		test("appends promptGuidelines to default guidelines", () => {
 			const prompt = buildSystemPrompt({

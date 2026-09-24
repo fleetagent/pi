@@ -29,8 +29,10 @@ export class CustomMessageComponent extends Container {
 
 		this.addChild(new Spacer(1));
 
-		// Create box with purple background (used for default rendering)
-		this.box = new Box(1, 1, (t) => theme.bg("customMessageBg", t));
+		// State summaries use the success palette to distinguish them from other custom messages.
+		this.box = new Box(1, 1, (t) =>
+			theme.bg(this.message.customType === "compress_context" ? "toolSuccessBg" : "customMessageBg", t),
+		);
 
 		this.rebuild();
 	}
@@ -75,7 +77,8 @@ export class CustomMessageComponent extends Container {
 		this.box.clear();
 
 		// Default rendering: label + content
-		const label = theme.fg("customMessageLabel", `\x1b[1m[${this.message.customType}]\x1b[22m`);
+		const labelColor = this.message.customType === "compress_context" ? "success" : "customMessageLabel";
+		const label = theme.fg(labelColor, `\x1b[1m[${this.message.customType}]\x1b[22m`);
 		this.box.addChild(new Text(label, 0, 0));
 		this.box.addChild(new Spacer(1));
 

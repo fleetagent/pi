@@ -106,6 +106,7 @@ export interface Settings {
 	lastChangelogVersion?: string;
 	defaultProvider?: string;
 	defaultModel?: string;
+	compressionDetectionModel?: string; // provider/model ID; unset disables background detection
 	defaultThinkingLevel?: ThinkingLevel;
 	transport?: TransportSetting; // default: "auto"
 	steeringMode?: QueueMode;
@@ -130,6 +131,7 @@ export interface Settings {
 	themes?: string[]; // Array of local theme file paths or directories
 	enableSkillCommands?: boolean; // default: true - register skills and rules as /skill:name and /rule:name commands
 	enableSubagents?: boolean; // default: false - expose built-in subagent tools
+	enableLspTools?: boolean; // default: false - expose configured LSP tools by default
 	terminal?: TerminalSettings;
 	images?: ImageSettings;
 	enabledModels?: string[]; // Model patterns for cycling (same format as --models CLI flag)
@@ -740,6 +742,17 @@ export class SettingsManager {
 		return this.settings.defaultModel;
 	}
 
+	getCompressionDetectionModel(): string | undefined {
+		return this.globalSettings.compressionDetectionModel;
+	}
+
+	setCompressionDetectionModel(reference: string | undefined): void {
+		if (reference) this.globalSettings.compressionDetectionModel = reference;
+		else delete this.globalSettings.compressionDetectionModel;
+		this.markModified("compressionDetectionModel");
+		this.save();
+	}
+
 	setDefaultProvider(provider: string): void {
 		this.globalSettings.defaultProvider = provider;
 		this.markModified("defaultProvider");
@@ -1092,6 +1105,10 @@ export class SettingsManager {
 
 	getEnableSubagents(): boolean {
 		return this.settings.enableSubagents ?? false;
+	}
+
+	getEnableLspTools(): boolean {
+		return this.settings.enableLspTools ?? false;
 	}
 
 	setEnableSubagents(enabled: boolean): void {

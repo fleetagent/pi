@@ -404,6 +404,7 @@ function applyCliToolSelection(parsed: Args, options: PiAgentSessionOptions): vo
 	if (parsed.noTools) options.noTools = "all";
 	else if (parsed.noBuiltinTools) options.noTools = "builtin";
 	if (parsed.tools) options.tools = [...parsed.tools];
+	if (parsed.enableLspTools) options.enableLspTools = true;
 }
 
 function buildSessionOptions(
@@ -944,6 +945,7 @@ export async function main(args: string[], options?: MainOptions) {
 				thinkingLevel: sessionOptions.thinkingLevel,
 				scopedModels: sessionOptions.scopedModels,
 				tools: sessionOptions.tools,
+				enableLspTools: sessionOptions.enableLspTools,
 				noTools: sessionOptions.noTools,
 				customTools: sessionOptions.customTools,
 				toolOperations,

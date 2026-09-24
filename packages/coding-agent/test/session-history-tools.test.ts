@@ -1,5 +1,11 @@
 import type { AgentToolResult } from "@fleetagent/pi-agent-core";
-import { fauxAssistantMessage, fauxToolCall, type TextContent, validateToolArguments } from "@fleetagent/pi-ai";
+import {
+	fauxAssistantMessage,
+	fauxToolCall,
+	type Message,
+	type TextContent,
+	validateToolArguments,
+} from "@fleetagent/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { STRUCTURED_RESPONSE_INTERNAL_CUSTOM_TYPE } from "../src/core/messages.ts";
 import type {
@@ -7,7 +13,7 @@ import type {
 	SessionHistoryToolName,
 	SessionSearchToolDetails,
 } from "../src/core/tools/session-history.ts";
-import { createHarness, type Harness } from "./suite/harness.ts";
+import { createHarness, getMessageText, type Harness } from "./suite/harness.ts";
 
 function textOutput(result: AgentToolResult<unknown>): string {
 	return result.content
@@ -18,7 +24,7 @@ function textOutput(result: AgentToolResult<unknown>): string {
 
 async function executeTool(
 	harness: Harness,
-	name: SessionHistoryToolName,
+	name: SessionHistoryToolName | "compress_context",
 	arguments_: Record<string, unknown>,
 	toolCallId = `test-${name}`,
 ): Promise<AgentToolResult<unknown>> {
@@ -47,18 +53,100 @@ describe("session history tools", () => {
 		return created;
 	}
 
-	it("registers both tools as active host-owned built-ins", async () => {
+	it("registers session tools as active host-owned built-ins", async () => {
 		const created = await harness();
 		expect(created.session.getActiveToolNames()).toEqual(
-			expect.arrayContaining(["session_search", "session_entry_get"]),
+			expect.arrayContaining(["session_search", "session_entry_get", "compress_context"]),
 		);
-		expect(created.session.getAllTools().find((tool) => tool.name === "session_search")?.sourceInfo).toMatchObject({
-			path: "<builtin:session_search>",
+		expect(created.session.getAllTools().find((tool) => tool.name === "compress_context")?.sourceInfo).toMatchObject({
+			path: "<builtin:compress_context>",
 			source: "builtin",
 		});
 	});
 
-	it("searches compacted current-branch history with regex and grep-like context", async () => {
+	it("exposes user and tool-result entry IDs and utilization only to the model", async () => {
+		const created = await harness();
+		const providerContexts: Message[][] = [];
+		created.setResponses([
+			(context) => {
+				providerContexts.push(context.messages);
+				return fauxAssistantMessage(
+					[
+						fauxToolCall("session_search", { pattern: "metadata", fixedStrings: true }),
+						fauxToolCall("session_entry_get", { entryId: "missing" }),
+					],
+					{ stopReason: "toolUse" },
+				);
+			},
+			(context) => {
+				providerContexts.push(context.messages);
+				return fauxAssistantMessage("done");
+			},
+		]);
+		await created.session.prompt("inspect metadata");
+		const branch = created.sessionManager.getBranch();
+		const userId = branch.find((entry) => entry.type === "message" && entry.message.role === "user")?.id;
+		const assistantId = branch.find((entry) => entry.type === "message" && entry.message.role === "assistant")?.id;
+		const resultIds = branch
+			.filter((entry) => entry.type === "message" && entry.message.role === "toolResult")
+			.map((entry) => entry.id);
+		const firstRequest = JSON.stringify(providerContexts[0]);
+		const secondRequest = JSON.stringify(providerContexts[1]);
+		if (!userId || !assistantId) throw new Error("Missing persisted message entries");
+		expect(firstRequest).toContain(`user entry ${userId}`);
+		expect(firstRequest).toMatch(/context ~\d+\.\d%/u);
+		expect(secondRequest).toContain(`assistant entry ${assistantId}`);
+		for (const resultId of resultIds) expect(secondRequest).toContain(`result entry ${resultId}`);
+		const resultIndexes = providerContexts[1].flatMap((message, index) =>
+			message.role === "toolResult" ? [index] : [],
+		);
+		const noticeIndex = providerContexts[1].findIndex(
+			(message) => message.role === "user" && JSON.stringify(message).includes("assistant entry"),
+		);
+		expect(resultIndexes).toHaveLength(2);
+		expect(noticeIndex).toBeGreaterThan(resultIndexes[1]);
+		expect(branch.some((entry) => entry.type === "custom_message" && entry.customType === "context_metadata")).toBe(
+			false,
+		);
+		expect(
+			created.session.messages.some(
+				(message) => message.role === "custom" && message.customType === "context_metadata",
+			),
+		).toBe(false);
+	});
+
+	it("omits model-only context notices when the compression tool is inactive", async () => {
+		const created = await createHarness({ tools: [] });
+		harnesses.push(created);
+		let providerMessages: Message[] = [];
+		created.setResponses([
+			(context) => {
+				providerMessages = context.messages;
+				return fauxAssistantMessage("done");
+			},
+		]);
+		await created.session.prompt("no compression tool");
+		expect(created.session.getActiveToolNames()).not.toContain("compress_context");
+		expect(JSON.stringify(providerMessages)).not.toContain("context metadata:");
+	});
+
+	it("reports unknown utilization in notices after compaction until usage is available", async () => {
+		const created = await harness();
+		const kept = created.sessionManager.appendMessage({ role: "user", content: "kept", timestamp: 1 });
+		created.sessionManager.appendCompaction("previous work", kept, 200);
+		created.session.agent.state.messages = created.sessionManager.buildSessionContext().messages;
+		let providerMessages: Message[] = [];
+		created.setResponses([
+			(context) => {
+				providerMessages = context.messages;
+				return fauxAssistantMessage("done");
+			},
+		]);
+		await created.session.prompt("after compaction");
+		expect(JSON.stringify(providerMessages)).toContain("context ~?");
+	});
+
+	it("searches current model context by default and compacted branch history explicitly", async () => {
 		const created = await harness();
 		const rootId = created.sessionManager.appendMessage({
 			role: "user",
@@ -83,9 +171,19 @@ describe("session history tools", () => {
 			beforeContext: 1,
 		});
 		const details = result.details as SessionSearchToolDetails;
-		expect(details.matchCount).toBe(2);
-		expect(details.matches.map((match) => match.entryId)).toEqual([rootId, currentId]);
-		expect(textOutput(result)).toContain("1-role: user");
+		expect(details.scope).toBe("context");
+		expect(details.matchCount).toBe(1);
+		expect(details.matches.map((match) => match.entryId)).toEqual([currentId]);
+		const branchResult = await executeTool(created, "session_search", {
+			pattern: "INCIDENT-\\d+|foo\\d+",
+			beforeContext: 1,
+			scope: "branch",
+		});
+		expect((branchResult.details as SessionSearchToolDetails).matches.map((match) => match.entryId)).toEqual([
+			rootId,
+			currentId,
+		]);
+		expect(textOutput(branchResult)).toContain("1-role: user");
 		expect(textOutput(result)).not.toContain("abandoned branch value");
 	});
 
@@ -238,5 +336,249 @@ describe("session history tools", () => {
 		await expect(executeTool(created, "session_entry_get", { entryId: "missing" })).rejects.toThrow(
 			"Session entry not found: missing",
 		);
+	});
+	it("archives only the selected tail after its tool result", async () => {
+		const contexts: string[][] = [];
+		const created = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.on("context", (event) => {
+						contexts.push(
+							event.messages.map((message) =>
+								message.role === "custom" ? String(message.content) : getMessageText(message),
+							),
+						);
+					});
+				},
+			],
+		});
+		harnesses.push(created);
+		const prefixId = created.sessionManager.appendMessage({ role: "user", content: "preserve prefix", timestamp: 1 });
+		const startId = created.sessionManager.appendMessage({
+			role: "user",
+			content: `stale read ${"old content ".repeat(300)}`,
+			timestamp: 2,
+		});
+		created.session.agent.state.messages = created.sessionManager.buildSessionContext().messages;
+		const usageBefore = created.session.getContextUsage();
+		const compressionUsage: Array<ReturnType<typeof created.session.getContextUsage>> = [];
+		created.session.subscribe((event) => {
+			if (event.type === "state_compressed") compressionUsage.push(created.session.getContextUsage());
+		});
+		const call = fauxToolCall("compress_context", {
+			startEntryId: startId,
+			summary: "Retain current objective and latest file state.",
+		});
+		created.setResponses([fauxAssistantMessage(call, { stopReason: "toolUse" }), fauxAssistantMessage("done")]);
+		await created.session.prompt("current request");
+		const branch = created.sessionManager.getBranch();
+		expect(compressionUsage).toHaveLength(1);
+		expect(compressionUsage[0]?.tokens).toBeLessThan(usageBefore?.tokens ?? 0);
+		expect(compressionUsage[0]?.percent).toBeLessThan(usageBefore?.percent ?? 0);
+		expect(contexts).toHaveLength(2);
+		expect(contexts[1]).toContain("Retain current objective and latest file state.");
+		expect(contexts[1]).not.toContain("stale read");
+		expect(contexts[1]).not.toContain("current request");
+		expect(branch[0]?.id).toBe(prefixId);
+		expect(branch.some((entry) => entry.id === startId)).toBe(false);
+		expect(
+			branch.find((entry) => entry.type === "custom_message" && entry.customType === "compress_context"),
+		).toMatchObject({
+			content: "Retain current objective and latest file state.",
+		});
+		expect(created.sessionManager.getEntry(startId)).toBeDefined();
+		expect(created.sessionManager.buildSessionContext().messages.map((message) => message.role)).toEqual([
+			"user",
+			"custom",
+			"assistant",
+		]);
+		const inContext = await executeTool(created, "session_search", { pattern: "stale read", fixedStrings: true });
+		expect((inContext.details as SessionSearchToolDetails).matchCount).toBe(0);
+		const old = await executeTool(created, "session_search", {
+			pattern: "stale read",
+			fixedStrings: true,
+			scope: "all",
+		});
+		expect((old.details as SessionSearchToolDetails).matches[0]?.entryId).toBe(startId);
+	});
+	it("replaces a bounded earlier range while preserving and replaying the later tool turn", async () => {
+		const created = await harness();
+		const session = created.sessionManager;
+		const prefix = session.appendMessage({ role: "user", content: "keep prefix", timestamp: 1 });
+		const start = session.appendMessage({ role: "user", content: "old investigation", timestamp: 2 });
+		session.appendModelChange(created.getModel().provider, created.getModel().id);
+		const end = session.appendMessage(fauxAssistantMessage("old findings"));
+		const retainedThinking = session.appendThinkingLevelChange("high");
+		const retainedUser = session.appendMessage({ role: "user", content: "retain this later task", timestamp: 4 });
+		const call = fauxToolCall("read", { path: "later.txt" });
+		const retainedAssistant = session.appendMessage(fauxAssistantMessage([call], { stopReason: "toolUse" }));
+		const retainedResult = session.appendMessage({
+			role: "toolResult",
+			toolCallId: call.id,
+			toolName: "read",
+			content: [{ type: "text", text: "later result" }],
+			isError: false,
+			timestamp: 5,
+		});
+		created.session.agent.state.messages = session.buildSessionContext().messages;
+		created.setResponses([
+			fauxAssistantMessage(
+				fauxToolCall("compress_context", { startEntryId: start, endEntryId: end, summary: "Concise old findings" }),
+				{ stopReason: "toolUse" },
+			),
+			fauxAssistantMessage("done"),
+		]);
+		await created.session.prompt("compress earlier work");
+		const branch = session.getBranch();
+		expect(branch[0]?.id).toBe(prefix);
+		expect(branch.map((entry) => entry.id)).not.toContain(start);
+		expect(branch.map((entry) => entry.id)).not.toContain(end);
+		expect(branch.some((entry) => entry.type === "thinking_level_change" && entry.thinkingLevel === "high")).toBe(
+			true,
+		);
+		expect(branch.map((entry) => entry.id)).not.toContain(retainedThinking);
+		expect(session.buildSessionContext().model).toMatchObject({
+			provider: created.getModel().provider,
+			modelId: created.getModel().id,
+		});
+		for (const id of [start, end, retainedUser, retainedAssistant, retainedResult])
+			expect(session.getEntry(id)).toBeDefined();
+		const messages = session.buildSessionContext().messages;
+		expect(messages.map((message) => message.role)).toEqual([
+			"user",
+			"custom",
+			"user",
+			"assistant",
+			"toolResult",
+			"user",
+			"assistant",
+		]);
+		expect(messages[1]?.role === "custom" ? messages[1].content : undefined).toBe("Concise old findings");
+		expect(messages[2]?.role === "user" ? messages[2].content : undefined).toBe("retain this later task");
+		expect(messages[4]?.role === "toolResult" ? messages[4].toolCallId : undefined).toBe(call.id);
+		expect(getMessageText(messages[5])).toBe("compress earlier work");
+		expect(branch.find((entry) => entry.type === "message" && entry.message.role === "toolResult")?.id).not.toBe(
+			retainedResult,
+		);
+		const archived = await executeTool(created, "session_search", {
+			pattern: "old investigation",
+			fixedStrings: true,
+		});
+		expect((archived.details as SessionSearchToolDetails).matchCount).toBe(0);
+		const retained = await executeTool(created, "session_search", {
+			pattern: "retain this later task",
+			fixedStrings: true,
+		});
+		expect((retained.details as SessionSearchToolDetails).matches[0]?.entryId).toBe(
+			branch.find(
+				(entry) =>
+					entry.type === "message" &&
+					entry.message.role === "user" &&
+					entry.message.content === "retain this later task",
+			)?.id,
+		);
+	});
+
+	it("rejects unknown, reversed and split-tool-call bounded ranges", async () => {
+		const created = await harness();
+		const session = created.sessionManager;
+		const start = session.appendMessage({ role: "user", content: "start", timestamp: 1 });
+		const call = fauxToolCall("read", { path: "later.txt" });
+		const assistant = session.appendMessage(fauxAssistantMessage([call], { stopReason: "toolUse" }));
+		const result = session.appendMessage({
+			role: "toolResult",
+			toolCallId: call.id,
+			toolName: "read",
+			content: [],
+			isError: false,
+			timestamp: 2,
+		});
+		await expect(
+			executeTool(created, "compress_context", { startEntryId: start, endEntryId: "missing", summary: "x" }),
+		).rejects.toThrow("endEntryId");
+		await expect(
+			executeTool(created, "compress_context", { startEntryId: result, endEntryId: start, summary: "x" }),
+		).rejects.toThrow("precede");
+		await expect(
+			executeTool(created, "compress_context", { startEntryId: start, endEntryId: assistant, summary: "x" }),
+		).rejects.toThrow("split a tool call");
+	});
+
+	it("rejects invalid tail ranges and tool results as cut points", async () => {
+		const created = await harness();
+		const first = created.sessionManager.appendMessage({ role: "user", content: "first", timestamp: 1 });
+		const toolResult = created.sessionManager.appendMessage({
+			role: "toolResult",
+			toolCallId: "old",
+			toolName: "read",
+			content: [],
+			isError: false,
+			timestamp: 2,
+		});
+		await expect(
+			executeTool(created, "compress_context", { startEntryId: "not-on-branch", summary: "x" }),
+		).rejects.toThrow("current model context");
+		await expect(
+			executeTool(created, "compress_context", { startEntryId: toolResult, summary: "x" }),
+		).rejects.toThrow("tool result");
+		await expect(executeTool(created, "compress_context", { startEntryId: first, summary: "" })).rejects.toThrow(
+			"non-empty summary",
+		);
+	});
+
+	it("does not replace across the latest compaction boundary", async () => {
+		const created = await harness();
+		const kept = created.sessionManager.appendMessage({ role: "user", content: "kept", timestamp: 2 });
+		created.sessionManager.appendCompaction("summary", kept, 100);
+		created.sessionManager.appendMessage({ role: "user", content: "new", timestamp: 3 });
+		await expect(executeTool(created, "compress_context", { startEntryId: kept, summary: "x" })).rejects.toThrow(
+			"earlier compaction",
+		);
+	});
+
+	it("requires both compression arguments and rejects the removed listing API", async () => {
+		const created = await harness();
+		const tool = created.session.agent.state.tools.find((candidate) => candidate.name === "compress_context");
+		expect(tool?.description).toContain("model-only context metadata");
+		expect(tool?.description).not.toContain("List IDs");
+		expect(Object.keys(tool?.parameters.properties ?? {})).toEqual(["startEntryId", "endEntryId", "summary"]);
+		await expect(executeTool(created, "compress_context", {})).rejects.toThrow();
+		await expect(executeTool(created, "compress_context", { startEntryId: "missing" })).rejects.toThrow();
+		await expect(executeTool(created, "compress_context", { summary: "x" })).rejects.toThrow();
+		await expect(
+			executeTool(created, "compress_context", { startEntryId: "missing", summary: "x", offset: 50 }),
+		).rejects.toThrow();
+	});
+
+	it("supports repeated tail compression without restoring the prior tail", async () => {
+		const created = await harness();
+		created.sessionManager.appendMessage({ role: "user", content: "prefix", timestamp: 1 });
+		const start = created.sessionManager.appendMessage({ role: "user", content: "old detail", timestamp: 2 });
+		created.session.agent.state.messages = created.sessionManager.buildSessionContext().messages;
+		created.setResponses([
+			fauxAssistantMessage(fauxToolCall("compress_context", { startEntryId: start, summary: "first summary" }), {
+				stopReason: "toolUse",
+			}),
+			fauxAssistantMessage("continue"),
+		]);
+		await created.session.prompt("work");
+		const firstSummaryId = created.sessionManager
+			.getBranch()
+			.find((entry) => entry.type === "custom_message" && entry.customType === "compress_context")?.id;
+		if (!firstSummaryId) throw new Error("Missing first compression summary");
+		created.setResponses([
+			fauxAssistantMessage(
+				fauxToolCall("compress_context", { startEntryId: firstSummaryId, summary: "second summary" }),
+				{ stopReason: "toolUse" },
+			),
+			fauxAssistantMessage("finished"),
+		]);
+		await created.session.prompt("more work");
+		const errors = created.session.messages.filter((message) => message.role === "toolResult" && message.isError);
+		expect(errors).toEqual([]);
+		const context = created.sessionManager.buildSessionContext().messages;
+		expect(context.map((message) => message.role)).toEqual(["user", "custom", "assistant"]);
+		expect(context.find((message) => message.role === "custom")?.content).toBe("second summary");
+		expect(created.sessionManager.getEntry(firstSummaryId)).toBeDefined();
 	});
 });

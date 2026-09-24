@@ -1,0 +1,68 @@
+sequenceDiagram
+    autonumber
+    actor User
+    participant Session as AgentSession
+    participant Detector as Background detector
+    participant Model as Detector model
+    participant Agent as Main agent
+    participant Tool as compress_context
+    participant History as Session history
+    participant UI as TUI
+
+    User->>Session: Send message
+    Session->>History: Persist user message and entry ID
+    opt Detection model configured and threshold reached
+        Note over Session,Detector: +5 context percentage points or 10 new user/tool-result messages
+        Session->>Detector: Check active context and entry IDs
+        activate Detector
+        Detector->>Model: Request CONTINUE or COMPRESS with optional range
+        Model-->>Detector: Verdict or read-only tool call
+        opt Verify facts or cut points
+            Detector->>History: session_search / session_entry_get (read-only, bounded)
+            History-->>Detector: Matching entries
+            Detector->>Model: Continue decision with lookup results
+            Model-->>Detector: Verdict or another bounded lookup
+        end
+        opt COMPRESS range missing or invalid
+            Detector->>History: Validate against current active branch
+            History-->>Detector: Validation reason and current IDs
+            Detector->>Model: One corrective request
+        end
+        Model-->>Detector: Final verdict
+        Detector-->>Session: CONTINUE or COMPRESS with optional valid range
+        deactivate Detector
+        opt Verdict is COMPRESS
+            alt During active run
+                Session->>Agent: Queue advisory as steering for next turn
+            else Idle or before first request
+                Session->>Agent: Include advisory in next model request
+            end
+        end
+        Note over Session,Agent: Agent waits for detector before its next model request
+    end
+
+    Session->>Agent: Continue with context and model-only entry IDs
+    alt Agent decides to compress
+        Agent->>Tool: startEntryId, optional endEntryId, agent-written summary
+        activate Tool
+        Tool->>History: Validate active range, at least two messages, complete tool calls
+        alt Invalid range
+            History-->>Tool: Validation error
+            Tool-->>Agent: Reject request
+        else Valid range
+            History-->>Tool: Validated range
+            Tool-->>Agent: Schedule replacement
+            Session->>History: Persist tool call and result on original branch
+            Session->>History: Branch before startEntryId and append summary
+            opt Bounded range with endEntryId
+                Session->>History: Replay later suffix with new entry IDs
+            end
+            History-->>Session: Rebuilt active context (prefix + summary + suffix)
+            Session-->>UI: Refresh transcript and utilization
+            Session-->>Agent: Continue with rebuilt context
+            Note over History,Agent: Originals remain archived and searchable. Detector never compresses automatically.
+        end
+        deactivate Tool
+    else Agent continues without compression
+        Agent-->>User: Continue work
+    end

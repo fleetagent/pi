@@ -25,6 +25,8 @@ export interface SessionEntryBase {
 export interface SessionMessageEntry extends SessionEntryBase {
 	type: "message";
 	message: AgentMessage;
+	/** Original entry when this message was retained on a compressed branch (usage was already counted). */
+	replayedFromId?: string;
 }
 
 export interface ThinkingLevelChangeEntry extends SessionEntryBase {

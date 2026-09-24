@@ -78,6 +78,11 @@ import {
 	prepareCompaction,
 	shouldCompact,
 } from "./compaction/compaction.ts";
+import {
+	type CompressionDetectionCounts,
+	type CompressionDetectionVerdict,
+	CompressionDetector,
+} from "./compaction/compression-detector.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
@@ -158,6 +163,7 @@ import type { LspConnectionFactoryRegistry } from "./lsp/transport.ts";
 import {
 	type BashExecutionMessage,
 	type CustomMessage,
+	createCustomMessage,
 	normalizeMessageContent,
 	STRUCTURED_RESPONSE_INTERNAL_CUSTOM_TYPE,
 } from "./messages.ts";
@@ -168,14 +174,27 @@ import type { ResourceExtensionPaths, ResourceLoader, ResourcePathEntry } from "
 import type { Rule } from "./rules.ts";
 import { CURRENT_SESSION_VERSION } from "./session/constants.ts";
 import { getLatestCompactionEntry } from "./session/context.ts";
+import { annotateContextMetadata } from "./session/context-metadata.ts";
 import type { Session } from "./session/session.ts";
-import type { BranchSummaryEntry, CompactionEntry, SessionEntry, SessionHeader } from "./session/types.ts";
+import type {
+	BranchSummaryEntry,
+	CompactionEntry,
+	SessionContext,
+	SessionEntry,
+	SessionHeader,
+} from "./session/types.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import type { Skill } from "./skills.ts";
 import { HIDDEN_BUILTIN_SLASH_COMMAND_NAMES, type SlashCommandInfo } from "./slash-commands.ts";
 import { createSyntheticSourceInfo, getSourceBackend, type SourceInfo } from "./source-info.ts";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.ts";
 import { createLocalBashOperations } from "./tools/bash.ts";
+import {
+	createCompressContextToolDefinition,
+	getSuggestedCompressionRangeError,
+	isValidSuggestedCompressionRange,
+	type PendingContextCompression,
+} from "./tools/compress-context.ts";
 import {
 	DeferredRemoteToolOperations,
 	LocalToolOperations,
@@ -203,16 +222,16 @@ import { WORKSPACE_TOOL_NAMES, WorkspaceToolHost } from "./tools/workspace-tool-
 // ============================================================================
 
 const CORE_DEFAULT_TOOL_NAMES = ["read", "bash", "edit", "write", "websearch"] as const;
-const SESSION_HISTORY_TOOL_NAMES = ["session_search", "session_entry_get"] as const;
+const SESSION_HISTORY_TOOL_NAMES = ["session_search", "session_entry_get", "compress_context"] as const;
 export const SUBAGENT_TOOL_NAMES = ["subagent", "subagent_runs", "create_subagent"] as const;
-export const DEFAULT_ACTIVE_TOOL_NAMES = [
-	...CORE_DEFAULT_TOOL_NAMES,
-	...SESSION_HISTORY_TOOL_NAMES,
-	...LSP_TOOL_NAMES,
-] as const;
+export const DEFAULT_ACTIVE_TOOL_NAMES = [...CORE_DEFAULT_TOOL_NAMES, ...SESSION_HISTORY_TOOL_NAMES] as const;
 
-export function getDefaultActiveToolNames(enableSubagents = false): string[] {
-	return enableSubagents ? [...DEFAULT_ACTIVE_TOOL_NAMES, ...SUBAGENT_TOOL_NAMES] : [...DEFAULT_ACTIVE_TOOL_NAMES];
+export function getDefaultActiveToolNames(enableSubagents = false, enableLspTools = false): string[] {
+	return [
+		...DEFAULT_ACTIVE_TOOL_NAMES,
+		...(enableLspTools ? LSP_TOOL_NAMES : []),
+		...(enableSubagents ? SUBAGENT_TOOL_NAMES : []),
+	];
 }
 
 // ============================================================================
@@ -254,6 +273,9 @@ export type AgentSessionEvent =
 			followUp: readonly string[];
 	  }
 	| { type: "compaction_start"; reason: "manual" | "threshold" | "overflow" }
+	| { type: "state_compressed" }
+	| { type: "compression_detection_activity"; active: boolean }
+	| { type: "compression_detection_result"; verdict: CompressionDetectionVerdict }
 	| { type: "session_info_changed"; name: string | undefined }
 	| { type: "thinking_level_changed"; level: ThinkingLevel }
 	| {
@@ -318,6 +340,8 @@ export interface AgentSessionConfig {
 	modelRegistry: ModelRegistry;
 	/** Initial active built-in tool names. Defaults to DEFAULT_ACTIVE_TOOL_NAMES. */
 	initialActiveToolNames?: string[];
+	/** CLI/SDK override for exposing configured LSP tools by default; explicit tool allowlists remain authoritative. */
+	enableLspTools?: boolean;
 	/** Optional allowlist of tool names. When provided, only these tool names are exposed. */
 	allowedToolNames?: string[];
 	/** Tool names that must never be exposed in this session. */
@@ -1079,6 +1103,7 @@ export class AgentSession {
 	private _cwd: string;
 	private _extensionRunnerRef?: { current?: ExtensionRunner };
 	private _initialActiveToolNames?: string[];
+	private readonly _enableLspTools?: boolean;
 	private _allowedToolNames?: Set<string>;
 	private _excludedToolNames: Set<string>;
 	private _baseToolsOverride?: Record<string, AgentTool>;
@@ -1131,6 +1156,11 @@ export class AgentSession {
 	private readonly _queuedPromptIds = new Map<string, string[]>();
 	private readonly _toolStartedAt = new Map<string, number>();
 	private readonly _preToolHookContext = new Map<string, string[]>();
+	private readonly _compressionDetector: CompressionDetector;
+	private _agentRunEnding = false;
+	private _waitingForDetectorAtRequest = false;
+	private _pendingContextCompression?: PendingContextCompression;
+	private _stateCompressionApplied = false;
 
 	// Model registry for API key resolution
 	private _modelRegistry: ModelRegistry;
@@ -1158,8 +1188,33 @@ export class AgentSession {
 		this._customTools = config.customTools ?? [];
 		this._cwd = config.cwd;
 		this._modelRegistry = config.modelRegistry;
+		this._compressionDetector = new CompressionDetector(
+			this.settingsManager,
+			this._modelRegistry,
+			(active) => this._emit({ type: "compression_detection_activity", active }),
+			(verdict) => {
+				this._emit({ type: "compression_detection_result", verdict });
+				if (
+					verdict === "COMPRESS" &&
+					!this._disposed &&
+					!this._agentRunEnding &&
+					!this._waitingForDetectorAtRequest &&
+					this.agent.state.isStreaming &&
+					this.getActiveToolNames().includes("compress_context")
+				) {
+					this.agent.steer(this._createCompressionAdvisory());
+				}
+			},
+			undefined,
+			{
+				getBranch: () => this.session.getBranch(),
+				session: this.session,
+				getRangeError: (start, end) => getSuggestedCompressionRangeError(this.session, start, end),
+			},
+		);
 		this._extensionRunnerRef = config.extensionRunnerRef;
 		this._initialActiveToolNames = config.initialActiveToolNames;
+		this._enableLspTools = config.enableLspTools;
 		this._excludedToolNames = new Set(config.excludedToolNames ?? []);
 		if (!config.subagentRunner) {
 			this._excludedToolNames.add("subagent");
@@ -1188,6 +1243,7 @@ export class AgentSession {
 		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);
 		this._installAgentToolHooks();
 		this._installAgentTurnPreparation();
+		this._installContextMetadata();
 
 		this._buildRuntime({
 			activeToolNames: this._initialActiveToolNames
@@ -2156,14 +2212,68 @@ export class AgentSession {
 		this.agent.prepareNextTurnWithContext = async (turn, signal) => {
 			const previousUpdate = await previousPrepareNextTurnWithContext?.(turn, signal);
 			const compacted = await this._drainExtensionCompactionQueue("between-turns");
+			const contextReplaced = compacted || this._stateCompressionApplied;
+			this._stateCompressionApplied = false;
+			// Rebuild the loop context so session-driven changes to tools and the prompt
+			// take effect on the next turn within this run.
+			const context = this._buildCurrentAgentContext(
+				contextReplaced ? undefined : (previousUpdate?.context ?? turn.context),
+			);
+			if (this.getActiveToolNames().includes("compress_context")) {
+				this._compressionDetector.check(
+					this.getContextUsage()?.percent,
+					context.messages,
+					context.systemPrompt,
+					this.session.getBranch(),
+				);
+				await this._compressionDetector.waitForIdle(signal);
+			}
+			return { ...previousUpdate, context } satisfies AgentLoopTurnUpdate;
+		};
+	}
 
-			// Always rebuild the loop context so session-driven changes to the active
-			// tool set and system prompt (e.g. load_tool / unload_tool) take effect on
-			// the next turn within the same run instead of waiting for a new prompt.
-			return {
-				...previousUpdate,
-				context: this._buildCurrentAgentContext(compacted ? undefined : (previousUpdate?.context ?? turn.context)),
-			} satisfies AgentLoopTurnUpdate;
+	private _createCompressionAdvisory(): CustomMessage {
+		const suggested = this._compressionDetector.suggestedRange;
+		const range =
+			suggested && isValidSuggestedCompressionRange(this.session, suggested.startEntryId, suggested.endEntryId)
+				? ` Suggested inclusive range: startEntryId ${suggested.startEntryId}, endEntryId ${suggested.endEntryId}; verify before acting.`
+				: "";
+		return createCustomMessage(
+			"compression_detection",
+			`[Background compression detector: COMPRESS.${range} At the next safe checkpoint, consider using compress_context to summarize older context. Preserve essential decisions and unfinished work. This is advisory; continue if details are still needed.]`,
+			false,
+			{ verdictCount: this._compressionDetector.counts.compress },
+			new Date().toISOString(),
+		);
+	}
+
+	/** Add model-only ID and utilization notices without persisting them. */
+	private _installContextMetadata(): void {
+		const previousTransformContext = this.agent.transformContext;
+		this.agent.transformContext = async (messages, signal) => {
+			this._waitingForDetectorAtRequest = true;
+			try {
+				await this._compressionDetector.waitForIdle(signal);
+			} finally {
+				this._waitingForDetectorAtRequest = false;
+			}
+			const transformed = (await previousTransformContext?.(messages, signal)) ?? messages;
+			const annotated = this.getActiveToolNames().includes("compress_context")
+				? annotateContextMetadata(transformed, this.session.getBranch(), this.getContextUsage())
+				: transformed;
+			if (!this.getActiveToolNames().includes("compress_context") || !this._compressionDetector.shouldCompress)
+				return annotated;
+			const verdictCount = this._compressionDetector.counts.compress;
+			if (
+				annotated.some(
+					(message) =>
+						message.role === "custom" &&
+						message.customType === "compression_detection" &&
+						(message.details as { verdictCount?: number } | undefined)?.verdictCount === verdictCount,
+				)
+			)
+				return annotated;
+			return [...annotated, this._createCompressionAdvisory()];
 		};
 	}
 
@@ -2240,6 +2350,7 @@ export class AgentSession {
 
 	private _persistCompletedMessage(message: AgentMessage): void {
 		if (message.role === "custom") {
+			if (message.customType === "compression_detection") return;
 			this.session.appendCustomMessageEntry(message.customType, message.content, message.display, message.details);
 			return;
 		}
@@ -2248,6 +2359,55 @@ export class AgentSession {
 		}
 	}
 
+	private _applyPendingContextCompression(message: AgentMessage): void {
+		const pending = this._pendingContextCompression;
+		if (!pending || message.role !== "toolResult" || message.toolCallId !== pending.toolCallId) return;
+		this._pendingContextCompression = undefined;
+		if (message.isError) return;
+
+		const branch = this.session.getBranch();
+		const start = branch.find((entry) => entry.id === pending.startEntryId);
+		const assistant = branch.find((entry) => entry.id === pending.assistantEntryId);
+		const last = branch.at(-1);
+		if (!start || !assistant || last?.type !== "message" || last.message !== message) return;
+		const startIndex = branch.indexOf(start);
+		const assistantIndex = branch.indexOf(assistant);
+		const endIndex = pending.endEntryId
+			? branch.findIndex((entry) => entry.id === pending.endEntryId)
+			: assistantIndex - 1;
+		if (endIndex < startIndex || endIndex >= assistantIndex) return;
+		const preservedSuffix = pending.endEntryId ? branch.slice(endIndex + 1, assistantIndex) : [];
+
+		const previous = this.session.buildSessionContext();
+		const oldLeafId = last.id;
+		if (start.parentId === null) this.session.resetLeaf();
+		else this.session.branch(start.parentId);
+		this.session.appendCustomMessageEntry("compress_context", pending.summary, true, {
+			fromId: oldLeafId,
+			startEntryId: pending.startEntryId,
+			...(pending.endEntryId ? { endEntryId: pending.endEntryId } : {}),
+		});
+		const replayedIds = new Map<string, string>();
+		for (const entry of preservedSuffix)
+			replayedIds.set(entry.id, this.session.appendReplayedEntry(entry, replayedIds));
+		this._restoreCompressionContextState(previous);
+		this.agent.state.messages = this.session.buildSessionContext().messages;
+		this._compressionDetector.reset(this.agent.state.messages);
+		this._stateCompressionApplied = true;
+		this._emit({ type: "state_compressed" });
+	}
+	private _restoreCompressionContextState(previous: SessionContext): void {
+		const rebuilt = this.session.buildSessionContext();
+		if (
+			previous.model &&
+			(previous.model.provider !== rebuilt.model?.provider || previous.model.modelId !== rebuilt.model?.modelId)
+		) {
+			this.session.appendModelChange(previous.model.provider, previous.model.modelId);
+		}
+		if (previous.thinkingLevel !== rebuilt.thinkingLevel) {
+			this.session.appendThinkingLevelChange(previous.thinkingLevel);
+		}
+	}
 	private _updateRetryStateAfterAssistantMessage(message: AgentMessage): void {
 		if (message.role !== "assistant") return;
 		const assistantMessage = message as AssistantMessage;
@@ -2265,20 +2425,32 @@ export class AgentSession {
 
 	/** Internal handler for agent events - shared by subscribe and reconnect */
 	private _handleAgentEvent = async (event: AgentEvent): Promise<void> => {
+		if (event.type === "agent_start") this._agentRunEnding = false;
 		// afterToolCall can be skipped when a prepared call is aborted. Never retain per-run tool state.
 		if (event.type === "agent_end") {
+			this._agentRunEnding = true;
 			this._toolStartedAt.clear();
 			this._preToolHookContext.clear();
+			this._pendingContextCompression = undefined;
 		}
 		this._consumeStartedQueuedMessage(event);
 
 		// Extensions observe the event before public session listeners.
 		await this._runAsyncBarrierCallback(`extension ${event.type} handler`, () => this._emitExtensionEvent(event));
 		this._emit(event.type === "agent_end" ? { ...event, willRetry: this._willRetryAfterAgentEnd(event) } : event);
-		if (event.type === "agent_end") this._scheduleExtensionCompactions();
-
+		if (event.type === "agent_end") {
+			this._scheduleExtensionCompactions();
+			if (!this._disposed && this.getActiveToolNames().includes("compress_context"))
+				this._compressionDetector.check(
+					this.getContextUsage()?.percent,
+					this.agent.state.messages,
+					this._buildCurrentAgentContext().systemPrompt,
+					this.session.getBranch(),
+				);
+		}
 		if (event.type === "message_end") {
 			this._persistCompletedMessage(event.message);
+			this._applyPendingContextCompression(event.message);
 			this._updateRetryStateAfterAssistantMessage(event.message);
 		}
 	};
@@ -2483,6 +2655,7 @@ export class AgentSession {
 	}
 
 	private async _prepareForShutdown(): Promise<void> {
+		this._compressionDetector.reset();
 		this._hookAbortController.abort();
 		if (this._steeringMessages.length > 0 || this._followUpMessages.length > 0 || this.agent.hasQueuedMessages()) {
 			this.clearQueue();
@@ -4005,6 +4178,12 @@ export class AgentSession {
 		});
 	}
 
+	/** Choose or disable the background detector without changing the primary model. */
+	setCompressionDetectionModel(reference: string | undefined): void {
+		this.settingsManager.setCompressionDetectionModel(reference);
+		this._compressionDetector.reset();
+	}
+
 	/**
 	 * Set model directly.
 	 * Validates that auth is configured, saves to session and settings.
@@ -4377,6 +4556,7 @@ export class AgentSession {
 		);
 		const newEntries = this.session.getEntries();
 		this.agent.state.messages = this.session.buildSessionContext().messages;
+		this._compressionDetector.reset(this.agent.state.messages);
 		const savedCompactionEntry = newEntries.find(
 			(entry): entry is CompactionEntry => entry.type === "compaction" && entry.summary === result.summary,
 		);
@@ -4651,6 +4831,7 @@ export class AgentSession {
 		);
 		const newEntries = this.session.getEntries();
 		this.agent.state.messages = this.session.buildSessionContext().messages;
+		this._compressionDetector.reset(this.agent.state.messages);
 		const savedCompactionEntry = newEntries.find(
 			(entry): entry is CompactionEntry => entry.type === "compaction" && entry.summary === result.summary,
 		);
@@ -5328,6 +5509,9 @@ export class AgentSession {
 			...Object.fromEntries(workspaceToolHost?.getDefinitions() ?? []),
 			session_search: createSessionSearchToolDefinition(this.session) as unknown as ToolDefinition,
 			session_entry_get: createSessionEntryGetToolDefinition(this.session) as unknown as ToolDefinition,
+			compress_context: createCompressContextToolDefinition(this.session, (request) => {
+				this._pendingContextCompression = request;
+			}) as unknown as ToolDefinition,
 			websearch: createWebsearchToolDefinition(
 				parseWebsearchToolOptions(this.settingsManager.getToolSettings("websearch")),
 			) as unknown as ToolDefinition,
@@ -5428,7 +5612,10 @@ export class AgentSession {
 
 			const defaultActiveToolNames = this._baseToolsOverride
 				? Object.keys(this._baseToolsOverride)
-				: getDefaultActiveToolNames();
+				: getDefaultActiveToolNames(
+						this.settingsManager.getEnableSubagents(),
+						this._enableLspTools ?? this.settingsManager.getEnableLspTools(),
+					);
 			const baseActiveToolNames = this._withCurrentDefaultTools(options.activeToolNames ?? defaultActiveToolNames);
 			this._refreshToolRegistry({
 				activeToolNames: baseActiveToolNames,
@@ -5444,11 +5631,15 @@ export class AgentSession {
 		if (this._baseToolsOverride || this._allowedToolNames) {
 			return activeToolNames.filter((name) => !this._excludedToolNames.has(name));
 		}
-		const configuredDefaults = getDefaultActiveToolNames(this.settingsManager.getEnableSubagents());
+		const enableLspTools = this._enableLspTools ?? this.settingsManager.getEnableLspTools();
+		const configuredDefaults = getDefaultActiveToolNames(this.settingsManager.getEnableSubagents(), enableLspTools);
 		const subagentToolNames = new Set<string>(SUBAGENT_TOOL_NAMES);
-		const retainedToolNames = this.settingsManager.getEnableSubagents()
-			? activeToolNames
-			: activeToolNames.filter((name) => !subagentToolNames.has(name));
+		const lspToolNames = new Set<string>(LSP_TOOL_NAMES);
+		const retainedToolNames = activeToolNames.filter(
+			(name) =>
+				(enableLspTools || !lspToolNames.has(name)) &&
+				(this.settingsManager.getEnableSubagents() || !subagentToolNames.has(name)),
+		);
 		const active = new Set(retainedToolNames);
 		const usesDefaultCoreTools = CORE_DEFAULT_TOOL_NAMES.every((toolName) => active.has(toolName));
 		const expanded = usesDefaultCoreTools
@@ -6068,6 +6259,14 @@ export class AgentSession {
 			return calculateContextTokens(assistant.usage) > 0;
 		}
 		return false;
+	}
+
+	getCompressionDetectionCounts(): CompressionDetectionCounts {
+		return this._compressionDetector.counts;
+	}
+
+	getCompressionDetectionCost(): number {
+		return this._compressionDetector.cost;
 	}
 
 	getContextUsage(): ContextUsage | undefined {

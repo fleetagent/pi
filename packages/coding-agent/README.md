@@ -96,7 +96,7 @@ pi
 /login  # Then select provider
 ```
 
-Then just talk to pi. By default, pi gives the model file and shell tools. Enable the built-in subagent tool family through `/settings` or `enableSubagents` in `settings.json`. LSP tools are available after you [configure an external language server](docs/lsp.md). The model uses enabled tools to fulfill your requests. Add capabilities via [skills](#skills), [prompt templates](#prompt-templates), [extensions](#extensions), or [pi packages](#pi-packages).
+Then just talk to pi. By default, pi gives the model file and shell tools. Enable the built-in subagent tool family through `/settings` or `enableSubagents` in `settings.json`. LSP tools require both [an external language server configuration](docs/lsp.md) and `--enable-lsp-tools` (or `enableLspTools` in `settings.json`); they are off by default. The model uses enabled tools to fulfill your requests. Add capabilities via [skills](#skills), [prompt templates](#prompt-templates), [extensions](#extensions), or [pi packages](#pi-packages).
 
 **Platform notes:** [Windows](docs/windows.md) | [Termux (Android)](docs/termux.md) | [tmux](docs/tmux.md) | [Terminal setup](docs/terminal-setup.md) | [Shell aliases](docs/shell-aliases.md)
 
@@ -274,7 +274,7 @@ Long sessions can exhaust context windows. Compaction summarizes older messages 
 
 **Automatic:** Enabled by default. Triggers on context overflow (recovers and retries) or when approaching the limit (proactive). Configure via `/settings` or `settings.json`.
 
-Compaction is lossy, but the full history remains in the JSONL file. The model can use `session_search` to locate finalized entries omitted from context and `session_entry_get` to retrieve one exact model-visible entry; `/tree` remains available for interactive navigation. Customize compaction behavior via [extensions](#extensions). See [docs/compaction.md](docs/compaction.md) for internals.
+Compaction is lossy, but the full history remains in the JSONL file. The model can use `session_search` to locate finalized entries omitted from context and `session_entry_get` to retrieve one exact model-visible entry; `/tree` remains available for interactive navigation. The `compress_context` tool uses context metadata entry IDs to replace a tail—or an earlier bounded range via `endEntryId`—with a summary while retaining later messages and archiving the originals on another branch. Customize compaction behavior via [extensions](#extensions). See [docs/compaction.md](docs/compaction.md) for internals.
 
 ---
 
@@ -613,11 +613,12 @@ cat README.md | pi -p "Summarize this text"
 | `--tools <list>`, `-t <list>` | Allowlist specific tool names across built-in, extension, and custom tools |
 | `--no-builtin-tools`, `-nbt` | Disable built-in tools by default but keep extension/custom tools enabled |
 | `--no-tools`, `-nt` | Disable all tools by default |
+| `--enable-lsp-tools` | Expose configured `lsp_*` tools by default |
 | `--remote <url>` | Run built-in workspace tools through a `pi --daemon` WebSocket backend |
 | `--remote-deferred` | Start with a deferred daemon backend and connect later with `/sandbox --attach <ws://url>` |
 | `--remote-cwd <path>` | Stable daemon workspace cwd for deferred remote mode |
 | `--daemon` | Start the integrated remote workspace daemon instead of a normal Pi session |
-Available built-in tools: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`, `websearch`, `session_search`, `session_entry_get`, `subagent`, `subagent_runs`, `create_subagent`, and—when externally configured—`lsp_diagnostics`, `lsp_hover`, `lsp_definition`, `lsp_references`, `lsp_rename`, and `lsp_code_actions`. The subagent family is inactive by default; enable it in `/settings` or with `enableSubagents`, or explicitly select its names with `--tools`. Explicit allowlists may select any subset, while `--no-tools` and `--no-builtin-tools` remain authoritative.
+Available built-in tools: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`, `websearch`, `session_search`, `session_entry_get`, `compress_context`, `subagent`, `subagent_runs`, `create_subagent`, and—when externally configured—`lsp_diagnostics`, `lsp_hover`, `lsp_definition`, `lsp_references`, `lsp_rename`, and `lsp_code_actions`. By default `read`, `bash`, `edit`, `write`, `websearch`, `session_search`, `session_entry_get`, and `compress_context` are active. Subagent and LSP tools require separate opt-ins (`enableSubagents` and `enableLspTools`/`--enable-lsp-tools` respectively), or an explicit `--tools` allowlist. Explicit allowlists may select any subset, while `--no-tools` and `--no-builtin-tools` remain authoritative.
 
 ### Resource Options
 

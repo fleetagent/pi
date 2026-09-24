@@ -21,6 +21,7 @@ Hooks use a Claude Code-compatible schema and are captured as an immutable per-s
 |---------|------|---------|-------------|
 | `defaultProvider` | string | - | Default provider (e.g., `"anthropic"`, `"openai"`) |
 | `defaultModel` | string | - | Default model ID |
+| `compressionDetectionModel` | string | - | Global-only opt-in `provider/model-id` for background compression recommendations; choose or clear with `/compress-detection-model`. Unset makes no detection requests. |
 | `defaultThinkingLevel` | string | - | `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"` |
 | `hideThinkingBlock` | boolean | `false` | Hide thinking blocks in output |
 | `thinkingBudgets` | object | - | Custom token budgets per thinking level |
@@ -169,6 +170,7 @@ Keep `retry.provider.maxRetries` at `0` unless provider-level retries are explic
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `enableSubagents` | boolean | `false` | Enable the built-in `subagent`, `subagent_runs`, and `create_subagent` tools by default. Changes made in `/settings` apply immediately; `/reload` applies file edits. Explicit CLI/SDK tool allowlists can opt in to any subset, while no-tools modes remain authoritative. |
+| `enableLspTools` | boolean | `false` | Expose configured `lsp_*` tools by default. `--enable-lsp-tools` opts in for one CLI invocation; `/reload` applies settings-file edits. The LSP runtime still requires separate configuration; explicit tool allowlists override this default. |
 | `tools` | object | `{}` | Per-tool configuration keyed by tool name |
 | `tools.websearch.provider` | string | `"duckduckgo"` | Web search provider: `"duckduckgo"`, `"brave"`, or `"firecrawl"` |
 | `tools.websearch.apiKey` | string | - | Provider API key. Brave env fallback: `PI_WEBSEARCH_BRAVE_API_KEY` or `BRAVE_SEARCH_API_KEY`. Firecrawl env fallback: `PI_WEBSEARCH_FIRECRAWL_API_KEY` or `FIRECRAWL_API_KEY` |

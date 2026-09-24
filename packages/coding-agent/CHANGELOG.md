@@ -56,9 +56,17 @@
 
 ## [Unreleased]
 
-### Fixed
+### Added
 
+- Added `compress_context` to replace the active session tail or an earlier bounded range with an agent-authored summary, retaining later messages and the archived original branch. Its summary appears with distinct styling immediately after compression. Model-only notices expose entry IDs and approximate utilization after user messages and completed tool-call batches without changing the transcript.
+- Added `--enable-lsp-tools` and `enableLspTools` to opt in to model-facing LSP tools; configured LSP tools are off by default.
+- Added opt-in background compression detection with a separately selected model via `/compress-detection-model`; `COMPRESS` results can steer an active agent at the next turn or advise it on its next request, and may suggest an inclusive range without modifying history. The detector can verify session facts using bounded, read-only `session_search` and `session_entry_get` calls. Missing or invalid range suggestions get one corrective detector request with validation feedback and current branch IDs. The Working indicator shows `[Evaluating compression possibility]` while detection is active; the footer tracks cumulative KEEP and COMPRESS verdicts and the detector's separate reported cost.
+### Fixed
+- Count only new user messages and tool results toward the background compression detector's ten-message trigger; assistant responses no longer advance it.
+- Wait for in-flight compression detection before the primary agent proceeds to another model request; deliver active-run verdicts before the next turn instead of losing them at run end.
+- Scoped `session_search` to the current model context by default; explicit branch/all scopes still retrieve older history.
 - Forwarded current `PI_*` session metadata to sandbox bash calls.
+- Corrected the context utilization footer when token usage is unavailable.
 
 ## [0.2.6](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.2.5...@fleetagent/pi-coding-agent-v0.2.6) (2026-09-17)
 
