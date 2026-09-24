@@ -715,7 +715,14 @@ describe("native subagent tool", () => {
 		const childUserTexts: string[] = [];
 		faux.setResponses([
 			(context) => {
-				const user = context.messages.filter((message) => message.role === "user").at(-1);
+				const user = context.messages
+					.filter(
+						(message) =>
+							message.role === "user" &&
+							Array.isArray(message.content) &&
+							message.content.some((part) => part.type === "text" && part.text.startsWith("<task>")),
+					)
+					.at(-1);
 				childUserTexts.push(
 					user?.role === "user" && Array.isArray(user.content)
 						? user.content
@@ -727,7 +734,14 @@ describe("native subagent tool", () => {
 				return fauxAssistantMessage("first output");
 			},
 			(context) => {
-				const user = context.messages.filter((message) => message.role === "user").at(-1);
+				const user = context.messages
+					.filter(
+						(message) =>
+							message.role === "user" &&
+							Array.isArray(message.content) &&
+							message.content.some((part) => part.type === "text" && part.text.startsWith("<task>")),
+					)
+					.at(-1);
 				childUserTexts.push(
 					user?.role === "user" && Array.isArray(user.content)
 						? user.content
