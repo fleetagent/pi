@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.9](https://github.com/fleetagent/pi/compare/@fleetagent/pi-ai-v0.2.8...@fleetagent/pi-ai-v0.2.9) (2026-09-24)
+
+
+### Features
+
+* **ai:** feat/opus-5-5-support - Add Opus 5.5 adaptive thinking ([0e856e9](https://github.com/fleetagent/pi/commit/0e856e9fe03bb72f603cf737d992bb5e7abf25d6))
+
 ## [0.2.8](https://github.com/fleetagent/pi/compare/@fleetagent/pi-ai-v0.2.7...@fleetagent/pi-ai-v0.2.8) (2026-09-23)
 
 
