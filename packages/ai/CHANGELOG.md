@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.11](https://github.com/fleetagent/pi/compare/@fleetagent/pi-ai-v0.2.10...@fleetagent/pi-ai-v0.2.11) (2026-09-24)
+
+
+### Miscellaneous Chores
+
+* **@fleetagent/pi-ai:** Synchronize pi versions
+
 ## [0.2.10](https://github.com/fleetagent/pi/compare/@fleetagent/pi-ai-v0.2.9...@fleetagent/pi-ai-v0.2.10) (2026-09-24)
 
 

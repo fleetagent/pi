@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.2.11](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.2.10...@fleetagent/pi-coding-agent-v0.2.11) (2026-09-24)
+
+
+### Bug Fixes
+
+* **coding-agent:** baseline compression detection after compaction ([494ee40](https://github.com/fleetagent/pi/commit/494ee400b962677116c49b8f8e3b091e2b763198))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @fleetagent/pi-agent-core bumped from ^0.2.10 to ^0.2.11
+    * @fleetagent/pi-ai bumped from ^0.2.10 to ^0.2.11
+    * @fleetagent/pi-tui bumped from ^0.2.10 to ^0.2.11
+
 ## [0.2.10](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.2.9...@fleetagent/pi-coding-agent-v0.2.10) (2026-09-24)
 
 
