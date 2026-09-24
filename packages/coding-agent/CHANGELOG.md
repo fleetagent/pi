@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.2.10](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.2.9...@fleetagent/pi-coding-agent-v0.2.10) (2026-09-24)
+
+
+### Features
+
+* **coding-agent:** add agent-led context compression and detection ([588ea1e](https://github.com/fleetagent/pi/commit/588ea1e6b90d278d9cd5f8c015962ca6b63c87e4))
+
+
+### Bug Fixes
+
+* **coding-agent:** ignore context metadata in subagent prompt test ([1582f56](https://github.com/fleetagent/pi/commit/1582f56ea230f3f71cd5bbb90595734a1891c619))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @fleetagent/pi-agent-core bumped from ^0.2.9 to ^0.2.10
+    * @fleetagent/pi-ai bumped from ^0.2.9 to ^0.2.10
+    * @fleetagent/pi-tui bumped from ^0.2.9 to ^0.2.10
+
 ## [0.2.9](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.2.8...@fleetagent/pi-coding-agent-v0.2.9) (2026-09-24)
 
 
