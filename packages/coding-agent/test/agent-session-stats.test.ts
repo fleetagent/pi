@@ -110,7 +110,7 @@ describe("AgentSession.getSessionStats", () => {
 			syncAgentMessages(session, sessionManager);
 
 			const stats = session.getSessionStats();
-			expect(stats.tokens.input).toBe(195_000);
+			expect(stats.tokens.input).toBe(375_000);
 			expect(stats.contextUsage).toBeDefined();
 			expect(stats.contextUsage?.tokens).toBeNull();
 			expect(stats.contextUsage?.percent).toBeNull();
@@ -133,10 +133,31 @@ describe("AgentSession.getSessionStats", () => {
 			syncAgentMessages(session, sessionManager);
 
 			const stats = session.getSessionStats();
-			expect(stats.tokens.input).toBe(220_000);
+			expect(stats.tokens.input).toBe(400_000);
 			expect(stats.contextUsage).toBeDefined();
 			expect(stats.contextUsage?.tokens).toBe(25_000);
 			expect(stats.contextUsage?.percent).toBe((25_000 / model.contextWindow) * 100);
+		} finally {
+			session.dispose();
+		}
+	});
+	it("keeps billed cost after bounded compression and does not bill replayed suffixes twice", () => {
+		const { session, sessionManager } = createSession();
+		try {
+			const first = createAssistantMessage("old", 120, 1);
+			first.usage.cost.total = 0.12;
+			const firstId = sessionManager.appendMessage(first);
+			const second = createAssistantMessage("later", 80, 2);
+			second.usage.cost.total = 0.08;
+			const secondId = sessionManager.appendMessage(second);
+			sessionManager.branch(firstId);
+			sessionManager.appendCustomMessageEntry("compress_context", "summary", true);
+			const entry = sessionManager.getEntry(secondId);
+			if (!entry) throw new Error("Missing original response");
+			sessionManager.appendReplayedEntry(entry, new Map());
+			syncAgentMessages(session, sessionManager);
+			expect(session.getSessionStats().tokens.input).toBe(200);
+			expect(session.getSessionStats().cost).toBeCloseTo(0.2);
 		} finally {
 			session.dispose();
 		}

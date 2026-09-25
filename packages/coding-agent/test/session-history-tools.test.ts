@@ -7,7 +7,14 @@ import {
 	validateToolArguments,
 } from "@fleetagent/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
+import {
+	COMPRESSION_ECONOMICS_ENTRY_TYPE,
+	estimateCompressionEconomics,
+	estimateCompressionSavings,
+} from "../src/core/compaction/compression-economics.ts";
 import { STRUCTURED_RESPONSE_INTERNAL_CUSTOM_TYPE } from "../src/core/messages.ts";
+import { buildSessionContext, projectSessionContextEntries } from "../src/core/session/context.ts";
+import type { SessionEntry } from "../src/core/session/types.ts";
 import type {
 	SessionEntryGetToolDetails,
 	SessionHistoryToolName,
@@ -337,7 +344,7 @@ describe("session history tools", () => {
 			"Session entry not found: missing",
 		);
 	});
-	it("archives only the selected tail after its tool result", async () => {
+	it("projects the summary before the preserved compression request and result", async () => {
 		const contexts: string[][] = [];
 		const created = await createHarness({
 			extensionFactories: [
@@ -359,8 +366,8 @@ describe("session history tools", () => {
 			content: `stale read ${"old content ".repeat(300)}`,
 			timestamp: 2,
 		});
+		const endId = created.sessionManager.appendMessage({ role: "user", content: "older follow-up", timestamp: 3 });
 		created.session.agent.state.messages = created.sessionManager.buildSessionContext().messages;
-		const usageBefore = created.session.getContextUsage();
 		const compressionUsage: Array<ReturnType<typeof created.session.getContextUsage>> = [];
 		created.session.subscribe((event) => {
 			if (event.type === "state_compressed") compressionUsage.push(created.session.getContextUsage());
@@ -373,24 +380,52 @@ describe("session history tools", () => {
 		await created.session.prompt("current request");
 		const branch = created.sessionManager.getBranch();
 		expect(compressionUsage).toHaveLength(1);
-		expect(compressionUsage[0]?.tokens).toBeLessThan(usageBefore?.tokens ?? 0);
-		expect(compressionUsage[0]?.percent).toBeLessThan(usageBefore?.percent ?? 0);
+		expect(compressionUsage[0]?.tokens).toBeNull();
+		expect(compressionUsage[0]?.percent).toBeNull();
 		expect(contexts).toHaveLength(2);
 		expect(contexts[1]).toContain("Retain current objective and latest file state.");
 		expect(contexts[1]).not.toContain("stale read");
-		expect(contexts[1]).not.toContain("current request");
+		expect(contexts[1]).toContain("current request");
 		expect(branch[0]?.id).toBe(prefixId);
-		expect(branch.some((entry) => entry.id === startId)).toBe(false);
+		expect(branch.some((entry) => entry.id === startId)).toBe(true);
 		expect(
 			branch.find((entry) => entry.type === "custom_message" && entry.customType === "compress_context"),
 		).toMatchObject({
 			content: "Retain current objective and latest file state.",
+			details: { replacementVersion: 1, startEntryId: startId, endEntryId: endId },
 		});
+		expect(
+			branch.find((entry) => entry.type === "custom" && entry.customType === COMPRESSION_ECONOMICS_ENTRY_TYPE),
+		).toMatchObject({ data: { version: 1, sourceTokens: expect.any(Number), removedTokens: expect.any(Number) } });
+		expect(estimateCompressionSavings(branch).liveRemovedTokens).toBeGreaterThan(0);
 		expect(created.sessionManager.getEntry(startId)).toBeDefined();
 		expect(created.sessionManager.buildSessionContext().messages.map((message) => message.role)).toEqual([
 			"user",
 			"custom",
+			"user",
 			"assistant",
+			"toolResult",
+			"assistant",
+		]);
+		const context = created.sessionManager.buildSessionContext().messages;
+		expect(getMessageText(context[2])).toBe("current request");
+		expect(JSON.stringify(context[4])).toContain("Compression complete");
+		const persisted = JSON.parse(JSON.stringify(created.sessionManager.getEntries())) as SessionEntry[];
+		expect(buildSessionContext(persisted, created.sessionManager.getLeafId()).messages).toEqual(context);
+		const marker = branch.find((entry) => entry.type === "custom_message" && entry.customType === "compress_context");
+		const beforeMarker = branch.find((entry) => entry.type === "message" && entry.message.role === "toolResult");
+		if (!marker || !beforeMarker) throw new Error("Missing compression marker or result");
+		expect(
+			buildSessionContext(persisted, beforeMarker.id).messages.some((entry) =>
+				getMessageText(entry).includes("stale read"),
+			),
+		).toBe(true);
+		expect(buildSessionContext(persisted, marker.id).messages.map((entry) => entry.role)).toEqual([
+			"user",
+			"custom",
+			"user",
+			"assistant",
+			"toolResult",
 		]);
 		const inContext = await executeTool(created, "session_search", { pattern: "stale read", fixedStrings: true });
 		expect((inContext.details as SessionSearchToolDetails).matchCount).toBe(0);
@@ -401,8 +436,48 @@ describe("session history tools", () => {
 		});
 		expect((old.details as SessionSearchToolDetails).matches[0]?.entryId).toBe(startId);
 	});
-	it("replaces a bounded earlier range while preserving and replaying the later tool turn", async () => {
+	it("rejects an end cut that includes the current compression request", async () => {
 		const created = await harness();
+		const first = created.sessionManager.appendMessage({ role: "user", content: "earlier", timestamp: 1 });
+		created.sessionManager.appendMessage({ role: "user", content: "more earlier", timestamp: 2 });
+		created.session.agent.state.messages = created.sessionManager.buildSessionContext().messages;
+		created.setResponses([
+			() => {
+				const current = created.sessionManager
+					.getBranch()
+					.filter((entry) => entry.type === "message" && entry.message.role === "user")
+					.at(-1);
+				if (!current) throw new Error("Missing current request");
+				return fauxAssistantMessage(
+					fauxToolCall("compress_context", { startEntryId: first, endEntryId: current.id, summary: "wrong" }),
+					{ stopReason: "toolUse" },
+				);
+			},
+			fauxAssistantMessage("done"),
+		]);
+		await created.session.prompt("compress now");
+		const branch = created.sessionManager.getBranch();
+		expect(branch.some((entry) => entry.type === "custom_message" && entry.customType === "compress_context")).toBe(
+			false,
+		);
+		expect(
+			branch.some(
+				(entry) =>
+					entry.type === "message" &&
+					entry.message.role === "toolResult" &&
+					entry.message.isError &&
+					JSON.stringify(entry.message.content).includes(
+						"endEntryId is the current user request; omit endEntryId",
+					),
+			),
+		).toBe(true);
+	});
+
+	it("replaces a bounded earlier range while keeping later entry IDs and the compression turn", async () => {
+		const created = await createHarness({
+			models: [{ id: "faux-1", cost: { input: 4, output: 20, cacheRead: 1, cacheWrite: 5 } }],
+		});
+		harnesses.push(created);
 		const session = created.sessionManager;
 		const prefix = session.appendMessage({ role: "user", content: "keep prefix", timestamp: 1 });
 		const start = session.appendMessage({ role: "user", content: "old investigation", timestamp: 2 });
@@ -430,13 +505,39 @@ describe("session history tools", () => {
 		]);
 		await created.session.prompt("compress earlier work");
 		const branch = session.getBranch();
+		const marker = branch.find((entry) => entry.type === "custom_message" && entry.customType === "compress_context");
+		const economics = branch.find(
+			(entry) => entry.type === "custom" && entry.customType === COMPRESSION_ECONOMICS_ENTRY_TYPE,
+		);
+		if (!marker || !economics || economics.type !== "custom")
+			throw new Error("Missing compression marker or economics record");
+		const compressCallIndex = branch.findIndex(
+			(entry) =>
+				entry.type === "message" &&
+				entry.message.role === "assistant" &&
+				entry.message.content.some((block) => block.type === "toolCall" && block.name === "compress_context"),
+		);
+		expect(compressCallIndex).toBeGreaterThan(0);
+		const beforeCompression = projectSessionContextEntries(branch.slice(0, compressCallIndex));
+		const expected = estimateCompressionEconomics(
+			beforeCompression,
+			start,
+			end,
+			created.getModel(),
+			"Concise old findings",
+		);
+		expect(economics.data).toMatchObject(expected ?? {});
+		expect(expected?.oneTimeCost).toBeGreaterThan(
+			((expected?.summaryTokens ?? 0) * (created.getModel().cost.input + created.getModel().cost.output)) /
+				1_000_000,
+		);
 		expect(branch[0]?.id).toBe(prefix);
-		expect(branch.map((entry) => entry.id)).not.toContain(start);
-		expect(branch.map((entry) => entry.id)).not.toContain(end);
+		expect(branch.map((entry) => entry.id)).toContain(start);
+		expect(branch.map((entry) => entry.id)).toContain(end);
 		expect(branch.some((entry) => entry.type === "thinking_level_change" && entry.thinkingLevel === "high")).toBe(
 			true,
 		);
-		expect(branch.map((entry) => entry.id)).not.toContain(retainedThinking);
+		expect(branch.map((entry) => entry.id)).toContain(retainedThinking);
 		expect(session.buildSessionContext().model).toMatchObject({
 			provider: created.getModel().provider,
 			modelId: created.getModel().id,
@@ -452,12 +553,14 @@ describe("session history tools", () => {
 			"toolResult",
 			"user",
 			"assistant",
+			"toolResult",
+			"assistant",
 		]);
 		expect(messages[1]?.role === "custom" ? messages[1].content : undefined).toBe("Concise old findings");
 		expect(messages[2]?.role === "user" ? messages[2].content : undefined).toBe("retain this later task");
 		expect(messages[4]?.role === "toolResult" ? messages[4].toolCallId : undefined).toBe(call.id);
 		expect(getMessageText(messages[5])).toBe("compress earlier work");
-		expect(branch.find((entry) => entry.type === "message" && entry.message.role === "toolResult")?.id).not.toBe(
+		expect(branch.find((entry) => entry.type === "message" && entry.message.role === "toolResult")?.id).toBe(
 			retainedResult,
 		);
 		const archived = await executeTool(created, "session_search", {
@@ -526,20 +629,52 @@ describe("session history tools", () => {
 		);
 	});
 
-	it("does not replace across the latest compaction boundary", async () => {
-		const created = await harness();
-		const kept = created.sessionManager.appendMessage({ role: "user", content: "kept", timestamp: 2 });
-		created.sessionManager.appendCompaction("summary", kept, 100);
-		created.sessionManager.appendMessage({ role: "user", content: "new", timestamp: 3 });
-		await expect(executeTool(created, "compress_context", { startEntryId: kept, summary: "x" })).rejects.toThrow(
-			"earlier compaction",
-		);
-	});
+	it.each([false, true])(
+		"compresses retained messages before compaction (include summary: %s)",
+		async (includeCompaction) => {
+			const created = await harness();
+			const session = created.sessionManager;
+			const first = session.appendMessage({ role: "user", content: "first retained", timestamp: 1 });
+			const second = session.appendMessage({ role: "user", content: "second retained", timestamp: 2 });
+			const compaction = session.appendCompaction("prior compaction summary", first, 100);
+			const later = session.appendMessage({ role: "user", content: "later task", timestamp: 3 });
+			created.session.agent.state.messages = session.buildSessionContext().messages;
+			created.setResponses([
+				fauxAssistantMessage(
+					fauxToolCall("compress_context", {
+						startEntryId: includeCompaction ? compaction : first,
+						endEntryId: second,
+						summary: "new concise summary",
+					}),
+					{ stopReason: "toolUse" },
+				),
+				fauxAssistantMessage("done"),
+			]);
+			await created.session.prompt("compress older work");
+			const messages = session.buildSessionContext().messages;
+			const contents = messages.map((message) =>
+				message.role === "custom"
+					? String(message.content)
+					: message.role === "compactionSummary"
+						? message.summary
+						: getMessageText(message),
+			);
+			if (includeCompaction) expect(contents).not.toContain("prior compaction summary");
+			else expect(contents).toContain("prior compaction summary");
+			expect(contents).toContain("new concise summary");
+			expect(contents).toContain("later task");
+			expect(contents).not.toContain("first retained");
+			expect(contents).not.toContain("second retained");
+			expect(session.getBranch().some((entry) => entry.id === later)).toBe(true);
+			expect(session.getBranch().some((entry) => entry.type === "compaction")).toBe(true);
+		},
+	);
 
 	it("requires both compression arguments and rejects the removed listing API", async () => {
 		const created = await harness();
 		const tool = created.session.agent.state.tools.find((candidate) => candidate.name === "compress_context");
 		expect(tool?.description).toContain("model-only context metadata");
+		expect(tool?.description).toContain("do not use the current user's ID");
 		expect(tool?.description).not.toContain("List IDs");
 		expect(Object.keys(tool?.parameters.properties ?? {})).toEqual(["startEntryId", "endEntryId", "summary"]);
 		await expect(executeTool(created, "compress_context", {})).rejects.toThrow();
@@ -554,6 +689,7 @@ describe("session history tools", () => {
 		const created = await harness();
 		created.sessionManager.appendMessage({ role: "user", content: "prefix", timestamp: 1 });
 		const start = created.sessionManager.appendMessage({ role: "user", content: "old detail", timestamp: 2 });
+		created.sessionManager.appendMessage({ role: "user", content: "old continuation", timestamp: 3 });
 		created.session.agent.state.messages = created.sessionManager.buildSessionContext().messages;
 		created.setResponses([
 			fauxAssistantMessage(fauxToolCall("compress_context", { startEntryId: start, summary: "first summary" }), {
@@ -577,8 +713,75 @@ describe("session history tools", () => {
 		const errors = created.session.messages.filter((message) => message.role === "toolResult" && message.isError);
 		expect(errors).toEqual([]);
 		const context = created.sessionManager.buildSessionContext().messages;
-		expect(context.map((message) => message.role)).toEqual(["user", "custom", "assistant"]);
+		expect(context.map((message) => message.role)).toEqual([
+			"user",
+			"custom",
+			"user",
+			"assistant",
+			"toolResult",
+			"assistant",
+		]);
 		expect(context.find((message) => message.role === "custom")?.content).toBe("second summary");
 		expect(created.sessionManager.getEntry(firstSummaryId)).toBeDefined();
+	});
+	it("replaces overlapping bounded ranges in place across three compressions", async () => {
+		const created = await harness();
+		const session = created.sessionManager;
+		const one = session.appendMessage({ role: "user", content: "1", timestamp: 1 });
+		const two = session.appendMessage({ role: "user", content: "2", timestamp: 2 });
+		const three = session.appendMessage({ role: "user", content: "3", timestamp: 3 });
+		session.appendMessage({ role: "user", content: "4", timestamp: 4 });
+		const compress = async (startEntryId: string, endEntryId: string, summary: string): Promise<string> => {
+			created.session.agent.state.messages = session.buildSessionContext().messages;
+			created.setResponses([
+				fauxAssistantMessage(fauxToolCall("compress_context", { startEntryId, endEntryId, summary }), {
+					stopReason: "toolUse",
+				}),
+				fauxAssistantMessage("done"),
+			]);
+			await created.session.prompt(`compress ${summary}`);
+			const entry = session
+				.getBranch()
+				.find(
+					(candidate) =>
+						candidate.type === "custom_message" &&
+						candidate.customType === "compress_context" &&
+						candidate.content === summary,
+				);
+			if (!entry) throw new Error(`Missing ${summary}`);
+			return entry.id;
+		};
+		const visible = () =>
+			session.buildSessionContext().messages.flatMap((message) => {
+				if (message.role === "custom" && message.customType === "compress_context")
+					return [String(message.content)];
+				if (message.role === "user" && /^[1-6]$/.test(String(message.content))) return [String(message.content)];
+				return [];
+			});
+		const first = await compress(two, three, "3'");
+		expect(visible()).toEqual(["1", "3'", "4"]);
+		session.appendMessage({ role: "user", content: "5", timestamp: 5 });
+		session.appendMessage({ role: "user", content: "6", timestamp: 6 });
+		const second = await compress(one, first, "1'");
+		expect(visible()).toEqual(["1'", "4", "5", "6"]);
+		const five = session
+			.getBranch()
+			.find((entry) => entry.type === "message" && entry.message.role === "user" && entry.message.content === "5");
+		if (!five) throw new Error("Missing retained message 5");
+		await compress(second, five.id, "1''");
+		expect(visible()).toEqual(["1''", "6"]);
+		expect(session.getEntry(first)).toBeDefined();
+		expect(session.getEntry(second)).toBeDefined();
+		const records = new Map<string, number>();
+		for (const entry of session.getEntries()) {
+			if (entry.type !== "custom" || entry.customType !== COMPRESSION_ECONOMICS_ENTRY_TYPE) continue;
+			const data = entry.data as { summaryEntryId: string; removedTokens: number };
+			records.set(data.summaryEntryId, data.removedTokens);
+		}
+		expect(records.size).toBe(3);
+		const removed = [...records.values()].reduce((total, amount) => total + amount, 0);
+		const savings = estimateCompressionSavings(session.getBranch());
+		expect(savings.totalRemovedTokens).toBe(removed);
+		expect(savings.liveRemovedTokens).toBe([...records.values()][2]);
 	});
 });

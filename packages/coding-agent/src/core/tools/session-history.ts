@@ -5,7 +5,7 @@ import type { Static } from "typebox";
 import { Type } from "typebox";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { STRUCTURED_RESPONSE_INTERNAL_CUSTOM_TYPE } from "../messages.ts";
-import { getLatestCompactionEntry } from "../session/context.ts";
+import { getLatestCompactionEntry, projectSessionContextEntries } from "../session/context.ts";
 import type { ReadonlySession } from "../session/session.ts";
 import type { SessionEntry } from "../session/types.ts";
 import { abortIf } from "./runtime.ts";
@@ -688,24 +688,12 @@ function projectEntryForModel(entry: SessionEntry): unknown | undefined {
 
 function getContextSearchEntries(path: SessionEntry[]): SessionEntry[] {
 	const compaction = getLatestCompactionEntry(path);
-	let entries = path;
-	if (compaction) {
-		const compactionIndex = path.findIndex((entry) => entry.id === compaction.id);
-		const firstKeptIndex = path.findIndex(
-			(entry, index) => index < compactionIndex && entry.id === compaction.firstKeptEntryId,
-		);
-		entries = [
-			path[compactionIndex],
-			...(firstKeptIndex < 0 ? [] : path.slice(firstKeptIndex, compactionIndex)),
-			...path.slice(compactionIndex + 1),
-		];
-	}
-	return entries.filter(
+	return projectSessionContextEntries(path).filter(
 		(entry) =>
 			entry.type === "message" ||
 			entry.type === "custom_message" ||
 			entry.type === "branch_summary" ||
-			(entry.type === "compaction" && entry.id === compaction?.id),
+			(entry.type === "compaction" && entry.id === compaction?.id && entry.summary.length > 0),
 	);
 }
 

@@ -44,6 +44,7 @@ describe("background compression detection", () => {
 			fauxAssistantMessage("first answer"),
 			(context) => {
 				expect(context.systemPrompt).toContain("COMPRESS startEntryId endEntryId");
+				expect(JSON.stringify(context.messages)).toContain("Primary model catalog rates");
 				const entries = harness.sessionManager.getBranch();
 				return fauxAssistantMessage(`COMPRESS ${entries[0]?.id} ${entries.at(-1)?.id}`);
 			},
@@ -58,6 +59,7 @@ describe("background compression detection", () => {
 		const advisory = JSON.stringify(contexts[0]);
 		expect(advisory).toContain("Background compression detector: COMPRESS");
 		expect(advisory).toContain("Suggested inclusive range: startEntryId");
+		expect(advisory).toContain("Estimated if summary is 25% of range");
 		expect(JSON.stringify(harness.session.messages)).toContain("Background compression detector");
 		expect(JSON.stringify(harness.sessionManager.getEntries())).not.toContain("Background compression detector");
 		harness.settingsManager.setCompressionDetectionModel(undefined);
@@ -175,7 +177,7 @@ describe("background compression detection", () => {
 			},
 		]);
 		const detector = new CompressionDetector(harness.settingsManager, harness.session.modelRegistry);
-		detector.check(5, messages, "Primary instructions must remain available");
+		detector.check(15, messages, "Primary instructions must remain available");
 		await vi.waitFor(() => expect(request).toBeDefined());
 		const serialized = JSON.stringify(request);
 		expect(request).toHaveLength(messages.length + 2);
@@ -201,7 +203,7 @@ describe("background compression detection", () => {
 				return fauxAssistantMessage(`COMPRESS ${startEntryId} ${endEntryId}`);
 			},
 		]);
-		detector.check(5, harness.sessionManager.buildSessionContext().messages, "", branch);
+		detector.check(15, harness.sessionManager.buildSessionContext().messages, "", branch);
 		await vi.waitFor(() => expect(detector.suggestedRange).toEqual({ startEntryId, endEntryId }));
 		expect(roster).toContain(startEntryId);
 		expect(roster).toContain(endEntryId);
@@ -249,7 +251,7 @@ describe("background compression detection", () => {
 				return fauxAssistantMessage(`COMPRESS ${start} ${end}`);
 			},
 		]);
-		detector.check(5, harness.sessionManager.buildSessionContext().messages, "", harness.sessionManager.getBranch());
+		detector.check(15, harness.sessionManager.buildSessionContext().messages, "", harness.sessionManager.getBranch());
 		await detector.waitForIdle();
 		expect(detector.suggestedRange).toEqual({ startEntryId: start, endEntryId: end });
 		expect(detector.counts).toEqual({ keep: 0, compress: 1 });
@@ -288,7 +290,7 @@ describe("background compression detection", () => {
 				return fauxAssistantMessage("CONTINUE");
 			},
 		]);
-		detector.check(5, []);
+		detector.check(15, []);
 		await detector.waitForIdle();
 		expect(calls).toBe(4);
 		expect(detector.counts).toEqual({ keep: 1, compress: 0 });
@@ -318,7 +320,7 @@ describe("background compression detection", () => {
 			),
 			fauxAssistantMessage("should remain unused"),
 		]);
-		detector.check(5, []);
+		detector.check(15, []);
 		await detector.waitForIdle();
 		expect(detector.counts).toEqual({ keep: 0, compress: 0 });
 		expect(harness.getPendingResponseCount()).toBe(1);
@@ -331,7 +333,7 @@ describe("background compression detection", () => {
 		harness.settingsManager.setCompressionDetectionModel(`${model.provider}/${model.id}`);
 		const detector = new CompressionDetector(harness.settingsManager, harness.session.modelRegistry);
 		harness.setResponses([fauxAssistantMessage("COMPRESS missing-start missing-end")]);
-		detector.check(5, [], "", harness.sessionManager.getBranch());
+		detector.check(15, [], "", harness.sessionManager.getBranch());
 		await vi.waitFor(() => expect(detector.counts.compress).toBe(1));
 		expect(detector.shouldCompress).toBe(true);
 		expect(detector.suggestedRange).toBeUndefined();
@@ -362,7 +364,7 @@ describe("background compression detection", () => {
 				return fauxAssistantMessage(`COMPRESS ${start} ${end}`);
 			},
 		]);
-		detector.check(5, harness.sessionManager.buildSessionContext().messages, "", harness.sessionManager.getBranch());
+		detector.check(15, harness.sessionManager.buildSessionContext().messages, "", harness.sessionManager.getBranch());
 		await vi.waitFor(() => expect(detector.suggestedRange).toEqual({ startEntryId: start, endEntryId: end }));
 		expect(retryPrompt).toContain("startEntryId must be a message in the current model context");
 		expect(retryPrompt).toContain(start);
@@ -415,7 +417,7 @@ describe("background compression detection", () => {
 				return fauxAssistantMessage(`COMPRESS ${start} ${end}`);
 			},
 		]);
-		detector.check(5, harness.sessionManager.buildSessionContext().messages, "", harness.sessionManager.getBranch());
+		detector.check(15, harness.sessionManager.buildSessionContext().messages, "", harness.sessionManager.getBranch());
 		await detector.waitForIdle();
 		expect(detector.suggestedRange).toEqual({ startEntryId: start, endEntryId: end });
 		expect(detector.counts).toEqual({ keep: 0, compress: 1 });
@@ -446,11 +448,34 @@ describe("background compression detection", () => {
 				return fauxAssistantMessage(`COMPRESS ${end} ${start}`);
 			},
 		]);
-		detector.check(5, harness.sessionManager.buildSessionContext().messages, "", harness.sessionManager.getBranch());
+		detector.check(15, harness.sessionManager.buildSessionContext().messages, "", harness.sessionManager.getBranch());
 		await vi.waitFor(() => expect(detector.counts.compress).toBe(1));
 		expect(detector.shouldCompress).toBe(true);
 		expect(detector.suggestedRange).toBeUndefined();
 		expect(harness.getPendingResponseCount()).toBe(0);
+	});
+	it("does not run the percentage trigger below fifteen percent", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const model = harness.getModel();
+		harness.settingsManager.setCompressionDetectionModel(`${model.provider}/${model.id}`);
+		const detector = new CompressionDetector(harness.settingsManager, harness.session.modelRegistry);
+		harness.setResponses([fauxAssistantMessage("CONTINUE")]);
+		for (const percent of [5, 10, 14.9]) detector.check(percent, []);
+		expect(harness.getPendingResponseCount()).toBe(1);
+		detector.check(15, []);
+		await detector.waitForIdle();
+		expect(detector.counts.keep).toBe(1);
+		detector.reset([], 0);
+		harness.setResponses([fauxAssistantMessage("CONTINUE")]);
+		const tenMessages = Array.from({ length: 10 }, (_, index) => ({
+			role: "user" as const,
+			content: `task ${index}`,
+			timestamp: Date.now(),
+		}));
+		detector.check(1, tenMessages);
+		await detector.waitForIdle();
+		expect(detector.counts.keep).toBe(2);
 	});
 	it("checks after five percentage points or ten user messages/tool results, whichever comes first", async () => {
 		const harness = await createHarness();
@@ -463,13 +488,13 @@ describe("background compression detection", () => {
 			fauxAssistantMessage("CONTINUE"),
 			fauxAssistantMessage("COMPRESS"),
 		]);
-		detector.check(12.2, []);
+		detector.check(15, []);
 		await vi.waitFor(() => expect(harness.getPendingResponseCount()).toBe(2));
 		expect(detector.shouldCompress).toBe(true);
 		expect(detector.counts).toEqual({ keep: 0, compress: 1 });
-		detector.check(17.1, []);
+		detector.check(19.9, []);
 		expect(harness.getPendingResponseCount()).toBe(2);
-		detector.check(17.2, []);
+		detector.check(20, []);
 		await vi.waitFor(() => expect(harness.getPendingResponseCount()).toBe(1));
 		expect(detector.shouldCompress).toBe(false);
 		expect(detector.counts).toEqual({ keep: 1, compress: 1 });
@@ -504,7 +529,7 @@ describe("background compression detection", () => {
 		harness.settingsManager.setCompressionDetectionModel(`${model.provider}/${model.id}`);
 		const detector = new CompressionDetector(harness.settingsManager, harness.session.modelRegistry);
 		harness.setResponses([fauxAssistantMessage("CONTINUE"), fauxAssistantMessage("CONTINUE")]);
-		detector.check(5, []);
+		detector.check(15, []);
 		await detector.waitForIdle();
 		const assistants = Array.from({ length: 12 }, () => fauxAssistantMessage("assistant response"));
 		detector.check(undefined, assistants);
@@ -543,7 +568,7 @@ describe("background compression detection", () => {
 			fauxAssistantMessage("CONTINUE"),
 			fauxAssistantMessage("CONTINUE"),
 		]);
-		detector.check(5, []);
+		detector.check(15, []);
 		await detector.waitForIdle();
 		detector.reset([], 40);
 		detector.check(40, []);
@@ -595,7 +620,7 @@ describe("background compression detection", () => {
 			content: `message ${index}`,
 			timestamp: Date.now(),
 		}));
-		detector.check(5, messages.slice(0, 1));
+		detector.check(15, messages.slice(0, 1));
 		await vi.waitFor(() => expect(finish).toBeDefined());
 		detector.check(8, messages.slice(0, 2));
 		detector.check(10, messages.slice(0, 3));
@@ -626,14 +651,14 @@ describe("background compression detection", () => {
 			fauxAssistantMessage("CONTINUE"),
 			fauxAssistantMessage("COMPRESS", { stopReason: "error", errorMessage: "provider failed" }),
 		]);
-		detector.check(5, []);
+		detector.check(15, []);
 		await vi.waitFor(() => expect(harness.getPendingResponseCount()).toBe(3));
 		expect(detector.counts).toEqual({ keep: 0, compress: 0 });
-		detector.check(10, []);
-		await vi.waitFor(() => expect(harness.getPendingResponseCount()).toBe(2));
-		detector.check(15, []);
-		await vi.waitFor(() => expect(harness.getPendingResponseCount()).toBe(1));
 		detector.check(20, []);
+		await vi.waitFor(() => expect(harness.getPendingResponseCount()).toBe(2));
+		detector.check(25, []);
+		await vi.waitFor(() => expect(harness.getPendingResponseCount()).toBe(1));
+		detector.check(30, []);
 		await vi.waitFor(() => expect(harness.getPendingResponseCount()).toBe(0));
 		expect(detector.counts).toEqual({ keep: 1, compress: 1 });
 		expect(verdicts).toEqual(["COMPRESS", "CONTINUE"]);
@@ -652,7 +677,7 @@ describe("background compression detection", () => {
 			fauxAssistantMessage("should remain queued"),
 		]);
 		const detector = new CompressionDetector(harness.settingsManager, harness.session.modelRegistry);
-		detector.check(5, []);
+		detector.check(15, []);
 		await vi.waitFor(() => expect(finish).toBeDefined());
 		detector.check(15, []);
 		detector.reset();
@@ -668,7 +693,7 @@ describe("background compression detection", () => {
 		harness.settingsManager.setCompressionDetectionModel(`${model.provider}/${model.id}`);
 		harness.setResponses([() => new Promise<AssistantMessage>(() => {})]);
 		const detector = new CompressionDetector(harness.settingsManager, harness.session.modelRegistry);
-		detector.check(5, []);
+		detector.check(15, []);
 		const controller = new AbortController();
 		let released = false;
 		const waiting = detector.waitForIdle(controller.signal).then(() => {
@@ -700,14 +725,14 @@ describe("background compression detection", () => {
 		const detector = new CompressionDetector(harness.settingsManager, harness.session.modelRegistry, (active) =>
 			activity.push(active),
 		);
-		detector.check(5, []);
+		detector.check(15, []);
 		expect(activity).toEqual([true]);
 		await vi.waitFor(() => expect(finish).toBeDefined());
 		finish?.(fauxAssistantMessage("CONTINUE"));
 		await vi.waitFor(() => expect(activity).toEqual([true, false]));
 		// Cancellation must hide the indicator immediately, even if the provider has not returned.
 		harness.setResponses([() => new Promise(() => {})]);
-		detector.check(10, []);
+		detector.check(20, []);
 		expect(activity).toEqual([true, false, true]);
 		detector.reset();
 		expect(activity).toEqual([true, false, true, false]);
@@ -759,10 +784,10 @@ describe("background compression detection", () => {
 				return response;
 			},
 		);
-		detector.check(5, []);
+		detector.check(15, []);
 		await vi.waitFor(() => expect(detector.cost).toBeCloseTo(0.01));
 		expect(detector.counts).toEqual({ keep: 0, compress: 0 });
-		detector.check(10, []);
+		detector.check(20, []);
 		await vi.waitFor(() => expect(detector.counts.keep).toBe(1));
 		expect(detector.cost).toBeCloseTo(0.0125);
 		detector.reset();

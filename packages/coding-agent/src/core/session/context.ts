@@ -27,7 +27,7 @@ export function sessionEntryToContextMessages(entry: SessionEntry): AgentMessage
 	if (entry.type === "branch_summary" && entry.summary) {
 		return [createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp)];
 	}
-	if (entry.type === "compaction") {
+	if (entry.type === "compaction" && entry.summary) {
 		return [createCompactionSummaryMessage(entry.summary, entry.tokensBefore, entry.timestamp)];
 	}
 	return [];
@@ -37,7 +37,6 @@ export function sessionEntryToContextMessages(entry: SessionEntry): AgentMessage
 interface SessionPathState {
 	thinkingLevel: string;
 	model: SessionContext["model"];
-	compaction: CompactionEntry | null;
 }
 
 function traceSessionPath(leaf: SessionEntry, byId: Map<string, SessionEntry>): SessionEntry[] {
@@ -53,7 +52,6 @@ function traceSessionPath(leaf: SessionEntry, byId: Map<string, SessionEntry>): 
 function inspectSessionPath(path: SessionEntry[]): SessionPathState {
 	let thinkingLevel = "off";
 	let model: SessionContext["model"] = null;
-	let compaction: CompactionEntry | null = null;
 	for (const entry of path) {
 		switch (entry.type) {
 			case "thinking_level_change":
@@ -67,42 +65,51 @@ function inspectSessionPath(path: SessionEntry[]): SessionPathState {
 					model = { provider: entry.message.provider, modelId: entry.message.model };
 				}
 				break;
-			case "compaction":
-				compaction = entry;
 		}
 	}
-	return { thinkingLevel, model, compaction };
+	return { thinkingLevel, model };
+}
+function applyCompressionReplacement(visible: SessionEntry[], entry: SessionEntry): boolean {
+	if (entry.type !== "custom_message" || entry.customType !== "compress_context") return false;
+	const details = entry.details;
+	if (
+		!details ||
+		typeof details !== "object" ||
+		!("replacementVersion" in details) ||
+		details.replacementVersion !== 1
+	)
+		return false;
+	const startEntryId = "startEntryId" in details ? details.startEntryId : undefined;
+	const endEntryId = "endEntryId" in details ? details.endEntryId : undefined;
+	if (typeof startEntryId !== "string" || typeof endEntryId !== "string") return false;
+	const startIndex = visible.findIndex((candidate) => candidate.id === startEntryId);
+	const endIndex = visible.findIndex((candidate) => candidate.id === endEntryId);
+	if (startIndex < 0 || endIndex < startIndex) return false;
+	visible.splice(startIndex, endIndex - startIndex + 1, entry);
+	return true;
 }
 
-function appendSessionContextMessages(
-	messages: AgentMessage[],
-	path: SessionEntry[],
-	startIndex: number,
-	endIndex: number,
-): void {
-	for (let index = startIndex; index < endIndex; index++) {
-		const entry = path[index];
-		// The active compaction summary is inserted explicitly. Older compaction
-		// entries in the retained path must not become additional context summaries.
-		if (entry.type !== "compaction") messages.push(...sessionEntryToContextMessages(entry));
+/** Return entries in model-visible order, applying append-only range replacements at their declared positions. */
+export function projectSessionContextEntries(path: SessionEntry[]): SessionEntry[] {
+	const compaction = getLatestCompactionEntry(path);
+	const compactionIndex = compaction ? path.findIndex((entry) => entry.id === compaction.id) : -1;
+	const firstKeptIndex = compaction
+		? path.findIndex((entry, index) => index < compactionIndex && entry.id === compaction.firstKeptEntryId)
+		: -1;
+	const ordered = compaction
+		? [
+				compaction,
+				...(firstKeptIndex < 0 ? [] : path.slice(firstKeptIndex, compactionIndex)),
+				...path.slice(compactionIndex + 1),
+			]
+		: path;
+	const visible: SessionEntry[] = [];
+	for (const entry of ordered) {
+		if (entry.type === "compaction" && entry.id !== compaction?.id) continue;
+		if (applyCompressionReplacement(visible, entry)) continue;
+		visible.push(entry);
 	}
-}
-
-function buildSessionContextMessages(path: SessionEntry[], compaction: CompactionEntry | null): AgentMessage[] {
-	const messages: AgentMessage[] = [];
-	if (!compaction) {
-		appendSessionContextMessages(messages, path, 0, path.length);
-		return messages;
-	}
-
-	messages.push(createCompactionSummaryMessage(compaction.summary, compaction.tokensBefore, compaction.timestamp));
-	const compactionIndex = path.findIndex((entry) => entry.type === "compaction" && entry.id === compaction.id);
-	const firstKeptIndex = path.findIndex(
-		(entry, index) => index < compactionIndex && entry.id === compaction.firstKeptEntryId,
-	);
-	if (firstKeptIndex >= 0) appendSessionContextMessages(messages, path, firstKeptIndex, compactionIndex);
-	appendSessionContextMessages(messages, path, compactionIndex + 1, path.length);
-	return messages;
+	return visible;
 }
 
 /**
@@ -123,6 +130,7 @@ export function buildSessionContext(
 	if (!leaf) return { messages: [], thinkingLevel: "off", model: null };
 
 	const path = traceSessionPath(leaf, entriesById);
-	const { thinkingLevel, model, compaction } = inspectSessionPath(path);
-	return { messages: buildSessionContextMessages(path, compaction), thinkingLevel, model };
+	const { thinkingLevel, model } = inspectSessionPath(path);
+	const messages = projectSessionContextEntries(path).flatMap(sessionEntryToContextMessages);
+	return { messages, thinkingLevel, model };
 }

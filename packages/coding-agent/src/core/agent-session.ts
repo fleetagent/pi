@@ -83,6 +83,12 @@ import {
 	type CompressionDetectionVerdict,
 	CompressionDetector,
 } from "./compaction/compression-detector.ts";
+import {
+	COMPRESSION_ECONOMICS_ENTRY_TYPE,
+	COMPRESSION_SAVINGS_SNAPSHOT_TYPE,
+	createCompressionSavingsSnapshot,
+	estimateCompressionEconomics,
+} from "./compaction/compression-economics.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
@@ -173,7 +179,7 @@ import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts
 import type { ResourceExtensionPaths, ResourceLoader, ResourcePathEntry } from "./resource-loader.ts";
 import type { Rule } from "./rules.ts";
 import { CURRENT_SESSION_VERSION } from "./session/constants.ts";
-import { getLatestCompactionEntry } from "./session/context.ts";
+import { getLatestCompactionEntry, projectSessionContextEntries } from "./session/context.ts";
 import { annotateContextMetadata } from "./session/context-metadata.ts";
 import type { Session } from "./session/session.ts";
 import type {
@@ -183,6 +189,7 @@ import type {
 	SessionEntry,
 	SessionHeader,
 } from "./session/types.ts";
+import { readUsageLedger, USAGE_LEDGER_ENTRY_TYPE } from "./session/usage-ledger.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import type { Skill } from "./skills.ts";
 import { HIDDEN_BUILTIN_SLASH_COMMAND_NAMES, type SlashCommandInfo } from "./slash-commands.ts";
@@ -191,6 +198,7 @@ import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-promp
 import { createLocalBashOperations } from "./tools/bash.ts";
 import {
 	createCompressContextToolDefinition,
+	getCompressibleEntries,
 	getSuggestedCompressionRangeError,
 	isValidSuggestedCompressionRange,
 	type PendingContextCompression,
@@ -1207,8 +1215,14 @@ export class AgentSession {
 			},
 			undefined,
 			{
-				getBranch: () => this.session.getBranch(),
+				getBranch: () => getCompressibleEntries(this.session, ""),
 				session: this.session,
+				getCostInfo: () => {
+					const model = this.model;
+					return model
+						? `Primary model catalog rates ($/million tokens): input ${model.cost.input}, cacheRead ${model.cost.cacheRead}, cacheWrite ${model.cost.cacheWrite}, output ${model.cost.output}. Subscription: ${this._modelRegistry.isUsingOAuth(model)}. Actual cache hit rate and future request count are unknown.`
+						: "Primary model pricing is unavailable.";
+				},
 				getRangeError: (start, end) => getSuggestedCompressionRangeError(this.session, start, end),
 			},
 		);
@@ -2224,7 +2238,7 @@ export class AgentSession {
 					this.getContextUsage()?.percent,
 					context.messages,
 					context.systemPrompt,
-					this.session.getBranch(),
+					getCompressibleEntries(this.session, ""),
 				);
 				await this._compressionDetector.waitForIdle(signal);
 			}
@@ -2234,10 +2248,27 @@ export class AgentSession {
 
 	private _createCompressionAdvisory(): CustomMessage {
 		const suggested = this._compressionDetector.suggestedRange;
-		const range =
-			suggested && isValidSuggestedCompressionRange(this.session, suggested.startEntryId, suggested.endEntryId)
-				? ` Suggested inclusive range: startEntryId ${suggested.startEntryId}, endEntryId ${suggested.endEntryId}; verify before acting.`
-				: "";
+		let range = "";
+		if (suggested && isValidSuggestedCompressionRange(this.session, suggested.startEntryId, suggested.endEntryId)) {
+			range = ` Suggested inclusive range: startEntryId ${suggested.startEntryId}, endEntryId ${suggested.endEntryId}; verify before acting.`;
+			const model = this.model;
+			const estimate = model
+				? estimateCompressionEconomics(
+						getCompressibleEntries(this.session, ""),
+						suggested.startEntryId,
+						suggested.endEntryId,
+						model,
+						undefined,
+						this._modelRegistry.isUsingOAuth(model),
+					)
+				: undefined;
+			if (estimate) {
+				range += ` Estimated if summary is 25% of range: ~${estimate.removedTokens} fewer context tokens per request`;
+				if (estimate.breakEvenRequests != null)
+					range += `, ~${estimate.breakEvenRequests} requests to break even at catalog rates`;
+				range += "; estimates depend on caching and future requests.";
+			}
+		}
 		return createCustomMessage(
 			"compression_detection",
 			`[Background compression detector: COMPRESS.${range} At the next safe checkpoint, consider using compress_context to summarize older context. Preserve essential decisions and unfinished work. This is advisory; continue if details are still needed.]`,
@@ -2370,31 +2401,82 @@ export class AgentSession {
 		const assistant = branch.find((entry) => entry.id === pending.assistantEntryId);
 		const last = branch.at(-1);
 		if (!start || !assistant || last?.type !== "message" || last.message !== message) return;
-		const startIndex = branch.indexOf(start);
 		const assistantIndex = branch.indexOf(assistant);
+		const triggerIndex = branch
+			.slice(0, assistantIndex)
+			.map((entry) => entry.type === "message" && entry.message.role === "user")
+			.lastIndexOf(true);
+		if (triggerIndex < 0) return;
+		const earlierEntries = new Set(branch.slice(0, triggerIndex).map((entry) => entry.id));
+		const visible = getCompressibleEntries(this.session, pending.toolCallId).filter((entry) =>
+			earlierEntries.has(entry.id),
+		);
+		const startIndex = visible.findIndex((entry) => entry.id === start.id);
 		const endIndex = pending.endEntryId
-			? branch.findIndex((entry) => entry.id === pending.endEntryId)
-			: assistantIndex - 1;
-		if (endIndex < startIndex || endIndex >= assistantIndex) return;
-		const preservedSuffix = pending.endEntryId ? branch.slice(endIndex + 1, assistantIndex) : [];
-
+			? visible.findIndex((entry) => entry.id === pending.endEntryId)
+			: visible.length - 1;
+		if (startIndex < 0 || endIndex < startIndex) return;
+		const economicsSnapshot = createCompressionSavingsSnapshot(branch);
+		// The tool call and result were not in the request that produced this compression.
+		// Only the earlier visible suffix could have been cached before the replacement.
+		const contextEntries = getCompressibleEntries(this.session, "");
+		const economicsEntries = contextEntries.slice(
+			0,
+			contextEntries.findIndex((entry) => entry.id === assistant.id),
+		);
+		const model = this.model;
 		const previous = this.session.buildSessionContext();
 		const oldLeafId = last.id;
-		if (start.parentId === null) this.session.resetLeaf();
-		else this.session.branch(start.parentId);
-		this.session.appendCustomMessageEntry("compress_context", pending.summary, true, {
+		const summaryEntryId = this.session.appendCustomMessageEntry("compress_context", pending.summary, true, {
+			replacementVersion: 1,
 			fromId: oldLeafId,
-			startEntryId: pending.startEntryId,
-			...(pending.endEntryId ? { endEntryId: pending.endEntryId } : {}),
+			startEntryId: start.id,
+			endEntryId: visible[endIndex].id,
 		});
-		const replayedIds = new Map<string, string>();
-		for (const entry of preservedSuffix)
-			replayedIds.set(entry.id, this.session.appendReplayedEntry(entry, replayedIds));
+		if (economicsSnapshot.totalRemovedTokens) {
+			const retainedIds = new Set(projectSessionContextEntries(this.session.getBranch()).map((entry) => entry.id));
+			economicsSnapshot.activeSavings = economicsSnapshot.activeSavings.filter((saving) =>
+				retainedIds.has(saving.summaryEntryId),
+			);
+			economicsSnapshot.liveRemovedTokens = economicsSnapshot.activeSavings.reduce(
+				(total, saving) => total + saving.removedTokens,
+				0,
+			);
+			this.session.appendCustomEntry(COMPRESSION_SAVINGS_SNAPSHOT_TYPE, economicsSnapshot);
+		}
+		this._recordCompressionEconomics(
+			economicsEntries,
+			start.id,
+			visible[endIndex].id,
+			pending.summary,
+			summaryEntryId,
+			model,
+		);
 		this._restoreCompressionContextState(previous);
 		this.agent.state.messages = this.session.buildSessionContext().messages;
 		this._compressionDetector.reset(this.agent.state.messages, this.getContextUsage()?.percent ?? null);
 		this._stateCompressionApplied = true;
 		this._emit({ type: "state_compressed" });
+	}
+	private _recordCompressionEconomics(
+		branch: SessionEntry[],
+		startEntryId: string,
+		endEntryId: string,
+		summary: string,
+		summaryEntryId: string,
+		model: Model<Api> | undefined,
+	): void {
+		if (!model) return;
+		const economics = estimateCompressionEconomics(
+			branch,
+			startEntryId,
+			endEntryId,
+			model,
+			summary,
+			this._modelRegistry.isUsingOAuth(model),
+		);
+		if (economics)
+			this.session.appendCustomEntry(COMPRESSION_ECONOMICS_ENTRY_TYPE, { ...economics, version: 1, summaryEntryId });
 	}
 	private _restoreCompressionContextState(previous: SessionContext): void {
 		const rebuilt = this.session.buildSessionContext();
@@ -2439,13 +2521,18 @@ export class AgentSession {
 		await this._runAsyncBarrierCallback(`extension ${event.type} handler`, () => this._emitExtensionEvent(event));
 		this._emit(event.type === "agent_end" ? { ...event, willRetry: this._willRetryAfterAgentEnd(event) } : event);
 		if (event.type === "agent_end") {
+			const entries = this.session.getEntries();
+			const ledger = readUsageLedger(entries);
+			const lastEntry = entries.at(-1);
+			if (ledger.checkpointId && !(lastEntry?.type === "custom" && lastEntry.customType === USAGE_LEDGER_ENTRY_TYPE))
+				this.session.appendCustomEntry(USAGE_LEDGER_ENTRY_TYPE, ledger);
 			this._scheduleExtensionCompactions();
 			if (!this._disposed && this.getActiveToolNames().includes("compress_context"))
 				this._compressionDetector.check(
 					this.getContextUsage()?.percent,
 					this.agent.state.messages,
 					this._buildCurrentAgentContext().systemPrompt,
-					this.session.getBranch(),
+					getCompressibleEntries(this.session, ""),
 				);
 		}
 		if (event.type === "message_end") {
@@ -6208,24 +6295,10 @@ export class AgentSession {
 		const toolResults = state.messages.filter((m) => m.role === "toolResult").length;
 
 		let toolCalls = 0;
-		let totalInput = 0;
-		let totalOutput = 0;
-		let totalCacheRead = 0;
-		let totalCacheWrite = 0;
-		let totalCost = 0;
-
 		for (const message of state.messages) {
-			if (message.role === "assistant") {
-				const assistantMsg = message as AssistantMessage;
-				toolCalls += assistantMsg.content.filter((c) => c.type === "toolCall").length;
-				totalInput += assistantMsg.usage.input;
-				totalOutput += assistantMsg.usage.output;
-				totalCacheRead += assistantMsg.usage.cacheRead;
-				totalCacheWrite += assistantMsg.usage.cacheWrite;
-				totalCost += assistantMsg.usage.cost.total;
-			}
+			if (message.role === "assistant") toolCalls += message.content.filter((c) => c.type === "toolCall").length;
 		}
-
+		const usage = readUsageLedger(this.session.getEntries());
 		return {
 			sessionFile: this.sessionFile,
 			sessionId: this.sessionId,
@@ -6235,22 +6308,19 @@ export class AgentSession {
 			toolResults,
 			totalMessages: state.messages.length,
 			tokens: {
-				input: totalInput,
-				output: totalOutput,
-				cacheRead: totalCacheRead,
-				cacheWrite: totalCacheWrite,
-				total: totalInput + totalOutput + totalCacheRead + totalCacheWrite,
+				input: usage.input,
+				output: usage.output,
+				cacheRead: usage.cacheRead,
+				cacheWrite: usage.cacheWrite,
+				total: usage.input + usage.output + usage.cacheRead + usage.cacheWrite,
 			},
-			cost: totalCost,
+			cost: usage.catalogCost,
 			contextUsage: this.getContextUsage(),
 		};
 	}
 
-	private _hasUsableAssistantUsageAfterCompaction(
-		branchEntries: SessionEntry[],
-		latestCompaction: CompactionEntry,
-	): boolean {
-		const compactionIndex = branchEntries.lastIndexOf(latestCompaction);
+	private _hasUsableAssistantUsageAfterBoundary(branchEntries: SessionEntry[], boundary: SessionEntry): boolean {
+		const compactionIndex = branchEntries.lastIndexOf(boundary);
 		for (let index = branchEntries.length - 1; index > compactionIndex; index--) {
 			const entry = branchEntries[index];
 			if (entry.type !== "message" || entry.message.role !== "assistant") continue;
@@ -6281,8 +6351,23 @@ export class AgentSession {
 		// If no such assistant exists, context token count is unknown until the next LLM response.
 		const branchEntries = this.session.getBranch();
 		const latestCompaction = getLatestCompactionEntry(branchEntries);
-
-		if (latestCompaction && !this._hasUsableAssistantUsageAfterCompaction(branchEntries, latestCompaction)) {
+		const latestCompression = [...branchEntries]
+			.reverse()
+			.find(
+				(entry) =>
+					entry.type === "custom_message" &&
+					entry.customType === "compress_context" &&
+					!!entry.details &&
+					typeof entry.details === "object" &&
+					"replacementVersion" in entry.details &&
+					entry.details.replacementVersion === 1,
+			);
+		const boundary =
+			latestCompression &&
+			(!latestCompaction || branchEntries.indexOf(latestCompression) > branchEntries.indexOf(latestCompaction))
+				? latestCompression
+				: latestCompaction;
+		if (boundary && !this._hasUsableAssistantUsageAfterBoundary(branchEntries, boundary)) {
 			return { tokens: null, contextWindow, percent: null };
 		}
 

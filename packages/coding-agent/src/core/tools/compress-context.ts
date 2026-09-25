@@ -3,7 +3,7 @@ import { Type } from "typebox";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { HOOK_EXECUTION_CUSTOM_TYPE } from "../hooks/types.ts";
 import { STRUCTURED_RESPONSE_INTERNAL_CUSTOM_TYPE } from "../messages.ts";
-import { getLatestCompactionEntry } from "../session/context.ts";
+import { getLatestCompactionEntry, projectSessionContextEntries } from "../session/context.ts";
 import type { ReadonlySession } from "../session/session.ts";
 import type { SessionEntry } from "../session/types.ts";
 import { abortIf } from "./runtime.ts";
@@ -12,7 +12,10 @@ const schema = Type.Object(
 	{
 		startEntryId: Type.String({ description: "ID of the first message to replace" }),
 		endEntryId: Type.Optional(
-			Type.String({ description: "Inclusive last message to replace; omit to compress through the current tail" }),
+			Type.String({
+				description:
+					"Inclusive last message to replace; must precede the current user request. Omit to compress through the last eligible entry.",
+			}),
 		),
 		summary: Type.String({ description: "Replacement context for the selected range" }),
 	},
@@ -35,7 +38,7 @@ function isContextEntry(entry: SessionEntry, compactionId: string | undefined, t
 			entry.customType !== HOOK_EXECUTION_CUSTOM_TYPE
 		);
 	}
-	if (entry.type === "compaction") return entry.id === compactionId;
+	if (entry.type === "compaction") return entry.id === compactionId && entry.summary.length > 0;
 	if (entry.type === "branch_summary") return true;
 	if (entry.type !== "message") return false;
 	const message = entry.message;
@@ -52,23 +55,11 @@ function isContextEntry(entry: SessionEntry, compactionId: string | undefined, t
 	return true;
 }
 
-/** Collect visible entries for validating a context-tail cut (retained messages before compaction cannot be cut). */
-function getCompressibleEntries(session: ReadonlySession, toolCallId: string): SessionEntry[] {
+/** Collect entries in model-context order, excluding the currently executing tool call. */
+export function getCompressibleEntries(session: ReadonlySession, toolCallId: string): SessionEntry[] {
 	const path = session.getBranch();
 	const compaction = getLatestCompactionEntry(path);
-	const compactionIndex = compaction ? path.findIndex((entry) => entry.id === compaction.id) : -1;
-	const firstKeptIndex = compaction
-		? path.findIndex((entry, index) => index < compactionIndex && entry.id === compaction.firstKeptEntryId)
-		: -1;
-	const contextEntries =
-		compactionIndex < 0
-			? path
-			: [
-					path[compactionIndex],
-					...(firstKeptIndex < 0 ? [] : path.slice(firstKeptIndex, compactionIndex)),
-					...path.slice(compactionIndex + 1),
-				];
-	return contextEntries.filter((entry) => isContextEntry(entry, compaction?.id, toolCallId));
+	return projectSessionContextEntries(path).filter((entry) => isContextEntry(entry, compaction?.id, toolCallId));
 }
 
 function hasUnmatchedToolCall(entries: SessionEntry[]): boolean {
@@ -86,12 +77,7 @@ function hasUnmatchedToolCall(entries: SessionEntry[]): boolean {
 	return pending.size > 0;
 }
 
-function validateCompressionRange(
-	session: ReadonlySession,
-	entries: SessionEntry[],
-	startEntryId: string,
-	endEntryId?: string,
-): void {
+function validateCompressionRange(entries: SessionEntry[], startEntryId: string, endEntryId?: string): void {
 	const startIndex = entries.findIndex((entry) => entry.id === startEntryId);
 	if (startIndex < 0) throw new Error("startEntryId must be a message in the current model context.");
 	const endIndex = endEntryId ? entries.findIndex((entry) => entry.id === endEntryId) : entries.length - 1;
@@ -103,14 +89,6 @@ function validateCompressionRange(
 	}
 	if (hasUnmatchedToolCall(entries.slice(0, startIndex))) {
 		throw new Error("Cannot leave an unmatched tool call in the preserved prefix; start at its assistant message.");
-	}
-	const branch = session.getBranch();
-	const compaction = getLatestCompactionEntry(branch);
-	const lastCompactionIndex = compaction ? branch.findIndex((entry) => entry.id === compaction.id) : -1;
-	if (lastCompactionIndex >= 0 && branch.findIndex((entry) => entry.id === startEntryId) <= lastCompactionIndex) {
-		throw new Error(
-			"Cannot replace messages retained by an earlier compaction; start after the latest compaction entry.",
-		);
 	}
 	if (endIndex - startIndex + 1 < 2)
 		throw new Error("compress_context requires at least two messages in the selected range.");
@@ -126,7 +104,7 @@ export function getSuggestedCompressionRangeError(
 	endEntryId: string,
 ): string | undefined {
 	try {
-		validateCompressionRange(session, getCompressibleEntries(session, ""), startEntryId, endEntryId);
+		validateCompressionRange(getCompressibleEntries(session, ""), startEntryId, endEntryId);
 		return undefined;
 	} catch (error) {
 		return error instanceof Error ? error.message : "Invalid range.";
@@ -150,7 +128,7 @@ export function createCompressContextToolDefinition(
 		name: "compress_context",
 		label: "compress_context",
 		description:
-			"Replace at least two messages from startEntryId through optional inclusive endEntryId with your own summary. Omit endEntryId to compress through the active tail. The earlier prefix and any later messages remain in order. The original branch is archived. Use a user or assistant tool-call entry ID from model-only context metadata for the start, not a tool-result ID.",
+			"Replace at least two messages from startEntryId through optional inclusive endEntryId with your own summary. endEntryId must be before the current user request; do not use the current user's ID from context metadata as the end. Omit endEntryId to compress through the last entry before that request. The earlier prefix, current request, tool call, result, and any later messages remain in order. Use a user or assistant tool-call entry ID from model-only context metadata for the start, not a tool-result ID.",
 		promptSnippet: "Summarize a bounded range or the active session tail",
 		promptGuidelines: [
 			"Pass startEntryId and a non-empty summary; add endEntryId to retain later messages. Keep tool calls paired with their results and preserve important decisions.",
@@ -162,9 +140,28 @@ export function createCompressContextToolDefinition(
 			if (!startEntryId || !summary.trim()) {
 				throw new Error("Provide startEntryId and a non-empty summary to compress.");
 			}
-			const entries = getCompressibleEntries(session, toolCallId);
-			validateCompressionRange(session, entries, startEntryId, endEntryId);
 			const assistant = session.getLeafEntry();
+			const branch = session.getBranch();
+			const isCurrentCall =
+				assistant?.type === "message" &&
+				assistant.message.role === "assistant" &&
+				assistant.message.content.some((block) => block.type === "toolCall" && block.id === toolCallId);
+			const triggerIndex = isCurrentCall
+				? branch
+						.slice(0, -1)
+						.map((entry) => entry.type === "message" && entry.message.role === "user")
+						.lastIndexOf(true)
+				: -1;
+			const eligibleIds = new Set(branch.slice(0, triggerIndex).map((entry) => entry.id));
+			if (endEntryId && triggerIndex >= 0 && endEntryId === branch[triggerIndex]?.id) {
+				throw new Error(
+					"endEntryId is the current user request; omit endEntryId to compress through the last entry before it.",
+				);
+			}
+			const entries = getCompressibleEntries(session, toolCallId).filter(
+				(entry) => triggerIndex < 0 || eligibleIds.has(entry.id),
+			);
+			validateCompressionRange(entries, startEntryId, endEntryId);
 			if (
 				assistant?.type !== "message" ||
 				assistant.message.role !== "assistant" ||
@@ -175,12 +172,7 @@ export function createCompressContextToolDefinition(
 			abortIf(signal);
 			schedule({ toolCallId, startEntryId, endEntryId, summary: summary.trim(), assistantEntryId: assistant.id });
 			return {
-				content: [
-					{
-						type: "text",
-						text: "Compression scheduled; the replacement will take effect after this tool result is recorded.",
-					},
-				],
+				content: [{ type: "text", text: "Compression complete. Continue with the current request." }],
 				details: undefined,
 			};
 		},

@@ -1,7 +1,12 @@
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { type Component, truncateToWidth, visibleWidth } from "@fleetagent/pi-tui";
 import type { AgentSession } from "../../../core/agent-session.ts";
+import {
+	estimateCompressionCatchUp,
+	estimateCompressionSavings,
+} from "../../../core/compaction/compression-economics.ts";
 import type { ReadonlyFooterDataProvider } from "../../../core/footer-data-provider.ts";
+import { readUsageLedger, type UsageLedger } from "../../../core/session/usage-ledger.ts";
 import { theme } from "../theme/theme.ts";
 
 /**
@@ -25,13 +30,6 @@ function formatTokens(count: number): string {
 	if (count < 1000000) return `${Math.round(count / 1000)}k`;
 	if (count < 10000000) return `${(count / 1000000).toFixed(1)}M`;
 	return `${Math.round(count / 1000000)}M`;
-}
-interface FooterUsageTotals {
-	input: number;
-	output: number;
-	cacheRead: number;
-	cacheWrite: number;
-	cost: number;
 }
 
 export function formatCwdForFooter(cwd: string, home: string | undefined): string {
@@ -86,19 +84,6 @@ export class FooterComponent implements Component {
 		// Git watcher cleanup handled by provider
 	}
 
-	private collectUsageTotals(): FooterUsageTotals {
-		const totals: FooterUsageTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
-		for (const entry of this.session.session.getEntries()) {
-			if (entry.type !== "message" || entry.message.role !== "assistant" || entry.replayedFromId) continue;
-			totals.input += entry.message.usage.input;
-			totals.output += entry.message.usage.output;
-			totals.cacheRead += entry.message.usage.cacheRead;
-			totals.cacheWrite += entry.message.usage.cacheWrite;
-			totals.cost += entry.message.usage.cost.total;
-		}
-		return totals;
-	}
-
 	private formatLocation(): string {
 		let location = formatCwdForFooter(this.session.session.getCwd(), process.env.HOME || process.env.USERPROFILE);
 		const branch = this.footerData.getGitBranch();
@@ -108,24 +93,62 @@ export class FooterComponent implements Component {
 		return location;
 	}
 
-	private formatContextUsage(contextWindow: number, contextPercentValue: number, contextPercent: string): string {
+	private formatContextUsage(
+		contextWindow: number,
+		contextTokens: number | null,
+		contextPercentValue: number,
+		contextPercent: string,
+	): string {
 		const autoIndicator = this.autoCompactEnabled ? " (auto)" : "";
 		const display =
 			contextPercent === "?"
 				? `?/${formatTokens(contextWindow)}${autoIndicator}`
-				: `${contextPercent}%/${formatTokens(contextWindow)}${autoIndicator}`;
+				: `ctx ~${formatTokens(contextTokens ?? (contextPercentValue * contextWindow) / 100)}/${formatTokens(contextWindow)} (${contextPercent}%)${autoIndicator}`;
 		if (contextPercentValue > 90) return theme.fg("error", display);
 		if (contextPercentValue > 70) return theme.fg("warning", display);
 		return display;
 	}
 
+	private formatCompressionSavings(): string[] {
+		const branch = this.session.session.getBranch();
+		const savings = estimateCompressionSavings(branch);
+		const parts: string[] = [];
+		if (savings.totalRemovedTokens) parts.push(`~${formatTokens(savings.totalRemovedTokens)} fewer cumulative`);
+		if (savings.oneTimeCost > 0 && savings.remainingToBreakEven > 0) {
+			parts.push(`(est $${savings.remainingToBreakEven.toFixed(4)} to break even)`);
+			const model = this.session.state.model;
+			if (model) {
+				const catchUp = estimateCompressionCatchUp(branch, model, this.session.modelRegistry.isUsingOAuth(model));
+				if (catchUp.cachedTurns != null || catchUp.newInputTurns != null)
+					parts.push(`(cache ~${catchUp.cachedTurns ?? "?"}/new ~${catchUp.newInputTurns ?? "?"} turns)`);
+			}
+		} else if (savings.netAvoidedCost > 0) parts.push(`(est $${savings.netAvoidedCost.toFixed(4)} net avoided)`);
+		return parts;
+	}
+
+	private countSessionCompressions(): number {
+		// Replayed summaries retain their original fromId, so count each completed operation once across all branches.
+		const compressions = new Set<string>();
+		for (const entry of this.session.session.getEntries()) {
+			if (entry.type !== "custom_message" || entry.customType !== "compress_context") continue;
+			const details = entry.details;
+			const fromId = details && typeof details === "object" && "fromId" in details ? details.fromId : undefined;
+			compressions.add(typeof fromId === "string" ? fromId : entry.id);
+		}
+		return compressions.size;
+	}
+
 	private formatUsageSummary(
-		totals: FooterUsageTotals,
+		totals: UsageLedger,
 		contextWindow: number,
+		contextTokens: number | null,
 		contextPercentValue: number,
 		contextPercent: string,
 	): string {
-		const parts: string[] = [];
+		const parts: string[] = [
+			this.formatContextUsage(contextWindow, contextTokens, contextPercentValue, contextPercent),
+		];
+		if (totals.requests) parts.push("total");
 		if (totals.input) parts.push(`↑${formatTokens(totals.input)}`);
 		if (totals.output) parts.push(`↓${formatTokens(totals.output)}`);
 		if (totals.cacheRead) parts.push(`R${formatTokens(totals.cacheRead)}`);
@@ -133,6 +156,7 @@ export class FooterComponent implements Component {
 		const state = this.session.state;
 		const usingSubscription = state.model ? this.session.modelRegistry.isUsingOAuth(state.model) : false;
 		const counts = this.session.getCompressionDetectionCounts();
+		const compressionCount = this.countSessionCompressions();
 		const detectionCost = this.session.getCompressionDetectionCost();
 		const showDetection = !!(
 			this.session.settingsManager.getCompressionDetectionModel() ||
@@ -140,13 +164,15 @@ export class FooterComponent implements Component {
 			counts.compress ||
 			detectionCost
 		);
-		if (totals.cost || usingSubscription || showDetection) {
+		if (totals.requests) {
 			parts.push(
-				`$${totals.cost.toFixed(3)}${usingSubscription ? " (sub)" : ""}${showDetection ? ` (detect $${detectionCost.toFixed(4)})` : ""}`,
+				usingSubscription
+					? `catalog $${totals.catalogCost.toFixed(3)} (sub)`
+					: `catalog $${totals.catalogCost.toFixed(3)}`,
 			);
-		}
-		if (showDetection) parts.push(`K${counts.keep} C${counts.compress}`);
-		parts.push(this.formatContextUsage(contextWindow, contextPercentValue, contextPercent));
+		} else if (usingSubscription) parts.push("sub");
+		if (showDetection) parts.push(`(detect est $${detectionCost.toFixed(4)} total)`);
+		if (showDetection || compressionCount) parts.push(`D${counts.keep}/${counts.compress} C${compressionCount}`);
 		return parts.join(" ");
 	}
 
@@ -189,14 +215,20 @@ export class FooterComponent implements Component {
 
 	render(width: number): string[] {
 		const state = this.session.state;
-		const totals = this.collectUsageTotals();
+		const totals = readUsageLedger(this.session.session.getEntries());
 		const contextUsage = this.session.getContextUsage();
 		const contextWindow = contextUsage?.contextWindow ?? state.model?.contextWindow ?? 0;
 		const contextPercentValue = contextUsage?.percent ?? 0;
 		const contextPercent = contextUsage?.percent != null ? contextPercentValue.toFixed(1) : "?";
 		const locationText = this.formatLocation();
 
-		let stats = this.formatUsageSummary(totals, contextWindow, contextPercentValue, contextPercent);
+		let stats = this.formatUsageSummary(
+			totals,
+			contextWindow,
+			contextUsage?.tokens ?? null,
+			contextPercentValue,
+			contextPercent,
+		);
 		if (visibleWidth(stats) > width) stats = truncateToWidth(stats, width, "...");
 		const modelSummary = this.formatModelSummary(visibleWidth(stats), width);
 		const statsLine = this.layoutStatsLine(stats, modelSummary, width);
@@ -206,7 +238,8 @@ export class FooterComponent implements Component {
 		const dimmedRemainder = theme.fg("dim", statsLine.slice(stats.length));
 		const location = truncateToWidth(theme.fg("dim", locationText), width, theme.fg("dim", "..."));
 		const lines = [location, dimmedStats + dimmedRemainder];
-
+		const savings = this.formatCompressionSavings().join(" ");
+		if (savings) lines.push(theme.fg("dim", truncateToWidth(savings, width, "...")));
 		const extensionStatuses = this.formatExtensionStatuses(width);
 		if (extensionStatuses !== undefined) lines.push(extensionStatuses);
 		return lines;
