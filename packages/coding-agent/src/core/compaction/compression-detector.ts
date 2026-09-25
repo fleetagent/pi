@@ -17,6 +17,7 @@ import type { ReadonlySession } from "../session/session.ts";
 import type { SessionEntry } from "../session/types.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import { createSessionEntryGetTool, createSessionSearchTool } from "../tools/session-history.ts";
+import type { CompressionDetectionEvent } from "./compression-detection-ledger.ts";
 
 const MAX_TOOL_CALLS = 4;
 const MAX_TOOL_RESULT_CHARS = 8_000;
@@ -40,6 +41,8 @@ export interface CompressionRangeContext {
 	/** Return a reason when a candidate is not compressible on the live branch. */
 	getCostInfo?(): string;
 	getRangeError(startEntryId: string, endEntryId: string): string | undefined;
+	/** Persist cost and accepted decisions without adding them to the primary model's context. */
+	recordEvent?(event: CompressionDetectionEvent): void;
 }
 
 interface DetectionToolBudget {
@@ -308,7 +311,20 @@ export class CompressionDetector {
 		);
 		const cost = response.usage.cost.total;
 		if (Number.isFinite(cost) && cost > 0) this.totalCost += cost;
+		this.recordEvent({
+			kind: "response",
+			model: `${model.provider}/${model.id}`,
+			stopReason: response.stopReason,
+			cost: Number.isFinite(cost) && cost > 0 ? cost : 0,
+		});
 		return response;
+	}
+	private recordEvent(event: CompressionDetectionEvent): void {
+		try {
+			this.rangeContext?.recordEvent?.(event);
+		} catch {
+			// Session persistence must never interrupt the primary agent or detector.
+		}
 	}
 
 	private async executeSessionToolCalls(
@@ -448,6 +464,12 @@ export class CompressionDetector {
 				: undefined;
 		if (compression) this.compressCount++;
 		else this.keepCount++;
+		this.recordEvent({
+			kind: "verdict",
+			model: this.lastModel ?? "",
+			verdict: compression ? "COMPRESS" : "CONTINUE",
+			...(this.rangeSuggestion ? { suggestion: this.rangeSuggestion } : {}),
+		});
 		this.onVerdict?.(compression ? "COMPRESS" : "CONTINUE");
 	}
 }

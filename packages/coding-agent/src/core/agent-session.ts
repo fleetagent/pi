@@ -79,6 +79,10 @@ import {
 	shouldCompact,
 } from "./compaction/compaction.ts";
 import {
+	appendCompressionDetectionEvent,
+	readCompressionDetectionLedger,
+} from "./compaction/compression-detection-ledger.ts";
+import {
 	type CompressionDetectionCounts,
 	type CompressionDetectionVerdict,
 	CompressionDetector,
@@ -1224,6 +1228,7 @@ export class AgentSession {
 						: "Primary model pricing is unavailable.";
 				},
 				getRangeError: (start, end) => getSuggestedCompressionRangeError(this.session, start, end),
+				recordEvent: (event) => appendCompressionDetectionEvent(this.session, event),
 			},
 		);
 		this._extensionRunnerRef = config.extensionRunnerRef;
@@ -6332,11 +6337,12 @@ export class AgentSession {
 	}
 
 	getCompressionDetectionCounts(): CompressionDetectionCounts {
-		return this._compressionDetector.counts;
+		const { keep, compress } = readCompressionDetectionLedger(this.session.getEntries());
+		return { keep, compress };
 	}
 
 	getCompressionDetectionCost(): number {
-		return this._compressionDetector.cost;
+		return readCompressionDetectionLedger(this.session.getEntries()).cost;
 	}
 
 	getContextUsage(): ContextUsage | undefined {

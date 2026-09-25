@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import type { AgentMessage } from "@fleetagent/pi-agent-core";
 import {
 	type AssistantMessage,
@@ -8,8 +9,13 @@ import {
 } from "@fleetagent/pi-ai";
 import { setKeybindings, type TUI } from "@fleetagent/pi-tui";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+	appendCompressionDetectionEvent,
+	readCompressionDetectionLedger,
+} from "../src/core/compaction/compression-detection-ledger.ts";
 import { CompressionDetector } from "../src/core/compaction/compression-detector.ts";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
+import { LocalSessionManager } from "../src/core/session/local-session-manager.ts";
 import { getSuggestedCompressionRangeError } from "../src/core/tools/compress-context.ts";
 import { ModelSelectorComponent } from "../src/modes/interactive/components/model-selector.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
@@ -31,7 +37,7 @@ describe("background compression detection", () => {
 		expect(harness.session.messages).toHaveLength(2);
 	});
 
-	it("checks on percent increase and advises only the primary model, without persisting the verdict", async () => {
+	it("checks on percent increase and advises only the primary model, persisting events outside the context", async () => {
 		const harness = await createHarness({
 			models: [{ id: "detector-test", contextWindow: 200 }],
 			settings: { compaction: { enabled: false } },
@@ -62,6 +68,18 @@ describe("background compression detection", () => {
 		expect(advisory).toContain("Estimated if summary is 25% of range");
 		expect(JSON.stringify(harness.session.messages)).toContain("Background compression detector");
 		expect(JSON.stringify(harness.sessionManager.getEntries())).not.toContain("Background compression detector");
+		const history = readCompressionDetectionLedger(harness.sessionManager.getEntries());
+		expect(history.compress).toBe(1);
+		expect(history.verdicts[0]?.suggestion).toMatchObject({
+			startEntryId: harness.sessionManager.getBranch()[0]?.id,
+		});
+		expect(
+			harness.sessionManager
+				.buildSessionContext()
+				.messages.some(
+					(message) => message.role === "custom" && message.customType === "compression_detection_event",
+				),
+		).toBe(false);
 		harness.settingsManager.setCompressionDetectionModel(undefined);
 		harness.setResponses([fauxAssistantMessage("third answer")]);
 		await harness.session.prompt("third task");
@@ -762,6 +780,105 @@ describe("background compression detection", () => {
 		expect(harness.settingsManager.getDefaultModel()).toBe("main");
 		expect(harness.settingsManager.getDefaultProvider()).toBe("primary");
 	});
+	it("restores detector cost and suggested verdicts from a reopened JSONL session", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const manager = new LocalSessionManager({ cwd: harness.tempDir, sessionDir: join(harness.tempDir, "sessions") });
+		const session = manager.create();
+		const start = session.appendMessage({ role: "user", content: "older", timestamp: 1 });
+		session.appendMessage(fauxAssistantMessage("older answer"));
+		appendCompressionDetectionEvent(session, {
+			kind: "response",
+			model: "test/detector",
+			stopReason: "stop",
+			cost: 0.017,
+		});
+		appendCompressionDetectionEvent(session, {
+			kind: "verdict",
+			model: "test/detector",
+			verdict: "COMPRESS",
+			suggestion: { startEntryId: start, endEntryId: start },
+		});
+		const reference = session.getSessionReference();
+		expect(reference).toBeDefined();
+		if (!reference) throw new Error("Session reference was not created");
+		const reopened = manager.openReference(reference);
+		expect(reopened.getEntries()).toEqual(session.getEntries());
+		const history = readCompressionDetectionLedger(reopened.getEntries());
+		expect(history).toMatchObject({ cost: 0.017, keep: 0, compress: 1 });
+		expect(history.verdicts[0]?.suggestion).toEqual({ startEntryId: start, endEntryId: start });
+		expect(reopened.buildSessionContext().messages).toHaveLength(2);
+	});
+
+	it("deduplicates replayed detector records across branches and retains decisions", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const session = harness.sessionManager;
+		const first = session.appendMessage({ role: "user", content: "earlier", timestamp: 1 });
+		appendCompressionDetectionEvent(session, {
+			kind: "response",
+			model: "test/detector",
+			stopReason: "stop",
+			cost: 0.012,
+		});
+		appendCompressionDetectionEvent(session, {
+			kind: "verdict",
+			model: "test/detector",
+			verdict: "COMPRESS",
+			suggestion: { startEntryId: first, endEntryId: first },
+		});
+		const replay = session
+			.getBranch()
+			.filter((entry) => entry.type === "custom" && entry.customType === "compression_detection_event");
+		for (const entry of replay) session.appendReplayedEntry(entry, new Map());
+		appendCompressionDetectionEvent(session, { kind: "verdict", model: "test/detector", verdict: "CONTINUE" });
+		const history = readCompressionDetectionLedger(session.getEntries());
+		expect(history).toMatchObject({ cost: 0.012, keep: 1, compress: 1 });
+		expect(history.verdicts.map((event) => event.verdict)).toEqual(["COMPRESS", "CONTINUE"]);
+		expect(history.verdicts[0]?.suggestion).toEqual({ startEntryId: first, endEntryId: first });
+	});
+
+	it("persists invalid-response cost and verdict totals through detector resets", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const model = harness.getModel();
+		harness.settingsManager.setCompressionDetectionModel(`${model.provider}/${model.id}`);
+		const priced = (text: string, cost: number): AssistantMessage => {
+			const response = fauxAssistantMessage(text);
+			return { ...response, usage: { ...response.usage, cost: { ...response.usage.cost, total: cost } } };
+		};
+		const responses = [priced("MAYBE", 0.01), priced("CONTINUE", 0.0025)];
+		const detector = new CompressionDetector(
+			harness.settingsManager,
+			harness.session.modelRegistry,
+			undefined,
+			undefined,
+			async () => {
+				const response = responses.shift();
+				if (!response) throw new Error("No detector response queued");
+				return response;
+			},
+			{
+				getBranch: () => harness.sessionManager.getBranch(),
+				getRangeError: () => undefined,
+				recordEvent: (event) => appendCompressionDetectionEvent(harness.sessionManager, event),
+			},
+		);
+		detector.check(15, []);
+		await detector.waitForIdle();
+		expect(harness.session.getCompressionDetectionCost()).toBeCloseTo(0.01);
+		expect(harness.session.getCompressionDetectionCounts()).toEqual({ keep: 0, compress: 0 });
+		detector.reset();
+		detector.check(20, []);
+		await detector.waitForIdle();
+		expect(harness.session.getCompressionDetectionCost()).toBeCloseTo(0.0125);
+		expect(harness.session.getCompressionDetectionCounts()).toEqual({ keep: 1, compress: 0 });
+		harness.settingsManager.setCompressionDetectionModel(undefined);
+		expect(readCompressionDetectionLedger(harness.sessionManager.getEntries()).verdicts[0]).toMatchObject({
+			verdict: "CONTINUE",
+		});
+	});
+
 	it("tracks detector response cost separately, including invalid verdicts and across resets", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
