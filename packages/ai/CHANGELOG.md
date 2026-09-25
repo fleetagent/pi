@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.12](https://github.com/fleetagent/pi/compare/@fleetagent/pi-ai-v0.2.11...@fleetagent/pi-ai-v0.2.12) (2026-09-25)
+
+
+### Features
+
+* **coding-agent:** improve context compression and usage accounting ([edeed4b](https://github.com/fleetagent/pi/commit/edeed4bb5ca40f536ff54ddd30a6e21c46db300c))
+
 ## [0.2.11](https://github.com/fleetagent/pi/compare/@fleetagent/pi-ai-v0.2.10...@fleetagent/pi-ai-v0.2.11) (2026-09-24)
 
 
