@@ -3,6 +3,7 @@ import type { AgentTool } from "@fleetagent/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@fleetagent/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
+import { USAGE_LEDGER_ENTRY_TYPE } from "../../src/core/session/usage-ledger.ts";
 import { LocalToolOperations } from "../../src/core/tools/operations.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
@@ -164,7 +165,9 @@ describe("AgentSession bash and persistence characterization", () => {
 			"message",
 			"message",
 			"message",
+			"custom",
 		]);
+		expect(entries.at(-1)).toMatchObject({ type: "custom", customType: USAGE_LEDGER_ENTRY_TYPE });
 		expect(harness.session.messages.map((message) => message.role)).toEqual([
 			"custom",
 			"user",
@@ -213,12 +216,14 @@ describe("AgentSession bash and persistence characterization", () => {
 		await harness.session.abort();
 		await promptPromise;
 
-		const lastEntry = harness.sessionManager.getEntries()[harness.sessionManager.getEntries().length - 1];
-		expect(lastEntry?.type).toBe("message");
-		if (lastEntry?.type === "message") {
-			expect(lastEntry.message.role).toBe("assistant");
-			if (lastEntry.message.role === "assistant") {
-				expect(lastEntry.message.stopReason).toBe("aborted");
+		const entries = harness.sessionManager.getEntries();
+		expect(entries.at(-1)).toMatchObject({ type: "custom", customType: USAGE_LEDGER_ENTRY_TYPE });
+		const lastMessage = entries.filter((entry) => entry.type === "message").at(-1);
+		expect(lastMessage?.type).toBe("message");
+		if (lastMessage?.type === "message") {
+			expect(lastMessage.message.role).toBe("assistant");
+			if (lastMessage.message.role === "assistant") {
+				expect(lastMessage.message.stopReason).toBe("aborted");
 			}
 		}
 	});
