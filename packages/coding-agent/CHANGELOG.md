@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.2.12](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.2.11...@fleetagent/pi-coding-agent-v0.2.12) (2026-09-25)
+
+
+### Features
+
+* **coding-agent:** improve context compression and usage accounting ([edeed4b](https://github.com/fleetagent/pi/commit/edeed4bb5ca40f536ff54ddd30a6e21c46db300c))
+* **coding-agent:** persist compression detector history ([1b24316](https://github.com/fleetagent/pi/commit/1b243162c1ecde6690d73c1b40c43bef7870bc6b))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @fleetagent/pi-agent-core bumped from ^0.2.11 to ^0.2.12
+    * @fleetagent/pi-ai bumped from ^0.2.11 to ^0.2.12
+    * @fleetagent/pi-tui bumped from ^0.2.11 to ^0.2.12
+
 ## [0.2.11](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.2.10...@fleetagent/pi-coding-agent-v0.2.11) (2026-09-24)
 
 
