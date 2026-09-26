@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.2.13](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.2.12...@fleetagent/pi-coding-agent-v0.2.13) (2026-09-26)
+
+
+### Features
+
+* **coding-agent:** score compression urgency at safe checkpoints ([5903764](https://github.com/fleetagent/pi/commit/5903764aa66f83d263c96039e1c23150bf9cf2b3))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @fleetagent/pi-agent-core bumped from ^0.2.12 to ^0.2.13
+    * @fleetagent/pi-ai bumped from ^0.2.12 to ^0.2.13
+    * @fleetagent/pi-tui bumped from ^0.2.12 to ^0.2.13
+
 ## [0.2.12](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.2.11...@fleetagent/pi-coding-agent-v0.2.12) (2026-09-25)
 
 
