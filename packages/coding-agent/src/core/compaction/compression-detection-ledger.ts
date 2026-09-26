@@ -10,6 +10,8 @@ export interface CompressionDetectionVerdictEvent {
 	model: string;
 	verdict: CompressionDetectionVerdict;
 	suggestion?: CompressionRangeSuggestion;
+	/** Detector-rated priority for the next safe checkpoint (0–100), not confidence. */
+	urgency?: number;
 }
 
 export type CompressionDetectionEvent =
@@ -47,6 +49,8 @@ function isDetectionEvent(value: unknown): value is PersistedCompressionDetectio
 			event.cost >= 0
 		);
 	if (event.kind !== "verdict" || (event.verdict !== "COMPRESS" && event.verdict !== "CONTINUE")) return false;
+	if (event.urgency !== undefined && (!Number.isInteger(event.urgency) || event.urgency < 0 || event.urgency > 100))
+		return false;
 	if (event.suggestion === undefined) return true;
 	return (
 		event.verdict === "COMPRESS" &&

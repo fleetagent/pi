@@ -112,11 +112,12 @@
 
 ### Added
 
-- Added `compress_context` to replace the active session tail or an earlier bounded range with an agent-authored summary, retaining later messages and the archived original branch. Its summary appears with distinct styling immediately after compression. Model-only notices expose entry IDs and approximate utilization after user messages and completed tool-call batches without changing the transcript.
+- Added `compress_context` to replace the active session tail or an earlier bounded range with an agent-authored summary, retaining later messages and the archived original branch. Its summary appears with distinct styling immediately after compression. Model-only notices expose entry IDs after user messages and completed tool-call batches without changing the transcript.
 - Added `--enable-lsp-tools` and `enableLspTools` to opt in to model-facing LSP tools; configured LSP tools are off by default.
 - Added opt-in background compression detection with a separately selected model via `/compress-detection-model`; `COMPRESS` results can steer an active agent at the next turn or advise it on its next request, and may suggest an inclusive range without modifying history. The detector can verify session facts using bounded, read-only `session_search` and `session_entry_get` calls. Missing or invalid range suggestions get one corrective detector request with validation feedback and current branch IDs. The Working indicator shows `[Evaluating compression possibility]` while detection is active; the footer tracks cumulative KEEP and COMPRESS verdicts and the detector's separate reported cost.
 - Added estimated, branch-local context tokens removed and catalog-price input avoided after `compress_context`, with candidate break-even guidance in compression advisories. Estimates are not provider-reported or guaranteed cash savings.
 - Persist background compression detector response costs and validated verdict/range suggestions in session history, restoring footer totals across reloads and branches without adding the records to model context.
+- Add a detector-rated compression urgency score to persisted verdicts and COMPRESS advisories; move the detector's current context percentage into its final question and guide primary-agent compression by completed work checkpoints instead of context thresholds.
 ### Fixed
 - Restore cumulative provider-reported usage in a persistent branch-independent ledger and distinguish it from active context; label subscription catalog costs as estimates. Show cached-read versus uncached-input catch-up estimates before compression breaks even.
 - Delay percentage-based compression detection until at least 15% context usage; the ten-incoming-message trigger is unchanged.

@@ -2253,6 +2253,7 @@ export class AgentSession {
 
 	private _createCompressionAdvisory(): CustomMessage {
 		const suggested = this._compressionDetector.suggestedRange;
+		const urgency = this._compressionDetector.urgency;
 		let range = "";
 		if (suggested && isValidSuggestedCompressionRange(this.session, suggested.startEntryId, suggested.endEntryId)) {
 			range = ` Suggested inclusive range: startEntryId ${suggested.startEntryId}, endEntryId ${suggested.endEntryId}; verify before acting.`;
@@ -2276,14 +2277,14 @@ export class AgentSession {
 		}
 		return createCustomMessage(
 			"compression_detection",
-			`[Background compression detector: COMPRESS.${range} At the next safe checkpoint, consider using compress_context to summarize older context. Preserve essential decisions and unfinished work. This is advisory; continue if details are still needed.]`,
+			`[Background compression detector: COMPRESS${urgency === undefined ? "." : ` (urgency ${urgency}%).`}${range} At the next safe checkpoint, consider using compress_context to summarize older context. Preserve essential decisions and unfinished work. This is advisory; continue if details are still needed.]`,
 			false,
 			{ verdictCount: this._compressionDetector.counts.compress },
 			new Date().toISOString(),
 		);
 	}
 
-	/** Add model-only ID and utilization notices without persisting them. */
+	/** Add model-only entry ID notices without persisting them. */
 	private _installContextMetadata(): void {
 		const previousTransformContext = this.agent.transformContext;
 		this.agent.transformContext = async (messages, signal) => {
@@ -2295,7 +2296,7 @@ export class AgentSession {
 			}
 			const transformed = (await previousTransformContext?.(messages, signal)) ?? messages;
 			const annotated = this.getActiveToolNames().includes("compress_context")
-				? annotateContextMetadata(transformed, this.session.getBranch(), this.getContextUsage())
+				? annotateContextMetadata(transformed, this.session.getBranch())
 				: transformed;
 			if (!this.getActiveToolNames().includes("compress_context") || !this._compressionDetector.shouldCompress)
 				return annotated;

@@ -108,11 +108,11 @@ function buildDefaultSystemPrompt(options: BuildSystemPromptOptions, tools: stri
 	const orchestrationSection = buildOrchestrationSection(tools.includes("subagent"));
 	const stateCompressionSection = tools.includes("compress_context")
 		? `## State compression
-Proactively use compress_context at useful checkpoints after finishing a substantial slice of work (such as investigation, implementation, or validation), when the detailed tool calls are no longer needed for the next steps. Do not wait for the context window to fill or for the user to ask. Avoid compressing during active work or when the raw details are still needed.
+Consider compress_context at concrete checkpoints: when the user switches tasks, an investigation has yielded stable findings, an implementation slice is complete, or validation has finished and its raw logs are no longer needed. If older tool output or intermediate reasoning can be replaced by a concise account of decisions and current state, compress before starting the next slice; do not wait for a context percentage or an explicit request. Keep the active work and details needed for the next step intact. Do not compress a trivial exchange or interrupt an ongoing investigation, edit, or test.
 
-When current context utilization is known, treat about 35% as a soft threshold: compress at the next completed work slice if there is redundant history. At about 50%, prioritize compression at the next safe checkpoint. These are guidelines, not reasons to interrupt active work, compress trivial exchanges, or repeatedly check utilization just to hit a number.
+The primary agent does not receive a context-utilization percentage. A background detector may send an advisory with an urgency score; treat it as a cue to evaluate the next safe checkpoint, not an instruction to compress immediately.
 
-You receive model-only context metadata after user messages and completed tool-call batches, with session entry IDs and approximate utilization at those points. Use a user or assistant tool-call entry ID as a compression cut point; tool-result IDs are for lookup, not cuts. Do not repeat this metadata to the user.
+You receive model-only context metadata after user messages and completed tool-call batches, with session entry IDs but no utilization estimate. Use a user or assistant tool-call entry ID as a compression cut point; tool-result IDs are for lookup, not cuts. Do not repeat this metadata to the user.
 
 Turn batches of reads, searches, builds, and tests into concise state: findings and decisions, changed files, what passed or failed (including relevant errors), unresolved issues, and concrete next steps. Preserve important user instructions and constraints. Omit redundant tool output rather than carrying it forward.
 

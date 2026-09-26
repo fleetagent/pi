@@ -49,10 +49,13 @@ describe("background compression detection", () => {
 		harness.setResponses([
 			fauxAssistantMessage("first answer"),
 			(context) => {
-				expect(context.systemPrompt).toContain("COMPRESS startEntryId endEntryId");
+				expect(context.systemPrompt).toContain("COMPRESS startEntryId endEntryId urgency=N%");
+				const question = context.messages.at(-1);
+				expect(JSON.stringify(question)).toContain("Current context usage:");
+				expect(JSON.stringify(context.messages.slice(0, -1))).not.toContain("Current context usage:");
 				expect(JSON.stringify(context.messages)).toContain("Primary model catalog rates");
 				const entries = harness.sessionManager.getBranch();
-				return fauxAssistantMessage(`COMPRESS ${entries[0]?.id} ${entries.at(-1)?.id}`);
+				return fauxAssistantMessage(`COMPRESS ${entries[0]?.id} ${entries.at(-1)?.id} urgency=85%`);
 			},
 			(context) => {
 				contexts.push(context.messages);
@@ -63,13 +66,14 @@ describe("background compression detection", () => {
 		expect(harness.eventsOfType("compression_detection_activity").length).toBeGreaterThanOrEqual(2);
 		expect(harness.getPendingResponseCount()).toBe(0);
 		const advisory = JSON.stringify(contexts[0]);
-		expect(advisory).toContain("Background compression detector: COMPRESS");
+		expect(advisory).toContain("Background compression detector: COMPRESS (urgency 85%).");
 		expect(advisory).toContain("Suggested inclusive range: startEntryId");
 		expect(advisory).toContain("Estimated if summary is 25% of range");
 		expect(JSON.stringify(harness.session.messages)).toContain("Background compression detector");
 		expect(JSON.stringify(harness.sessionManager.getEntries())).not.toContain("Background compression detector");
 		const history = readCompressionDetectionLedger(harness.sessionManager.getEntries());
 		expect(history.compress).toBe(1);
+		expect(history.verdicts[0]?.urgency).toBe(85);
 		expect(history.verdicts[0]?.suggestion).toMatchObject({
 			startEntryId: harness.sessionManager.getBranch()[0]?.id,
 		});
@@ -376,10 +380,10 @@ describe("background compression detection", () => {
 		);
 		let retryPrompt = "";
 		harness.setResponses([
-			fauxAssistantMessage("COMPRESS missing-start missing-end"),
+			fauxAssistantMessage("COMPRESS missing-start missing-end urgency=75%"),
 			(context) => {
 				retryPrompt = JSON.stringify(context.messages);
-				return fauxAssistantMessage(`COMPRESS ${start} ${end}`);
+				return fauxAssistantMessage(`COMPRESS ${start} ${end} urgency=70%`);
 			},
 		]);
 		detector.check(15, harness.sessionManager.buildSessionContext().messages, "", harness.sessionManager.getBranch());
@@ -388,6 +392,7 @@ describe("background compression detection", () => {
 		expect(retryPrompt).toContain(start);
 		expect(retryPrompt).toContain(end);
 		expect(detector.counts).toEqual({ keep: 0, compress: 1 });
+		expect(detector.urgency).toBe(70);
 		expect(harness.getPendingResponseCount()).toBe(0);
 	});
 
@@ -460,7 +465,7 @@ describe("background compression detection", () => {
 			},
 		);
 		harness.setResponses([
-			fauxAssistantMessage("COMPRESS"),
+			fauxAssistantMessage("COMPRESS urgency=90%"),
 			(context) => {
 				expect(JSON.stringify(context.messages)).toContain("No range was supplied");
 				return fauxAssistantMessage(`COMPRESS ${end} ${start}`);
@@ -471,6 +476,7 @@ describe("background compression detection", () => {
 		expect(detector.shouldCompress).toBe(true);
 		expect(detector.suggestedRange).toBeUndefined();
 		expect(harness.getPendingResponseCount()).toBe(0);
+		expect(detector.urgency).toBe(90);
 	});
 	it("does not run the percentage trigger below fifteen percent", async () => {
 		const harness = await createHarness();
@@ -646,11 +652,41 @@ describe("background compression detection", () => {
 		expect(harness.getPendingResponseCount()).toBe(1);
 		finish?.(fauxAssistantMessage("CONTINUE"));
 		await vi.waitFor(() => expect(activity).toEqual([true, false, true, false]));
-		expect(secondRequest).toContain("Context usage: 15.0%");
+		expect(secondRequest).toContain("Current context usage: 15.0%");
 		expect(secondRequest).toContain("message 4");
 		expect(secondRequest).toContain("latest-system-prompt");
 		expect(detector.shouldCompress).toBe(true);
 	});
+	it("records scored CONTINUE verdicts and rejects out-of-range urgency", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const model = harness.getModel();
+		harness.settingsManager.setCompressionDetectionModel(`${model.provider}/${model.id}`);
+		const detector = new CompressionDetector(
+			harness.settingsManager,
+			harness.session.modelRegistry,
+			undefined,
+			undefined,
+			undefined,
+			{
+				getBranch: () => harness.sessionManager.getBranch(),
+				getRangeError: () => undefined,
+				recordEvent: (event) => appendCompressionDetectionEvent(harness.sessionManager, event),
+			},
+		);
+		harness.setResponses([
+			fauxAssistantMessage("CONTINUE urgency=101%"),
+			fauxAssistantMessage("CONTINUE urgency=12%"),
+		]);
+		detector.check(15, []);
+		await detector.waitForIdle();
+		expect(detector.counts).toEqual({ keep: 0, compress: 0 });
+		detector.check(20, []);
+		await detector.waitForIdle();
+		expect(detector.counts).toEqual({ keep: 1, compress: 0 });
+		expect(readCompressionDetectionLedger(harness.sessionManager.getEntries()).verdicts[0]?.urgency).toBe(12);
+	});
+
 	it("counts only exact successful verdicts and reports completed results", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);

@@ -1,21 +1,6 @@
 import type { AgentMessage, CustomMessage } from "@fleetagent/pi-agent-core";
-import { estimateTokens } from "../compaction/compaction.ts";
-import type { ContextUsage } from "../extensions/types.ts";
 import { createCustomMessage } from "../messages.ts";
 import type { SessionEntry, SessionMessageEntry } from "./types.ts";
-
-function estimatePrefixPercentages(messages: AgentMessage[], usage: ContextUsage | undefined): string[] {
-	const percentages: string[] = new Array(messages.length);
-	let suffixTokens = 0;
-	for (let index = messages.length - 1; index >= 0; index--) {
-		percentages[index] =
-			usage?.tokens != null && usage.contextWindow > 0
-				? `${((Math.max(0, usage.tokens - suffixTokens) / usage.contextWindow) * 100).toFixed(1)}%`
-				: "?";
-		suffixTokens += estimateTokens(messages[index]);
-	}
-	return percentages;
-}
 
 function createMetadataNotice(content: string): CustomMessage {
 	return createCustomMessage(
@@ -68,13 +53,8 @@ function indexBranchMessages(branch: SessionEntry[]): ContextMessageIndex {
 }
 
 /** Model-only notices are placed after complete tool-result batches to preserve provider tool-call ordering. */
-export function annotateContextMetadata(
-	messages: AgentMessage[],
-	branch: SessionEntry[],
-	usage: ContextUsage | undefined,
-): AgentMessage[] {
+export function annotateContextMetadata(messages: AgentMessage[], branch: SessionEntry[]): AgentMessage[] {
 	const { entries, identityIds, assistantIds } = indexBranchMessages(branch);
-	const percentages = estimatePrefixPercentages(messages, usage);
 	const usedIds = new Set<string>();
 	const annotated: AgentMessage[] = [];
 	const toolNotices: string[] = [];
@@ -83,12 +63,10 @@ export function annotateContextMetadata(
 		annotated.push(message);
 		const entryId = findMessageEntryId(message, entries, identityIds, usedIds);
 		if (message.role === "user" && entryId) {
-			annotated.push(createMetadataNotice(`user entry ${entryId}; context ~${percentages[index]}`));
+			annotated.push(createMetadataNotice(`user entry ${entryId};`));
 		} else if (message.role === "toolResult" && entryId) {
 			const assistantId = assistantIds.get(message.toolCallId);
-			toolNotices.push(
-				`${message.toolName}: assistant entry ${assistantId ?? "?"}, result entry ${entryId}, context ~${percentages[index]}`,
-			);
+			toolNotices.push(`${message.toolName}: assistant entry ${assistantId ?? "?"}, result entry ${entryId}`);
 		}
 		if (toolNotices.length > 0 && messages[index + 1]?.role !== "toolResult") {
 			annotated.push(createMetadataNotice(toolNotices.join("; ")));

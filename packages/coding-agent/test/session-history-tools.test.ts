@@ -71,7 +71,7 @@ describe("session history tools", () => {
 		});
 	});
 
-	it("exposes user and tool-result entry IDs and utilization only to the model", async () => {
+	it("exposes user and tool-result entry IDs without utilization only to the model", async () => {
 		const created = await harness();
 		const providerContexts: Message[][] = [];
 		created.setResponses([
@@ -101,7 +101,8 @@ describe("session history tools", () => {
 		const secondRequest = JSON.stringify(providerContexts[1]);
 		if (!userId || !assistantId) throw new Error("Missing persisted message entries");
 		expect(firstRequest).toContain(`user entry ${userId}`);
-		expect(firstRequest).toMatch(/context ~\d+\.\d%/u);
+		expect(firstRequest).not.toContain("context ~");
+		expect(secondRequest).not.toContain("context ~");
 		expect(secondRequest).toContain(`assistant entry ${assistantId}`);
 		for (const resultId of resultIds) expect(secondRequest).toContain(`result entry ${resultId}`);
 		const resultIndexes = providerContexts[1].flatMap((message, index) =>
@@ -137,7 +138,7 @@ describe("session history tools", () => {
 		expect(JSON.stringify(providerMessages)).not.toContain("context metadata:");
 	});
 
-	it("reports unknown utilization in notices after compaction until usage is available", async () => {
+	it("keeps entry ID notices without utilization after compaction", async () => {
 		const created = await harness();
 		const kept = created.sessionManager.appendMessage({ role: "user", content: "kept", timestamp: 1 });
 		created.sessionManager.appendCompaction("previous work", kept, 200);
@@ -150,7 +151,8 @@ describe("session history tools", () => {
 			},
 		]);
 		await created.session.prompt("after compaction");
-		expect(JSON.stringify(providerMessages)).toContain("context ~?");
+		expect(JSON.stringify(providerMessages)).toContain("user entry");
+		expect(JSON.stringify(providerMessages)).not.toContain("context ~");
 	});
 
 	it("searches current model context by default and compacted branch history explicitly", async () => {
