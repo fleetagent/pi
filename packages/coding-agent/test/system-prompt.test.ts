@@ -115,19 +115,24 @@ describe("buildSystemPrompt", () => {
 	});
 
 	describe("state compression", () => {
-		test("instructs the agent to send only the starting ID and summary when the tool is active", () => {
+		test("gives concrete compression checkpoints without exposing utilization when the tool is active", () => {
 			const prompt = buildSystemPrompt({
 				selectedTools: ["read", "compress_context"],
 				cwd: process.cwd(),
 			});
 
 			expect(prompt).toContain("## State compression");
-			expect(prompt).toContain("Proactively use compress_context at useful checkpoints");
-			expect(prompt).toContain("Do not wait for the context window to fill or for the user to ask.");
-			expect(prompt).toContain("about 35% as a soft threshold");
-			expect(prompt).toContain("At about 50%, prioritize compression at the next safe checkpoint");
-			expect(prompt).toContain("repeatedly check utilization just to hit a number");
+			expect(prompt).toContain("Consider compress_context at concrete checkpoints");
+			expect(prompt).toContain("when the user switches tasks");
+			expect(prompt).toContain("an implementation slice is complete");
+			expect(prompt).toContain("validation has finished");
+			expect(prompt).toContain("do not wait for a context percentage or an explicit request");
+			expect(prompt).toContain("does not receive a context-utilization percentage");
+			expect(prompt).toContain("urgency score");
+			expect(prompt).not.toContain("35%");
+			expect(prompt).not.toContain("50%");
 			expect(prompt).toContain("model-only context metadata after user messages and completed tool-call batches");
+			expect(prompt).toContain("session entry IDs but no utilization estimate");
 			expect(prompt).toContain("tool-result IDs are for lookup, not cuts");
 			expect(prompt).toContain("Turn batches of reads, searches, builds, and tests into concise state");
 			expect(prompt).toContain("what passed or failed (including relevant errors)");
