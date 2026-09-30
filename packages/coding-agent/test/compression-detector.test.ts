@@ -44,7 +44,7 @@ describe("background compression detection", () => {
 		});
 		harnesses.push(harness);
 		const model = harness.getModel();
-		harness.settingsManager.setCompressionDetectionModel(`${model.provider}/${model.id}`);
+		harness.session.setCompressionDetectionModel(`${model.provider}/${model.id}`);
 		const contexts: Message[][] = [];
 		harness.setResponses([
 			fauxAssistantMessage("first answer"),
@@ -96,7 +96,7 @@ describe("background compression detection", () => {
 		});
 		harnesses.push(harness);
 		const model = harness.getModel();
-		harness.settingsManager.setCompressionDetectionModel(`${model.provider}/${model.id}`);
+		harness.session.setCompressionDetectionModel(`${model.provider}/${model.id}`);
 		harness.session.getContextUsage = () => ({ tokens: 100, contextWindow: 200, percent: 50 });
 		let finish: ((response: AssistantMessage) => void) | undefined;
 		let steeredContext: Message[] | undefined;
@@ -134,7 +134,7 @@ describe("background compression detection", () => {
 		const harness = await createHarness({ settings: { compaction: { enabled: false } } });
 		harnesses.push(harness);
 		const model = harness.getModel();
-		harness.settingsManager.setCompressionDetectionModel(`${model.provider}/${model.id}`);
+		harness.session.setCompressionDetectionModel(`${model.provider}/${model.id}`);
 		let percent = 0;
 		harness.session.getContextUsage = () => ({ tokens: percent, contextWindow: 100, percent });
 		harness.session.subscribe((event) => {

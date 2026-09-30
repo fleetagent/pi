@@ -134,6 +134,11 @@
 - Added estimated, branch-local context tokens removed and catalog-price input avoided after `compress_context`, with candidate break-even guidance in compression advisories. Estimates are not provider-reported or guaranteed cash savings.
 - Persist background compression detector response costs and validated verdict/range suggestions in session history, restoring footer totals across reloads and branches without adding the records to model context.
 - Add a detector-rated compression urgency score to persisted verdicts and COMPRESS advisories; move the detector's current context percentage into its final question and guide primary-agent compression by completed work checkpoints instead of context thresholds.
+
+### Changed
+
+- Disable agent-initiated context compression and background detection by default. Enable them per session with `/context-compression on` and `/compress-detection on`, or for all agents with `PI_CONTEXT_COMPRESSION=1` and `PI_CONTEXT_COMPRESSION_DETECTION=1`. Selecting a detector model enables both for the current session only.
+
 ### Fixed
 - Restore cumulative provider-reported usage in a persistent branch-independent ledger and distinguish it from active context; label subscription catalog costs as estimates. Show cached-read versus uncached-input catch-up estimates before compression breaks even.
 - Delay percentage-based compression detection until at least 15% context usage; the ten-incoming-message trigger is unchanged.

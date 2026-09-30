@@ -3022,6 +3022,28 @@ export class InteractiveMode {
 		return text === command || text.startsWith(`${command} `);
 	}
 
+	private handleCompressionToggleCommand(text: string, command: string): void {
+		this.editor.setText("");
+		const action = text.slice(command.length).trim();
+		const detection = command === "/compress-detection";
+		if (action && action !== "on" && action !== "off") {
+			this.showWarning(`Usage: ${command} [on|off]`);
+			return;
+		}
+		try {
+			if (action) {
+				if (detection) this.session.setCompressionDetectionEnabled(action === "on");
+				else this.session.setContextCompressionEnabled(action === "on");
+			}
+			const enabled = detection ? this.session.compressionDetectionEnabled : this.session.contextCompressionEnabled;
+			this.showStatus(
+				`${detection ? "Compression detection" : "Context compression"} ${enabled ? "enabled" : "disabled"} for this session`,
+			);
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+		}
+	}
+
 	private resolveParameterizedEditorCommand(text: string): EditorCommandAction | undefined {
 		if (this.matchesEditorCommand(text, "/cd")) {
 			return {
@@ -3048,6 +3070,10 @@ export class InteractiveMode {
 				},
 			};
 		}
+		const compressionCommand = ["/context-compression", "/compress-detection"].find((command) =>
+			this.matchesEditorCommand(text, command),
+		);
+		if (compressionCommand) return { run: () => this.handleCompressionToggleCommand(text, compressionCommand) };
 		if (this.matchesEditorCommand(text, "/compress-detection-model")) {
 			const searchTerm = text.slice("/compress-detection-model".length).trim();
 			return {

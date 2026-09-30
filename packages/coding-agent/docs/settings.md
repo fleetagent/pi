@@ -21,7 +21,7 @@ Hooks use a Claude Code-compatible schema and are captured as an immutable per-s
 |---------|------|---------|-------------|
 | `defaultProvider` | string | - | Default provider (e.g., `"anthropic"`, `"openai"`) |
 | `defaultModel` | string | - | Default model ID |
-| `compressionDetectionModel` | string | - | Global-only opt-in `provider/model-id` for background compression recommendations; choose or clear with `/compress-detection-model`. Unset makes no detection requests. |
+| `compressionDetectionModel` | string | - | Global-only `provider/model-id` for background compression recommendations. Selection with `/compress-detection-model` enables detection for the current session only. Saved selections stay inactive unless enabled with `/compress-detection on` or `PI_CONTEXT_COMPRESSION_DETECTION=1`. Unset makes no detection requests. |
 | `defaultThinkingLevel` | string | - | `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"` |
 | `hideThinkingBlock` | boolean | `false` | Hide thinking blocks in output |
 | `thinkingBudgets` | object | - | Custom token budgets per thinking level |

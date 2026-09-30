@@ -234,13 +234,16 @@ import { WORKSPACE_TOOL_NAMES, WorkspaceToolHost } from "./tools/workspace-tool-
 // ============================================================================
 
 const CORE_DEFAULT_TOOL_NAMES = ["read", "bash", "edit", "write", "websearch"] as const;
-const SESSION_HISTORY_TOOL_NAMES = ["session_search", "session_entry_get", "compress_context"] as const;
+const SESSION_HISTORY_TOOL_NAMES = ["session_search", "session_entry_get"] as const;
 export const SUBAGENT_TOOL_NAMES = ["subagent", "subagent_runs", "create_subagent"] as const;
 export const DEFAULT_ACTIVE_TOOL_NAMES = [...CORE_DEFAULT_TOOL_NAMES, ...SESSION_HISTORY_TOOL_NAMES] as const;
 
 export function getDefaultActiveToolNames(enableSubagents = false, enableLspTools = false): string[] {
 	return [
 		...DEFAULT_ACTIVE_TOOL_NAMES,
+		...(process.env.PI_CONTEXT_COMPRESSION === "1" || process.env.PI_CONTEXT_COMPRESSION_DETECTION === "1"
+			? ["compress_context"]
+			: []),
 		...(enableLspTools ? LSP_TOOL_NAMES : []),
 		...(enableSubagents ? SUBAGENT_TOOL_NAMES : []),
 	];
@@ -1169,6 +1172,8 @@ export class AgentSession {
 	private readonly _toolStartedAt = new Map<string, number>();
 	private readonly _preToolHookContext = new Map<string, string[]>();
 	private readonly _compressionDetector: CompressionDetector;
+	private _contextCompressionEnabledOverride?: boolean;
+	private _compressionDetectionEnabled = process.env.PI_CONTEXT_COMPRESSION_DETECTION === "1";
 	private _agentRunEnding = false;
 	private _waitingForDetectorAtRequest = false;
 	private _pendingContextCompression?: PendingContextCompression;
@@ -1212,7 +1217,7 @@ export class AgentSession {
 					!this._agentRunEnding &&
 					!this._waitingForDetectorAtRequest &&
 					this.agent.state.isStreaming &&
-					this.getActiveToolNames().includes("compress_context")
+					this.compressionDetectionEnabled
 				) {
 					this.agent.steer(this._createCompressionAdvisory());
 				}
@@ -2238,7 +2243,7 @@ export class AgentSession {
 			const context = this._buildCurrentAgentContext(
 				contextReplaced ? undefined : (previousUpdate?.context ?? turn.context),
 			);
-			if (this.getActiveToolNames().includes("compress_context")) {
+			if (this.compressionDetectionEnabled) {
 				this._compressionDetector.check(
 					this.getContextUsage()?.percent,
 					context.messages,
@@ -2298,8 +2303,7 @@ export class AgentSession {
 			const annotated = this.getActiveToolNames().includes("compress_context")
 				? annotateContextMetadata(transformed, this.session.getBranch())
 				: transformed;
-			if (!this.getActiveToolNames().includes("compress_context") || !this._compressionDetector.shouldCompress)
-				return annotated;
+			if (!this.compressionDetectionEnabled || !this._compressionDetector.shouldCompress) return annotated;
 			const verdictCount = this._compressionDetector.counts.compress;
 			if (
 				annotated.some(
@@ -2533,7 +2537,7 @@ export class AgentSession {
 			if (ledger.checkpointId && !(lastEntry?.type === "custom" && lastEntry.customType === USAGE_LEDGER_ENTRY_TYPE))
 				this.session.appendCustomEntry(USAGE_LEDGER_ENTRY_TYPE, ledger);
 			this._scheduleExtensionCompactions();
-			if (!this._disposed && this.getActiveToolNames().includes("compress_context"))
+			if (!this._disposed && this.compressionDetectionEnabled)
 				this._compressionDetector.check(
 					this.getContextUsage()?.percent,
 					this.agent.state.messages,
@@ -3041,6 +3045,7 @@ export class AgentSession {
 		const tools: AgentTool[] = [];
 		const validToolNames: string[] = [];
 		for (const name of toolNames) {
+			if (name === "compress_context" && this._contextCompressionEnabledOverride === false) continue;
 			const tool = this._toolRegistry.get(name);
 			if (tool) {
 				tools.push(tool);
@@ -3048,6 +3053,7 @@ export class AgentSession {
 			}
 		}
 		this.agent.state.tools = tools;
+		if (!validToolNames.includes("compress_context")) this._compressionDetector.reset();
 
 		// Rebuild base system prompt with new tool set
 		this._baseSystemPrompt = this._rebuildSystemPrompt(validToolNames);
@@ -4271,10 +4277,43 @@ export class AgentSession {
 		});
 	}
 
-	/** Choose or disable the background detector without changing the primary model. */
-	setCompressionDetectionModel(reference: string | undefined): void {
-		this.settingsManager.setCompressionDetectionModel(reference);
+	/** Whether agent-initiated context compression is active in this session. */
+	get contextCompressionEnabled(): boolean {
+		return this.getActiveToolNames().includes("compress_context");
+	}
+
+	/** Toggle compression for this session without changing global settings. */
+	setContextCompressionEnabled(enabled: boolean): void {
+		if (enabled && !this._toolRegistry.has("compress_context")) {
+			throw new Error("Context compression is unavailable under this session's tool restrictions.");
+		}
+		this._contextCompressionEnabledOverride = enabled;
+		const tools = this.getActiveToolNames().filter((name) => name !== "compress_context");
+		if (enabled) tools.push("compress_context");
+		this.setActiveToolsByName(tools);
+	}
+
+	/** Detection requires both its session opt-in and an active compression tool. */
+	get compressionDetectionEnabled(): boolean {
+		return this._compressionDetectionEnabled && this.contextCompressionEnabled;
+	}
+
+	setCompressionDetectionEnabled(enabled: boolean): void {
+		if (enabled) {
+			if (!this.settingsManager.getCompressionDetectionModel()) {
+				throw new Error("Choose a detection model with /compress-detection-model first.");
+			}
+			this.setContextCompressionEnabled(true);
+		}
+		this._compressionDetectionEnabled = enabled;
 		this._compressionDetector.reset();
+	}
+
+	/** Save the detector model and opt in for this session only, without changing the primary model. */
+	setCompressionDetectionModel(reference: string | undefined): void {
+		if (reference) this.setContextCompressionEnabled(true);
+		this.settingsManager.setCompressionDetectionModel(reference);
+		this.setCompressionDetectionEnabled(!!reference);
 	}
 
 	/**

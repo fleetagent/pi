@@ -189,6 +189,9 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 | `/fork` | Create a new session from a previous user message |
 | `/clone` | Duplicate the current active branch into a new session |
 | `/compact [prompt]` | Manually compact context, optional custom instructions |
+| `/context-compression [on\|off]` | Show or change agent-initiated compression for this session (default: off) |
+| `/compress-detection [on\|off]` | Show or change background detection for this session (default: off); enabling also enables compression |
+| `/compress-detection-model [provider/model-id\|clear]` | Choose a detector model and enable detection for this session, or clear it |
 | `/copy` | Copy last assistant message to clipboard |
 | `/export [file]` | Export session to HTML file |
 | `/share` | Upload as private GitHub gist with shareable HTML link |
@@ -618,7 +621,7 @@ cat README.md | pi -p "Summarize this text"
 | `--remote-deferred` | Start with a deferred daemon backend and connect later with `/sandbox --attach <ws://url>` |
 | `--remote-cwd <path>` | Stable daemon workspace cwd for deferred remote mode |
 | `--daemon` | Start the integrated remote workspace daemon instead of a normal Pi session |
-Available built-in tools: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`, `websearch`, `session_search`, `session_entry_get`, `compress_context`, `subagent`, `subagent_runs`, `create_subagent`, and—when externally configured—`lsp_diagnostics`, `lsp_hover`, `lsp_definition`, `lsp_references`, `lsp_rename`, and `lsp_code_actions`. By default `read`, `bash`, `edit`, `write`, `websearch`, `session_search`, `session_entry_get`, and `compress_context` are active. Subagent and LSP tools require separate opt-ins (`enableSubagents` and `enableLspTools`/`--enable-lsp-tools` respectively), or an explicit `--tools` allowlist. Explicit allowlists may select any subset, while `--no-tools` and `--no-builtin-tools` remain authoritative.
+Available built-in tools: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`, `websearch`, `session_search`, `session_entry_get`, `compress_context`, `subagent`, `subagent_runs`, `create_subagent`, and—when externally configured—`lsp_diagnostics`, `lsp_hover`, `lsp_definition`, `lsp_references`, `lsp_rename`, and `lsp_code_actions`. By default `read`, `bash`, `edit`, `write`, `websearch`, `session_search`, and `session_entry_get` are active. Context compression is opt-in via `/context-compression on`, `PI_CONTEXT_COMPRESSION=1`, or an explicit `--tools` allowlist. Background detection is separately opt-in via `/compress-detection on` or `PI_CONTEXT_COMPRESSION_DETECTION=1` and requires a configured detector model. Subagent and LSP tools require separate opt-ins (`enableSubagents` and `enableLspTools`/`--enable-lsp-tools` respectively), or an explicit `--tools` allowlist. Explicit allowlists may select any subset, while `--no-tools` and `--no-builtin-tools` remain authoritative.
 
 ### Resource Options
 
@@ -714,6 +717,8 @@ pi --thinking high "Solve this complex problem"
 | `PI_OFFLINE` | Disable startup network operations, including update checks, package update checks, and install/update telemetry |
 | `PI_SKIP_VERSION_CHECK` | Skip the Pi version update check at startup. This prevents the npm metadata request |
 | `PI_TELEMETRY` | Override install/update telemetry. Use `1`/`true`/`yes` to enable or `0`/`false`/`no` to disable. This does not disable update checks |
+| `PI_CONTEXT_COMPRESSION` | Set to `1` to enable `compress_context` by default for all agents. Detection remains off |
+| `PI_CONTEXT_COMPRESSION_DETECTION` | Set to `1` to enable background detection and `compress_context` for all agents. Requires a configured `compressionDetectionModel` |
 | `PI_CACHE_RETENTION` | Set to `long` for extended prompt cache (Anthropic: 1h, OpenAI: 24h) |
 | `VISUAL`, `EDITOR` | External editor for Ctrl+G |
 | `PI_DAEMON_HOST`, `PI_DAEMON_PORT`, `PI_DAEMON_CWD`, `PI_DAEMON_TOKEN` | Integrated daemon bind address, port, workspace root, and bearer token |

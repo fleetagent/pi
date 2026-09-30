@@ -57,6 +57,7 @@ describe("session history tools", () => {
 	async function harness(): Promise<Harness> {
 		const created = await createHarness();
 		harnesses.push(created);
+		created.session.setContextCompressionEnabled(true);
 		return created;
 	}
 
@@ -362,6 +363,7 @@ describe("session history tools", () => {
 			],
 		});
 		harnesses.push(created);
+		created.session.setContextCompressionEnabled(true);
 		const prefixId = created.sessionManager.appendMessage({ role: "user", content: "preserve prefix", timestamp: 1 });
 		const startId = created.sessionManager.appendMessage({
 			role: "user",
@@ -480,6 +482,7 @@ describe("session history tools", () => {
 			models: [{ id: "faux-1", cost: { input: 4, output: 20, cacheRead: 1, cacheWrite: 5 } }],
 		});
 		harnesses.push(created);
+		created.session.setContextCompressionEnabled(true);
 		const session = created.sessionManager;
 		const prefix = session.appendMessage({ role: "user", content: "keep prefix", timestamp: 1 });
 		const start = session.appendMessage({ role: "user", content: "old investigation", timestamp: 2 });

@@ -618,7 +618,7 @@ describe("PiAgent session replacement characterization", () => {
 		const session = runtime.session;
 		expect(session.getLspStatus().enabled).toBe(true);
 		expect(session.getActiveToolNames()).not.toContain("lsp_hover");
-		expect(session.getActiveToolNames()).toContain("compress_context");
+		expect(session.getActiveToolNames()).not.toContain("compress_context");
 		await session.reload();
 		expect(session.getActiveToolNames()).not.toContain("lsp_hover");
 		writeFileSync(join(runtime.agentDir, "settings.json"), JSON.stringify({ enableLspTools: true }));
