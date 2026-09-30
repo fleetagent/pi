@@ -148,6 +148,7 @@ const OPENAI_RESPONSES_NONE_REASONING_MODELS = new Set([
 	"gpt-6-astra",
 	"gpt-6-luna",
 	"gpt-6-sol",
+	"gpt-6.1-sol",
 ]);
 
 function mergeThinkingLevelMap(model: Model<any>, map: NonNullable<Model<any>["thinkingLevelMap"]>): void {
@@ -1810,6 +1811,18 @@ async function generateModels() {
 			contextWindow: CODEX_CONTEXT,
 			maxTokens: CODEX_MAX_TOKENS,
 		},
+		{
+			id: "gpt-6.1-sol",
+			name: "GPT-6.1 Sol",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: CODEX_BASE_URL,
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 },
+			contextWindow: CODEX_CONTEXT,
+			maxTokens: CODEX_MAX_TOKENS,
+		},
 	];
 	allModels.push(...codexModels);
 
@@ -2078,6 +2091,66 @@ async function generateModels() {
 		}));
 	allModels.push(...azureOpenAiModels);
 
+	// Retain models used by tests while upstream catalogs temporarily omit them.
+	const catalogFallbacks: Model<Api>[] = [
+		{
+			id: "accounts/fireworks/models/kimi-k2p6",
+			name: "Kimi K2.6",
+			api: "anthropic-messages",
+			provider: "fireworks",
+			baseUrl: "https://api.fireworks.ai/inference",
+			compat: { sendSessionAffinityHeaders: true, supportsEagerToolInputStreaming: false, supportsCacheControlOnTools: false, supportsLongCacheRetention: false },
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0.95, output: 4, cacheRead: 0.16, cacheWrite: 0 },
+			contextWindow: 262000,
+			maxTokens: 262000,
+		},
+		{
+			id: "moonshotai/Kimi-K2.6",
+			name: "Kimi-K2.6",
+			api: "openai-completions",
+			provider: "huggingface",
+			baseUrl: "https://router.huggingface.co/v1",
+			compat: { supportsDeveloperRole: false },
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0.95, output: 4, cacheRead: 0.16, cacheWrite: 0 },
+			contextWindow: 262144,
+			maxTokens: 262144,
+		},
+		{
+			id: "kimi-k2.6",
+			name: "Kimi K2.6",
+			api: "openai-completions",
+			provider: "opencode-go",
+			baseUrl: "https://opencode.ai/zen/go/v1",
+			compat: { thinkingFormat: "deepseek", supportsReasoningEffort: false },
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0.95, output: 4, cacheRead: 0.16, cacheWrite: 0 },
+			contextWindow: 262144,
+			maxTokens: 65536,
+		},
+		{
+			id: "moonshotai/Kimi-K2.6",
+			name: "Kimi K2.6",
+			api: "openai-completions",
+			provider: "together",
+			baseUrl: TOGETHER_BASE_URL,
+			compat: TOGETHER_TOGGLE_REASONING_COMPAT,
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 1.2, output: 4.5, cacheRead: 0.2, cacheWrite: 0 },
+			contextWindow: 262144,
+			maxTokens: 131000,
+		},
+	];
+	for (const model of catalogFallbacks) {
+		if (!allModels.some((candidate) => candidate.provider === model.provider && candidate.id === model.id)) {
+			allModels.push(model);
+		}
+	}
 	for (const model of allModels) {
 		applyThinkingLevelMetadata(model);
 	}

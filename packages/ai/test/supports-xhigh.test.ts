@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { getModel, getSupportedThinkingLevels } from "../src/models.ts";
 
 const GPT_5_6_CODEX_MODELS = ["gpt-5.6", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"] as const;
-const GPT_6_CODEX_MODELS = ["gpt-6-astra", "gpt-6-luna", "gpt-6-sol"] as const;
+const GPT_6_CODEX_MODELS = ["gpt-6-astra", "gpt-6-luna", "gpt-6-sol", "gpt-6.1-sol"] as const;
 
 describe("getSupportedThinkingLevels", () => {
 	it("includes xhigh for Anthropic Opus 4.6 on anthropic-messages API", () => {
@@ -47,6 +47,14 @@ describe("getSupportedThinkingLevels", () => {
 			expect(model).toBeDefined();
 			expect(model!.api).not.toBe("openai-completions");
 			expect(getSupportedThinkingLevels(model!)).toContain("xhigh");
+		}
+	});
+
+	it("registers GPT-6.1 Sol with its updated cache price on OpenAI and Codex", () => {
+		for (const provider of ["openai", "openai-codex"] as const) {
+			const model = getModel(provider, "gpt-6.1-sol");
+			expect(model).toBeDefined();
+			expect(model!.cost.cacheRead).toBe(0.1);
 		}
 	});
 

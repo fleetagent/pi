@@ -55,6 +55,7 @@
 ### Added
 
 - Added GPT-6 Sol and GPT-6 Luna model metadata and OpenAI Codex support.
+- Added GPT-6.1 Sol model metadata and OpenAI Codex support.
 
 ### Fixed
 
