@@ -2140,6 +2140,7 @@ async function generateModels() {
 			baseUrl: TOGETHER_BASE_URL,
 			compat: TOGETHER_TOGGLE_REASONING_COMPAT,
 			reasoning: true,
+			thinkingLevelMap: getTogetherThinkingLevelMap("moonshotai/Kimi-K2.6", true),
 			input: ["text", "image"],
 			cost: { input: 1.2, output: 4.5, cacheRead: 0.2, cacheWrite: 0 },
 			contextWindow: 262144,

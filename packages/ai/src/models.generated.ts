@@ -19232,6 +19232,7 @@ export const MODELS = {
 			baseUrl: "https://api.together.ai/v1",
 			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":false,"maxTokensField":"max_tokens","supportsStrictMode":false,"supportsLongCacheRetention":false,"thinkingFormat":"together"},
 			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"low":null,"medium":null},
 			input: ["text", "image"],
 			cost: {
 				input: 1.2,
