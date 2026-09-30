@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.2.14](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.2.13...@fleetagent/pi-coding-agent-v0.2.14) (2026-09-30)
+
+
+### Features
+
+* **coding-agent:** make context compression opt-in ([eb53f3a](https://github.com/fleetagent/pi/commit/eb53f3a3ed9914aba76360d1d0819322dbe149c8))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @fleetagent/pi-agent-core bumped from ^0.2.13 to ^0.2.14
+    * @fleetagent/pi-ai bumped from ^0.2.13 to ^0.2.14
+    * @fleetagent/pi-tui bumped from ^0.2.13 to ^0.2.14
+
 ## [0.2.13](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.2.12...@fleetagent/pi-coding-agent-v0.2.13) (2026-09-26)
 
 

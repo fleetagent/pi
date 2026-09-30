@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.2.14](https://github.com/fleetagent/pi/compare/@fleetagent/pi-ai-v0.2.13...@fleetagent/pi-ai-v0.2.14) (2026-09-30)
+
+
+### Features
+
+* **ai:** add GPT-6.1 Sol and refresh model catalogs ([332f788](https://github.com/fleetagent/pi/commit/332f788d067a007b603cc94465d61f12b8a25c94))
+
+
+### Bug Fixes
+
+* **ai:** preserve Together Kimi fallback thinking levels ([941d9e2](https://github.com/fleetagent/pi/commit/941d9e2f8865bc854146ce2f09c2065cad2c7afe))
+
 ## [0.2.13](https://github.com/fleetagent/pi/compare/@fleetagent/pi-ai-v0.2.12...@fleetagent/pi-ai-v0.2.13) (2026-09-26)
 
 
