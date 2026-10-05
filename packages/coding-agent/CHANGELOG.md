@@ -154,6 +154,7 @@
 ### Changed
 
 - Disable agent-initiated context compression and background detection by default. Enable them per session with `/context-compression on` and `/compress-detection on`, or for all agents with `PI_CONTEXT_COMPRESSION=1` and `PI_CONTEXT_COMPRESSION_DETECTION=1`. Selecting a detector model enables both for the current session only.
+- Collapse interactive hook details by default, retaining event/subject and aggregate status counts with a configurable shortcut hint. Expand or collapse commands, sources, timings, and returned prompts alongside tool output with Ctrl+O.
 
 ### Fixed
 - Restore cumulative provider-reported usage in a persistent branch-independent ledger and distinguish it from active context; label subscription catalog costs as estimates. Show cached-read versus uncached-input catch-up estimates before compression breaks even.
