@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.2.15](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.2.14...@fleetagent/pi-coding-agent-v0.2.15) (2026-10-07)
+
+
+### Features
+
+* **coding-agent:** feat/collapse-hook-output - Collapse hook details ([84bc9e3](https://github.com/fleetagent/pi/commit/84bc9e346a1f165c3f78518e0e163d4e854a2284))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @fleetagent/pi-agent-core bumped from ^0.2.14 to ^0.2.15
+    * @fleetagent/pi-ai bumped from ^0.2.14 to ^0.2.15
+    * @fleetagent/pi-tui bumped from ^0.2.14 to ^0.2.15
+
 ## [0.2.14](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.2.13...@fleetagent/pi-coding-agent-v0.2.14) (2026-09-30)
 
 
