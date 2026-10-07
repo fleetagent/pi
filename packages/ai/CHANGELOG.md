@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.2.15](https://github.com/fleetagent/pi/compare/@fleetagent/pi-ai-v0.2.14...@fleetagent/pi-ai-v0.2.15) (2026-10-07)
+
+
+### Features
+
+* **ai:** feat/collapse-hook-output - Refresh image catalog ([9c5c59f](https://github.com/fleetagent/pi/commit/9c5c59f20ace9ce18b68906cfe9ee607643b8379))
+
+
+### Bug Fixes
+
+* **ai:** feat/collapse-hook-output - Sync Together catalog test ([45eaaea](https://github.com/fleetagent/pi/commit/45eaaea73b4ed1d8f85b509d9e7885a961580b37))
+
 ## [0.2.14](https://github.com/fleetagent/pi/compare/@fleetagent/pi-ai-v0.2.13...@fleetagent/pi-ai-v0.2.14) (2026-09-30)
 
 
