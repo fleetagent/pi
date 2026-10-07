@@ -197,6 +197,7 @@ type HookNoticeContext = {
 	hookExecutionComponents: HookExecutionComponent[];
 	activeToolHookExecutionGroups: Map<ToolHookEvent, HookExecutionNotice[]>;
 	hookExecutionTurnActive: boolean;
+	toolOutputExpanded: boolean;
 	chatContainer: Container;
 	ui: RenderRequestUi;
 	getMarkdownThemeWithSettings: typeof getMarkdownTheme;
@@ -265,6 +266,7 @@ type InteractiveModePrototype = {
 	mountRootComponents(this: MountRootContext): void;
 	setExtensionFooter(this: SetFooterContext, factory: ExtensionFooterFactory | undefined): void;
 	setExtensionHeader(this: HeaderContext, factory: ExtensionHeaderFactory | undefined): void;
+	setToolsExpanded(this: HookNoticeContext, expanded: boolean): void;
 	addHookExecutionNotice(this: HookNoticeContext, notice: HookExecutionNotice): void;
 	addCustomMessage(this: HookNoticeContext, message: CustomMessage): void;
 	appendHookExecutionNoticeToActiveGroup(this: HookNoticeContext, notice: HookExecutionNotice): boolean;
@@ -287,6 +289,7 @@ function createHookNoticeContext(): HookNoticeContext {
 		hookExecutionComponents: [],
 		activeToolHookExecutionGroups: new Map<ToolHookEvent, HookExecutionNotice[]>(),
 		hookExecutionTurnActive: false,
+		toolOutputExpanded: false,
 		chatContainer: new Container(),
 		ui: { requestRender: vi.fn() },
 		getMarkdownThemeWithSettings: getMarkdownTheme,
@@ -583,7 +586,21 @@ describe("createInteractiveTui", () => {
 		const replay = stripTerminalSequences(context.chatContainer.render(100).join("\n"));
 		expect(replay.indexOf("before hook")).toBeLessThan(replay.indexOf("Hook · Stop"));
 		expect(replay.indexOf("Hook · Stop")).toBeLessThan(replay.indexOf("after hook"));
-		expect(replay).toContain("hook feedback");
+		expect(replay).toContain("1 completed");
+		expect(replay).not.toContain("hook feedback");
+		expect(replay).not.toContain("node check.mjs");
+		expect(replay).not.toContain("/workspace/.pi/settings.json");
+
+		interactiveModePrototype.setToolsExpanded.call(context, true);
+		const expandedReplay = stripTerminalSequences(context.chatContainer.render(100).join("\n"));
+		expect(expandedReplay.indexOf("before hook")).toBeLessThan(expandedReplay.indexOf("Hook · Stop"));
+		expect(expandedReplay.indexOf("Hook · Stop")).toBeLessThan(expandedReplay.indexOf("after hook"));
+		expect(expandedReplay).toContain("hook feedback");
+		expect(expandedReplay).toContain("node check.mjs");
+		expect(expandedReplay).toContain("/workspace/.pi/settings.json");
+
+		interactiveModePrototype.setToolsExpanded.call(context, false);
+		expect(stripTerminalSequences(context.chatContainer.render(100).join("\n"))).toBe(replay);
 	});
 
 	it("bounds live hook cards and retains active-turn grouping", () => {
@@ -622,8 +639,15 @@ describe("createInteractiveTui", () => {
 		expect(context.hookExecutionNotices).toHaveLength(200);
 		expect(context.hookExecutionComponents).toHaveLength(200);
 		expect(context.chatContainer.children).toHaveLength(200);
+		const collapsedRender = stripTerminalSequences(context.chatContainer.render(100).join("\n"));
+		expect(collapsedRender.match(/Hook · Stop/g)).toHaveLength(200);
+		expect(collapsedRender).not.toContain("hook feedback");
+		expect(collapsedRender).not.toContain("node check.mjs");
+		interactiveModePrototype.setToolsExpanded.call(context, true);
 		const boundedRender = stripTerminalSequences(context.chatContainer.render(100).join("\n"));
+		expect(boundedRender).not.toContain("Hook · PreToolUse");
 		expect(boundedRender).not.toContain("hook feedback\n");
+		expect(boundedRender).toContain("hook feedback 1 ");
 		expect(boundedRender).toContain("hook feedback 200");
 
 		context.activeSession = { getSessionId: () => "shared-session-id" };

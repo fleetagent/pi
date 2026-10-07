@@ -150,7 +150,7 @@ This routing remains configurable through the ordinary action bindings. For exam
 
 | Keybinding id | Default | Description |
 |--------|---------|-------------|
-| `app.tools.expand` | `ctrl+o` | Collapse or expand tool output |
+| `app.tools.expand` | `ctrl+o` | Collapse or expand tool output and hook details |
 | `app.message.copy` | `ctrl+x` | Copy the last assistant message, or the selected entry in `/tree` |
 | `app.message.followUp` | `alt+enter` | Queue follow-up message |
 | `app.message.dequeue` | `alt+up` | Restore queued messages to editor |

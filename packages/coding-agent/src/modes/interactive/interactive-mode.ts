@@ -3338,6 +3338,7 @@ export class InteractiveMode {
 		const group = [notice];
 		this.hookExecutionNotices.push(group);
 		const component = new HookExecutionComponent(notice, this.getMarkdownThemeWithSettings());
+		component.setExpanded(this.toolOutputExpanded);
 		this.hookExecutionComponents.push(component);
 		this.chatContainer.addChild(component);
 		if (this.hookExecutionTurnActive && isToolHookEvent(notice.event)) {

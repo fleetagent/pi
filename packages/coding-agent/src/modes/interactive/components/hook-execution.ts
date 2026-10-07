@@ -1,6 +1,7 @@
 import { Box, Container, Markdown, type MarkdownTheme, Spacer, Text } from "@fleetagent/pi-tui";
 import type { HookExecutionCallNotice, HookExecutionNotice } from "../../../core/hooks/types.ts";
 import { getMarkdownTheme, type ThemeColor, theme } from "../theme/theme.ts";
+import { keyHint, keyText } from "./keybinding-hints.ts";
 
 const MAX_CALL_LABEL_CHARS = 300;
 
@@ -101,6 +102,7 @@ export class HookExecutionComponent extends Container {
 	private readonly notices: HookExecutionNotice[];
 	private readonly markdownTheme: MarkdownTheme;
 	private readonly box: Box;
+	private expanded = false;
 
 	constructor(notice: HookExecutionNotice, markdownTheme: MarkdownTheme = getMarkdownTheme()) {
 		super();
@@ -120,6 +122,12 @@ export class HookExecutionComponent extends Container {
 		this.rebuild();
 	}
 
+	setExpanded(expanded: boolean): void {
+		if (this.expanded === expanded) return;
+		this.expanded = expanded;
+		this.rebuild();
+	}
+
 	override invalidate(): void {
 		super.invalidate();
 		this.rebuild();
@@ -128,11 +136,36 @@ export class HookExecutionComponent extends Container {
 	private rebuild(): void {
 		this.box.clear();
 		const firstNotice = this.notices[0];
-		if (this.notices.length === 1) {
+		if (!this.expanded) {
+			this.renderCollapsedNotices(firstNotice);
+		} else if (this.notices.length === 1) {
 			this.renderSingleNotice(firstNotice);
-			return;
+		} else {
+			this.renderGroupedNotices(firstNotice);
 		}
-		this.renderGroupedNotices(firstNotice);
+	}
+
+	private renderCollapsedNotices(firstNotice: HookExecutionNotice): void {
+		const subjects = countValues(this.notices.flatMap((notice) => (notice.subject ? [notice.subject] : [])));
+		const subject = subjects.map(({ value, count }) => `${value}${count > 1 ? ` ×${count}` : ""}`).join(", ");
+		const title = theme.fg("warning", theme.bold(`Hook · ${firstNotice.event}`));
+		this.box.addChild(new Text(title + (subject ? theme.fg("muted", ` · ${subject}`) : ""), 0, 0));
+		const statuses = countValues(
+			this.notices.flatMap((notice) =>
+				notice.calls.map((call) => {
+					const successful = call.status === "completed" && (call.exitCode === 0 || call.exitCode === null);
+					return successful ? "completed" : call.status === "cancelled" ? "cancelled" : "failed";
+				}),
+			),
+		);
+		const summary = statuses
+			.map(({ value, count }) => {
+				const color = value === "completed" ? "success" : value === "cancelled" ? "warning" : "error";
+				return theme.fg(color, `${count} ${value}`);
+			})
+			.join(theme.fg("muted", ", "));
+		this.box.addChild(new Text(summary || theme.fg("muted", "0 calls"), 0, 0));
+		if (keyText("app.tools.expand")) this.box.addChild(new Text(keyHint("app.tools.expand", "to expand"), 0, 0));
 	}
 
 	private renderSingleNotice(notice: HookExecutionNotice): void {
