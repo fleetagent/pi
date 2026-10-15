@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.3.0](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.2.15...@fleetagent/pi-coding-agent-v0.3.0) (2026-10-15)
+
+
+### ⚠ BREAKING CHANGES
+
+* **compaction:** CompactionPreparation no longer exposes fileOps, and CompactionDetails is no longer exported.
+
+### Bug Fixes
+
+* **compaction:** omit file lists from default summaries ([1834a41](https://github.com/fleetagent/pi/commit/1834a4126c71f8369957c7880e69515234fdfd4d))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @fleetagent/pi-agent-core bumped from ^0.2.15 to ^0.3.0
+    * @fleetagent/pi-ai bumped from ^0.2.15 to ^0.3.0
+    * @fleetagent/pi-tui bumped from ^0.2.15 to ^0.3.0
+
 ## [0.2.15](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.2.14...@fleetagent/pi-coding-agent-v0.2.15) (2026-10-07)
 
 
