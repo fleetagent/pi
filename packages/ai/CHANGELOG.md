@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/fleetagent/pi/compare/@fleetagent/pi-ai-v0.2.15...@fleetagent/pi-ai-v0.3.0) (2026-10-15)
+
+
+### Bug Fixes
+
+* **ai:** tolerate upstream DeepSeek model ID changes in CI ([10faef0](https://github.com/fleetagent/pi/commit/10faef025650190096b16cc64ce2aa9583577761))
+
 ## [0.2.15](https://github.com/fleetagent/pi/compare/@fleetagent/pi-ai-v0.2.14...@fleetagent/pi-ai-v0.2.15) (2026-10-07)
 
 
