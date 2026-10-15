@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.2.15](https://github.com/fleetagent/pi/compare/@fleetagent/pi-ai-v0.2.14...@fleetagent/pi-ai-v0.2.15) (2026-10-07)
+
+
+### Features
+
+* **ai:** feat/collapse-hook-output - Refresh image catalog ([9c5c59f](https://github.com/fleetagent/pi/commit/9c5c59f20ace9ce18b68906cfe9ee607643b8379))
+
+
+### Bug Fixes
+
+* **ai:** feat/collapse-hook-output - Sync Together catalog test ([45eaaea](https://github.com/fleetagent/pi/commit/45eaaea73b4ed1d8f85b509d9e7885a961580b37))
+
+## [0.2.14](https://github.com/fleetagent/pi/compare/@fleetagent/pi-ai-v0.2.13...@fleetagent/pi-ai-v0.2.14) (2026-09-30)
+
+
+### Features
+
+* **ai:** add GPT-6.1 Sol and refresh model catalogs ([332f788](https://github.com/fleetagent/pi/commit/332f788d067a007b603cc94465d61f12b8a25c94))
+
+
+### Bug Fixes
+
+* **ai:** preserve Together Kimi fallback thinking levels ([941d9e2](https://github.com/fleetagent/pi/commit/941d9e2f8865bc854146ce2f09c2065cad2c7afe))
+
 ## [0.2.13](https://github.com/fleetagent/pi/compare/@fleetagent/pi-ai-v0.2.12...@fleetagent/pi-ai-v0.2.13) (2026-09-26)
 
 

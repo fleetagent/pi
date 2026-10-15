@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.2.15](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.2.14...@fleetagent/pi-coding-agent-v0.2.15) (2026-10-07)
+
+
+### Features
+
+* **coding-agent:** feat/collapse-hook-output - Collapse hook details ([84bc9e3](https://github.com/fleetagent/pi/commit/84bc9e346a1f165c3f78518e0e163d4e854a2284))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @fleetagent/pi-agent-core bumped from ^0.2.14 to ^0.2.15
+    * @fleetagent/pi-ai bumped from ^0.2.14 to ^0.2.15
+    * @fleetagent/pi-tui bumped from ^0.2.14 to ^0.2.15
+
+## [0.2.14](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.2.13...@fleetagent/pi-coding-agent-v0.2.14) (2026-09-30)
+
+
+### Features
+
+* **coding-agent:** make context compression opt-in ([eb53f3a](https://github.com/fleetagent/pi/commit/eb53f3a3ed9914aba76360d1d0819322dbe149c8))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @fleetagent/pi-agent-core bumped from ^0.2.13 to ^0.2.14
+    * @fleetagent/pi-ai bumped from ^0.2.13 to ^0.2.14
+    * @fleetagent/pi-tui bumped from ^0.2.13 to ^0.2.14
+
 ## [0.2.13](https://github.com/fleetagent/pi/compare/@fleetagent/pi-coding-agent-v0.2.12...@fleetagent/pi-coding-agent-v0.2.13) (2026-09-26)
 
 
@@ -138,6 +170,7 @@
 ### Changed
 
 - Disable agent-initiated context compression and background detection by default. Enable them per session with `/context-compression on` and `/compress-detection on`, or for all agents with `PI_CONTEXT_COMPRESSION=1` and `PI_CONTEXT_COMPRESSION_DETECTION=1`. Selecting a detector model enables both for the current session only.
+- Collapse interactive hook details by default, retaining event/subject and aggregate status counts with a configurable shortcut hint. Expand or collapse commands, sources, timings, and returned prompts alongside tool output with Ctrl+O.
 
 ### Fixed
 - Restore cumulative provider-reported usage in a persistent branch-independent ledger and distinguish it from active context; label subscription catalog costs as estimates. Show cached-read versus uncached-input catch-up estimates before compression breaks even.
