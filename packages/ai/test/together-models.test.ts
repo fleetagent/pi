@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { findEnvKeys, getEnvApiKey } from "../src/env-api-keys.ts";
-import { getModel } from "../src/models.ts";
+import { getModel, getModels } from "../src/models.ts";
 
 const originalTogetherApiKey = process.env.TOGETHER_API_KEY;
 
@@ -50,15 +50,18 @@ describe("Together models", () => {
 			thinkingFormat: "openai",
 		});
 
-		const deepSeekV4 = getModel("together", "deepseek-ai/DeepSeek-V4-Pro");
-		expect(deepSeekV4.thinkingLevelMap).toEqual({
+		const deepSeekV4 = getModels("together").find(
+			({ id }) => id === "deepseek-ai/DeepSeek-V4-Pro" || id === "deepseek-ai/DeepSeek-V4-Pro-0813",
+		);
+		expect(deepSeekV4).toBeDefined();
+		expect(deepSeekV4!.thinkingLevelMap).toEqual({
 			minimal: null,
 			low: null,
 			medium: null,
 			high: "high",
 			xhigh: null,
 		});
-		expect(deepSeekV4.compat).toMatchObject({
+		expect(deepSeekV4!.compat).toMatchObject({
 			supportsReasoningEffort: true,
 			thinkingFormat: "together",
 		});
