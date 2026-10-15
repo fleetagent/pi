@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getModel, getSupportedThinkingLevels } from "../src/models.ts";
+import { getModel, getModels, getSupportedThinkingLevels } from "../src/models.ts";
 
 const GPT_5_6_CODEX_MODELS = ["gpt-5.6", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"] as const;
 const GPT_6_CODEX_MODELS = ["gpt-6-astra", "gpt-6-luna", "gpt-6-sol", "gpt-6.1-sol"] as const;
@@ -65,7 +65,9 @@ describe("getSupportedThinkingLevels", () => {
 	});
 
 	it("includes only high/xhigh plus off for DeepSeek V4 Flash on opencode-go", () => {
-		const model = getModel("opencode-go", "deepseek-v4-flash");
+		const model = getModels("opencode-go").find(
+			({ id }) => id === "deepseek-v4-flash" || id === "deepseek-v4.1-flash",
+		);
 		expect(model).toBeDefined();
 		expect(getSupportedThinkingLevels(model!)).toEqual(["off", "high", "xhigh"]);
 	});

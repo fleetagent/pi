@@ -354,13 +354,9 @@ describe("harness compaction", () => {
 		expect(preparation?.tokensBefore).toBe(estimateContextTokens(buildSessionContext(pathEntries).messages).tokens);
 	});
 
-	it("prepares split-turn compaction with prior file-operation details", () => {
+	it("prepares split-turn compaction without carrying forward file-operation details", () => {
 		const u1 = createMessageEntry(createUserMessage("user msg 1"));
-		const assistantMessage: AssistantMessage = {
-			...createAssistantMessage("assistant msg 1"),
-			content: [{ type: "toolCall", id: "tool-1", name: "write", arguments: { path: "written.ts" } }],
-		};
-		const a1 = createMessageEntry(assistantMessage, u1.id);
+		const a1 = createMessageEntry(createAssistantMessage("assistant msg 1"), u1.id);
 		const compaction1: CompactionEntry = {
 			...createCompactionEntry("First summary", u1.id, a1.id),
 			details: { readFiles: ["old-read.ts"], modifiedFiles: ["old-edit.ts"] },
@@ -374,12 +370,9 @@ describe("harness compaction", () => {
 				keepRecentTokens: 1,
 			}),
 		);
-
 		expect(preparation).toMatchObject({ previousSummary: "First summary", isSplitTurn: true });
 		expect(preparation?.turnPrefixMessages.map((message) => message.role)).toEqual(["user"]);
-		expect([...preparation!.fileOps.read]).toContain("old-read.ts");
-		expect([...preparation!.fileOps.edited]).toContain("old-edit.ts");
-		expect([...preparation!.fileOps.written]).toContain("written.ts");
+		expect(preparation).not.toHaveProperty("fileOps");
 	});
 
 	it("prepares custom and branch summary entries for summarization", () => {
@@ -545,12 +538,14 @@ describe("harness compaction", () => {
 				{ "x-test": "yes" },
 				undefined,
 				"focus",
-				"old summary",
+				"old summary\n\n<read-files>\nold.ts\n</read-files>\n\n<modified-files>\nchanged.ts\n</modified-files>",
 			),
 		);
 
 		expect(summary).toContain("Test summary");
 		expect(promptText).toContain("<previous-summary>\nold summary\n</previous-summary>");
+		expect(promptText).not.toContain("<read-files>");
+		expect(promptText).not.toContain("<modified-files>");
 		expect(promptText).toContain("Additional focus: focus");
 	});
 
@@ -590,7 +585,6 @@ describe("harness compaction", () => {
 			turnPrefixMessages: messages,
 			isSplitTurn: true,
 			tokensBefore: 600000,
-			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
 			settings: { enabled: true, reserveTokens: 500000, keepRecentTokens: 20000 },
 		};
 
@@ -607,7 +601,6 @@ describe("harness compaction", () => {
 			turnPrefixMessages: [],
 			isSplitTurn: false,
 			tokensBefore: 100,
-			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
 			settings: { enabled: true, reserveTokens: 2000, keepRecentTokens: 20 },
 		};
 		const { faux: historyFaux, model: historyModel } = createFauxModel(false);
@@ -642,7 +635,6 @@ describe("harness compaction", () => {
 			turnPrefixMessages: messages,
 			isSplitTurn: true,
 			tokensBefore: 100,
-			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
 			settings: { enabled: true, reserveTokens: 2000, keepRecentTokens: 20 },
 		};
 
@@ -659,7 +651,6 @@ describe("harness compaction", () => {
 			turnPrefixMessages: messages,
 			isSplitTurn: true,
 			tokensBefore: 100,
-			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
 			settings: { enabled: true, reserveTokens: 2000, keepRecentTokens: 20 },
 		};
 		const { faux, model } = createFauxModel(false);
@@ -678,7 +669,7 @@ describe("harness compaction", () => {
 		});
 	});
 
-	it("returns a compaction result with file details", async () => {
+	it("returns a compaction result without file lists or details", async () => {
 		const u1 = createMessageEntry(createUserMessage("read a file"));
 		const assistantMessage: AssistantMessage = {
 			...createAssistantMessage("calling tool", createMockUsage(1000, 200)),
@@ -692,9 +683,8 @@ describe("harness compaction", () => {
 		const { faux, model } = createFauxModel(false);
 		faux.setResponses([fauxAssistantMessage("## Goal\nTest summary")]);
 		const result = getOrThrow(await compact(preparation!, model, "test-key"));
-		expect(result.summary.length).toBeGreaterThan(0);
-		expect(result.firstKeptEntryId).toBeTruthy();
-		expect(result.details).toBeDefined();
+		expect(result.summary).toBe("## Goal\nTest summary");
+		expect(result).not.toHaveProperty("details");
 	});
 });
 
