@@ -7,7 +7,6 @@
 
 import {
 	type AgentMessage,
-	type CompactionDetails,
 	type CompactionPreparation,
 	type CompactionResult,
 	type CompactionSettings,
@@ -34,65 +33,15 @@ import { completeSimple, retryAssistantCall } from "@fleetagent/pi-ai";
 import { convertToLlm } from "../messages.ts";
 import { buildSessionContext, sessionEntryToContextMessages } from "../session/context.ts";
 import type { CompactionEntry, SessionEntry } from "../session/types.ts";
-import {
-	computeFileLists,
-	createFileOps,
-	extractFileOpsFromMessage,
-	type FileOperations,
-	formatFileOperations,
-	SUMMARIZATION_SYSTEM_PROMPT,
-	serializeConversation,
-} from "./utils.ts";
+import { SUMMARIZATION_SYSTEM_PROMPT, serializeConversation } from "./utils.ts";
 
 export type {
-	CompactionDetails,
 	CompactionPreparation,
 	CompactionResult,
 	CompactionSettings,
 	ContextUsageEstimate,
 	CutPointResult,
 } from "@fleetagent/pi-agent-core";
-
-// ============================================================================
-// File Operation Tracking
-// ============================================================================
-
-function getPreviousCompactionDetails(
-	entries: SessionEntry[],
-	prevCompactionIndex: number,
-): CompactionDetails | undefined {
-	if (prevCompactionIndex < 0) return undefined;
-	const previousCompaction = entries[prevCompactionIndex] as CompactionEntry;
-	// fromHook field is kept for session file compatibility.
-	if (previousCompaction.fromHook || !previousCompaction.details) return undefined;
-	return previousCompaction.details as CompactionDetails;
-}
-
-/**
- * Extract file operations from messages and previous compaction entries.
- */
-function extractFileOperations(
-	messages: AgentMessage[],
-	entries: SessionEntry[],
-	prevCompactionIndex: number,
-): FileOperations {
-	const fileOps = createFileOps();
-
-	const previousDetails = getPreviousCompactionDetails(entries, prevCompactionIndex);
-	if (Array.isArray(previousDetails?.readFiles)) {
-		for (const file of previousDetails.readFiles) fileOps.read.add(file);
-	}
-	if (Array.isArray(previousDetails?.modifiedFiles)) {
-		for (const file of previousDetails.modifiedFiles) fileOps.edited.add(file);
-	}
-
-	// Extract from tool calls in messages
-	for (const msg of messages) {
-		extractFileOpsFromMessage(msg, fileOps);
-	}
-
-	return fileOps;
-}
 
 // ============================================================================
 // Message Extraction
@@ -556,7 +505,7 @@ export async function generateSummary(
 	// Build the prompt with conversation wrapped in tags
 	let promptText = `<conversation>\n${conversationText}\n</conversation>\n\n`;
 	if (previousSummary) {
-		promptText += `<previous-summary>\n${previousSummary}\n</previous-summary>\n\n`;
+		promptText += `<previous-summary>\n${previousSummary.replace(/\n*<(read|modified)-files>[\s\S]*?<\/\1-files>/g, "")}\n</previous-summary>\n\n`;
 	}
 	promptText += basePrompt;
 
@@ -645,15 +594,6 @@ export function prepareCompaction(
 	const turnPrefixMessages = cutPoint.isSplitTurn
 		? collectMessagesForCompaction(pathEntries, cutPoint.turnStartIndex, cutPoint.firstKeptEntryIndex)
 		: [];
-
-	// Extract file operations from messages and previous compaction
-	const fileOps = extractFileOperations(messagesToSummarize, pathEntries, prevCompactionIndex);
-
-	// Include file operations from a split turn's prefix.
-	for (const message of turnPrefixMessages) {
-		extractFileOpsFromMessage(message, fileOps);
-	}
-
 	return {
 		firstKeptEntryId,
 		messagesToSummarize,
@@ -661,7 +601,6 @@ export function prepareCompaction(
 		isSplitTurn: cutPoint.isSplitTurn,
 		tokensBefore,
 		previousSummary,
-		fileOps,
 		settings,
 	};
 }
@@ -711,7 +650,6 @@ export async function compact(
 		isSplitTurn,
 		tokensBefore,
 		previousSummary,
-		fileOps,
 		settings,
 	} = preparation;
 
@@ -768,10 +706,6 @@ export async function compact(
 		);
 	}
 
-	// Compute file lists and append to summary
-	const { readFiles, modifiedFiles } = computeFileLists(fileOps);
-	summary += formatFileOperations(readFiles, modifiedFiles);
-
 	if (!firstKeptEntryId) {
 		throw new Error("First kept entry has no UUID - session may need migration");
 	}
@@ -780,7 +714,6 @@ export async function compact(
 		summary,
 		firstKeptEntryId,
 		tokensBefore,
-		details: { readFiles, modifiedFiles } as CompactionDetails,
 	};
 }
 

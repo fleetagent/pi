@@ -129,13 +129,31 @@ describe("generateSummary reasoning options", () => {
 			turnPrefixMessages: messages,
 			isSplitTurn: true,
 			tokensBefore: 600000,
-			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
 			settings: { enabled: true, reserveTokens: 500000, keepRecentTokens: 20000 },
 		};
 
 		await compact(preparation, createModel(false, 128000), "test-key");
 
 		expect(completeSimpleMock.mock.calls.map((call) => call[2]?.maxTokens)).toEqual([128000, 128000]);
+	});
+
+	it("does not append file lists or store them in compaction details", async () => {
+		const preparation: CompactionPreparation = {
+			firstKeptEntryId: "entry-keep",
+			messagesToSummarize: messages,
+			turnPrefixMessages: [],
+			isSplitTurn: false,
+			tokensBefore: 100,
+			previousSummary:
+				"Previous summary\n\n<read-files>\nold.ts\n</read-files>\n\n<modified-files>\nchanged.ts\n</modified-files>",
+			settings: { enabled: true, reserveTokens: 2000, keepRecentTokens: 20 },
+		};
+		const result = await compact(preparation, createModel(false), "test-key");
+		const previousSummary = completeSimpleMock.mock.calls[0][1].messages[0].content[0].text as string;
+		expect(previousSummary).not.toContain("<read-files>");
+		expect(previousSummary).not.toContain("<modified-files>");
+		expect(result.summary).toBe("## Goal\nTest summary");
+		expect(result).not.toHaveProperty("details");
 	});
 
 	it("isolates one summary operation while preserving request options across retries", async () => {

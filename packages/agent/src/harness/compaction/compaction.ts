@@ -23,18 +23,8 @@ import {
 } from "../messages.ts";
 import { buildSessionContext } from "../session/session.ts";
 import { type CompactionEntry, CompactionError, err, ok, type Result, type SessionTreeEntry } from "../types.ts";
-import {
-	computeFileLists,
-	createFileOps,
-	extractFileOpsFromMessage,
-	type FileOperationLists,
-	type FileOperations,
-	formatFileOperations,
-	serializeConversation,
-} from "./utils.ts";
+import { serializeConversation } from "./utils.ts";
 
-/** File-operation lists stored on generated compaction entries. */
-export type CompactionDetails = FileOperationLists;
 function safeJsonStringify(value: unknown): string {
 	try {
 		return JSON.stringify(value) ?? "undefined";
@@ -43,36 +33,6 @@ function safeJsonStringify(value: unknown): string {
 	}
 }
 
-function restorePreviousCompactionFileOperations(
-	fileOps: FileOperations,
-	entries: SessionTreeEntry[],
-	prevCompactionIndex: number,
-): void {
-	if (prevCompactionIndex < 0) return;
-	const prevCompaction = entries[prevCompactionIndex] as CompactionEntry;
-	if (prevCompaction.fromHook || !prevCompaction.details) return;
-	const details = prevCompaction.details as CompactionDetails;
-	if (Array.isArray(details.readFiles)) {
-		for (const file of details.readFiles) fileOps.read.add(file);
-	}
-	if (Array.isArray(details.modifiedFiles)) {
-		for (const file of details.modifiedFiles) fileOps.edited.add(file);
-	}
-}
-
-function extractFileOperations(
-	messages: AgentMessage[],
-	entries: SessionTreeEntry[],
-	prevCompactionIndex: number,
-): FileOperations {
-	const fileOps = createFileOps();
-	restorePreviousCompactionFileOperations(fileOps, entries, prevCompactionIndex);
-	for (const msg of messages) {
-		extractFileOpsFromMessage(msg, fileOps);
-	}
-
-	return fileOps;
-}
 function getMessageFromEntry(entry: SessionTreeEntry): AgentMessage | undefined {
 	if (entry.type === "message") {
 		return entry.message as AgentMessage;
@@ -486,7 +446,7 @@ export async function generateSummary(
 	const conversationText = serializeConversation(llmMessages);
 	let promptText = `<conversation>\n${conversationText}\n</conversation>\n\n`;
 	if (previousSummary) {
-		promptText += `<previous-summary>\n${previousSummary}\n</previous-summary>\n\n`;
+		promptText += `<previous-summary>\n${previousSummary.replace(/\n*<(read|modified)-files>[\s\S]*?<\/\1-files>/g, "")}\n</previous-summary>\n\n`;
 	}
 	promptText += basePrompt;
 
@@ -542,8 +502,6 @@ export interface CompactionPreparation {
 	tokensBefore: number;
 	/** Previous compaction summary used for iterative updates. */
 	previousSummary?: string;
-	/** File operations extracted from summarized history. */
-	fileOps: FileOperations;
 	/** Settings used to prepare compaction. */
 	settings: CompactionSettings;
 }
@@ -594,7 +552,6 @@ export function prepareCompaction(
 	}
 
 	const previousCompaction = findPreviousCompactionBoundary(pathEntries);
-	const prevCompactionIndex = previousCompaction.index;
 	const previousSummary = previousCompaction.summary;
 	const boundaryStart = previousCompaction.startIndex;
 	const boundaryEnd = pathEntries.length;
@@ -613,9 +570,6 @@ export function prepareCompaction(
 	const turnPrefixMessages = cutPoint.isSplitTurn
 		? collectCompactionMessages(pathEntries, cutPoint.turnStartIndex, cutPoint.firstKeptEntryIndex)
 		: [];
-	const fileOps = extractFileOperations(messagesToSummarize, pathEntries, prevCompactionIndex);
-	for (const message of turnPrefixMessages) extractFileOpsFromMessage(message, fileOps);
-
 	return ok({
 		firstKeptEntryId,
 		messagesToSummarize,
@@ -623,7 +577,6 @@ export function prepareCompaction(
 		isSplitTurn: cutPoint.isSplitTurn,
 		tokensBefore,
 		previousSummary,
-		fileOps,
 		settings,
 	});
 }
@@ -660,7 +613,6 @@ export async function compact(
 		isSplitTurn,
 		tokensBefore,
 		previousSummary,
-		fileOps,
 		settings,
 	} = preparation;
 
@@ -713,14 +665,10 @@ export async function compact(
 		summary = summaryResult.value;
 	}
 
-	const { readFiles, modifiedFiles } = computeFileLists(fileOps);
-	summary += formatFileOperations(readFiles, modifiedFiles);
-
 	return ok({
 		summary,
 		firstKeptEntryId,
 		tokensBefore,
-		details: { readFiles, modifiedFiles } as CompactionDetails,
 	});
 }
 async function generateTurnPrefixSummary(

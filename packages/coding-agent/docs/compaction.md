@@ -20,7 +20,7 @@ Pi has two summarization mechanisms:
 | Compaction | Context exceeds threshold, or `/compact` | Summarize old messages to free up context |
 | Branch summarization | `/tree` navigation | Preserve context when switching branches |
 
-Both use the same structured summary format and track file operations cumulatively.
+Both use structured summaries. Branch summarization tracks file operations; default compaction does not append file lists.
 
 ### Agent-initiated range compression
 
@@ -157,15 +157,9 @@ interface CompactionEntry<T = unknown> {
   fromHook?: boolean;  // true if provided by extension (legacy field name)
   details?: T;         // implementation-specific data
 }
-
-// Default compaction uses this for details (from compaction.ts):
-interface CompactionDetails {
-  readFiles: string[];
-  modifiedFiles: string[];
-}
 ```
 
-Extensions can store any JSON-serializable data in `details`. The default compaction tracks file operations, but custom extension implementations can use their own structure.
+Extensions can store any JSON-serializable data in `details`. Default compaction does not populate this field.
 
 See [`prepareCompaction()`](https://github.com/fleetagent/pi/blob/main/packages/coding-agent/src/core/compaction/compaction.ts) and [`compact()`](https://github.com/fleetagent/pi/blob/main/packages/coding-agent/src/core/compaction/compaction.ts) for the implementation.
 
@@ -202,11 +196,7 @@ After navigation with summary:
 
 ### Cumulative File Tracking
 
-Both compaction and branch summarization track files cumulatively. When generating a summary, pi extracts file operations from:
-- Tool calls in the messages being summarized
-- Previous compaction or branch summary `details` (if any)
-
-This means file tracking accumulates across multiple compactions or nested branch summaries, preserving the full history of read and modified files.
+Branch summarization tracks files cumulatively from tool calls in the messages being summarized and previous branch or legacy compaction `details` (if any). Default compaction no longer stores or appends file lists.
 
 ### BranchSummaryEntry Structure
 
@@ -237,7 +227,7 @@ See [`collectEntriesForBranchSummary()`](https://github.com/fleetagent/pi/blob/m
 
 ## Summary Format
 
-Both compaction and branch summarization use the same structured format:
+Both compaction and branch summarization use the same structured sections. Branch summarization can also append file lists:
 
 ```markdown
 ## Goal
@@ -306,7 +296,6 @@ pi.on("session_before_compact", async (event, ctx) => {
   // preparation.messagesToSummarize - messages to summarize
   // preparation.turnPrefixMessages - split turn prefix (if isSplitTurn)
   // preparation.previousSummary - previous compaction summary
-  // preparation.fileOps - extracted file operations
   // preparation.tokensBefore - context tokens before compaction
   // preparation.firstKeptEntryId - where kept messages start
   // preparation.settings - compaction settings
