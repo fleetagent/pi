@@ -145,7 +145,7 @@ describe("PiAgent hook composition", () => {
 		const settingsPath = join(agentDir, "settings.json");
 		writeFileSync(settingsPath, JSON.stringify(promptHookSettings("old", log)));
 
-		const faux = registerFauxProvider();
+		let faux = registerFauxProvider();
 		cleanups.push(() => faux.unregister());
 		const model = faux.getModel();
 		const authStorage = AuthStorage.inMemory();
@@ -169,22 +169,20 @@ describe("PiAgent hook composition", () => {
 		});
 		cleanups.push(() => pi.dispose());
 		const session = await pi.createAgentSession();
-		faux.setResponses([
-			fauxAssistantMessage("one"),
-			fauxAssistantMessage("two"),
-			fauxAssistantMessage("three"),
-			fauxAssistantMessage("four"),
-			fauxAssistantMessage("five"),
-		]);
+		faux.setResponses([fauxAssistantMessage("one")]);
 
 		await session.prompt("first");
 		writeFileSync(settingsPath, JSON.stringify(promptHookSettings("new", log)));
 		await session.reload();
+		faux = registerFauxProvider({ api: model.api });
+		faux.setResponses([fauxAssistantMessage("two")]);
 		await session.prompt("second");
 		expect(readFileSync(log, "utf8")).toBe("old\nnew\n");
 
 		writeFileSync(settingsPath, "{broken");
 		await session.reload();
+		faux = registerFauxProvider({ api: model.api });
+		faux.setResponses([fauxAssistantMessage("three")]);
 		expect(pi.diagnostics.some((diagnostic) => diagnostic.message.includes("Hook parse"))).toBe(true);
 		await session.prompt("third");
 		expect(readFileSync(log, "utf8")).toBe("old\nnew\n");
@@ -192,6 +190,8 @@ describe("PiAgent hook composition", () => {
 		session.setHooksEnabled(false);
 		writeFileSync(settingsPath, JSON.stringify(promptHookSettings("recovered", log)));
 		await session.reload();
+		faux = registerFauxProvider({ api: model.api });
+		faux.setResponses([fauxAssistantMessage("four"), fauxAssistantMessage("five")]);
 		expect(pi.diagnostics.some((diagnostic) => diagnostic.message.includes("Hook parse"))).toBe(false);
 		expect(session.hooksEnabled).toBe(false);
 		await session.prompt("fourth");
